@@ -93,11 +93,31 @@
                 <div class="row">
                     <div class="col-12">
                         {% for category, message in messages %}
+                            {% if category == 'token' %}
+                            {# A credential that cannot be shown again. NOT
+                               dismissible, and not styled like every other
+                               notice: this is the one thing on the page that
+                               is unrecoverable once it scrolls away, and an
+                               alert somebody closes by reflex is the wrong
+                               container for it. #}
+                            <div class="alert alert-warning" role="alert">
+                                <div><i class="fas fa-key"></i>
+                                    <strong>Shown once.</strong>
+                                    Copy it now &mdash; only its hash is
+                                    stored, so no screen can show it again.
+                                </div>
+                                <code class="d-block mt-2 p-2 user-select-all"
+                                      style="word-break:break-all; font-size:.85rem;
+                                             background:var(--dark-bg-tertiary);
+                                             border-radius:6px">{{ message }}</code>
+                            </div>
+                            {% else %}
                             <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
                                 <i class="fas fa-{{ 'exclamation-circle' if category == 'error' else 'info-circle' if category == 'info' else 'check-circle' if category == 'success' else 'exclamation-triangle' }}"></i>
                                 {{ message }}
                                 <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
                             </div>
+                            {% endif %}
                         {% endfor %}
                     </div>
                 </div>

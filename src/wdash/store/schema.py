@@ -22,7 +22,7 @@ joins nobody performs.
 """
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Integer, MetaData, String, Table, Text,
+    Boolean, Column, DateTime, Index, Integer, MetaData, String, Table, Text,
     UniqueConstraint,
 )
 from sqlalchemy.types import JSON
@@ -203,4 +203,96 @@ signin_attempts = Table(
     #: 'success', 'failure' or 'locked' — a refused attempt while locked out
     #: is worth keeping, because it says the pressure is still on.
     Column("outcome", String(16), nullable=False),
+)
+
+
+# ---------------------------------------------------------------------------
+# Synthetic monitoring, run by WDash's own agents
+# ---------------------------------------------------------------------------
+#
+# WDash reads what other agents write (see hub/adapters/es_monitors.py). These
+# three tables are for the checks it runs itself, through an agent that pulls
+# its configuration and pushes results back. WDash still does not probe
+# anything: the agent owns the schedule, the network path and the retries, and
+# a WDash restart therefore misses no check.
+
+agents = Table(
+    "wdash_agents", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("name", String(128), nullable=False, unique=True),
+    #: SHA-256 of the bearer token, hex. NOT Argon2, and the difference is
+    #: deliberate: Argon2 exists to make a low-entropy secret expensive to
+    #: guess, and this token is 256 bits of machine-generated randomness with
+    #: no dictionary to attack. Verifying it with Argon2 on every result batch
+    #: — every fifteen seconds, per agent — would burn CPU for no security and
+    #: make the ingest endpoint a way to exhaust the server.
+    Column("token_hash", String(64), nullable=False, unique=True, index=True),
+    #: Free-form, for saying where this agent is: {"region": "eu-west"}.
+    Column("labels", JSON),
+    #: When it last spoke to us. An agent that has gone quiet puts its
+    #: monitors into `unknown`, NOT `down` — "no answer" is not "the target is
+    #: broken", and reporting it as one is how a dead agent becomes a
+    #: false outage.
+    Column("last_seen_at", DateTime(timezone=True), index=True),
+    Column("version", String(32)),
+    Column("enabled", Boolean, nullable=False, default=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+monitors = Table(
+    "wdash_monitors", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("name", String(128), nullable=False),
+    #: http | tcp. Deliberately short: ICMP needs a raw socket and therefore a
+    #: privileged container, and a browser check needs a browser. Both are
+    #: real, and both are a decision to make on purpose rather than a type
+    #: that quietly appears in a dropdown.
+    Column("kind", String(16), nullable=False),
+    #: A URL for http, host:port for tcp.
+    Column("target", String(1024), nullable=False),
+    Column("interval_seconds", Integer, nullable=False, default=60),
+    Column("timeout_seconds", Integer, nullable=False, default=10),
+    #: What makes a check pass: expected status codes, a string the body must
+    #: contain, a response-time ceiling. Empty means "it answered at all".
+    Column("assertions", JSON),
+    Column("labels", JSON),
+    Column("enabled", Boolean, nullable=False, default=True),
+    Column("created_by", String(255)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+#: Which agents run which monitor. A join table rather than an `agent_id`
+#: column, because running one check from several places is the entire point
+#: of synthetic monitoring: "up from Frankfurt, down from Singapore" is the
+#: answer, and a single-agent column cannot express it.
+#:
+#: NO rows for a monitor means every enabled agent runs it. That is the useful
+#: default — one agent, everything assigned to it — without making the common
+#: case require bookkeeping.
+monitor_agents = Table(
+    "wdash_monitor_agents", metadata,
+    Column("monitor_id", String(64), nullable=False, index=True),
+    Column("agent_id", String(64), nullable=False, index=True),
+)
+
+monitor_results = Table(
+    "wdash_monitor_results", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("monitor_id", String(64), nullable=False),
+    Column("agent_id", String(64), nullable=False),
+    #: When the agent ran the check, by the agent's clock.
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    #: When we received it, by ours. Both, because the difference is the only
+    #: way to see clock skew — and an agent an hour out puts its points in the
+    #: wrong buckets, which reads as a nightly slowdown that never happened.
+    Column("received_at", DateTime(timezone=True), nullable=False),
+    Column("status", String(16), nullable=False),        # up | down
+    Column("duration_us", Integer),
+    Column("error", Text),
+    Column("http_status", Integer),
+    #: The certificate, when the check saw one. Shaped like the neutral
+    #: Certificate model so the source adapter has nothing to translate.
+    Column("tls", JSON),
+    Index("ix_wdash_monitor_results_lookup", "monitor_id", "started_at"),
 )

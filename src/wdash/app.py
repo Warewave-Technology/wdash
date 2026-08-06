@@ -23,6 +23,7 @@ from wdash.store import SecretBox, Store
 from wdash.models import SavedSearch
 from wdash.utils import timerange
 from wdash.api.advisor_routes import advisor_bp
+from wdash.api.agent_routes import agent_bp
 from wdash.api.monitor_routes import monitor_bp
 from wdash.api.trace_routes import trace_bp
 from wdash.api.log_routes import log_bp
@@ -60,6 +61,8 @@ def create_app(config_class=Config):
     app.register_blueprint(advisor_bp)
     app.register_blueprint(trace_bp)
     app.register_blueprint(monitor_bp)
+    # No session login on this one: an agent has no browser and no cookie.
+    app.register_blueprint(agent_bp)
     app.register_blueprint(log_bp)
     app.register_blueprint(dashboard_bp)
     
@@ -206,6 +209,13 @@ def create_app(config_class=Config):
     configured = register_configured_sources(hub, store, catalogue)
     if configured:
         app.logger.info(f"{configured} source(s) registered from configuration")
+
+    # The checks WDash runs itself. Registered unconditionally and cheap when
+    # unused: with no agents and no monitors it reports an empty list, which
+    # is the truth rather than an absence the page has to explain.
+    if store is not None:
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+        hub.add_monitors(StoreMonitorSource(store))
 
     app.duplicate_sources = _same_backend_twice(app, store)
     for warning in app.duplicate_sources:

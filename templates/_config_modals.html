@@ -308,3 +308,130 @@
     </div>
   </div>
 </div>
+
+<!-- ======================= ADD / EDIT A CHECK ======================= -->
+<div class="modal fade" id="monitorModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <form method="post" action="{{ url_for('config.save_monitor') }}">
+        <div class="modal-header">
+          <h5 class="modal-title" id="monitorModalTitle">Add check</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" name="id" id="monitorId">
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label small">Name</label>
+              <input class="form-control form-control-sm" name="name"
+                     id="monitorName" required placeholder="Checkout API">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small">Type</label>
+              <select class="form-select form-select-sm" name="kind"
+                      id="monitorKind">
+                {% for kind in monitor_kinds %}
+                <option value="{{ kind }}">{{ kind }}</option>
+                {% endfor %}
+              </select>
+              <div class="form-text" style="font-size:.7rem">
+                No ICMP: a ping needs a raw socket and so a privileged
+                container. No browser check: that needs a browser.
+              </div>
+            </div>
+            <div class="col-md-3 d-flex align-items-end">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" name="enabled"
+                       id="monitorEnabled" checked>
+                <label class="form-check-label small" for="monitorEnabled"
+                >Enabled</label>
+              </div>
+            </div>
+
+            <div class="col-12">
+              <label class="form-label small">Target</label>
+              <input class="form-control form-control-sm" name="target"
+                     id="monitorTarget" required
+                     placeholder="https://checkout.example.com/health">
+              <div class="form-text" style="font-size:.7rem">
+                A URL for <code>http</code>, <code>host:port</code> for
+                <code>tcp</code>.
+              </div>
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label small">Every (seconds)</label>
+              <input class="form-control form-control-sm" name="interval_seconds"
+                     id="monitorInterval" type="number" min="10" max="3600"
+                     value="60">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small">Timeout (seconds)</label>
+              <input class="form-control form-control-sm" name="timeout_seconds"
+                     id="monitorTimeout" type="number" min="1" max="120"
+                     value="10">
+              <div class="form-text" style="font-size:.7rem">
+                Shorter than the interval, or a slow check is still running
+                when the next one is due.
+              </div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small">Runs on</label>
+              {# Nothing ticked means every agent. That is the useful default —
+                 one agent, everything on it — and ticking several is how one
+                 check runs from several places, which is the whole point of
+                 synthetic monitoring. #}
+              <div class="border rounded p-2" style="max-height:6rem; overflow-y:auto">
+                {% for agent in own_agents %}
+                <div class="form-check">
+                  <input class="form-check-input monitor-agent" type="checkbox"
+                         name="agent_ids" value="{{ agent.id }}"
+                         id="agent-{{ agent.id }}">
+                  <label class="form-check-label small" for="agent-{{ agent.id }}">
+                    {{ agent.name }}</label>
+                </div>
+                {% else %}
+                <small class="text-muted">No agent registered yet.</small>
+                {% endfor %}
+              </div>
+              <div class="form-text" style="font-size:.7rem">
+                None ticked means every agent runs it.
+              </div>
+            </div>
+
+            <div class="col-12"><hr class="my-1"></div>
+            <div class="col-12">
+              <label class="form-label small">What makes it pass</label>
+              <div class="form-text mb-2" style="font-size:.7rem">
+                All optional. Left empty, the check passes if the target
+                answered at all &mdash; which for a <code>tcp</code> check is
+                the whole question.
+              </div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Expected status</label>
+              <input class="form-control form-control-sm" name="status"
+                     id="monitorStatus" placeholder="200, 204">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Body contains</label>
+              <input class="form-control form-control-sm" name="body_contains"
+                     id="monitorBody" placeholder="ok">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Slower than (ms) is a failure</label>
+              <input class="form-control form-control-sm" name="max_duration_ms"
+                     id="monitorMaxDuration" type="number" min="1"
+                     placeholder="2000">
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-sm btn-secondary"
+                  data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-sm btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>

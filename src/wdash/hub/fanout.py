@@ -582,10 +582,27 @@ class FanOutMonitorSource(MonitorSource):
                     seen.append(name)
         return seen
 
-    def monitors(self, window, scope):
+    def monitors(self, window, scope, series=False):
+        """`series` is forwarded, and a member that cannot take it still works.
+
+        Without the forward, the sparklines vanished the moment a second
+        monitor source was configured — the route asks the fan-out, the
+        fan-out asked each member without it, and every row came back with an
+        empty series. A page that quietly loses a column when you add a source
+        is worse than one that never had it.
+        """
+        def ask(source):
+            if not series:
+                return source.monitors(window, scope)
+            try:
+                return source.monitors(window, scope, series=True)
+            except TypeError:
+                # A source written against the two-argument interface. Its
+                # rows simply have no sparkline; the others keep theirs.
+                return source.monitors(window, scope)
+
         merged, warnings, answered, missing = [], [], [], []
-        for source, page, error in self._parallel(
-                lambda s: s.monitors(window, scope)):
+        for source, page, error in self._parallel(ask):
             if error is not None or page is None:
                 missing.append(source.name)
                 warnings.append(f"{source.name}: {error}")

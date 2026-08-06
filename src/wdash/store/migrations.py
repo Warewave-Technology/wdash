@@ -148,6 +148,18 @@ def _grant_monitors_to_admins(connection):
             {"permissions": json.dumps(permissions), "name": row["name"]})
 
 
+def _add_own_monitoring(connection):
+    """Version 9: agents, monitors, their assignment, and results.
+
+    Created here rather than by widening `_create_everything`, because that
+    step already ran on every existing installation and will never run again.
+    A table added to it is a table nobody upgrading ever gets.
+    """
+    from .schema import agents, monitor_agents, monitor_results, monitors
+    for table in (agents, monitors, monitor_agents, monitor_results):
+        table.create(connection, checkfirst=True)
+
+
 MIGRATIONS = [
     (1, "initial schema", _create_everything),
     (2, "authorization audit trail", _add_audit),
@@ -157,6 +169,7 @@ MIGRATIONS = [
     (6, "audit forwarding queue marker", _add_audit_forwarding),
     (7, "one source, several signals", _add_source_signals),
     (8, "monitors:read for existing administrators", _grant_monitors_to_admins),
+    (9, "agents, monitors and their results", _add_own_monitoring),
 ]
 
 

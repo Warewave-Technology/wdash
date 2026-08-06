@@ -34,6 +34,7 @@ from ..hub import Scope, TimeWindow
 from ..permissions import grouped as permission_groups
 from ..permissions import normalise as normalise_permissions
 from ..store import SOURCE_KINDS, SourceError
+from ..store.monitoring import MONITOR_KINDS, MonitoringError
 from ..store.secrets import SecretsUnavailable
 from ..store.settings_repo import AUDIT_FORWARDING, LDAP, OIDC
 
@@ -115,6 +116,11 @@ def config_page():
         # impossible to tick.
         all_signals=list(dict.fromkeys(
             signal for d in SOURCE_KINDS.values() for signal in d["signals"])),
+        # The checks WDash runs itself. Separate from `sources`, which is
+        # where it reads checks something else ran.
+        own_agents=store.agents.all(),
+        own_monitors=store.monitors.all(),
+        monitor_kinds=MONITOR_KINDS,
         roles=store.roles.all(),
         permission_groups=permission_groups(),
         default_role=store.settings.get("rbac.default_role", "viewer"),
@@ -940,3 +946,162 @@ def run_audit_forwarding():
     flash(f"{shipped:,} entr{'y' if shipped == 1 else 'ies'} forwarded."
           if shipped else "Nothing was waiting.", "success")
     return redirect(url_for("config.audit_page"))
+
+
+# ---------------------------------------------------------------------------
+# The checks WDash runs itself
+# ---------------------------------------------------------------------------
+
+@config_bp.route("/agents", methods=["POST"])
+@login_required
+def create_agent():
+    """Register an agent and show its token ONCE.
+
+    Flashed rather than stored anywhere readable: only the hash is kept, so
+    there is no screen that can show it again. Somebody who loses it rotates
+    rather than recovers, which is the only honest offer a store that cannot
+    read its own secrets can make.
+    """
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    try:
+        agent, token = _store().agents.create(request.form.get("name"))
+    except MonitoringError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("config.config_page") + "#tab-monitors")
+
+    _audit("agent registered", subject=agent["name"])
+    # The token itself is NOT audited. An audit trail readable by every
+    # administrator is a worse place for a live credential than the form that
+    # is about to be closed.
+    #
+    # Flashed ALONE, with the explanation in the template: the block is
+    # `user-select-all`, so anything else in it is copied along with the
+    # token — and a token pasted into a config file with "Its token is shown
+    # once, now:" in front of it fails authentication for a reason nobody can
+    # see.
+    flash(f"Agent '{agent['name']}' registered.", "success")
+    flash(token, "token")
+    return redirect(url_for("config.config_page") + "#tab-monitors")
+
+
+@config_bp.route("/agents/<agent_id>/rotate", methods=["POST"])
+@login_required
+def rotate_agent(agent_id):
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    agent = store.agents.get(agent_id)
+    token = store.agents.rotate_token(agent_id)
+    if token is None:
+        flash("No such agent.", "error")
+    else:
+        _audit("agent token rotated", subject=agent["name"])
+        # No grace period, and the message says so: an agent left running
+        # with the old token stops reporting, and somebody has to know that
+        # before they walk away.
+        flash(f"New token for '{agent['name']}'. The old one stopped working "
+              f"immediately, so this agent is reporting nothing until it is "
+              f"restarted with the new one.", "warning")
+        flash(token, "token")
+    return redirect(url_for("config.config_page") + "#tab-monitors")
+
+
+@config_bp.route("/agents/<agent_id>/delete", methods=["POST"])
+@login_required
+def delete_agent(agent_id):
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    agent = store.agents.get(agent_id)
+    if agent is None:
+        flash("No such agent.", "error")
+    else:
+        store.agents.delete(agent_id)
+        _audit("agent removed", subject=agent["name"])
+        # Results are NOT deleted with it. They are measurements of a target,
+        # not property of the agent, and throwing away history because the
+        # thing that collected it was retired is how an investigation loses
+        # the week before the incident.
+        flash(f"Agent '{agent['name']}' removed. Its past results are kept.",
+              "success")
+    return redirect(url_for("config.config_page") + "#tab-monitors")
+
+
+@config_bp.route("/monitors", methods=["POST"])
+@login_required
+def save_monitor():
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    form = request.form
+    monitor_id = form.get("id") or None
+
+    assertions = {}
+    statuses = [int(s) for s in (form.get("status") or "").replace(",", " ").split()
+                if s.strip().isdigit()]
+    if statuses:
+        assertions["status"] = statuses
+    if (form.get("body_contains") or "").strip():
+        assertions["body_contains"] = form["body_contains"].strip()
+    if (form.get("max_duration_ms") or "").strip().isdigit():
+        assertions["max_duration_ms"] = int(form["max_duration_ms"])
+
+    fields = dict(
+        name=form.get("name"), kind=form.get("kind"),
+        target=form.get("target"),
+        interval_seconds=form.get("interval_seconds"),
+        timeout_seconds=form.get("timeout_seconds"),
+        assertions=assertions,
+        agent_ids=form.getlist("agent_ids"))
+
+    try:
+        if monitor_id:
+            saved = store.monitors.update(
+                monitor_id, enabled=form.get("enabled") == "on", **fields)
+            if saved is None:
+                flash("No such monitor.", "error")
+                return redirect(url_for("config.config_page") + "#tab-monitors")
+            _audit("monitor updated", subject=saved["name"])
+        else:
+            saved = store.monitors.create(
+                created_by=getattr(current_user, "username", None), **fields)
+            _audit("monitor created", subject=saved["name"])
+    except MonitoringError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("config.config_page") + "#tab-monitors")
+
+    flash(f"Monitor '{saved['name']}' saved. Agents pick it up within a "
+          f"minute — they poll for configuration rather than being pushed to, "
+          f"which is what lets them run behind NAT.", "success")
+    return redirect(url_for("config.config_page") + "#tab-monitors")
+
+
+@config_bp.route("/monitors/<monitor_id>/delete", methods=["POST"])
+@login_required
+def delete_monitor(monitor_id):
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    monitor = store.monitors.get(monitor_id)
+    if monitor is None:
+        flash("No such monitor.", "error")
+    else:
+        store.monitors.delete(monitor_id)
+        _audit("monitor removed", subject=monitor["name"])
+        # Results DO go with it, unlike an agent's. They are about a check
+        # that no longer exists, and a page cannot show them without a
+        # definition to name them.
+        flash(f"Monitor '{monitor['name']}' and its results were removed.",
+              "success")
+    return redirect(url_for("config.config_page") + "#tab-monitors")

@@ -10,6 +10,7 @@ right up until Elasticsearch became optional.
 
 from .database import DatabaseError, build_engine, describe, is_sqlite
 from .migrations import migrate
+from .monitoring import AgentRepository, MonitorRepository, ResultRepository
 from .objects import (
     DashboardRepository, ObjectConflict, SavedSearchRepository,
 )
@@ -54,6 +55,11 @@ class Store:
         self.rbac = RoleResolver(self.roles, self.settings)
         self.dashboards = DashboardRepository(engine)
         self.saved_searches = SavedSearchRepository(engine)
+        #: Checks WDash runs itself, through its own agents. Separate from
+        #: `sources`, which is where it reads checks something else ran.
+        self.agents = AgentRepository(engine)
+        self.monitors = MonitorRepository(engine)
+        self.results = ResultRepository(engine)
 
     @classmethod
     def open(cls, url=None, rbac_file=None, secret_box=None):

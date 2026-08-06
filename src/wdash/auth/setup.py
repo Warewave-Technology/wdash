@@ -32,6 +32,20 @@ setup_bp = Blueprint('setup', __name__)
 #: Reachable before an account exists. Everything else redirects to setup.
 OPEN_ENDPOINTS = {'setup.first_run', 'static', 'health'}
 
+#: Blueprints that must never be redirected anywhere.
+#:
+#: An agent has no browser. A 302 to an HTML setup form is not something a
+#: daemon can act on — it parses the body as JSON, fails, and reports itself
+#: broken while WDash is merely waiting for somebody to create an account. It
+#: has a bearer token and its own 401; that is the answer it can use.
+OPEN_BLUEPRINTS = {'agent'}
+
+
+def _is_open(endpoint):
+    if endpoint in OPEN_ENDPOINTS:
+        return True
+    return bool(endpoint) and endpoint.split('.')[0] in OPEN_BLUEPRINTS
+
 
 def _store():
     return getattr(current_app, 'store', None)
@@ -43,7 +57,7 @@ def register_setup_gate(app):
     @app.before_request
     def _require_setup():
         store = _store()
-        if store is None or request.endpoint in OPEN_ENDPOINTS:
+        if store is None or _is_open(request.endpoint):
             return None
         # A live check, not a flag cached at startup: the worker that did not
         # process the setup form must still see that setup is done.

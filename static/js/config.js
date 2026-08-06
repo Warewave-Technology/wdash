@@ -620,3 +620,85 @@ document.querySelectorAll('.pick-target').forEach(button => {
                                                                () => addRow());
     serialise();
 })();
+
+
+// ---------------------------------------------------------------------------
+// Checks WDash runs itself
+// ---------------------------------------------------------------------------
+
+/**
+ * Fill the check form from a row, or clear it for a new one.
+ *
+ * Cleared explicitly rather than relying on the browser: a modal reused for
+ * "add" after an "edit" keeps whatever was in it, and somebody creating a
+ * second check would silently inherit the first one's assertions.
+ */
+function fillMonitor(monitor) {
+    const value = (id, v) => {
+        const element = document.getElementById(id);
+        if (element) { element.value = v === undefined || v === null ? '' : v; }
+    };
+    const assertions = (monitor && monitor.assertions) || {};
+
+    value('monitorId', monitor ? monitor.id : '');
+    value('monitorName', monitor ? monitor.name : '');
+    value('monitorTarget', monitor ? monitor.target : '');
+    value('monitorInterval', monitor ? monitor.interval_seconds : 60);
+    value('monitorTimeout', monitor ? monitor.timeout_seconds : 10);
+    value('monitorStatus', (assertions.status || []).join(', '));
+    value('monitorBody', assertions.body_contains || '');
+    value('monitorMaxDuration', assertions.max_duration_ms || '');
+
+    const kind = document.getElementById('monitorKind');
+    if (kind) { kind.value = monitor ? monitor.kind : kind.options[0].value; }
+
+    const enabled = document.getElementById('monitorEnabled');
+    if (enabled) { enabled.checked = monitor ? !!monitor.enabled : true; }
+
+    const assigned = new Set((monitor && monitor.agent_ids) || []);
+    document.querySelectorAll('.monitor-agent').forEach(box => {
+        box.checked = assigned.has(box.value);
+    });
+
+    const title = document.getElementById('monitorModalTitle');
+    if (title) { title.textContent = monitor ? 'Edit check' : 'Add check'; }
+}
+
+document.getElementById('addMonitorBtn')?.addEventListener('click', () => {
+    fillMonitor(null);
+});
+
+document.querySelectorAll('.edit-monitor').forEach(button => {
+    button.addEventListener('click', () => {
+        let monitor = null;
+        try {
+            monitor = JSON.parse(button.dataset.monitor);
+        } catch (e) {
+            console.error('could not read the check definition', e);
+            return;
+        }
+        fillMonitor(monitor);
+        const modal = document.getElementById('monitorModal');
+        if (modal && window.bootstrap) {
+            window.bootstrap.Modal.getOrCreateInstance(modal).show();
+        }
+    });
+});
+
+// The tab the server sent us back to. Without this every save lands on
+// Sources and the person has to find their way back to what they just
+// changed.
+if (window.location.hash === '#tab-monitors') {
+    const trigger = document.querySelector('[data-bs-target="#tab-monitors"]');
+    if (trigger && window.bootstrap) {
+        window.bootstrap.Tab.getOrCreateInstance(trigger).show();
+    }
+}
+
+// Timestamps as the reader's local time.
+document.querySelectorAll('[data-timestamp]').forEach(element => {
+    const raw = element.getAttribute('data-timestamp');
+    if (!raw) { return; }
+    const when = new Date(raw);
+    if (!isNaN(when)) { element.textContent = when.toLocaleString(); }
+});
