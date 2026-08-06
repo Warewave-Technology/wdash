@@ -787,3 +787,141 @@ class ChartDataTest(unittest.TestCase):
         top of the chart."""
         chart = self._chart([(10, 100, 0), (10, 10, 0)])
         self.assertEqual(chart["peak_ms"], 100)
+
+
+class FanOutCompletenessTest(unittest.TestCase):
+    """The fan-out has to offer everything the routes ask a source for.
+
+    Twice now a method was added to the sources and not to the fan-out, and
+    both times the symptom appeared only once a SECOND source was configured
+    — because with one source `hub.monitors(ALL)` returns the source itself
+    and the fan-out is never built. The sparklines went empty the first time;
+    the detail chart went to "not enough checks to draw a line" the second,
+    while the list beside it was full.
+
+    So this checks the class rather than the instance.
+    """
+
+    #: What the monitor routes call on whatever `hub.monitors()` returns.
+    USED_BY_ROUTES = ("monitors", "history", "certificates", "series",
+                      "health", "containers", "supports", "capabilities")
+
+    def test_the_fanout_offers_everything_a_source_does(self):
+        from wdash.hub.adapters.es_monitors import ElasticsearchMonitorSource
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+        from wdash.hub.fanout import FanOutMonitorSource
+
+        for source in (ElasticsearchMonitorSource, StoreMonitorSource):
+            missing = [name for name in self.USED_BY_ROUTES
+                       if hasattr(source, name)
+                       and not hasattr(FanOutMonitorSource, name)]
+            self.assertEqual(
+                missing, [],
+                f"the fan-out cannot serve {missing} that "
+                f"{source.__name__} provides")
+
+    def test_the_optional_arguments_are_accepted_too(self):
+        """Present is not enough. `monitors(series=True)` and
+        `history(offset=, limit=)` are how the page asks for a sparkline and a
+        page of checks, and a fan-out that takes neither silently drops both.
+        """
+        import inspect
+
+        from wdash.hub.fanout import FanOutMonitorSource
+        signatures = {
+            "monitors": ("series",),
+            "history": ("offset", "limit"),
+            "series": ("points",),
+        }
+        for name, expected in signatures.items():
+            parameters = inspect.signature(
+                getattr(FanOutMonitorSource, name)).parameters
+            for argument in expected:
+                self.assertIn(argument, parameters,
+                              f"FanOutMonitorSource.{name} does not take "
+                              f"{argument}")
+
+    def test_a_two_source_hub_still_draws_a_chart(self):
+        """The reported fault, end to end: with one source the page worked and
+        with two it said there was not enough data."""
+        from wdash.hub import Hub
+        from wdash.hub.models import UP, Monitor, MonitorPage, MonitorPoint
+        from wdash.hub.query import TimeWindow
+
+        class Source:
+            capabilities = frozenset({"monitor_list", "monitor_history"})
+
+            def __init__(self, name, knows):
+                self.name = name
+                self._knows = knows
+
+            def monitors(self, window, scope, series=False):
+                return MonitorPage(
+                    monitors=[Monitor(id=self._knows, name=self._knows,
+                                      status=UP, source=self.name)],
+                    sources=(self.name,))
+
+            def series(self, monitor_id, window, scope, points=120):
+                if monitor_id != self._knows:
+                    return []
+                return [MonitorPoint(timestamp=None, duration_ms=10 + n,
+                                     down=0, checks=3) for n in range(points)]
+
+            def history(self, monitor_id, window, scope):
+                return []
+
+            def certificates(self, window, scope):
+                return []
+
+            def health(self):
+                return True, "ok"
+
+            def containers(self, scope):
+                return []
+
+        hub = Hub()
+        hub.add_monitors(Source("first", "a"))
+        hub.add_monitors(Source("second", "b"))
+        merged = hub.monitors(hub.ALL_SOURCES)
+
+        from wdash.api.monitor_routes import response_chart
+        points = merged.series("a", TimeWindow.of("1h"), None, points=12)
+        self.assertTrue(points, "the fan-out returned no series")
+        self.assertIsNotNone(response_chart(points),
+                             "a full series still produced no chart")
+
+    def test_merging_two_series_weights_by_check_count(self):
+        """A plain mean of means lets a source with one check outweigh one
+        with fifty."""
+        from wdash.hub.fanout import FanOutMonitorSource
+        from wdash.hub.models import MonitorPoint
+
+        class Source:
+            capabilities = frozenset()
+
+            def __init__(self, name, duration, checks):
+                self.name = name
+                self._duration = duration
+                self._checks = checks
+
+            def series(self, monitor_id, window, scope, points=120):
+                return [MonitorPoint(timestamp=None,
+                                     duration_ms=self._duration,
+                                     down=0, checks=self._checks)]
+
+            def health(self):
+                return True, "ok"
+
+            def containers(self, scope):
+                return []
+
+            def monitors(self, window, scope, series=False):
+                return None
+
+        fanout = FanOutMonitorSource([Source("busy", 10.0, 50),
+                                      Source("quiet", 1000.0, 1)])
+        point = fanout.series("m", None, None, points=1)[0]
+        # 50 checks at 10 ms and one at 1000: the weighted mean is ~29 ms,
+        # the mean of means would be 505.
+        self.assertLess(point.duration_ms, 100)
+        self.assertEqual(point.checks, 51)

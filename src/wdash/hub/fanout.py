@@ -36,7 +36,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .aggregation import AggregationResult, Bucket
 from .models import (
-    DOWN, FieldStat, FieldValue, LogPage, MonitorPage, Service, Trace,
+    DOWN, FieldStat, FieldValue, LogPage, MonitorPage, MonitorPoint, Service,
+    Trace,
 )
 from .source import Capability, LogSource, MonitorSource, TraceSource
 
@@ -623,19 +624,82 @@ class FanOutMonitorSource(MonitorSource):
             partial=bool(missing), sources=tuple(answered),
             missing_sources=tuple(dict.fromkeys(missing)))
 
-    def history(self, monitor_id, window, scope):
+    def history(self, monitor_id, window, scope, offset=0, limit=None):
         """Whichever sources know this monitor, merged by time.
 
         A monitor id is unique within an agent, not across agents. Asking all
         of them and merging is what makes a history complete when the same
         check runs from two places.
+
+        Paged HERE rather than pushed down, because a page of the merge is not
+        the merge of two pages: taking rows 25-50 from each source and
+        concatenating gives neither source's rows 25-50 nor the combined
+        ones. The members are asked for everything in the window — which the
+        window already bounds — and the slice is taken after the sort.
         """
         merged = []
-        for _, checks, error in self._parallel(
+        for source, checks, error in self._parallel(
                 lambda s: s.history(monitor_id, window, scope)):
             if error is None and checks:
                 merged.extend(checks)
         merged.sort(key=lambda check: check.timestamp or 0)
+
+        total = len(merged)
+        if limit is not None:
+            newest_first = list(reversed(merged))
+            merged = list(reversed(
+                newest_first[int(offset):int(offset) + int(limit)]))
+        result = _CountedChecks(merged)
+        result.total = total
+        return result
+
+    def series(self, monitor_id, window, scope, points=120):
+        """The detail chart, merged across sources.
+
+        Missing entirely until a second monitor source was configured, at
+        which point the fan-out replaced the single source and took its
+        `series` with it — the chart went to "not enough checks to draw a
+        line" while the list beside it was full. The same shape as the
+        `series=True` gap on `monitors`: one instance of the class was fixed
+        and the class was not.
+
+        Members share the window and the bucket count, so bucket `i` is the
+        same span everywhere and the merge is by index. Durations are averaged
+        WEIGHTED by how many checks each bucket holds — a plain mean of means
+        lets a source with one check outweigh one with fifty.
+        """
+        collected = []
+        for _, series, error in self._parallel(
+                lambda s: s.series(monitor_id, window, scope, points=points)
+                if hasattr(s, "series") else []):
+            if error is None and series:
+                collected.append(series)
+
+        if not collected:
+            return []
+        if len(collected) == 1:
+            return collected[0]
+
+        width = max(len(series) for series in collected)
+        merged = []
+        for index in range(width):
+            buckets = [series[index] for series in collected
+                       if index < len(series)]
+            checks = sum(b.checks for b in buckets)
+            weighted = sum((b.duration_ms or 0) * b.checks
+                           for b in buckets if b.duration_ms is not None)
+            counted = sum(b.checks for b in buckets if b.duration_ms is not None)
+            worsts = [getattr(b, "worst_ms", None) for b in buckets]
+            worsts = [w for w in worsts if w is not None]
+
+            point = MonitorPoint(
+                timestamp=next((b.timestamp for b in buckets if b.timestamp),
+                               None),
+                duration_ms=(weighted / counted) if counted else None,
+                down=sum(b.down for b in buckets),
+                checks=checks)
+            point.worst_ms = max(worsts) if worsts else None
+            merged.append(point)
         return merged
 
     def certificates(self, window, scope):
@@ -647,3 +711,8 @@ class FanOutMonitorSource(MonitorSource):
         merged.sort(key=lambda m: (m.certificate.days_remaining is None,
                                    m.certificate.days_remaining or 0))
         return merged
+
+
+class _CountedChecks(list):
+    """A list of checks that also knows the total, matching the sources."""
+    total = 0
