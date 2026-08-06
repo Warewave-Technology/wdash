@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Sign in - WDash{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-5 col-lg-4">
+    <div class="card mt-5">
+      <div class="card-body p-4">
+        <h3 class="mb-3"><i class="fas fa-right-to-bracket text-primary"></i> Sign in</h3>
+
+        {% if oidc_available %}
+        <a href="{{ url_for('auth.oidc_login') }}" class="btn btn-primary w-100 mb-3">
+          <i class="fas fa-id-badge"></i> Continue with single sign-on
+        </a>
+        {% if local_available %}
+        <div class="text-center text-muted mb-3" style="font-size:.8rem">or</div>
+        {% endif %}
+        {% endif %}
+
+        {% if local_available %}
+        <form method="POST">
+          <div class="mb-3">
+            <label for="username" class="form-label">Username</label>
+            <input type="text" class="form-control" id="username" name="username"
+                   value="{{ username or '' }}" autocomplete="username" required>
+          </div>
+          <div class="mb-3">
+            <label for="password" class="form-label">Password</label>
+            <input type="password" class="form-control" id="password"
+                   name="password" autocomplete="current-password" required>
+          </div>
+          <button type="submit" class="btn btn-outline-primary w-100">
+            {% if ldap_available %}Sign in{% else %}Sign in with a local account{% endif %}
+          </button>
+          {% if ldap_available %}
+          <div class="form-text text-center mt-2">
+            Local accounts and directory accounts both use this form.
+          </div>
+          {% endif %}
+        </form>
+        {% elif not oidc_available %}
+        <div class="alert alert-warning mb-0">
+          No sign-in method is configured.
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

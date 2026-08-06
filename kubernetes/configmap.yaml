@@ -1,0 +1,215 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wdash-config
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: config
+data:
+  # Every key here is read by the application. Ones that were not — LOG_LEVEL,
+  # LOG_FORMAT, SESSION_TIMEOUT, MAX_SEARCH_SIZE, WORKERS,
+  # WORKER_CONNECTIONS, WORKER_TIMEOUT, SECRET_KEY_FILE, REDIS_TIMEOUT,
+  # ELASTICSEARCH_MAX_RETRIES — have been removed. A key that looks like
+  # configuration and changes nothing is worse than a missing one: somebody
+  # turns it and reports that it had no effect.
+
+  # Flask. No FLASK_ENV: Flask removed it in 2.3, and the only reader left in
+  # this repository is run.sh, which the image does not use — its CMD is
+  # gunicorn.
+  FLASK_DEBUG: "false"
+
+  # Metadata store: local accounts, roles, sources, saved searches, audit
+  # trail and — with DASHBOARD_STORAGE below — the dashboards.
+  #
+  # Four slashes: an absolute path. Three would make it relative to WORKDIR
+  # (/app), which is the container's own layer rather than the volume mounted
+  # at /data, and every restart would start from an empty database.
+  #
+  # SQLite is right for one replica. For more than one, point this at
+  # Postgres — postgresql+psycopg://user:pass@host/wdash — and the replica
+  # count below stops mattering.
+  DATABASE_URL: "sqlite:////data/wdash.db"
+  # Keeps the dashboards with the rest of the metadata. Left as "file" they
+  # go to DASHBOARD_STORAGE_FILE instead, so half the state is on the volume
+  # and half is in the database.
+  DASHBOARD_STORAGE: "database"
+
+  # Elasticsearch.
+  #
+  # This registers a source of its own, named "elasticsearch". If the same
+  # cluster is also declared on the configuration page, both register and a
+  # merged search counts every matching record twice. Pick one; WDash warns
+  # on the configuration page when it sees both.
+  ELASTICSEARCH_URL: "http://elasticsearch:9200"
+  ELASTICSEARCH_TIMEOUT: "30"
+  # Which indices hold traces. Excluded from log search, or spans come back
+  # as records with no body and no severity.
+  TRACE_INDEX_PATTERNS: "*traces*,*apm*"
+
+  # Redis — not used by the code yet; sessions still live in the cookie.
+  REDIS_URL: "redis://redis:6379/0"
+
+  # OIDC
+  OIDC_DISCOVERY_URL: ""
+  OIDC_CLIENT_ID: ""
+  OIDC_REDIRECT_URI: "http://wdash.local/auth/callback"
+
+  # Application
+  DASHBOARD_STORAGE_FILE: "/data/dashboards.json"
+  RBAC_CONFIG_FILE: "/etc/config/rbac.yaml"
+  LOGS_PER_PAGE: "50"
+  MAX_SEARCH_RESULTS: "1000"
+
+  # Security.
+  #
+  # The nginx sidecar is one proxy. At 0 the socket address is used, which
+  # behind the sidecar is 127.0.0.1 for every request — so all users share
+  # one sign-in throttle bucket and one attacker locks out everybody. Count
+  # every proxy in the chain, including anything in front of the ingress.
+  TRUSTED_PROXY_COUNT: "1"
+  # TLS is terminated at the ingress, so without this the session cookie also
+  # travels over plain HTTP to the same host.
+  SESSION_COOKIE_SECURE: "true"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wdash-rbac-config
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: rbac
+data:
+  rbac.yaml: |
+    # WDash RBAC Configuration
+    roles:
+      admin:
+        description: "Full system administrator"
+        permissions:
+          - "system:admin"
+          - "logs:read"
+          - "logs:search"
+          - "dashboard:view"
+          - "dashboard:create"
+          - "dashboard:edit"
+          - "dashboard:delete"
+          - "user:manage"
+        index_patterns:
+          - "*"
+      
+      operator:
+        description: "Operations team member"
+        permissions:
+          - "logs:read"
+          - "logs:search"
+          - "dashboard:view"
+          - "dashboard:create"
+          - "dashboard:edit"
+        index_patterns:
+          - "app-logs-*"
+          - "service-*"
+          - "system-*"
+      
+      developer:
+        description: "Development team member"
+        permissions:
+          - "logs:read"
+          - "logs:search"
+          - "dashboard:view"
+          - "dashboard:create"
+        index_patterns:
+          - "app-logs-*"
+          - "service-*"
+      
+      viewer:
+        description: "Read-only access"
+        permissions:
+          - "logs:read"
+          - "dashboard:view"
+        index_patterns:
+          - "app-logs-*"
+    
+    # User assignments (can be overridden by OIDC claims)
+    users:
+      admin@company.com:
+        role: admin
+        email: admin@company.com
+        username: admin
+      
+      ops@company.com:
+        role: operator
+        email: ops@company.com
+        username: operator
+      
+      dev@company.com:
+        role: developer
+        email: dev@company.com
+        username: developer
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wdash-nginx-config
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: nginx
+data:
+  nginx.conf: |
+    upstream wdash_backend {
+        server 127.0.0.1:5000;
+    }
+    
+    server {
+        listen 80;
+        server_name _;
+        
+        # Security headers come from the application, which sets them per
+        # response alongside a Content-Security-Policy carrying a per-request
+        # nonce. nginx `add_header` APPENDS rather than replaces, so setting
+        # them here sent two X-Frame-Options — the app's DENY and this file's
+        # SAMEORIGIN — and a browser reading conflicting values is entitled to
+        # honour either. X-XSS-Protection is gone with them: it is removed
+        # from every current browser and was itself an XSS vector.
+        
+        # Gzip compression
+        gzip on;
+        gzip_vary on;
+        gzip_min_length 1024;
+        gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
+        
+        # Static files
+        location /static/ {
+            alias /app/static/;
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+        
+        # Health check
+        location /health {
+            proxy_pass http://wdash_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+        
+        # Main application
+        location / {
+            proxy_pass http://wdash_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # WebSocket support
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            
+            # Timeouts
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+        }
+    }

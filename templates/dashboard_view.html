@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+
+{% block title %}{{ dashboard.name }} - WDash{% endblock %}
+
+{% block content %}
+<div data-dashboard-id="{{ dashboard.id }}" data-dashboard-query="{{ dashboard.query|e }}"></div>
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <h2>
+            <i class="fas fa-chart-line text-primary"></i> {{ dashboard.name }}
+            <span class="badge d-none align-middle" id="statusBadge"
+                  style="font-size:.6em"></span>
+        </h2>
+        <p class="text-muted mb-0">{{ dashboard.description or 'No description' }}</p>
+        <small class="text-muted">
+            Query: <code class="text-info">{{ dashboard.query }}</code><br>
+            Index Patterns: <code class="text-warning">{{ dashboard.index_patterns | join(', ') }}</code>
+        </small>
+    </div>
+    <div>
+        {% if current_user.has_permission('dashboard:edit') and 
+              (dashboard.created_by == current_user.username or current_user.has_permission('system:admin')) %}
+            <a href="{{ url_for('dashboards.edit_dashboard', dashboard_id=dashboard.id) }}" class="btn btn-outline-secondary me-2">
+                <i class="fas fa-edit"></i> Edit
+            </a>
+        {% endif %}
+        <a href="{{ url_for('dashboards.dashboards_page') }}" class="btn btn-secondary">
+            <i class="fas fa-arrow-left"></i> Back
+        </a>
+    </div>
+</div>
+
+<!-- Time Range Selector -->
+<div class="card mb-4">
+    <div class="card-body">
+        <div class="row align-items-center">
+            <div class="col-md-2">
+                <label for="timeRange" class="form-label">Time Range</label>
+                <select class="form-select" id="timeRange">
+                    <option value="15m">Last 15 minutes</option>
+                    <option value="1h" selected>Last 1 hour</option>
+                    <option value="6h">Last 6 hours</option>
+                    <option value="24h">Last 24 hours</option>
+                    <option value="7d">Last 7 days</option>
+                </select>
+            </div>
+            <div class="col-md-5">
+                <label for="dashboardFilter" class="form-label">
+                    Filter <span class="text-muted" style="font-size:.75rem">(narrows the dashboard query)</span>
+                </label>
+                <div class="input-group">
+                    <input type="text" class="form-control" id="dashboardFilter"
+                           placeholder='e.g. service:"payment-service"'>
+                    <button class="btn btn-outline-secondary" id="clearFilterBtn"
+                            type="button" title="Clear filter">&times;</button>
+                </div>
+            </div>
+            <div class="col-md-5 text-end">
+                <label class="form-label d-block">&nbsp;</label>
+                <button class="btn btn-primary" id="refreshBtn">
+                    <i class="fas fa-sync-alt"></i> Refresh
+                </button>
+                <button class="btn btn-outline-secondary" id="autoRefreshBtn">
+                    <i class="fas fa-play"></i> Auto Refresh
+                </button>
+                <button class="btn btn-outline-secondary" id="shareBtn"
+                        title="Copy a link to exactly this view">
+                    <i class="fas fa-link"></i>
+                </button>
+            </div>
+        </div>
+        <div class="row mt-2">
+            <div class="col-12 text-end">
+                <small class="text-muted">Last updated: <span id="lastUpdated">-</span></small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Dashboard Stats.
+     Each card carries three things: the number, how it moved against the
+     preceding window of the same length, and a link to the records behind it.
+     A count on its own tells you almost nothing — 1,700 errors is alarming or
+     routine depending entirely on what it was yesterday. -->
+<div class="row g-3 mb-4 dashboard-stats">
+    <div class="col-md-3">
+        <div class="card stat-card h-100" id="cardTotal" role="button" tabindex="0">
+            <div class="card-body py-3">
+                <div class="d-flex justify-content-between align-items-start">
+                    <span class="text-muted text-uppercase" style="font-size:.7rem;letter-spacing:.05em">Total Logs</span>
+                    <i class="fas fa-arrow-up-right-from-square text-muted stat-jump" style="font-size:.65rem"></i>
+                </div>
+                <h3 class="text-primary mb-1 mt-1" id="totalHits">-</h3>
+                <div class="stat-delta text-muted" id="totalHitsDelta" style="font-size:.75rem">&nbsp;</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card h-100" id="cardError" role="button" tabindex="0">
+            <div class="card-body py-3">
+                <div class="d-flex justify-content-between align-items-start">
+                    <span class="text-muted text-uppercase" style="font-size:.7rem;letter-spacing:.05em">Errors</span>
+                    <span class="badge bg-danger-subtle text-danger" id="errorRate" style="font-size:.65rem">-</span>
+                </div>
+                <h3 class="text-danger mb-1 mt-1" id="errorCount">-</h3>
+                <div class="stat-delta text-muted" id="errorCountDelta" style="font-size:.75rem">&nbsp;</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card h-100" id="cardWarn" role="button" tabindex="0">
+            <div class="card-body py-3">
+                <div class="d-flex justify-content-between align-items-start">
+                    <span class="text-muted text-uppercase" style="font-size:.7rem;letter-spacing:.05em">Warnings</span>
+                    <i class="fas fa-arrow-up-right-from-square text-muted stat-jump" style="font-size:.65rem"></i>
+                </div>
+                <h3 class="text-warning mb-1 mt-1" id="warnCount">-</h3>
+                <div class="stat-delta text-muted" id="warnCountDelta" style="font-size:.75rem">&nbsp;</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card h-100" id="cardInfo" role="button" tabindex="0">
+            <div class="card-body py-3">
+                <div class="d-flex justify-content-between align-items-start">
+                    <span class="text-muted text-uppercase" style="font-size:.7rem;letter-spacing:.05em">Info</span>
+                    <i class="fas fa-arrow-up-right-from-square text-muted stat-jump" style="font-size:.65rem"></i>
+                </div>
+                <h3 class="text-info mb-1 mt-1" id="infoCount">-</h3>
+                <div class="stat-delta text-muted" id="infoCountDelta" style="font-size:.75rem">&nbsp;</div>
+            </div>
+        </div>
+    </div>
+</div>
+<div class="text-muted mb-4" style="font-size:.75rem" id="baselineNote"></div>
+
+<!-- Panels are built by the client from the /data response: the dashboard
+     owns the list, so hardcoding cards here would put the layout in two places
+     that must agree. -->
+<div class="row g-3 mb-4" id="panelGrid"></div>
+
+<template id="panelTemplate">
+    <div class="col-md-6 panel-slot">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0 panel-title"></h5>
+                <small class="text-muted panel-hint" style="font-size:.7rem"></small>
+            </div>
+            <div class="card-body">
+                <div class="chart-container" style="height:300px">
+                    <canvas></canvas>
+                </div>
+                <div class="panel-empty text-center text-muted d-none py-5">
+                    <i class="fas fa-inbox"></i>
+                    <div class="mt-2"><small>No data in this window</small></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</template>
+
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}" src="{{ url_for('static', filename='js/async-dashboard.js') }}"></script>
+{% endblock %}

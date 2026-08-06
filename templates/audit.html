@@ -1,0 +1,346 @@
+{% extends "base.html" %}
+{% block title %}Audit trail - WDash{% endblock %}
+
+{% block content %}
+{#
+  Read-only, and there is no control on this page that changes that. No delete,
+  no edit, no retention setting: a trail an administrator can prune from the
+  same screen they are being audited on is not a trail.
+#}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h2><i class="fas fa-clipboard-list text-primary"></i> Audit trail</h2>
+  <div class="d-flex align-items-center gap-2">
+    <span class="badge bg-secondary">{{ "{:,}".format(total) }} entries</span>
+    <a class="btn btn-sm btn-outline-secondary"
+       href="{{ url_for('config.audit_export', **request.args) }}">
+      <i class="fas fa-download"></i> Export
+    </a>
+    <a class="btn btn-sm btn-outline-secondary"
+       href="{{ url_for('config.config_page') }}">
+      <i class="fas fa-sliders"></i> Configuration
+    </a>
+  </div>
+</div>
+
+<ul class="nav nav-tabs mb-3" role="tablist">
+  <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab"
+      data-bs-target="#tab-changes" type="button">
+      <i class="fas fa-pen-to-square"></i> Changes</button></li>
+  <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
+      data-bs-target="#tab-attempts" type="button">
+      <i class="fas fa-right-to-bracket"></i> Sign-in attempts</button></li>
+  <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
+      data-bs-target="#tab-forwarding" type="button">
+      <i class="fas fa-paper-plane"></i> Forwarding
+      {% if forwarding_pending %}
+      <span class="badge bg-warning text-dark ms-1">{{ forwarding_pending }}</span>
+      {% endif %}
+    </button></li>
+</ul>
+
+<div class="tab-content">
+
+<!-- ============================ CHANGES ============================ -->
+<div class="tab-pane fade show active" id="tab-changes">
+
+  <form class="card mb-3" method="get">
+    <div class="card-body py-2">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-2">
+          <label class="form-label small mb-1">Actor</label>
+          <input class="form-control form-control-sm" name="actor"
+                 value="{{ filters.actor }}" placeholder="username">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label small mb-1">Action</label>
+          {# A list rather than a box: a typo that returns nothing looks
+             exactly like a period when nothing happened. #}
+          <select class="form-select form-select-sm" name="action">
+            <option value="">any action</option>
+            {% for name in actions %}
+            <option value="{{ name }}"
+                    {% if filters.action == name %}selected{% endif %}>
+              {{ name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small mb-1">Subject</label>
+          <input class="form-control form-control-sm" name="subject"
+                 value="{{ filters.subject }}" placeholder="role:viewer">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small mb-1">From</label>
+          <input type="datetime-local" class="form-control form-control-sm"
+                 name="since" value="{{ filters.since }}">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small mb-1">To</label>
+          <input type="datetime-local" class="form-control form-control-sm"
+                 name="until" value="{{ filters.until }}">
+        </div>
+        <div class="col-md-1 d-flex gap-1">
+          <button class="btn btn-sm btn-primary flex-grow-1" type="submit">
+            <i class="fas fa-filter"></i>
+          </button>
+          <a class="btn btn-sm btn-outline-secondary"
+             href="{{ url_for('config.audit_page') }}" title="Clear">
+            <i class="fas fa-times"></i>
+          </a>
+        </div>
+      </div>
+    </div>
+  </form>
+
+  {% if not entries %}
+  <div class="alert alert-secondary py-2" style="font-size:.85rem">
+    <i class="fas fa-circle-info"></i>
+    {% if filters.actor or filters.action or filters.subject
+          or filters.since or filters.until %}
+    Nothing matches these filters. That is a statement about the filters as
+    much as about the period &mdash; clear them to see what is there.
+    {% else %}
+    Nothing recorded yet.
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="card">
+    <div class="table-responsive">
+      <table class="table table-sm table-dark mb-0" style="font-size:.82rem">
+        <thead>
+          <tr>
+            <th style="width:11rem">When</th>
+            <th style="width:9rem">Actor</th>
+            <th style="width:8rem">From</th>
+            <th style="width:12rem">Action</th>
+            <th style="width:12rem">Subject</th>
+            <th>Resulting state</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for entry in entries %}
+          <tr>
+            <td class="text-nowrap text-muted">
+              {{ entry.at.strftime('%Y-%m-%d %H:%M:%S') if entry.at else '' }}
+            </td>
+            <td><code>{{ entry.actor }}</code></td>
+            <td class="text-muted">
+              <small>{{ entry.address or '&mdash;' | safe }}</small>
+            </td>
+            <td>
+              {% if 'refused' in entry.action or 'blocked' in entry.action %}
+              <span class="badge bg-warning text-dark">{{ entry.action }}</span>
+              {% elif 'deleted' in entry.action %}
+              <span class="badge bg-danger">{{ entry.action }}</span>
+              {% else %}
+              <span class="badge bg-secondary">{{ entry.action }}</span>
+              {% endif %}
+            </td>
+            <td class="text-truncate" style="max-width:12rem">
+              <small>{{ entry.subject or '' }}</small>
+            </td>
+            <td>
+              {% if entry.state %}
+              {# The whole object as it was left, so one row answers "what was
+                 it then" without replaying history. #}
+              <details>
+                <summary class="text-muted" style="cursor:pointer">
+                  <small>show</small></summary>
+                <pre class="mb-0 mt-1" style="font-size:.72rem;white-space:pre-wrap"
+                     >{{ entry.state | tojson(indent=2) }}</pre>
+              </details>
+              {% else %}
+              <small class="text-muted">&mdash;</small>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  {% if pages > 1 %}
+  <nav class="mt-2">
+    <ul class="pagination pagination-sm mb-0">
+      <li class="page-item {% if page == 0 %}disabled{% endif %}">
+        <a class="page-link"
+           href="{{ url_for('config.audit_page', page=page - 1, **filters) }}">
+          Newer</a>
+      </li>
+      <li class="page-item disabled">
+        <span class="page-link">{{ page + 1 }} of {{ pages }}</span>
+      </li>
+      <li class="page-item {% if page + 1 >= pages %}disabled{% endif %}">
+        <a class="page-link"
+           href="{{ url_for('config.audit_page', page=page + 1, **filters) }}">
+          Older</a>
+      </li>
+    </ul>
+  </nav>
+  {% endif %}
+  {% endif %}
+</div>
+
+<!-- ======================== SIGN-IN ATTEMPTS ======================== -->
+<div class="tab-pane fade" id="tab-attempts">
+  <div class="alert alert-secondary py-2" style="font-size:.82rem">
+    <i class="fas fa-circle-info"></i>
+    Every attempt, successful or not, kept for 30 days. A burst against
+    usernames that were never real is the clearest signal there is, so those
+    are recorded too &mdash; a name here does not mean an account exists.
+    <strong>locked</strong> means the attempt was refused before the password
+    was checked.
+  </div>
+
+  {% if not attempts %}
+  <div class="alert alert-secondary py-2" style="font-size:.85rem">
+    Nothing recorded yet.
+  </div>
+  {% else %}
+  <div class="card">
+    <div class="table-responsive">
+      <table class="table table-sm table-dark mb-0" style="font-size:.82rem">
+        <thead>
+          <tr>
+            <th style="width:11rem">When</th>
+            <th style="width:14rem">Username</th>
+            <th style="width:10rem">From</th>
+            <th>Outcome</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for attempt in attempts %}
+          <tr>
+            <td class="text-nowrap text-muted">
+              {{ attempt.at.strftime('%Y-%m-%d %H:%M:%S') if attempt.at else '' }}
+            </td>
+            <td><code>{{ attempt.username }}</code></td>
+            <td class="text-muted"><small>{{ attempt.address }}</small></td>
+            <td>
+              {% if attempt.outcome == 'success' %}
+              <span class="badge bg-success">success</span>
+              {% elif attempt.outcome == 'locked' %}
+              <span class="badge bg-danger">locked</span>
+              {% else %}
+              <span class="badge bg-warning text-dark">failure</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ========================== FORWARDING ========================== -->
+<div class="tab-pane fade" id="tab-forwarding">
+  <div class="alert alert-secondary py-2" style="font-size:.82rem">
+    <i class="fas fa-circle-info"></i>
+    The database stays authoritative and doubles as the queue: every entry
+    carries a "sent" marker, and forwarding is a sweep over the ones without
+    it. Point WDash at a destination today and <strong>everything from before
+    today goes too</strong>. Delivery is at-least-once &mdash; a batch that is
+    accepted but not marked goes again, because a duplicate entry is a
+    nuisance and a missing one is the failure this exists to prevent.
+  </div>
+
+  {% if forwarding.enabled %}
+  <div class="card mb-3">
+    <div class="card-body py-2 d-flex justify-content-between align-items-center">
+      <div>
+        <strong>{{ forwarding_pending }}</strong>
+        <span class="text-muted" style="font-size:.85rem">
+          entr{{ 'y' if forwarding_pending == 1 else 'ies' }} waiting to be sent
+        </span>
+      </div>
+      <form method="post" action="{{ url_for('config.run_audit_forwarding') }}">
+        <button class="btn btn-sm btn-primary" type="submit">
+          <i class="fas fa-paper-plane"></i> Forward now
+        </button>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+
+  <form class="card" method="post"
+        action="{{ url_for('config.save_audit_forwarding') }}">
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-md-4">
+          <label class="form-label small">Destination</label>
+          <select class="form-select form-select-sm" name="kind">
+            {% for kind in forwarding_kinds %}
+            <option value="{{ kind }}"
+                    {% if forwarding.kind == kind %}selected{% endif %}>
+              {{ kind }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-8">
+          <label class="form-label small">URL</label>
+          <input class="form-control form-control-sm" name="url"
+                 value="{{ forwarding.url or '' }}"
+                 placeholder="https://splunk.example:8088">
+          <div class="form-text">
+            Splunk: the HEC base URL. Elasticsearch: the cluster endpoint.
+          </div>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small">Index</label>
+          <input class="form-control form-control-sm" name="index"
+                 value="{{ forwarding.index or '' }}"
+                 placeholder="wdash-audit">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small">Username</label>
+          <input class="form-control form-control-sm" name="username"
+                 value="{{ forwarding.username or '' }}"
+                 placeholder="Elasticsearch only">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small">
+            Token or password
+            {% if forwarding_secret_set %}
+            <span class="badge bg-success ms-1">set</span>
+            {% else %}
+            <span class="badge bg-secondary ms-1">not set</span>
+            {% endif %}
+          </label>
+          <input type="password" class="form-control form-control-sm"
+                 name="credential" placeholder="leave blank to keep">
+          {# Written, never rendered. Blank means "keep what is stored" —
+             otherwise editing the URL would silently erase the token. #}
+        </div>
+        <div class="col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="verify_certs"
+                   id="fwdVerify"
+                   {% if forwarding.get('verify_certs', True) %}checked{% endif %}>
+            <label class="form-check-label small" for="fwdVerify">
+              Verify the destination's TLS certificate
+            </label>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="enabled"
+                   id="fwdEnabled"
+                   {% if forwarding.enabled %}checked{% endif %}>
+            <label class="form-check-label small" for="fwdEnabled">
+              Forwarding is on
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-footer text-end py-2">
+      <button class="btn btn-sm btn-primary" type="submit">Save</button>
+    </div>
+  </form>
+</div>
+
+</div>
+{% endblock %}

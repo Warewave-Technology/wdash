@@ -1,0 +1,49 @@
+# What `COPY . .` must not take.
+#
+# Without this file the build context was 151 MB, and the image carried:
+#
+#   .env            SECRET_KEY and WDASH_ENCRYPTION_KEY
+#   data/wdash.db   local accounts and their password hashes, the audit
+#                   trail, and the source credentials that .env's key
+#                   decrypts — so the key and the ciphertext together
+#   venv/           96 MB of the build host's interpreter, wrong platform
+#   node_modules/   19 MB of build-time tooling
+#   lab/.venv/      28 MB more of the same
+#
+# A published image is public. This is the same leak as committing the files,
+# through a door nobody looks at.
+
+# Secrets and state
+.env
+.env.*
+!.env.example
+data/*
+!data/.gitkeep
+
+# Environments and build tooling
+venv/
+.venv/
+**/.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Not needed at runtime
+.git/
+.gitignore
+tests/
+lab/
+kubernetes/
+docs/
+.kiro/
+.vscode/
+*.md
+!README.md
+package.json
+package-lock.json
+
+# Editor
+.DS_Store
+*.swp

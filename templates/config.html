@@ -1,0 +1,345 @@
+{% extends "base.html" %}
+{% block title %}Configuration - WDash{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h2><i class="fas fa-sliders text-primary"></i> Configuration</h2>
+  <span class="badge bg-secondary">signed in as {{ current_user.username }}</span>
+</div>
+
+{% for warning in duplicate_sources %}
+{# Two registrations of one system. Detected at startup and shown here,
+   because a warning in a log file is a warning nobody reads — and the
+   symptom, a merged total that is quietly too big, never points at its
+   cause. #}
+<div class="alert alert-warning py-2" style="font-size:.85rem">
+  <i class="fas fa-triangle-exclamation"></i>
+  <strong>Two sources, one system.</strong> {{ warning }}
+</div>
+{% endfor %}
+
+{% if not secrets_available %}
+<div class="alert alert-warning">
+  <i class="fas fa-triangle-exclamation"></i>
+  <strong><code>WDASH_ENCRYPTION_KEY</code> is not set.</strong>
+  Passwords and client secrets cannot be saved &mdash; WDash refuses to store
+  them as plain text rather than pretending they are protected. Everything else
+  on this page works.
+</div>
+{% endif %}
+
+<ul class="nav nav-tabs mb-3" role="tablist">
+  <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab"
+      data-bs-target="#tab-sources" type="button">
+      <i class="fas fa-database"></i> Sources</button></li>
+  <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
+      data-bs-target="#tab-auth" type="button">
+      <i class="fas fa-id-badge"></i> Authentication</button></li>
+  <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
+      data-bs-target="#tab-roles" type="button">
+      <i class="fas fa-user-shield"></i> Roles &amp; access</button></li>
+</ul>
+
+<div class="tab-content">
+
+<!-- ============================ SOURCES ============================ -->
+<div class="tab-pane fade show active" id="tab-sources">
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="mb-0">Configured sources</h5>
+      <button class="btn btn-sm btn-primary" data-bs-toggle="modal"
+              data-bs-target="#sourceModal" id="addSourceBtn">
+        <i class="fas fa-plus"></i> Add source
+      </button>
+    </div>
+    <div class="card-body p-0">
+      {% if sources %}
+      <table class="table table-dark table-sm mb-0 align-middle">
+        <thead><tr>
+          <th>Name</th><th>Signal</th><th>Type</th><th>URL</th>
+          <th>Credential</th><th></th>
+        </tr></thead>
+        <tbody>
+        {% for source in sources %}
+          <tr>
+            <td>
+              {{ source.name }}
+              {% if not source.enabled %}
+                <span class="badge bg-secondary ms-1">disabled</span>
+              {% endif %}
+            </td>
+            <td>
+              {# Every signal, not the first one. `source.signal` is the legacy
+                 single value kept for readers written before a row could
+                 serve two — printed here it said "logs" for a cluster serving
+                 both, which is a worse lie than saying nothing. #}
+              {% for signal in source.signals %}
+                <span class="badge bg-info-subtle text-info">{{ signal }}</span>
+              {% endfor %}
+            </td>
+            <td>{{ source_kinds[source.kind].label if source.kind in source_kinds else source.kind }}</td>
+            <td><code class="text-muted">{{ source.config.url }}</code></td>
+            <td>
+              {% if source.has_secret %}
+                <span class="text-success"><i class="fas fa-lock"></i> set</span>
+              {% else %}
+                <span class="text-muted">none</span>
+              {% endif %}
+            </td>
+            <td class="text-end text-nowrap">
+              <button class="btn btn-sm btn-outline-secondary edit-source"
+                      data-source='{{ source|tojson }}'
+                      data-bs-toggle="modal" data-bs-target="#sourceModal">Edit</button>
+              <form method="POST" class="d-inline"
+                    action="{{ url_for('config.delete_source', source_id=source.id) }}"
+                    onsubmit="return confirm('Delete {{ source.name }}?')">
+                <button class="btn btn-sm btn-outline-danger">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="p-4 text-center text-muted">
+        <p class="mb-1">No sources configured here yet.</p>
+        <small>WDash is using the source from its environment configuration.
+        Adding one here does not remove that.</small>
+      </div>
+      {% endif %}
+    </div>
+    <div class="card-footer text-muted" style="font-size:.8rem">
+      <i class="fas fa-info-circle"></i>
+      Sources are read at startup, so a new one is used for queries after a
+      restart. Use <strong>Test connection</strong> to check it before then.
+    </div>
+  </div>
+</div>
+
+<!-- ============================ AUTH ============================ -->
+<div class="tab-pane fade" id="tab-auth">
+  <div class="row g-3">
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header"><h5 class="mb-0">OpenID Connect</h5></div>
+        <div class="card-body">
+          <form method="POST" action="{{ url_for('config.save_auth') }}">
+            <input type="hidden" name="provider" value="oidc">
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" name="enabled"
+                     id="oidcEnabled" {% if oidc.value and oidc.value.enabled %}checked{% endif %}>
+              <label class="form-check-label" for="oidcEnabled">Enabled</label>
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Discovery URL</label>
+              <input class="form-control form-control-sm" name="discovery_url"
+                     placeholder="https://idp.example.com/.well-known/openid-configuration"
+                     value="{{ oidc.value.discovery_url if oidc.value else '' }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Client ID</label>
+              <input class="form-control form-control-sm" name="client_id"
+                     value="{{ oidc.value.client_id if oidc.value else '' }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Client secret</label>
+              <input type="password" class="form-control form-control-sm"
+                     name="client_secret" autocomplete="new-password"
+                     placeholder="{% if oidc.has_secret %}set — leave blank to keep{% else %}not set{% endif %}"
+                     {% if not secrets_available %}disabled{% endif %}>
+              <div class="form-text">Stored encrypted and never shown again.</div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label small">Redirect URI</label>
+              <input class="form-control form-control-sm" name="redirect_uri"
+                     value="{{ oidc.value.redirect_uri if oidc.value else '' }}">
+            </div>
+            <button class="btn btn-primary btn-sm">Save OIDC settings</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header"><h5 class="mb-0">LDAP</h5></div>
+        <div class="card-body">
+          <form method="POST" action="{{ url_for('config.save_auth') }}">
+            <input type="hidden" name="provider" value="ldap">
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" name="enabled"
+                     id="ldapEnabled" {% if ldap.value and ldap.value.enabled %}checked{% endif %}>
+              <label class="form-check-label" for="ldapEnabled">Enabled</label>
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Server</label>
+              <input class="form-control form-control-sm" name="server"
+                     placeholder="ldaps://ldap.example.com:636"
+                     value="{{ ldap.value.server if ldap.value else '' }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Bind DN</label>
+              <input class="form-control form-control-sm" name="bind_dn"
+                     value="{{ ldap.value.bind_dn if ldap.value else '' }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Bind password</label>
+              <input type="password" class="form-control form-control-sm"
+                     name="bind_password" autocomplete="new-password"
+                     placeholder="{% if ldap.has_secret %}set — leave blank to keep{% else %}not set{% endif %}"
+                     {% if not secrets_available %}disabled{% endif %}>
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Base DN</label>
+              <input class="form-control form-control-sm" name="base_dn"
+                     value="{{ ldap.value.base_dn if ldap.value else '' }}">
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">User filter</label>
+              <input class="form-control form-control-sm" name="user_filter"
+                     placeholder="(uid={username})"
+                     value="{{ ldap.value.user_filter if ldap.value else '' }}">
+            </div>
+            <div class="mb-3">
+              <label class="form-label small">Group attribute</label>
+              <input class="form-control form-control-sm" name="group_attribute"
+                     placeholder="memberOf"
+                     value="{{ ldap.value.group_attribute if ldap.value else '' }}">
+            </div>
+            <button class="btn btn-primary btn-sm">Save LDAP settings</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="alert alert-secondary mt-3 mb-0" style="font-size:.85rem">
+    <i class="fas fa-info-circle"></i>
+    <strong>These take effect immediately &mdash; no restart.</strong>
+    Nobody is signed out by a change here, and the local account created at
+    setup keeps working regardless of what happens to the provider. That is
+    what makes this page safe to experiment on: a wrong setting costs the
+    single sign-on button, not your way back in.
+    <br>
+    A provider switched off is off, even with its settings still filled in.
+    WDash does not fall back to the environment in that case &mdash; otherwise
+    the switch would do nothing on a deployment that has both.
+  </div>
+</div>
+
+<!-- ============================ ROLES ============================ -->
+<div class="tab-pane fade" id="tab-roles">
+  <div class="alert alert-info" style="font-size:.85rem">
+    <i class="fas fa-clock"></i>
+    Role changes reach every worker within about {{ cache_seconds }} seconds.
+    They apply to people who are already signed in &mdash; nobody has to sign
+    out for a change to take effect.
+  </div>
+
+  <div class="row g-3">
+    <div class="col-lg-7">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <h5 class="mb-0">Roles</h5>
+          <button class="btn btn-sm btn-primary" id="addRoleBtn"
+                  data-bs-toggle="modal" data-bs-target="#roleModal">
+            <i class="fas fa-plus"></i> Add role
+          </button>
+        </div>
+        <div class="card-body p-0">
+          <table class="table table-dark table-sm mb-0 align-middle">
+            <thead><tr><th>Role</th><th>Permissions</th><th>Log access</th><th></th></tr></thead>
+            <tbody>
+            {% for role in roles %}
+              <tr>
+                <td>
+                  <strong>{{ role.name }}</strong>
+                  {% if role.name == current_user.role %}
+                    <span class="badge bg-primary-subtle text-primary ms-1">yours</span>
+                  {% endif %}
+                  {% if role.groups %}
+                    <div class="text-muted" style="font-size:.7rem">
+                      groups: {{ role.groups|join(', ') }}
+                    </div>
+                  {% endif %}
+                </td>
+                <td><small class="text-muted">{{ role.permissions|length }} permissions</small></td>
+                <td><code class="text-muted" style="font-size:.75rem">{{ (role.containers or ['none'])|join(', ') }}</code></td>
+                <td class="text-end text-nowrap">
+                  <button class="btn btn-sm btn-outline-secondary edit-role"
+                          data-role='{{ role|tojson }}'
+                          data-bs-toggle="modal" data-bs-target="#roleModal">Edit</button>
+                  {% if role.name != current_user.role %}
+                  <form method="POST" class="d-inline"
+                        action="{{ url_for('config.delete_role', name=role.name) }}"
+                        onsubmit="return confirm('Delete role {{ role.name }}?')">
+                    <button class="btn btn-sm btn-outline-danger">Delete</button>
+                  </form>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-5">
+      <div class="card h-100">
+        <div class="card-header"><h5 class="mb-0">Who gets which role</h5></div>
+        <div class="card-body">
+          <form method="POST" action="{{ url_for('config.save_mappings') }}">
+            <div class="mb-3">
+              <label class="form-label small">Default role</label>
+              <select class="form-select form-select-sm" name="default_role">
+                {% for role in roles %}
+                  <option value="{{ role.name }}"
+                    {% if role.name == default_role %}selected{% endif %}>{{ role.name }}</option>
+                {% endfor %}
+              </select>
+              <div class="form-text">Used when nothing else matches.</div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label small">Direct mappings</label>
+              <div id="mappingRows" class="mb-2"></div>
+              <button type="button" class="btn btn-sm btn-outline-secondary"
+                      id="addMappingRow">
+                <i class="fas fa-plus"></i> Add mapping
+              </button>
+              <input type="hidden" name="user_roles" id="mappingField">
+              <div class="form-text">
+                <code>email or username</code> paired with a role. These win
+                over group mappings. The role is chosen rather than typed:
+                a name that does not exist grants nothing, silently.
+              </div>
+            </div>
+            <script nonce="{{ csp_nonce }}" type="application/json" id="mappingData">
+              {{ user_roles | tojson }}
+            </script>
+            <script nonce="{{ csp_nonce }}" type="application/json" id="roleNames">
+              {{ roles | map(attribute='name') | list | tojson }}
+            </script>
+            <button class="btn btn-primary btn-sm">Save mappings</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+{% include "_config_modals.html" %}
+{% endblock %}
+
+{% block scripts %}
+{# Same cache-buster as the main bundle in base.html. Without it an edited
+   config.js sits in the browser cache and the page keeps running the old one,
+   which reads as "the fix did not work". #}
+{# Which signals each source type can serve, taken from the one place that
+   declares it. A copy of the list in JavaScript would give the product two
+   answers to one question — the trap the index patterns already fell into. #}
+<script nonce="{{ csp_nonce }}" type="application/json" id="sourceSignals">
+  {{ signal_map | tojson }}
+</script>
+<script nonce="{{ csp_nonce }}" src="{{ url_for('static', filename='js/config.js') }}?v={{ range(1000,9999) | random }}"></script>
+{% endblock %}

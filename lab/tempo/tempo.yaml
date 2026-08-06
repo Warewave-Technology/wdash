@@ -1,0 +1,40 @@
+# Tempo for the WDash lab.
+#
+# Single binary, local storage. A real deployment puts blocks in object
+# storage and runs the components separately; none of that changes the query
+# API, which is the only surface WDash touches.
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+ingester:
+  # Short, so seeded traces become searchable in seconds rather than minutes.
+  # A lab that makes you wait five minutes to see whether the adapter works
+  # is a lab nobody runs twice.
+  max_block_duration: 5m
+  complete_block_timeout: 10s
+
+compactor:
+  compaction:
+    block_retention: 168h        # a week, matching the other lab backends
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+# No metrics-generator: it needs Prometheus to write to, and WDash does not
+# read service metrics from Tempo. Leaving it off keeps the lab honest about
+# what the adapter can and cannot get from this backend.

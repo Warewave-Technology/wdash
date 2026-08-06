@@ -1,0 +1,337 @@
+"""
+Dashboard creation, editing and storage.
+
+The theme is the same one that runs through the hub: a failure must never be
+reported as a success, and a mistake must surface where it was made.
+
+Three faults these tests lock down, all found by exercising the forms:
+
+  * a save that failed still flashed "created successfully", so the dashboard
+    was silently gone
+  * a malformed query saved cleanly and only failed later, on every view
+  * a name of nothing but spaces passed the `if not name` check
+"""
+
+import json
+import os
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from wdash.app import create_app  # noqa: E402
+from wdash.config import Config  # noqa: E402
+from wdash.dashboard.dashboard_manager import (  # noqa: E402
+    DashboardManager, DashboardStorageError,
+)
+
+
+class FakeES:
+    def ping(self):
+        return True
+
+    @property
+    def cat(self):
+        class Cat:
+            def indices(self, **kw):
+                return [{"index": "app-logs-000001", "creation.date": "100"}]
+        return Cat()
+
+    @property
+    def indices(self):
+        class Indices:
+            def get_mapping(self, index=None, **kw):
+                return {"app-logs-000001": {"mappings": {"properties": {
+                    "level": {"type": "keyword"}}}}}
+        return Indices()
+
+    def search(self, **kw):
+        return {"took": 1, "hits": {"total": {"value": 0}, "hits": []},
+                "aggregations": {}}
+
+
+class RouteTest(unittest.TestCase):
+    def setUp(self):
+        handle, self.storage = tempfile.mkstemp(suffix=".json")
+        os.close(handle)
+        with open(self.storage, "w") as file:
+            file.write("[]")
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "dash-persistence"
+            DASHBOARD_STORAGE_FILE = self.storage
+
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource
+
+        self.app = create_app(TestConfig)
+        hub = Hub()
+        hub.add_logs(ElasticsearchLogSource(FakeES()))
+        self.app.hub = hub
+        self.manager = self.app.dashboard_manager
+        self.client = self.app.test_client()
+        self.login()
+
+    def tearDown(self):
+        if os.path.exists(self.storage):
+            os.unlink(self.storage)
+
+    def login(self, permissions=("dashboard:view", "dashboard:create",
+                                 "dashboard:edit", "dashboard:delete")):
+        from tests.support import grant
+        grant(self.app, "u", permissions)
+        with self.client.session_transaction() as session:
+            session["user_data"] = {
+                "id": "1", "email": "u@x", "username": "u", "groups": [],
+                "role": "admin", "permissions": list(permissions),
+                "allowed_indices": ["*"], "allowed_trace_indices": ["*"],
+                "allowed_services": ["*"]}
+            session["_user_id"] = "1"
+
+    def create(self, **overrides):
+        form = {"name": "Test", "query": "*", "description": "",
+                "index_patterns": ["*"]}
+        form.update(overrides)
+        return self.client.post("/dashboard/create", data=form,
+                                follow_redirects=True)
+
+    def names(self):
+        self.manager.refresh_cache()
+        return [d.name for d in self.manager.get_all_dashboards()]
+
+    # ---------- the query is checked before it is stored ----------
+
+    def test_a_malformed_query_is_refused_at_save_time(self):
+        """Otherwise the mistake surfaces on every later view, not here."""
+        response = self.create(name="broken", query='level:"unterminated')
+        self.assertNotIn("broken", self.names())
+        self.assertIn(b"cannot be parsed", response.data)
+
+    def test_a_valid_query_is_accepted(self):
+        self.create(name="fine", query='level:ERROR AND service:"api"')
+        self.assertIn("fine", self.names())
+
+    def test_a_stored_dashboard_can_always_be_opened(self):
+        """The point of validating early: no dashboard that 400s on view."""
+        self.create(name="fine", query="level:ERROR")
+        self.manager.refresh_cache()
+        dashboard = next(d for d in self.manager.get_all_dashboards()
+                         if d.name == "fine")
+        response = self.client.get(f"/api/dashboard/{dashboard.id}/data")
+        self.assertNotEqual(response.status_code, 400,
+                            "a saved dashboard must not fail to render")
+
+    # ---------- whitespace ----------
+
+    def test_a_name_of_only_spaces_is_refused(self):
+        response = self.create(name="   ")
+        self.assertEqual(self.names(), [])
+        self.assertIn(b"name is required", response.data)
+
+    def test_a_query_of_only_spaces_is_refused(self):
+        response = self.create(query="   ")
+        self.assertEqual(self.names(), [])
+        self.assertIn(b"query is required", response.data)
+
+    def test_surrounding_whitespace_is_trimmed(self):
+        self.create(name="  Padded  ", query="  *  ")
+        self.assertIn("Padded", self.names())
+
+    # ---------- storage failure ----------
+
+    def test_a_failed_save_is_not_reported_as_success(self):
+        """The worst failure mode on this page: told it worked, nothing saved."""
+        self.manager.storage_path = "/nonexistent-directory/dashboards.json"
+        try:
+            response = self.create(name="lost")
+        finally:
+            self.manager.storage_path = self.storage
+
+        self.assertNotIn(b"created successfully", response.data)
+        self.assertIn(b"NOT been created", response.data)
+        self.assertNotIn("lost", self.names())
+
+    def test_a_failed_edit_says_the_change_was_not_applied(self):
+        self.create(name="original")
+        self.manager.refresh_cache()
+        dashboard = next(d for d in self.manager.get_all_dashboards())
+
+        self.manager.storage_path = "/nonexistent-directory/dashboards.json"
+        try:
+            response = self.client.post(
+                f"/dashboard/{dashboard.id}/edit",
+                data={"name": "renamed", "query": "*", "description": "",
+                      "index_patterns": ["*"]}, follow_redirects=True)
+        finally:
+            self.manager.storage_path = self.storage
+
+        self.assertIn(b"NOT applied", response.data)
+        self.assertIn("original", self.names())
+
+    def test_deleting_something_already_gone_is_a_404_not_a_success(self):
+        response = self.client.post("/dashboard/does-not-exist/delete")
+        self.assertEqual(response.status_code, 404)
+
+
+class PanelFormTest(RouteTest):
+    """Panels travel as JSON in one hidden field and are re-validated here."""
+
+    def test_panels_can_be_customised_through_the_form(self):
+        self.create(name="custom", panels=json.dumps([
+            {"type": "terms", "title": "Hosts", "field": "host", "size": 3,
+             "width": 6}]))
+        self.manager.refresh_cache()
+        dashboard = next(d for d in self.manager.get_all_dashboards())
+        panels = dashboard.get_panels()
+        self.assertEqual(len(panels), 1)
+        self.assertEqual(panels[0]["field"], "host")
+
+    def test_a_panel_naming_an_unusable_field_is_refused(self):
+        response = self.create(name="bad", panels=json.dumps([
+            {"type": "terms", "field": "body"}]))
+        self.assertEqual(self.names(), [])
+        self.assertIn(b"cannot group by", response.data)
+
+    def test_unreadable_panel_json_is_refused(self):
+        response = self.create(name="bad", panels="{not json")
+        self.assertEqual(self.names(), [])
+        self.assertIn(b"could not be read", response.data)
+
+    def test_omitting_panels_leaves_the_dashboard_on_the_defaults(self):
+        """Not the same as storing today's defaults, which would freeze them."""
+        self.create(name="plain")
+        self.manager.refresh_cache()
+        dashboard = next(d for d in self.manager.get_all_dashboards())
+        self.assertIsNone(dashboard.panels)
+        self.assertEqual(len(dashboard.get_panels()), 3)
+
+    def test_the_editor_page_carries_the_current_panels(self):
+        self.create(name="custom", panels=json.dumps([
+            {"type": "terms", "title": "Hosts", "field": "host", "width": 6}]))
+        self.manager.refresh_cache()
+        dashboard = next(d for d in self.manager.get_all_dashboards())
+
+        response = self.client.get(f"/dashboard/{dashboard.id}/edit")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"panelList", response.data)
+        self.assertIn(b"Hosts", response.data)
+
+
+class StorageTest(unittest.TestCase):
+    """The manager on its own, without Flask."""
+
+    def setUp(self):
+        handle, self.storage = tempfile.mkstemp(suffix=".json")
+        os.close(handle)
+        with open(self.storage, "w") as file:
+            file.write("[]")
+        self.manager = DashboardManager(self.storage)
+
+    def tearDown(self):
+        if os.path.exists(self.storage):
+            os.unlink(self.storage)
+
+    def test_save_raises_rather_than_swallowing(self):
+        self.manager.storage_path = "/nonexistent-directory/dashboards.json"
+        with self.assertRaises(DashboardStorageError):
+            self.manager.save_dashboards()
+
+    def test_a_failed_save_leaves_no_temporary_file_behind(self):
+        directory = os.path.dirname(self.storage)
+        before = set(os.listdir(directory))
+        self.manager.storage_path = os.path.join(directory, "sub", "dir", "x.json")
+        with self.assertRaises(DashboardStorageError):
+            self.manager.save_dashboards()
+        self.assertEqual(set(os.listdir(directory)) - before, set())
+
+    def test_an_external_write_is_picked_up(self):
+        """Another worker's change must become visible, not be cached forever."""
+        self.manager.create_dashboard("mine", "", "*", "u", ["*"])
+        self.assertEqual(len(self.manager.get_all_dashboards()), 1)
+
+        with open(self.storage) as file:
+            data = json.load(file)
+        data.append(dict(data[0], id="second-dashboard", name="theirs"))
+        with open(self.storage, "w") as file:
+            json.dump(data, file)
+
+        names = {d.name for d in self.manager.get_all_dashboards()}
+        self.assertIn("theirs", names,
+                      "a change written by another process was never seen")
+
+    def test_a_same_second_external_write_is_still_seen(self):
+        """A wall-clock 'is it newer' test misses a write in the same tick.
+
+        The signature only has to differ, so an identical timestamp with
+        different content still counts as a change.
+        """
+        self.manager.create_dashboard("first", "", "*", "u", ["*"])
+        signature = self.manager._signature()
+
+        with open(self.storage) as file:
+            data = json.load(file)
+        data.append(dict(data[0], id="second-dashboard", name="second"))
+        with open(self.storage, "w") as file:
+            json.dump(data, file)
+        # Force the timestamp back to what it was: only the size now differs.
+        os.utime(self.storage, ns=(signature[0], signature[0]))
+
+        self.assertTrue(self.manager._should_reload())
+        self.assertIn("second",
+                      {d.name for d in self.manager.get_all_dashboards()})
+
+    def test_a_corrupt_file_does_not_wipe_the_loaded_dashboards(self):
+        """Half-written JSON must not read as 'your dashboards are gone'."""
+        self.manager.create_dashboard("keep me", "", "*", "u", ["*"])
+        with open(self.storage, "w") as file:
+            file.write('[{"id": "x", "name": ')      # truncated
+
+        self.assertEqual([d.name for d in self.manager.get_all_dashboards()],
+                         ["keep me"])
+
+
+class IsolationTest(unittest.TestCase):
+    """A test run must not write into the repository's data directory.
+
+    It did. `test_dashboard_visibility` never set DASHBOARD_STORAGE_FILE, so
+    every run appended its fixtures to `data/dashboards.json` — 3,172
+    dashboards accumulated there, and the dashboards page rendered all of them
+    into a seven-megabyte response. The metadata store already had this
+    protection; the file store did not.
+    """
+
+    def test_a_testing_app_does_not_use_the_packaged_dashboard_file(self):
+        from wdash.config import Config, DEFAULT_DASHBOARD_FILE
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "isolation"
+            DATABASE_URL = "sqlite:///:memory:"
+            ELASTICSEARCH_URL = ""
+
+        app = create_app(TestConfig)
+        path = app.dashboard_manager.storage_path
+        self.assertNotEqual(str(path), DEFAULT_DASHBOARD_FILE)
+        self.assertNotIn("data/dashboards.json", str(path))
+
+    def test_an_explicitly_configured_path_is_still_honoured(self):
+        """The isolation compares against the literal default, so a test that
+        deliberately points somewhere is not redirected out from under it."""
+        from wdash.config import Config
+
+        handle, chosen = tempfile.mkstemp(suffix=".json")
+        os.close(handle)
+        try:
+            class TestConfig(Config):
+                TESTING = True
+                SECRET_KEY = "isolation"
+                DATABASE_URL = "sqlite:///:memory:"
+                ELASTICSEARCH_URL = ""
+                DASHBOARD_STORAGE_FILE = chosen
+
+            app = create_app(TestConfig)
+            self.assertEqual(app.dashboard_manager.storage_path, chosen)
+        finally:
+            os.unlink(chosen)

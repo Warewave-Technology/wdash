@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+
+{% block title %}Cluster Advisor - WDash{% endblock %}
+
+{% macro severity_meta(sev) %}
+    {%- if sev == 'critical' -%}danger|exclamation-circle|Critical
+    {%- elif sev == 'warning' -%}warning|exclamation-triangle|Warning
+    {%- else -%}info|info-circle|Info
+    {%- endif -%}
+{% endmacro %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2><i class="fas fa-stethoscope"></i> Advisor</h2>
+    <div class="d-flex align-items-center gap-2">
+        {% if sources and sources|length > 1 %}
+        {# One report per source. A source the Advisor cannot inspect is not
+           listed at all — an entry that produces nothing reads as a clean
+           bill of health for a backend nobody looked at. #}
+        <select class="form-select form-select-sm" id="advisorSource"
+                style="width:auto">
+            {% for choice in sources %}
+            <option value="{{ choice.value }}"
+                    {% if selected == choice.value
+                          or (not selected and loop.first) %}selected{% endif %}>
+                {{ choice.label }} &middot; {{ choice.backend }}
+            </option>
+            {% endfor %}
+        </select>
+        {% endif %}
+        {% if report %}
+        <a class="btn btn-sm btn-outline-secondary"
+           href="{{ url_for('advisor.advisor_report_json', source=selected or None) }}"
+           target="_blank">
+            <i class="fas fa-code"></i> JSON
+        </a>
+        {% endif %}
+        <a class="btn btn-sm btn-primary"
+           href="{{ url_for('advisor.advisor_page', refresh=1,
+                            source=selected or None) }}">
+            <i class="fas fa-sync"></i> Re-run
+        </a>
+    </div>
+</div>
+
+{% if report and report.backend != 'elasticsearch' %}
+<div class="alert alert-secondary py-2" style="font-size:.85rem">
+    <i class="fas fa-circle-info"></i>
+    Reading <strong>{{ report.source }}</strong>, a {{ report.backend }}
+    source. Each backend exposes a different amount about itself, so a clean
+    report here is a narrower statement than a clean report for another —
+    {{ rule_count }} check{{ '' if rule_count == 1 else 's' }} can run against
+    this one.
+</div>
+{% endif %}
+
+{% if not report %}
+<div class="alert alert-danger">
+    <h5><i class="fas fa-exclamation-circle"></i> Analysis unavailable</h5>
+    <p class="mb-0">
+        {% if no_cluster %}
+        There is no source to analyse. Add one on the configuration page.
+        {% else %}
+        This source could not be analysed. Check that it is reachable and try
+        again.
+        {% endif %}
+    </p>
+</div>
+{% else %}
+
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card h-100">
+            <div class="card-body text-center">
+                {% set score_class = 'success' if report.score >= 80 else ('warning' if report.score >= 50 else 'danger') %}
+                <div class="display-4 fw-bold text-{{ score_class }}">{{ report.score }}</div>
+                <div class="text-muted small">Health score</div>
+                <div class="text-muted" style="font-size:0.7rem">heuristic — read the findings</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-9">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div><strong>{{ report.cluster_name }}</strong>
+                            <span class="badge bg-secondary ms-1">{{ report.distribution }} {{ report.version }}</span>
+                        </div>
+                        <div class="text-muted small mt-1">
+                            Analysed {{ age }}s ago &middot; {{ rule_count }} rules evaluated
+                        </div>
+                    </div>
+                    <div class="col-md-6 text-md-end mt-3 mt-md-0">
+                        <span class="badge bg-danger">{{ report.counts.critical }} critical</span>
+                        <span class="badge bg-warning text-dark">{{ report.counts.warning }} warning</span>
+                        <span class="badge bg-info text-dark">{{ report.counts.info }} info</span>
+                        <span class="badge bg-success">{{ report.passed|length }} passed</span>
+                        {% if report.skipped %}
+                        <span class="badge bg-secondary">{{ report.skipped|length }} skipped</span>
+                        {% endif %}
+                    </div>
+                </div>
+                {% if report.collection_errors %}
+                <div class="alert alert-warning py-2 px-3 mt-3 mb-0" style="font-size:0.85rem">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    Some data could not be collected, so parts of this report may be incomplete:
+                    <code>{{ report.collection_errors.keys()|join(', ') }}</code>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if not report.findings %}
+<div class="alert alert-success">
+    <h5 class="mb-1"><i class="fas fa-check-circle"></i> No findings</h5>
+    <p class="mb-0">All {{ rule_count }} rules passed against this cluster.</p>
+</div>
+{% endif %}
+
+{% for finding in report.findings %}
+    {% set meta = severity_meta(finding.severity.value).split('|') %}
+    <div class="card mb-3 border-{{ meta[0] }}">
+        <div class="card-header d-flex justify-content-between align-items-center py-2">
+            <div>
+                <span class="badge bg-{{ meta[0] }}{% if meta[0] != 'danger' %} text-dark{% endif %}">
+                    <i class="fas fa-{{ meta[1] }}"></i> {{ meta[2] }}
+                </span>
+                <code class="ms-2 text-muted">{{ finding.rule_id }}</code>
+                <strong class="ms-2">{{ finding.title }}</strong>
+            </div>
+            <span class="badge bg-secondary">{{ finding.category }}</span>
+        </div>
+        <div class="card-body py-3">
+            <dl class="row mb-0" style="font-size:0.9rem">
+                <dt class="col-sm-2 text-muted">Observed</dt>
+                <dd class="col-sm-10"><code style="white-space:pre-wrap">{{ finding.evidence }}</code></dd>
+
+                <dt class="col-sm-2 text-muted">Impact</dt>
+                <dd class="col-sm-10">{{ finding.impact }}</dd>
+
+                <dt class="col-sm-2 text-muted">Fix</dt>
+                <dd class="col-sm-10">{{ finding.remediation }}</dd>
+
+                {% if finding.targets %}
+                <dt class="col-sm-2 text-muted">Affected</dt>
+                <dd class="col-sm-10 mb-0">
+                    {% for target in finding.targets[:12] %}
+                        <span class="badge target-chip">{{ target }}</span>
+                    {% endfor %}
+                    {% if finding.targets|length > 12 %}
+                        <span class="text-muted small">+{{ finding.targets|length - 12 }} more</span>
+                    {% endif %}
+                </dd>
+                {% endif %}
+            </dl>
+        </div>
+    </div>
+{% endfor %}
+
+{% if report.passed %}
+<div class="card mb-3">
+    <div class="card-header py-2" data-bs-toggle="collapse" data-bs-target="#passedRules" style="cursor:pointer">
+        <i class="fas fa-check-circle text-success"></i>
+        <strong>{{ report.passed|length }} rules passed</strong>
+        <i class="fas fa-caret-down float-end"></i>
+    </div>
+    <div class="collapse" id="passedRules">
+        <div class="card-body py-2">
+            {% for item in report.passed %}
+            <div class="d-flex py-1" style="font-size:0.85rem">
+                <code class="text-muted" style="width:80px">{{ item.0 }}</code>
+                <span>{{ item.1 }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if report.skipped %}
+<div class="card mb-3">
+    <div class="card-header py-2" data-bs-toggle="collapse" data-bs-target="#skippedRules" style="cursor:pointer">
+        <i class="fas fa-forward text-secondary"></i>
+        <strong>{{ report.skipped|length }} rules skipped</strong>
+        <i class="fas fa-caret-down float-end"></i>
+    </div>
+    <div class="collapse" id="skippedRules">
+        <div class="card-body py-2">
+            {% for item in report.skipped %}
+            <div class="d-flex py-1" style="font-size:0.85rem">
+                <code class="text-muted" style="width:80px">{{ item.0 }}</code>
+                <span>{{ item.1 }}</span>
+                <span class="text-muted ms-2">— {{ item.2 }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if report.errors %}
+<div class="card mb-3 border-warning">
+    <div class="card-header py-2">
+        <i class="fas fa-bug text-warning"></i>
+        <strong>{{ report.errors|length }} rules failed to run</strong>
+    </div>
+    <div class="card-body py-2">
+        {% for item in report.errors %}
+        <div style="font-size:0.85rem"><code>{{ item.0 }}</code> — {{ item.1 }}</div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+// Changing the source reloads the page rather than fetching: a report is a
+// whole page of content, and half-swapping it leaves the summary describing
+// one backend and the findings another.
+document.getElementById('advisorSource')?.addEventListener('change', function () {
+    const url = new URL(window.location.href);
+    url.searchParams.set('source', this.value);
+    url.searchParams.delete('refresh');
+    window.location.href = url.toString();
+});
+</script>
+{% endblock %}

@@ -1,0 +1,300 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wdash
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: wdash
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wdash
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wdash
+        app.kubernetes.io/component: web
+        app.kubernetes.io/part-of: wdash
+      # No prometheus.io/scrape. WDash exposes no /metrics endpoint, and the
+      # annotation asking Prometheus to scrape one produced a target that is
+      # permanently down — which reads as a broken application rather than as
+      # a feature that was never built. Put it back with the endpoint, not
+      # before.
+    spec:
+      serviceAccountName: wdash
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: wdash
+        image: yigitbasalma/wdash-elastic-dashboard:1.0.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5000
+          name: http
+        env:
+        # Load configuration from ConfigMap
+        - name: FLASK_DEBUG
+          valueFrom:
+            configMapKeyRef:
+              name: wdash-config
+              key: FLASK_DEBUG
+        - name: ELASTICSEARCH_URL
+          valueFrom:
+            configMapKeyRef:
+              name: wdash-config
+              key: ELASTICSEARCH_URL
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: wdash-config
+              key: REDIS_URL
+        - name: OIDC_DISCOVERY_URL
+          valueFrom:
+            configMapKeyRef:
+              name: wdash-config
+              key: OIDC_DISCOVERY_URL
+        - name: OIDC_CLIENT_ID
+          valueFrom:
+            configMapKeyRef:
+              name: wdash-config
+              key: OIDC_CLIENT_ID
+        - name: OIDC_REDIRECT_URI
+          valueFrom:
+            configMapKeyRef:
+              name: wdash-config
+              key: OIDC_REDIRECT_URI
+        # Where the metadata lives. Without this the default is relative to
+        # WORKDIR — /app/data/wdash.db — which is the container's own layer,
+        # not the volume mounted at /data. Every restart would lose the local
+        # accounts, the audit trail, the sources and the dashboards, and
+        # first-run setup would reopen on an empty database.
+        - name: DATABASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: wdash-config
+              key: DATABASE_URL
+        - name: DASHBOARD_STORAGE
+          valueFrom:
+            configMapKeyRef:
+              name: wdash-config
+              key: DASHBOARD_STORAGE
+        # How many proxies are in front. The nginx sidecar is one. Left at the
+        # default of 0, every request is counted as coming from 127.0.0.1, so
+        # all users share one sign-in throttle bucket and one attacker locks
+        # out everybody.
+        - name: TRUSTED_PROXY_COUNT
+          valueFrom:
+            configMapKeyRef:
+              name: wdash-config
+              key: TRUSTED_PROXY_COUNT
+        # TLS is terminated at the ingress, so the session cookie must carry
+        # the Secure flag or it also travels over plain HTTP to this host.
+        - name: SESSION_COOKIE_SECURE
+          valueFrom:
+            configMapKeyRef:
+              name: wdash-config
+              key: SESSION_COOKIE_SECURE
+
+        # Load secrets
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: wdash-secrets
+              key: secret-key
+        # Encrypts the credentials stored from the configuration page. Without
+        # it the page loads but refuses to save any, which looks like a
+        # permissions problem.
+        - name: WDASH_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: wdash-secrets
+              key: encryption-key
+        - name: OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: wdash-secrets
+              key: oidc-client-secret
+              optional: true
+        - name: ELASTICSEARCH_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: wdash-secrets
+              key: elasticsearch-username
+              optional: true
+        - name: ELASTICSEARCH_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: wdash-secrets
+              key: elasticsearch-password
+              optional: true
+        
+        # Kubernetes metadata
+        - name: KUBERNETES_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: KUBERNETES_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: KUBERNETES_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        
+        volumeMounts:
+        - name: rbac-config
+          mountPath: /etc/config
+          readOnly: true
+        - name: dashboard-storage
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+        
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      
+      # Nginx sidecar for static file serving and reverse proxy
+      - name: nginx
+        image: nginx:1.25-alpine
+        ports:
+        - containerPort: 80
+          name: nginx
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/conf.d
+          readOnly: true
+        - name: static-files
+          mountPath: /app/static
+          readOnly: true
+        - name: nginx-tmp
+          mountPath: /var/cache/nginx
+        - name: nginx-run
+          mountPath: /var/run
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "10m"
+          limits:
+            memory: "64Mi"
+            cpu: "50m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 101
+          runAsGroup: 101
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - NET_BIND_SERVICE
+      
+      volumes:
+      - name: rbac-config
+        configMap:
+          name: wdash-rbac-config
+      - name: nginx-config
+        configMap:
+          name: wdash-nginx-config
+      - name: dashboard-storage
+        persistentVolumeClaim:
+          claimName: wdash-data-pvc
+      - name: static-files
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+      - name: nginx-tmp
+        emptyDir: {}
+      - name: nginx-run
+        emptyDir: {}
+      
+      initContainers:
+      - name: copy-static-files
+        image: yigitbasalma/wdash-elastic-dashboard:1.0.0
+        command: ['sh', '-c', 'cp -r /app/static/* /shared/static/']
+        volumeMounts:
+        - name: static-files
+          mountPath: /shared/static
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wdash
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: wdash
+spec:
+  selector:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: web
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http
+  - port: 5000
+    targetPort: 5000
+    name: wdash
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wdash-data-pvc
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

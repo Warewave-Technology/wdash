@@ -1,0 +1,294 @@
+<!-- Source editor -->
+<div class="modal fade" id="sourceModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <form method="POST" action="{{ url_for('config.save_source') }}" id="sourceForm">
+        <div class="modal-header">
+          <h5 class="modal-title" id="sourceModalTitle">Add source</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" name="id" id="sourceId">
+          <div class="row g-2">
+            <div class="col-md-6">
+              <label class="form-label small">Name</label>
+              <input class="form-control form-control-sm" name="name" id="sourceName" required>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small">Serves</label>
+              {# Checkboxes, not a dropdown. One cluster holding both signals
+                 used to need two sources — two credentials to rotate, two TLS
+                 settings that could drift apart, and two health rows for one
+                 system. The boxes a type cannot serve are hidden by
+                 applyKind. #}
+              <div class="d-flex gap-3 pt-1">
+                <div class="form-check" data-signal="logs">
+                  <input class="form-check-input" type="checkbox" name="signals"
+                         value="logs" id="sourceSignalLogs" checked>
+                  <label class="form-check-label small" for="sourceSignalLogs">
+                    logs</label>
+                </div>
+                <div class="form-check" data-signal="traces">
+                  <input class="form-check-input" type="checkbox" name="signals"
+                         value="traces" id="sourceSignalTraces">
+                  <label class="form-check-label small" for="sourceSignalTraces">
+                    traces</label>
+                </div>
+              </div>
+              {# A disabled checkbox submits nothing, so a type with one signal
+                 needs this to carry the value. Filled in by applyKind and
+                 emptied when there is a real choice to make. #}
+              <input type="hidden" name="signals" id="sourceSignalFixed"
+                     disabled value="">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small">Type</label>
+              <select class="form-select form-select-sm" name="kind" id="sourceKind">
+                {% for key, kind in source_kinds.items() %}
+                  <option value="{{ key }}">{{ kind.label }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-12">
+              <label class="form-label small">URL</label>
+              <input class="form-control form-control-sm" name="url" id="sourceUrl"
+                     placeholder="http://elasticsearch:9200" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small">Username <span class="text-muted">(optional)</span></label>
+              <input class="form-control form-control-sm" name="username" id="sourceUsername">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small">Password</label>
+              <input type="password" class="form-control form-control-sm"
+                     name="password" id="sourcePassword" autocomplete="new-password"
+                     {% if not secrets_available %}disabled{% endif %}>
+              <div class="form-text" id="sourcePasswordHint">
+                {% if secrets_available %}Stored encrypted and never shown again.
+                {% else %}Needs WDASH_ENCRYPTION_KEY.{% endif %}
+              </div>
+            </div>
+            <div class="col-md-6" data-kind="elasticsearch" data-needs="logs">
+              <label class="form-label small">Log index patterns</label>
+              <input class="form-control form-control-sm" name="logs_index_patterns"
+                     id="sourceLogPatterns" placeholder="app-*, infra-*">
+              <div class="form-text" style="font-size:.7rem">
+                Which indices hold logs. Separate from the trace patterns
+                below &mdash; one list for both means a trace search scans the
+                log indices.
+              </div>
+            </div>
+            <div class="col-md-6" data-kind="elasticsearch" data-needs="traces">
+              <label class="form-label small">Trace index patterns</label>
+              <input class="form-control form-control-sm" name="traces_index_patterns"
+                     id="sourceTracePatterns" placeholder="*traces*, *apm*">
+            </div>
+            <div class="col-md-6 d-none" data-kind="elasticsearch" data-needs="logs">
+              <label class="form-label small">Exclude patterns</label>
+              <input class="form-control form-control-sm" name="logs_exclude_patterns"
+                     id="sourceExcludes" placeholder="*traces*, *apm*">
+            </div>
+            <div class="col-md-3 d-none" data-kind="loki victorialogs jaeger tempo">
+              <label class="form-label small">Tenant
+                <span class="text-muted">(Loki: X-Scope-OrgID; VictoriaLogs:
+                  AccountID:ProjectID; Jaeger: x-tenant; Tempo: X-Scope-OrgID)</span></label>
+              <input class="form-control form-control-sm" name="tenant" id="sourceTenant">
+            </div>
+            <div class="col-md-3 d-none" data-kind="victorialogs">
+              <label class="form-label small">Stream field</label>
+              <input class="form-control form-control-sm" name="stream_field"
+                     id="sourceStreamField" placeholder="service">
+              <div class="form-text" style="font-size:.7rem">
+                What a container means here. It must be one of the stream
+                fields the data was ingested with, or every query is a scan.
+              </div>
+            </div>
+            <div class="col-md-3 d-none" data-kind="loki">
+              <label class="form-label small">Stream label</label>
+              <input class="form-control form-control-sm" name="stream_label"
+                     id="sourceStreamLabel" placeholder="service_name">
+              <div class="form-text" style="font-size:.7rem">
+                LogQL cannot express &ldquo;every stream&rdquo;, so this label
+                is what a container means here.
+              </div>
+            </div>
+            <div class="col-md-6 d-flex align-items-end">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" name="verify_certs"
+                       id="sourceVerify" checked>
+                <label class="form-check-label small" for="sourceVerify">Verify TLS certificates</label>
+              </div>
+            </div>
+            <div class="col-md-6 d-flex align-items-end">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" name="enabled"
+                       id="sourceEnabled" checked>
+                <label class="form-check-label small" for="sourceEnabled">Enabled</label>
+              </div>
+            </div>
+          </div>
+          <div class="mt-3" id="sourceTestResult"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-info btn-sm me-auto" id="testSourceBtn">
+            <i class="fas fa-plug"></i> Test connection
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary btn-sm">Save source</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- What exists, for the boundary fields to offer -->
+<div class="modal fade" id="targetPicker" tabindex="-1">
+  <div class="modal-dialog modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="targetPickerTitle">Available</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-secondary py-2" style="font-size:.8rem">
+          <i class="fas fa-info-circle"></i>
+          Adding an exact name pins the role to <em>that</em> container.
+          Containers rotate, so a rule written by name stops matching the day a
+          new one appears &mdash; the suggested pattern beside each name keeps
+          working.
+        </div>
+        <div id="targetPickerBody"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Role editor -->
+<div class="modal fade" id="roleModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <form method="POST" action="{{ url_for('config.save_role') }}">
+        <input type="hidden" name="mode" id="roleMode" value="create">
+        <div class="modal-header">
+          <h5 class="modal-title" id="roleModalTitle">Add role</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="row g-2">
+            <div class="col-md-4">
+              <label class="form-label small">Name</label>
+              <input class="form-control form-control-sm" name="name" id="roleName" required>
+            </div>
+            <div class="col-md-8">
+              <label class="form-label small">Description</label>
+              <input class="form-control form-control-sm" name="description" id="roleDescription">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small">Permissions</label>
+              <div class="border rounded p-2" id="rolePermissions"
+                   style="max-height:260px;overflow-y:auto">
+                {% for group, items in permission_groups.items() %}
+                <div class="text-muted text-uppercase mb-1"
+                     style="font-size:.65rem;letter-spacing:.05em">{{ group }}</div>
+                {% for item in items %}
+                <div class="form-check mb-2">
+                  <input class="form-check-input" type="checkbox"
+                         name="permissions" value="{{ item.name }}"
+                         id="perm-{{ item.name|replace(':','-') }}">
+                  <label class="form-check-label" for="perm-{{ item.name|replace(':','-') }}">
+                    {{ item.label }}
+                    <code class="text-muted" style="font-size:.7rem">{{ item.name }}</code>
+                    <div class="text-muted" style="font-size:.7rem;line-height:1.3">
+                      {{ item.description }}
+                    </div>
+                  </label>
+                </div>
+                {% endfor %}
+                {% endfor %}
+              </div>
+              <div class="form-text">
+                A typed permission name that WDash does not know grants nothing
+                and looks configured. Hence the list.
+              </div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small">Identity-provider groups</label>
+              <textarea class="form-control form-control-sm" name="groups"
+                        id="roleGroups" rows="6"
+                        style="font-family:monospace;font-size:.8rem"></textarea>
+              <div class="form-text">Anyone in one of these groups gets this role.</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Log containers</label>
+              <textarea class="form-control form-control-sm boundary-field"
+                        name="containers" id="roleContainers"
+                        data-kind="logs" rows="4"
+                        style="font-family:monospace;font-size:.8rem"></textarea>
+              <div class="d-flex justify-content-between align-items-start mt-1">
+                <div class="form-text mb-0">Blank grants nothing.</div>
+                <button type="button" class="btn btn-link btn-sm p-0 ms-2 pick-target"
+                        data-kind="logs" data-target="roleContainers"
+                        style="font-size:.7rem;white-space:nowrap">browse…</button>
+              </div>
+              <div class="boundary-verdict mt-1" data-for="roleContainers"></div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Trace stores</label>
+              <textarea class="form-control form-control-sm boundary-field"
+                        name="trace_containers" id="roleTraceContainers"
+                        data-kind="traces" rows="4"
+                        style="font-family:monospace;font-size:.8rem"></textarea>
+              <div class="d-flex justify-content-between align-items-start mt-1">
+                <div class="form-text mb-0">Blank grants nothing.</div>
+                <button type="button" class="btn btn-link btn-sm p-0 ms-2 pick-target"
+                        data-kind="traces" data-target="roleTraceContainers"
+                        style="font-size:.7rem;white-space:nowrap">browse…</button>
+              </div>
+              <div class="boundary-verdict mt-1" data-for="roleTraceContainers"></div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Visible services</label>
+              <textarea class="form-control form-control-sm boundary-field"
+                        name="services" id="roleServices" data-kind="services"
+                        rows="4" style="font-family:monospace;font-size:.8rem"></textarea>
+              <div class="d-flex justify-content-between align-items-start mt-1">
+                <div class="form-text mb-0">
+                  <strong>Blank means every service.</strong> The one field
+                  where empty is permissive.
+                </div>
+                <button type="button" class="btn btn-link btn-sm p-0 ms-2 pick-target"
+                        data-kind="services" data-target="roleServices"
+                        style="font-size:.7rem;white-space:nowrap">browse…</button>
+              </div>
+              <div class="boundary-verdict mt-1" data-for="roleServices"></div>
+            </div>
+          </div>
+          <div class="alert alert-warning mt-3 mb-2" style="font-size:.8rem">
+            <i class="fas fa-triangle-exclamation"></i>
+            Boundaries fail closed. A role with no log containers can search
+            nothing &mdash; which is the safe default, not a mistake to work
+            around by typing <code>*</code> without thinking about it.
+            <br>
+            A bare pattern applies to <strong>every</strong> source. Write
+            <code>source-name:pattern</code> to restrict it to one, and
+            <code>-pattern</code> to exclude &mdash; an exclusion beats every
+            inclusion, so <code>app-*</code> with <code>-*-pii-*</code> means
+            &ldquo;the app family, never the sensitive ones&rdquo; and stays
+            true as new containers appear.
+          </div>
+          <div id="rolePreview"></div>
+        </div>
+        <div class="modal-footer">
+          <div class="me-auto text-muted" style="font-size:.75rem">
+            Each field shows what it matches as you type.
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary btn-sm">Save role</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>

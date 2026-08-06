@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboards - WDash{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2><i class="fas fa-chart-bar"></i> Dashboards</h2>
+    {% if can_create %}
+        <a href="{{ url_for('dashboards.create_dashboard') }}" class="btn btn-primary">
+            <i class="fas fa-plus"></i> Create Dashboard
+        </a>
+    {% endif %}
+</div>
+
+{% if hidden_count %}
+<div class="alert alert-secondary py-2" style="font-size:.85rem">
+  <i class="fas fa-eye-slash"></i>
+  {{ hidden_count }} dashboard{{ 's' if hidden_count != 1 else '' }}
+  {{ 'are' if hidden_count != 1 else 'is' }} not shown: either private to
+  {{ 'their authors' if hidden_count != 1 else 'its author' }}, or covering
+  data outside your access.
+</div>
+{% endif %}
+
+{% if dashboards %}
+    {% if pages > 1 %}
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <small class="text-muted">
+        Showing {{ page * page_size + 1 }}&ndash;{{ page * page_size + dashboards|length }}
+        of {{ "{:,}".format(total) }}
+      </small>
+      <small class="text-muted">page {{ page + 1 }} of {{ pages }}</small>
+    </div>
+    {% endif %}
+
+    <div class="row">
+        {% for dashboard in dashboards %}
+            <div class="col-md-6 col-lg-4 mb-4">
+                <div class="card h-100">
+                    <div class="card-body">
+                        <h5 class="card-title">
+                            <i class="fas fa-chart-line"></i> {{ dashboard.name }}
+                        </h5>
+                        <p class="card-text">{{ dashboard.description or 'No description' }}</p>
+                        <div class="mb-3">
+                            <small class="text-muted">
+                                <strong>Query:</strong> <code>{{ dashboard.query[:50] }}{% if dashboard.query|length > 50 %}...{% endif %}</code><br>
+                                <strong>Index Patterns:</strong> <code class="text-warning">{{ dashboard.index_patterns | join(', ') }}</code>
+                            </small>
+                        </div>
+                        <div class="mb-3">
+                            <small class="text-muted">
+                                Created by <strong>{{ dashboard.created_by }}</strong><br>
+                                {{ dashboard.created_at.strftime('%Y-%m-%d %H:%M') }}
+                            </small>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <div class="d-flex gap-2 justify-content-end">
+                            <a href="{{ url_for('dashboards.view_dashboard', dashboard_id=dashboard.id) }}" 
+                               class="btn btn-outline-primary">
+                                <i class="fas fa-eye"></i> View
+                            </a>
+                            {% if current_user.has_permission('dashboard:edit') and 
+                                  (dashboard.created_by == current_user.username or current_user.has_permission('system:admin')) %}
+                                <a href="{{ url_for('dashboards.edit_dashboard', dashboard_id=dashboard.id) }}" 
+                                   class="btn btn-outline-secondary">
+                                    <i class="fas fa-edit"></i> Edit
+                                </a>
+                            {% endif %}
+                            {% if current_user.has_permission('dashboard:delete') and 
+                                  (dashboard.created_by == current_user.username or current_user.has_permission('system:admin')) %}
+                                {# Data attributes rather than an inline
+                                   handler: `onclick` is inline script, and a
+                                   Content-Security-Policy nonce cannot cover
+                                   an attribute. Keeping it would have meant
+                                   'unsafe-inline' on script-src, which is the
+                                   whole protection. #}
+                                <button class="btn btn-outline-danger delete-dashboard"
+                                        data-dashboard-id="{{ dashboard.id }}"
+                                        data-dashboard-name="{{ dashboard.name }}">
+                                    <i class="fas fa-trash"></i> Delete
+                                </button>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        {% endfor %}
+    </div>
+
+    {% if pages > 1 %}
+    {#
+      Paged after the visibility filter, so these numbers describe what THIS
+      person can see rather than what exists. See dashboard_routes for why the
+      filter is not pushed into the store.
+    #}
+    <nav>
+      <ul class="pagination pagination-sm">
+        <li class="page-item {% if page == 0 %}disabled{% endif %}">
+          <a class="page-link"
+             href="{{ url_for('dashboards.dashboards_page', page=page - 1) }}">
+            Previous</a>
+        </li>
+        {% for number in range(pages) %}
+          {% if number < 3 or number > pages - 4 or (number - page)|abs < 2 %}
+          <li class="page-item {% if number == page %}active{% endif %}">
+            <a class="page-link"
+               href="{{ url_for('dashboards.dashboards_page', page=number) }}">
+              {{ number + 1 }}</a>
+          </li>
+          {% elif number == 3 and page > 4 %}
+          <li class="page-item disabled"><span class="page-link">&hellip;</span></li>
+          {% elif number == pages - 4 and page < pages - 5 %}
+          <li class="page-item disabled"><span class="page-link">&hellip;</span></li>
+          {% endif %}
+        {% endfor %}
+        <li class="page-item {% if page + 1 >= pages %}disabled{% endif %}">
+          <a class="page-link"
+             href="{{ url_for('dashboards.dashboards_page', page=page + 1) }}">
+            Next</a>
+        </li>
+      </ul>
+    </nav>
+    {% endif %}
+{% else %}
+    <div class="text-center py-5">
+        <i class="fas fa-chart-bar fa-4x text-muted mb-3"></i>
+        <h4 class="text-muted">No Dashboards Found</h4>
+        <p class="text-muted">Create your first dashboard to get started.</p>
+        {% if can_create %}
+            <a href="{{ url_for('dashboards.create_dashboard') }}" class="btn btn-primary">
+                <i class="fas fa-plus"></i> Create Dashboard
+            </a>
+        {% endif %}
+    </div>
+{% endif %}
+
+<!-- Delete Confirmation Modal -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Confirm Delete</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to delete the dashboard "<span id="dashboardName"></span>"?</p>
+                <p class="text-danger"><strong>This action cannot be undone.</strong></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="confirmDelete">Delete</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+let dashboardToDelete = null;
+
+function deleteDashboard(dashboardId, dashboardName) {
+    dashboardToDelete = dashboardId;
+    document.getElementById('dashboardName').textContent = dashboardName;
+    new bootstrap.Modal(document.getElementById('deleteModal')).show();
+}
+
+document.querySelectorAll('.delete-dashboard').forEach(button => {
+    button.addEventListener('click', () => deleteDashboard(
+        button.dataset.dashboardId, button.dataset.dashboardName));
+});
+
+document.getElementById('confirmDelete').addEventListener('click', function() {
+    if (!dashboardToDelete) return;
+    
+    fetch(`/dashboard/${dashboardToDelete}/delete`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            location.reload();
+        } else {
+            alert('Failed to delete dashboard: ' + (data.error || 'Unknown error'));
+        }
+    })
+    .catch(error => {
+        console.error('Delete error:', error);
+        alert('Failed to delete dashboard: ' + error.message);
+    });
+    
+    bootstrap.Modal.getInstance(document.getElementById('deleteModal')).hide();
+});
+</script>
+{% endblock %}

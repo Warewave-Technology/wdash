@@ -1,0 +1,16 @@
+{
+  "name": "wdash",
+  "version": "1.0.0",
+  "description": "Front-end build and test tooling for WDash. The application itself is Python; npm is only needed to work on static/js.",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "build": "terser static/js/wdash.js -o static/js/wdash.min.js --compress --mangle",
+    "test": "node tests/frontend_smoke.js && node tests/config_smoke.js && node tests/dashboard_smoke.js",
+    "check": "npm run build && npm test"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.0",
+    "terser": "^5.31.0"
+  }
+}

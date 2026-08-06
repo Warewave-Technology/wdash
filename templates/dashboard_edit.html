@@ -1,0 +1,467 @@
+{% extends "base.html" %}
+
+{% block title %}Edit Dashboard - WDash{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-8 mx-auto">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2><i class="fas fa-edit"></i> Edit Dashboard</h2>
+            <div>
+                <a href="{{ url_for('dashboards.view_dashboard', dashboard_id=dashboard.id) }}" class="btn btn-outline-primary me-2">
+                    <i class="fas fa-eye"></i> View
+                </a>
+                <a href="{{ url_for('dashboards.dashboards_page') }}" class="btn btn-secondary">
+                    <i class="fas fa-arrow-left"></i> Back
+                </a>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-body">
+                <form method="POST">
+                    {# The revision this form was rendered from. The store
+                       refuses a write against a stale one, so two people
+                       editing the same dashboard get told rather than one of
+                       them silently losing their work. Absent on stores that
+                       do not track revisions, which is last-write-wins. #}
+                    {% if dashboard.revision is defined and dashboard.revision %}
+                    <input type="hidden" name="revision"
+                           value="{{ dashboard.revision }}">
+                    {% endif %}
+                    <div class="mb-3">
+                        <label for="name" class="form-label">Dashboard Name *</label>
+                        <input type="text" class="form-control" id="name" name="name" required
+                               value="{{ dashboard.name }}" placeholder="Enter dashboard name">
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="description" class="form-label">Description</label>
+                        <textarea class="form-control" id="description" name="description" rows="3"
+                                  placeholder="Enter dashboard description (optional)">{{ dashboard.description or '' }}</textarea>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="index_patterns" class="form-label">Index Patterns</label>
+                        <select class="form-select" id="index_patterns" name="index_patterns" multiple size="6">
+                            <option value="*" {% if '*' in dashboard.index_patterns %}selected{% endif %}>* (All indices)</option>
+                            {% for index in indices %}
+                                <option value="{{ index }}" {% if index in dashboard.index_patterns %}selected{% endif %}>{{ index }}</option>
+                            {% endfor %}
+                            {% for pattern in dashboard.index_patterns %}
+                                {% if pattern != '*' and pattern not in indices %}
+                                    <option value="{{ pattern }}" selected>{{ pattern }} (custom)</option>
+                                {% endif %}
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">
+                            Select specific indices or patterns to limit dashboard data. Hold Ctrl/Cmd to select multiple.
+                            <br><strong>Current patterns:</strong> {{ dashboard.index_patterns | join(', ') }}
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="query" class="form-label">Search Query *</label>
+                        <input type="text" class="form-control" id="query" name="query" required
+                               value="{{ dashboard.query }}" placeholder="Enter Elasticsearch query">
+                        <div class="form-text">
+                            Use Elasticsearch query syntax. Examples:
+                            <ul class="mb-0 mt-2">
+                                <li><code>level:ERROR</code> - Show only error logs</li>
+                                <li><code>service:api AND level:WARN</code> - API warnings</li>
+                                <li><code>message:"database connection"</code> - Specific message</li>
+                                <li><code>*</code> - All logs</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <button type="button" class="btn btn-outline-secondary" id="testQuery">
+                            <i class="fas fa-play"></i> Test Query
+                        </button>
+                        <div id="testResults" class="mt-2"></div>
+                    </div>
+
+                    <!-- Panels. Submitted as JSON in one hidden field: the
+                         server validates the list as a whole, so posting it as
+                         a set of indexed form fields would only mean
+                         reassembling it there. -->
+
+                    <!-- Who may know this dashboard exists. The data boundary
+                         applies regardless: a dashboard cannot show anybody
+                         anything they could not already query. -->
+                    <div class="mb-3">
+                        <label class="form-label">Visibility</label>
+                        {% for value, (label, description) in visibilities.items() %}
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio"
+                                   name="visibility" value="{{ value }}"
+                                   id="vis-{{ value }}"
+                                   {% if (dashboard.visibility if dashboard is defined else 'shared') == value %}checked{% endif %}>
+                            <label class="form-check-label" for="vis-{{ value }}">
+                                {{ label }}
+                                <div class="text-muted" style="font-size:.8rem">{{ description }}</div>
+                            </label>
+                        </div>
+                        {% endfor %}
+                        <div class="form-text">
+                            Shared does not mean visible to everyone: people who
+                            cannot reach this dashboard's data cannot see it
+                            either.
+                        </div>
+                    </div>
+                    <hr>
+                    <div class="mb-3">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <label class="form-label mb-0">Panels</label>
+                            <div class="btn-group btn-group-sm">
+                                <button type="button" class="btn btn-outline-primary"
+                                        data-add-panel="timeseries">
+                                    <i class="fas fa-chart-area"></i> Volume over time
+                                </button>
+                                <button type="button" class="btn btn-outline-primary"
+                                        data-add-panel="terms">
+                                    <i class="fas fa-chart-bar"></i> Top values
+                                </button>
+                                <button type="button" class="btn btn-outline-info"
+                                        data-add-panel="trace_services">
+                                    <i class="fas fa-project-diagram"></i> Services (traces)
+                                </button>
+                            </div>
+                        </div>
+                        <div id="panelList" class="list-group"></div>
+                        <input type="hidden" name="panels" id="panelsField">
+                        <div class="form-text">
+                            Every panel is answered by the same request, so adding one
+                            costs an aggregation rather than a round trip.
+                        </div>
+                    </div>
+
+                    <!-- Thresholds. Not alerting: no notification, no schedule,
+                         no silencing. Just "is this outside what the owner
+                         calls normal", which stops every reader re-deriving it. -->
+                    <hr>
+                    <div class="mb-3">
+                        <label class="form-label">Thresholds <span class="text-muted" style="font-size:.8rem">(optional)</span></label>
+                        <div class="row g-2">
+                            <div class="col-md-6">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text" style="width:9rem">Error rate warn</span>
+                                    <input type="number" step="0.001" min="0" max="1"
+                                           class="form-control" name="threshold_error_rate_warning"
+                                           placeholder="0.02"
+                                           value="{{ thresholds.get('error_rate', {}).get('warning', '') }}">
+                                    <span class="input-group-text">ratio</span>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text" style="width:9rem">Error rate critical</span>
+                                    <input type="number" step="0.001" min="0" max="1"
+                                           class="form-control" name="threshold_error_rate_critical"
+                                           placeholder="0.05"
+                                           value="{{ thresholds.get('error_rate', {}).get('critical', '') }}">
+                                    <span class="input-group-text">ratio</span>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text" style="width:9rem">Error count warn</span>
+                                    <input type="number" step="1" min="0"
+                                           class="form-control" name="threshold_error_count_warning"
+                                           value="{{ thresholds.get('error_count', {}).get('warning', '') }}">
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text" style="width:9rem">Error count critical</span>
+                                    <input type="number" step="1" min="0"
+                                           class="form-control" name="threshold_error_count_critical"
+                                           value="{{ thresholds.get('error_count', {}).get('critical', '') }}">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-text">
+                            A rate is between 0 and 1 &mdash; use <code>0.05</code> for 5%.
+                            Leave blank to leave the dashboard never alarming.
+                        </div>
+                    </div>
+
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                        <a href="{{ url_for('dashboards.dashboards_page') }}" class="btn btn-secondary">Cancel</a>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-save"></i> Update Dashboard
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.getElementById('testQuery').addEventListener('click', function() {
+    const query = document.getElementById('query').value;
+    if (!query.trim()) {
+        alert('Please enter a query to test');
+        return;
+    }
+    
+    const testResults = document.getElementById('testResults');
+    testResults.innerHTML = '<div class="spinner-border spinner-border-sm" role="status"></div> Testing query...';
+    
+    // Get selected index patterns
+    const indexPatterns = Array.from(document.getElementById('index_patterns').selectedOptions)
+                               .map(option => option.value);
+    
+    const params = new URLSearchParams({
+        q: query,
+        size: 5
+    });
+    
+    // Add index patterns to the test (if not using wildcard)
+    if (indexPatterns.length > 0 && !indexPatterns.includes('*')) {
+        indexPatterns.forEach(pattern => params.append('indices', pattern));
+    }
+    
+    fetch('/api/search?' + params.toString())
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                testResults.innerHTML = `<div class="alert alert-danger">Error: ${data.error}</div>`;
+            } else {
+                const indexInfo = indexPatterns.includes('*') ? 'all accessible indices' : 
+                                 `indices: ${indexPatterns.join(', ')}`;
+                testResults.innerHTML = `
+                    <div class="alert alert-success">
+                        <strong>Query test successful!</strong><br>
+                        Found ${data.total} matching logs from ${indexInfo} (showing first 5)
+                    </div>
+                    <div class="mt-2">
+                        ${data.hits.slice(0, 3).map(hit => {
+                            const source = hit._source;
+                            const timestamp = source['@timestamp'] || new Date().toISOString();
+                            const message = (source.message || JSON.stringify(source)).substring(0, 100);
+                            return `<div class="border-start border-3 border-primary ps-2 mb-2">
+                                <small class="text-muted">${new Date(timestamp).toLocaleString()} | Index: ${hit._index}</small><br>
+                                <small>${escapeHtml(message)}${message.length > 100 ? '...' : ''}</small>
+                            </div>`;
+                        }).join('')}
+                    </div>
+                `;
+            }
+        })
+        .catch(error => {
+            testResults.innerHTML = `<div class="alert alert-danger">Test failed: ${error.message}</div>`;
+        });
+});
+
+// Add pattern input functionality
+document.getElementById('index_patterns').addEventListener('change', function() {
+    const selectedOptions = Array.from(this.selectedOptions).map(opt => opt.value);
+    
+    // If wildcard is selected, deselect others
+    if (selectedOptions.includes('*') && selectedOptions.length > 1) {
+        Array.from(this.options).forEach(option => {
+            if (option.value !== '*') {
+                option.selected = false;
+            }
+        });
+    }
+    // If specific indices are selected, deselect wildcard
+    else if (selectedOptions.length > 0 && !selectedOptions.includes('*')) {
+        Array.from(this.options).forEach(option => {
+            if (option.value === '*') {
+                option.selected = false;
+            }
+        });
+    }
+});
+
+// Add custom pattern input
+function addCustomPattern() {
+    const customPattern = prompt('Enter custom index pattern (e.g., logs-*, app-2024-*)');
+    if (customPattern && customPattern.trim()) {
+        const select = document.getElementById('index_patterns');
+        const option = document.createElement('option');
+        option.value = customPattern.trim();
+        option.text = customPattern.trim() + ' (custom)';
+        option.selected = true;
+        select.appendChild(option);
+        
+        // Deselect wildcard if custom pattern is added
+        Array.from(select.options).forEach(opt => {
+            if (opt.value === '*') opt.selected = false;
+        });
+    }
+}
+
+// Add button for custom patterns
+document.addEventListener('DOMContentLoaded', function() {
+    const indexPatternsDiv = document.getElementById('index_patterns').parentElement;
+    const customButton = document.createElement('button');
+    customButton.type = 'button';
+    customButton.className = 'btn btn-sm btn-outline-secondary mt-2';
+    customButton.innerHTML = '<i class="fas fa-plus"></i> Add Custom Pattern';
+    customButton.onclick = addCustomPattern;
+    indexPatternsDiv.appendChild(customButton);
+});
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+</script>
+
+<script nonce="{{ csp_nonce }}">
+/* ------------------------------------------------------------------
+ * Panel editor.
+ *
+ * Kept deliberately plain: a list of rows, each with its own controls,
+ * serialised into a hidden field on submit. The server re-validates
+ * everything — nothing here is trusted, and nothing here needs to be
+ * clever enough to be worth a framework.
+ * ---------------------------------------------------------------- */
+const AGGREGATABLE = {{ aggregatable_fields | tojson }};
+let panels = {{ panels | tojson }};
+
+function panelRow(panel, index) {
+    const row = document.createElement('div');
+    row.className = 'list-group-item';
+
+    const fieldOptions = (selected, allowNone) =>
+        (allowNone ? '<option value="">(total only)</option>' : '') +
+        AGGREGATABLE.map(f =>
+            `<option value="${f}"${f === selected ? ' selected' : ''}>${f}</option>`
+        ).join('');
+
+    const sortOptions = (selected) => ['spans', 'errors', 'error_rate'].map(v =>
+        `<option value="${v}"${v === selected ? ' selected' : ''}>${
+            v.replace('_', ' ')}</option>`).join('');
+
+    const specific = panel.type === 'trace_services'
+        ? `<div class="col-md-3">
+             <label class="form-label small mb-0">Sort by</label>
+             <select class="form-select form-select-sm" data-key="sort">
+               ${sortOptions(panel.sort || 'spans')}
+             </select>
+           </div>
+           <div class="col-md-2">
+             <label class="form-label small mb-0">Show top</label>
+             <input type="number" class="form-control form-control-sm"
+                    data-key="size" min="1" max="50" value="${panel.size || 10}">
+           </div>`
+        : panel.type === 'terms'
+        ? `<div class="col-md-3">
+             <label class="form-label small mb-0">Group by</label>
+             <select class="form-select form-select-sm" data-key="field">
+               ${fieldOptions(panel.field, false)}
+             </select>
+           </div>
+           <div class="col-md-2">
+             <label class="form-label small mb-0">Show top</label>
+             <input type="number" class="form-control form-control-sm"
+                    data-key="size" min="1" max="50" value="${panel.size || 10}">
+           </div>`
+        : `<div class="col-md-3">
+             <label class="form-label small mb-0">Split by</label>
+             <select class="form-select form-select-sm" data-key="split_by">
+               ${fieldOptions(panel.split_by || '', true)}
+             </select>
+           </div>
+           <div class="col-md-2"></div>`;
+
+    row.innerHTML = `
+      <div class="row g-2 align-items-end">
+        <div class="col-md-4">
+          <label class="form-label small mb-0">Title</label>
+          <input type="text" class="form-control form-control-sm"
+                 data-key="title" value="${(panel.title || '').replace(/"/g, '&quot;')}">
+        </div>
+        ${specific}
+        <div class="col-md-2">
+          <label class="form-label small mb-0">Width</label>
+          <select class="form-select form-select-sm" data-key="width">
+            ${[3, 4, 6, 8, 12].map(w =>
+              `<option value="${w}"${w === panel.width ? ' selected' : ''}>${
+                w === 12 ? 'full' : w + '/12'}</option>`).join('')}
+          </select>
+        </div>
+        <div class="col-md-1 text-end">
+          <div class="btn-group btn-group-sm">
+            <button type="button" class="btn btn-outline-secondary" data-move="-1"
+                    title="Move up"${index === 0 ? ' disabled' : ''}>&uarr;</button>
+            <button type="button" class="btn btn-outline-secondary" data-move="1"
+                    title="Move down"${index === panels.length - 1 ? ' disabled' : ''}>&darr;</button>
+            <button type="button" class="btn btn-outline-danger" data-remove
+                    title="Remove">&times;</button>
+          </div>
+        </div>
+      </div>
+      <small class="text-muted">${
+          { terms: 'Top values',
+            timeseries: 'Volume over time',
+            trace_services: 'Services by traffic — from traces, so this panel costs a second query'
+          }[panel.type] || panel.type}</small>`;
+
+    row.querySelectorAll('[data-key]').forEach(input => {
+        input.addEventListener('change', () => {
+            const key = input.dataset.key;
+            panels[index][key] = key === 'size' || key === 'width'
+                ? parseInt(input.value, 10) : input.value;
+        });
+    });
+    row.querySelectorAll('[data-move]').forEach(button => {
+        button.addEventListener('click', () => {
+            const to = index + parseInt(button.dataset.move, 10);
+            if (to < 0 || to >= panels.length) return;
+            [panels[index], panels[to]] = [panels[to], panels[index]];
+            drawPanels();
+        });
+    });
+    row.querySelector('[data-remove]').addEventListener('click', () => {
+        // A dashboard with no panels is a blank page, and the server refuses
+        // it anyway — say so here rather than on submit.
+        if (panels.length === 1) {
+            alert('A dashboard needs at least one panel.');
+            return;
+        }
+        panels.splice(index, 1);
+        drawPanels();
+    });
+    return row;
+}
+
+function drawPanels() {
+    const list = document.getElementById('panelList');
+    list.innerHTML = '';
+    panels.forEach((panel, index) => list.appendChild(panelRow(panel, index)));
+    document.getElementById('panelsField').value = JSON.stringify(panels);
+}
+
+document.querySelectorAll('[data-add-panel]').forEach(button => {
+    button.addEventListener('click', () => {
+        const type = button.dataset.addPanel;
+        const blank = {
+            terms: { type: 'terms', title: 'Top values', field: 'service',
+                     size: 10, width: 6 },
+            timeseries: { type: 'timeseries', title: 'Volume over time',
+                          split_by: 'severity', width: 12 },
+            trace_services: { type: 'trace_services', title: 'Services by traffic',
+                              sort: 'spans', size: 10, width: 6 },
+        };
+        panels.push({ ...blank[type] });
+        drawPanels();
+    });
+});
+
+document.querySelector('form').addEventListener('submit', () => {
+    document.getElementById('panelsField').value = JSON.stringify(panels);
+});
+
+drawPanels();
+</script>
+{% endblock %}

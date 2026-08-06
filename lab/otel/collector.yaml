@@ -1,0 +1,67 @@
+# OpenTelemetry Collector for the WDash lab.
+#
+# The point of running a real collector here is not convenience — the seed
+# could write documents directly, and did. It is that the seed writes the shape
+# we BELIEVE OpenTelemetry produces, and belief is not a test. With a real
+# collector in the path, the trace adapter is exercised against what the
+# ecosystem actually emits, and a mismatch shows up here rather than in
+# somebody's cluster.
+#
+# This file is also the answer to "how do I get data into WDash": point your
+# applications at the collector, point the collector at Elasticsearch, and
+# WDash reads what lands. WDash is deliberately NOT a collector — it is a
+# read-only query layer, and an ingest path would put it in the data path,
+# where being down means losing telemetry rather than losing a dashboard.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Bound the memory a burst can consume. Without this a downstream outage
+  # turns into an out-of-memory kill, which loses everything buffered rather
+  # than the tail of it.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+
+  batch:
+    timeout: 2s
+    send_batch_size: 512
+
+exporters:
+  elasticsearch:
+    endpoints: ["http://elasticsearch:9200"]
+    # 'otel' writes OpenTelemetry's own field names; 'ecs' rewrites them into
+    # Elastic Common Schema. WDash reads both — OtelSpanSchema and
+    # ApmSpanSchema — but this lab uses otel so the OTel path is the one under
+    # test. Switch to ecs to exercise the other.
+    mapping:
+      mode: otel
+    logs_index: otel-logs-000001
+    traces_index: otel-traces-000001
+    retry:
+      enabled: true
+      max_requests: 3
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [elasticsearch]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [elasticsearch]
+  telemetry:
+    logs:
+      level: info

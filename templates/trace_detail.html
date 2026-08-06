@@ -1,0 +1,328 @@
+{% extends "base.html" %}
+
+{% block title %}Trace {{ trace_id[:12] }} - WDash{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-start mb-3">
+    <div>
+        <h4 class="mb-1"><i class="fas fa-stream"></i> Trace</h4>
+        <code class="text-muted small" id="traceIdLabel">{{ trace_id }}</code>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+        <select class="form-select form-select-sm" id="timeRange" style="width:auto">
+            {% for value, label in [('1h','Last 1 hour'), ('6h','Last 6 hours'),
+                                    ('24h','Last 24 hours'), ('7d','Last 7 days'),
+                                    ('30d','Last 30 days')] %}
+            <option value="{{ value }}" {% if value == time_range %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        <a href="{{ url_for('traces.traces_page') }}" class="btn btn-sm btn-outline-secondary">
+            <i class="fas fa-arrow-left"></i> All traces
+        </a>
+    </div>
+</div>
+
+<div id="summary" class="row g-2 mb-3"></div>
+<div id="alerts"></div>
+
+<div class="row g-3">
+    <div class="col-lg-4">
+        <div class="card mb-3">
+            <div class="card-header py-2">
+                <strong><i class="fas fa-chart-pie"></i> Where the time went</strong>
+            </div>
+            <div class="card-body p-0" id="breakdown">
+                <div class="text-center py-4 text-muted"><small>Loading…</small></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header py-2">
+                <strong><i class="fas fa-info-circle"></i> Span detail</strong>
+            </div>
+            <div class="card-body" id="spanDetail">
+                <p class="text-muted mb-0"><small>Click a span in the waterfall.</small></p>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-8">
+        <div class="card mb-3">
+            <div class="card-header py-2">
+                <strong><i class="fas fa-water"></i> Waterfall</strong>
+            </div>
+            <div class="card-body p-0" id="waterfall">
+                <div class="text-center py-4 text-muted"><small>Loading…</small></div>
+            </div>
+        </div>
+
+        {% if can_read_logs %}
+        <div class="card">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                <strong><i class="fas fa-file-alt"></i> Correlated logs</strong>
+                <span class="badge bg-secondary" id="logCount"></span>
+            </div>
+            <div class="card-body p-0" id="correlatedLogs">
+                <div class="text-center py-4 text-muted"><small>Loading…</small></div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+(function () {
+    const TRACE_ID = {{ trace_id|tojson }};
+    // Which backend the click came from, if it came from a click. Empty when
+    // somebody pasted an id, and the server then looks everywhere.
+    const SOURCE = {{ (request.args.get('source') or '')|tojson }};
+
+    /** The source, when there is one to name. */
+    function sourceParams(extra) {
+        const params = new URLSearchParams(extra || {});
+        if (SOURCE) params.set('source', SOURCE);
+        return params;
+    }
+    const CAN_READ_LOGS = {{ 'true' if can_read_logs else 'false' }};
+
+    const el = (id) => document.getElementById(id);
+    const esc = (s) => String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    const range = () => el('timeRange').value;
+
+    function duration(us) {
+        if (us >= 1e6) return (us / 1e6).toFixed(2) + ' s';
+        if (us >= 1e3) return (us / 1e3).toFixed(1) + ' ms';
+        return us + ' µs';
+    }
+
+    // Same hashing as the trace list, so a service keeps its colour across pages.
+    function serviceColour(name, alpha) {
+        let hash = 0;
+        for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+        return 'hsla(' + (Math.abs(hash) % 360) + ', 62%, 55%, ' + (alpha || 1) + ')';
+    }
+
+    let trace = null;
+
+    function renderSummary(data) {
+        const root = data.spans.find(s => !s.parent_span_id) || data.spans[0];
+        const errors = data.spans.filter(s => s.status === 'ERROR').length;
+        const cards = [
+            ['Duration', duration(data.duration_us), 'info'],
+            ['Spans', data.spans.length, 'secondary'],
+            ['Services', data.services.length, 'secondary'],
+            ['Errors', errors, errors ? 'danger' : 'success'],
+            ['Started', root && root.start ? new Date(root.start).toLocaleString() : '—', 'secondary'],
+        ];
+        el('summary').innerHTML = cards.map(([label, value, tone]) =>
+            '<div class="col"><div class="card"><div class="card-body py-2 text-center">' +
+                '<div class="text-' + tone + ' fw-bold" style="font-size:1.1rem">' + esc(value) + '</div>' +
+                '<div class="text-muted" style="font-size:0.7rem">' + label + '</div>' +
+            '</div></div></div>').join('');
+
+        el('alerts').innerHTML =
+            (data.scoped ? '<div class="alert alert-warning py-2 px-3" style="font-size:0.85rem">' +
+                '<i class="fas fa-filter"></i> Filtered by your role — some spans are hidden, ' +
+                'so timings below may be incomplete.</div>' : '') +
+            (data.partial ? '<div class="alert alert-warning py-2 px-3" style="font-size:0.85rem">' +
+                '<i class="fas fa-exclamation-triangle"></i> Part of this trace could not be read.</div>' : '');
+    }
+
+    function renderBreakdown(data) {
+        const rows = data.service_breakdown || [];
+        if (!rows.length) {
+            el('breakdown').innerHTML = '<div class="p-3 text-muted"><small>No data.</small></div>';
+            return;
+        }
+        el('breakdown').innerHTML =
+            '<table class="table table-sm table-dark mb-0"><tbody>' +
+            rows.map(r =>
+                '<tr>' +
+                    '<td style="width:42%">' +
+                        '<span style="display:inline-block;width:8px;height:8px;border-radius:2px;' +
+                            'background:' + serviceColour(r.service) + ';margin-right:6px"></span>' +
+                        '<small><code>' + esc(r.service) + '</code></small>' +
+                        (r.error_count ? ' <i class="fas fa-exclamation-circle text-danger"></i>' : '') +
+                    '</td>' +
+                    '<td><div class="progress" style="height:6px">' +
+                        '<div class="progress-bar" style="width:' + (r.share * 100).toFixed(1) + '%;' +
+                            'background:' + serviceColour(r.service) + '"></div>' +
+                    '</div></td>' +
+                    '<td class="text-end text-nowrap" style="width:30%"><small>' +
+                        duration(r.self_time_us) +
+                        ' <span class="text-muted">' + (r.share * 100).toFixed(0) + '%</span></small></td>' +
+                '</tr>').join('') +
+            '</tbody></table>' +
+            '<div class="px-3 py-2 text-muted" style="font-size:0.7rem">' +
+                'Self time only — a parent that spent its time waiting on a child is not ' +
+                'credited with that child\'s work.</div>';
+    }
+
+    function renderWaterfall(data) {
+        const byId = {};
+        data.spans.forEach(s => { byId[s.span_id] = s; });
+        const total = data.duration_us || 1;
+        const rootStart = Math.min(...data.spans.map(s => Date.parse(s.start)));
+
+        const ticks = 5;
+        let axis = '<div class="position-relative" style="height:16px;border-bottom:1px solid #444">';
+        for (let i = 0; i <= ticks; i++) {
+            const pct = i / ticks * 100;
+            const align = i === 0 ? 'left:0'
+                : (i === ticks ? 'right:0' : 'left:' + pct + '%;transform:translateX(-50%)');
+            axis += '<span class="position-absolute text-muted" style="' + align +
+                    ';font-size:0.65rem;top:1px">' + duration(Math.round(total * i / ticks)) + '</span>';
+        }
+        axis += '</div>';
+
+        const rows = data.waterfall.map(function (row) {
+            const s = byId[row.span_id];
+            if (!s) return '';
+            const offset = (Date.parse(s.start) - rootStart) * 1000;
+            const left = Math.max(0, Math.min(100, offset / total * 100));
+            const width = Math.max(0.6, Math.min(100 - left, s.duration_us / total * 100));
+            const selfPct = s.duration_us > 0
+                ? Math.min(100, (row.self_time_us / s.duration_us) * 100) : 100;
+            const failed = s.status === 'ERROR';
+            const colour = serviceColour(s.service);
+
+            let guides = '';
+            for (let d = 0; d < row.depth; d++) {
+                guides += '<span style="display:inline-block;width:14px;border-left:1px solid #3a3a3a;' +
+                          'height:1.1rem;vertical-align:middle"></span>';
+            }
+
+            return '<tr class="span-row" data-span="' + esc(s.span_id) + '" style="cursor:pointer">' +
+                '<td style="width:28%">' + guides +
+                    '<span style="display:inline-block;width:8px;height:8px;border-radius:2px;' +
+                        'background:' + colour + ';margin-right:6px"></span>' +
+                    '<small><code>' + esc(s.service) + '</code></small>' +
+                    (failed ? ' <i class="fas fa-exclamation-circle text-danger"></i>' : '') +
+                '</td>' +
+                '<td style="width:13%"><code class="text-muted" style="font-size:0.68rem">' +
+                    esc(s.span_id) + '</code></td>' +
+                '<td><small class="text-muted">' + esc(s.name) + '</small></td>' +
+                '<td style="width:32%"><div class="position-relative" style="height:16px">' +
+                    '<div class="position-absolute" title="total ' + duration(s.duration_us) +
+                        ', self ' + duration(row.self_time_us) + '" style="left:' + left +
+                        '%;width:' + width + '%;height:10px;top:3px;border-radius:2px;background:' +
+                        (failed ? 'rgba(220,53,69,.3)' : serviceColour(s.service, 0.28)) + '">' +
+                        '<div style="width:' + selfPct + '%;height:100%;border-radius:2px;background:' +
+                            (failed ? '#dc3545' : colour) + '"></div>' +
+                    '</div>' +
+                '</div></td>' +
+                '<td class="text-end text-nowrap" style="width:13%"><small>' +
+                    duration(s.duration_us) + '</small><br>' +
+                    '<small class="text-muted" style="font-size:0.65rem">self ' +
+                        duration(row.self_time_us) + '</small></td>' +
+            '</tr>';
+        }).join('');
+
+        el('waterfall').innerHTML =
+            '<div class="table-responsive"><table class="table table-sm table-dark table-hover mb-0">' +
+            '<thead><tr class="text-muted" style="font-size:0.68rem">' +
+                '<th style="width:28%">Service</th><th style="width:13%">Span ID</th>' +
+                '<th>Operation</th><th style="width:32%">' + axis + '</th>' +
+                '<th class="text-end" style="width:13%">Duration</th>' +
+            '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+            '<div class="px-3 py-2 text-muted" style="font-size:0.7rem">' +
+                'Solid bar = self time, translucent = time in children.</div>';
+
+        el('waterfall').querySelectorAll('.span-row').forEach(row => {
+            row.addEventListener('click', () => showSpan(row.dataset.span));
+        });
+    }
+
+    function showSpan(spanId) {
+        const span = trace.spans.find(s => s.span_id === spanId);
+        if (!span) return;
+        const rows = [];
+        const push = (k, v) => {
+            if (v === null || v === undefined || v === '') return;
+            rows.push('<tr><td style="width:45%"><code class="hl-key" style="font-size:0.7rem">' +
+                esc(k) + '</code></td><td class="text-break"><small>' +
+                esc(typeof v === 'object' ? JSON.stringify(v) : v) + '</small></td></tr>');
+        };
+        push('span_id', span.span_id);
+        push('parent_span_id', span.parent_span_id);
+        push('service', span.service);
+        push('name', span.name);
+        push('kind', span.kind);
+        push('status', span.status);
+        push('start', span.start);
+        push('duration', duration(span.duration_us));
+        Object.keys(span.resource || {}).sort().forEach(k => push(k, span.resource[k]));
+        Object.keys(span.attributes || {}).sort().forEach(k => push(k, span.attributes[k]));
+
+        el('spanDetail').innerHTML =
+            '<div class="mb-2"><strong style="font-size:0.85rem">' +
+                '<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:' +
+                    serviceColour(span.service) + ';margin-right:6px"></span>' +
+                esc(span.service) + '</strong></div>' +
+            '<div style="max-height:320px;overflow-y:auto">' +
+            '<table class="table table-sm table-dark mb-0">' + rows.join('') + '</table></div>';
+    }
+
+    async function loadLogs() {
+        if (!CAN_READ_LOGS) return;
+        const box = el('correlatedLogs');
+        try {
+            const res = await fetch('/api/traces/' + encodeURIComponent(TRACE_ID) +
+                                    '/logs?' + sourceParams({ time_range: range() }));
+            const data = await res.json();
+            if (!res.ok || !data.records.length) {
+                box.innerHTML = '<div class="p-3 text-muted"><small>' +
+                    'No log records carry this trace id. ' +
+                    'Logs need a <code>trace_id</code> field for this to work.</small></div>';
+                return;
+            }
+            el('logCount').textContent = data.records.length + ' of ' + data.total;
+            box.innerHTML = '<table class="table table-sm table-dark mb-0"><tbody>' +
+                data.records.map(r =>
+                    '<tr>' +
+                        '<td class="text-nowrap" style="width:16%"><small class="text-muted">' +
+                            esc(new Date(r.timestamp).toLocaleTimeString()) + '</small></td>' +
+                        '<td style="width:9%"><span class="log-level ' +
+                            esc(r.severity) + '" style="font-size:0.6rem;padding:1px 5px">' +
+                            esc(r.severity_text || r.severity) + '</span></td>' +
+                        '<td style="width:16%"><small><code>' + esc(r.service) + '</code></small></td>' +
+                        '<td><small class="text-break">' +
+                            esc((r.body || '').split('\n')[0].substring(0, 160)) + '</small></td>' +
+                    '</tr>').join('') + '</tbody></table>';
+        } catch (e) {
+            box.innerHTML = '<div class="p-3 text-danger"><small>Network error</small></div>';
+        }
+    }
+
+    async function load() {
+        try {
+            const res = await fetch('/api/traces/' + encodeURIComponent(TRACE_ID) +
+                                    '?' + sourceParams({ time_range: range() }));
+            const data = await res.json();
+            if (!res.ok) {
+                el('alerts').innerHTML = '<div class="alert alert-warning">' + esc(data.error) +
+                    (data.suggestion ? '<br><small class="text-muted">' + esc(data.suggestion) + '</small>' : '') +
+                    '</div>';
+                el('waterfall').innerHTML = '';
+                el('breakdown').innerHTML = '';
+                return;
+            }
+            trace = data;
+            renderSummary(data);
+            renderBreakdown(data);
+            renderWaterfall(data);
+            loadLogs();
+        } catch (e) {
+            el('alerts').innerHTML = '<div class="alert alert-danger">Network error</div>';
+        }
+    }
+
+    el('timeRange').addEventListener('change', load);
+    load();
+})();
+</script>
+{% endblock %}

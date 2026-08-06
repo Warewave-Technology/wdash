@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+
+{% block title %}Create Dashboard - WDash{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-8 mx-auto">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2><i class="fas fa-plus"></i> Create Dashboard</h2>
+            <a href="{{ url_for('dashboards.dashboards_page') }}" class="btn btn-secondary">
+                <i class="fas fa-arrow-left"></i> Back to Dashboards
+            </a>
+        </div>
+
+        <div class="card">
+            <div class="card-body">
+                <form method="POST">
+                    <div class="mb-3">
+                        <label for="name" class="form-label">Dashboard Name *</label>
+                        <input type="text" class="form-control" id="name" name="name" required
+                               placeholder="Enter dashboard name">
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="description" class="form-label">Description</label>
+                        <textarea class="form-control" id="description" name="description" rows="3"
+                                  placeholder="Enter dashboard description (optional)"></textarea>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="index_patterns" class="form-label">Index Patterns</label>
+                        <select class="form-select" id="index_patterns" name="index_patterns" multiple size="6">
+                            <option value="*" selected>* (All indices)</option>
+                            {% for index in indices %}
+                                <option value="{{ index }}">{{ index }}</option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">
+                            Select specific indices or patterns to limit dashboard data. Hold Ctrl/Cmd to select multiple.
+                            <br><strong>Examples:</strong>
+                            <ul class="mb-0 mt-1">
+                                <li><code>*</code> - All indices (default)</li>
+                                <li><code>logs-*</code> - All indices starting with "logs-"</li>
+                                <li><code>app-logs-2024</code> - Specific index</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="query" class="form-label">Search Query *</label>
+                        <input type="text" class="form-control" id="query" name="query" required
+                               placeholder="Enter Elasticsearch query (e.g., level:ERROR, service:api)">
+                        <div class="form-text">
+                            Use Elasticsearch query syntax. Examples:
+                            <ul class="mb-0 mt-2">
+                                <li><code>level:ERROR</code> - Show only error logs</li>
+                                <li><code>service:api AND level:WARN</code> - API warnings</li>
+                                <li><code>message:"database connection"</code> - Specific message</li>
+                                <li><code>*</code> - All logs</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <button type="button" class="btn btn-outline-secondary" id="testQuery">
+                            <i class="fas fa-play"></i> Test Query
+                        </button>
+                        <div id="testResults" class="mt-2"></div>
+                    </div>
+
+                    <!-- Who may know this dashboard exists. The data boundary
+                         applies regardless: a dashboard cannot show anybody
+                         anything they could not already query. -->
+                    <div class="mb-3">
+                        <label class="form-label">Visibility</label>
+                        {% for value, (label, description) in visibilities.items() %}
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio"
+                                   name="visibility" value="{{ value }}"
+                                   id="vis-{{ value }}"
+                                   {% if (dashboard.visibility if dashboard is defined else 'shared') == value %}checked{% endif %}>
+                            <label class="form-check-label" for="vis-{{ value }}">
+                                {{ label }}
+                                <div class="text-muted" style="font-size:.8rem">{{ description }}</div>
+                            </label>
+                        </div>
+                        {% endfor %}
+                        <div class="form-text">
+                            Shared does not mean visible to everyone: people who
+                            cannot reach this dashboard's data cannot see it
+                            either.
+                        </div>
+                    </div>
+
+
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                        <a href="{{ url_for('dashboards.dashboards_page') }}" class="btn btn-secondary">Cancel</a>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-save"></i> Create Dashboard
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.getElementById('testQuery').addEventListener('click', function() {
+    const query = document.getElementById('query').value;
+    if (!query.trim()) {
+        alert('Please enter a query to test');
+        return;
+    }
+    
+    const testResults = document.getElementById('testResults');
+    testResults.innerHTML = '<div class="spinner-border spinner-border-sm" role="status"></div> Testing query...';
+    
+    // Get selected index patterns
+    const indexPatterns = Array.from(document.getElementById('index_patterns').selectedOptions)
+                               .map(option => option.value);
+    
+    const params = new URLSearchParams({
+        q: query,
+        size: 5
+    });
+    
+    // Add index patterns to the test (if not using wildcard)
+    if (indexPatterns.length > 0 && !indexPatterns.includes('*')) {
+        indexPatterns.forEach(pattern => params.append('indices', pattern));
+    }
+    
+    fetch('/api/search?' + params.toString())
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                testResults.innerHTML = `<div class="alert alert-danger">Error: ${data.error}</div>`;
+            } else {
+                const indexInfo = indexPatterns.includes('*') ? 'all accessible indices' : 
+                                 `indices: ${indexPatterns.join(', ')}`;
+                testResults.innerHTML = `
+                    <div class="alert alert-success">
+                        <strong>Query test successful!</strong><br>
+                        Found ${data.total} matching logs from ${indexInfo} (showing first 5)
+                    </div>
+                    <div class="mt-2">
+                        ${data.hits.slice(0, 3).map(hit => {
+                            const source = hit._source;
+                            const timestamp = source['@timestamp'] || new Date().toISOString();
+                            const message = (source.message || JSON.stringify(source)).substring(0, 100);
+                            return `<div class="border-start border-3 border-primary ps-2 mb-2">
+                                <small class="text-muted">${new Date(timestamp).toLocaleString()} | Index: ${hit._index}</small><br>
+                                <small>${escapeHtml(message)}${message.length > 100 ? '...' : ''}</small>
+                            </div>`;
+                        }).join('')}
+                    </div>
+                `;
+            }
+        })
+        .catch(error => {
+            testResults.innerHTML = `<div class="alert alert-danger">Test failed: ${error.message}</div>`;
+        });
+});
+
+// Add pattern input functionality
+document.getElementById('index_patterns').addEventListener('change', function() {
+    const selectedOptions = Array.from(this.selectedOptions).map(opt => opt.value);
+    
+    // If wildcard is selected, deselect others
+    if (selectedOptions.includes('*') && selectedOptions.length > 1) {
+        Array.from(this.options).forEach(option => {
+            if (option.value !== '*') {
+                option.selected = false;
+            }
+        });
+    }
+    // If specific indices are selected, deselect wildcard
+    else if (selectedOptions.length > 0 && !selectedOptions.includes('*')) {
+        Array.from(this.options).forEach(option => {
+            if (option.value === '*') {
+                option.selected = false;
+            }
+        });
+    }
+});
+
+// Add custom pattern input
+function addCustomPattern() {
+    const customPattern = prompt('Enter custom index pattern (e.g., logs-*, app-2024-*)');
+    if (customPattern && customPattern.trim()) {
+        const select = document.getElementById('index_patterns');
+        const option = document.createElement('option');
+        option.value = customPattern.trim();
+        option.text = customPattern.trim() + ' (custom)';
+        option.selected = true;
+        select.appendChild(option);
+        
+        // Deselect wildcard if custom pattern is added
+        Array.from(select.options).forEach(opt => {
+            if (opt.value === '*') opt.selected = false;
+        });
+    }
+}
+
+// Add button for custom patterns
+document.addEventListener('DOMContentLoaded', function() {
+    const indexPatternsDiv = document.getElementById('index_patterns').parentElement;
+    const customButton = document.createElement('button');
+    customButton.type = 'button';
+    customButton.className = 'btn btn-sm btn-outline-secondary mt-2';
+    customButton.innerHTML = '<i class="fas fa-plus"></i> Add Custom Pattern';
+    customButton.onclick = addCustomPattern;
+    indexPatternsDiv.appendChild(customButton);
+});
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+</script>
+{% endblock %}

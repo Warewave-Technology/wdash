@@ -1,0 +1,305 @@
+{% extends "base.html" %}
+
+{% block title %}Logs - WDash{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2><i class="fas fa-file-alt"></i> Log Viewer</h2>
+    <span class="badge bg-secondary">Role: {{ user_role }}</span>
+</div>
+
+{% if no_access %}
+<div class="alert alert-warning" role="alert">
+    <h4 class="alert-heading"><i class="fas fa-exclamation-triangle"></i> No Access to Log Indices</h4>
+    <p>Your current role <strong>"{{ user_role }}"</strong> does not have access to any log indices.</p>
+    <hr>
+    <p class="mb-0">
+        <strong>What you can do:</strong>
+        <ul class="mt-2">
+            <li>Contact your administrator to request access to specific log indices</li>
+            <li>Ask to be assigned a role with broader log access permissions</li>
+            <li>Check if there are any logs being ingested into Elasticsearch</li>
+        </ul>
+    </p>
+</div>
+{% elif elasticsearch_error %}
+<div class="alert alert-danger" role="alert">
+    <h4 class="alert-heading"><i class="fas fa-exclamation-circle"></i> Elasticsearch Connection Error</h4>
+    <p>Unable to connect to Elasticsearch to retrieve log data.</p>
+    <hr>
+    <p class="mb-0">
+        <strong>Possible solutions:</strong>
+        <ul class="mt-2">
+            <li>Check if Elasticsearch is running and accessible</li>
+            <li>Verify network connectivity</li>
+            <li>Contact your system administrator</li>
+        </ul>
+    </p>
+</div>
+{% else %}
+
+<div class="search-controls">
+    <form id="searchForm">
+        <div class="row">
+            <div class="col-md-7">
+                <label for="query" class="form-label">Search Query</label>
+                <div class="input-group">
+                    <input type="text" class="form-control" id="query" name="query" 
+                           placeholder="Enter search query (e.g., error, service:api)" value="*">
+                    <div class="btn-group">
+                        <button type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" id="savedSearchBtn" title="Saved Searches">
+                            <i class="fas fa-star"></i>
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-end" id="savedSearchMenu" style="min-width:280px;">
+                            <li><h6 class="dropdown-header">Saved Searches</h6></li>
+                            <li id="savedSearchList"><span class="dropdown-item-text text-muted"><small>Loading...</small></span></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li>
+                                <div class="px-3 py-2">
+                                    <div class="input-group input-group-sm">
+                                        <input type="text" class="form-control" id="saveSearchName" placeholder="Name for current search">
+                                        <button class="btn btn-outline-primary" type="button" id="saveSearchBtn"><i class="fas fa-save"></i></button>
+                                    </div>
+                                </div>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="form-text">
+                    <small>Examples: <code>level:ERROR</code>, <code>service:api</code>, <code>message:"database"</code></small>
+                </div>
+            </div>
+            <div class="col-md-5">
+                <label for="size" class="form-label">Results per Page</label>
+                <select class="form-select" id="size" name="size">
+                    <option value="25">25</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                    <option value="200">200</option>
+                </select>
+            </div>
+        </div>
+        
+        <div class="row mt-3">
+            {% if source_choices %}
+            <div class="col-md-3">
+                <label for="sourceSelect" class="form-label">Source</label>
+                <select class="form-select" id="sourceSelect" name="source">
+                    {% for choice in source_choices %}
+                    <option value="{{ choice.value }}">{{ choice.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
+            <div class="col-md-4">
+                <label for="timeRange" class="form-label">Time Range</label>
+                <select class="form-select" id="timeRange" name="timeRange">
+                    <option value="15m">Last 15 minutes</option>
+                    <option value="1h" selected>Last 1 hour</option>
+                    <option value="6h">Last 6 hours</option>
+                    <option value="24h">Last 24 hours</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="custom">Custom</option>
+                </select>
+            </div>
+            <div class="col-md-4 d-none" id="customStartGroup">
+                <label for="startTime" class="form-label">Start Time</label>
+                <input type="text" class="form-control" id="startTime" name="startTime" placeholder="Select start date & time">
+            </div>
+            <div class="col-md-4 d-none" id="customEndGroup">
+                <label for="endTime" class="form-label">End Time</label>
+                <input type="text" class="form-control" id="endTime" name="endTime" placeholder="Select end date & time">
+            </div>
+        </div>
+        
+        <div class="row mt-3">
+            <div class="col-md-12 d-flex justify-content-end">
+                <button type="button" class="btn btn-secondary me-2" id="clearBtn">
+                    <i class="fas fa-times"></i> Clear
+                </button>
+                <button type="submit" class="btn btn-primary">
+                    <i class="fas fa-search"></i> Search
+                </button>
+            </div>
+        </div>
+        
+        <!-- Index Info Badge -->
+        <div class="row mt-2">
+            <div class="col-md-12">
+                <small class="text-muted">
+                    <span class="badge bg-info" id="totalIndicesBadge">
+                        <i class="fas fa-database"></i> Available: {{ indices|length }} indices
+                    </span>
+                </small>
+            </div>
+        </div>
+    </form>
+</div>
+
+<!-- Volume over time. Kibana's Discover puts this above the results for a
+     reason: a list of records tells you what happened, the histogram tells you
+     when and whether it is unusual. -->
+<div class="card mb-3 d-none" id="histogramCard">
+    <div class="card-body py-2">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+            <small class="text-muted" id="histogramSummary"></small>
+            <small class="text-muted" style="font-size:0.7rem">
+                Click a bar to zoom into that interval
+            </small>
+        </div>
+        <div style="height:110px"><canvas id="logHistogram"></canvas></div>
+    </div>
+</div>
+
+<div class="row">
+<!-- Field Stats Sidebar -->
+<div class="col-md-3" id="fieldStatsSidebar">
+  {# One sticky stack rather than one sticky card each: two cards pinned to
+     the same offset draw on top of each other as the page scrolls. #}
+  <div class="sidebar-stack">
+    {#
+      Sources first, and in its own card. It comes from the search itself
+      rather than from the FIELD_STATS capability, so it is present even when
+      the card below is not — and a merged search over a source that lacks
+      that capability is exactly when "who answered" is the thing you want.
+    #}
+    <div class="card mb-2 d-none" id="sourceBreakdownCard">
+        <div class="card-header py-2">
+            <small class="fw-bold"><i class="fas fa-database"></i> Sources</small>
+        </div>
+        <div class="card-body p-0" id="sourceBreakdownContent"></div>
+    </div>
+    <div class="card">
+        <div class="card-header py-2">
+            <small class="fw-bold"><i class="fas fa-chart-bar"></i> Field Statistics</small>
+        </div>
+        <div class="card-body p-0" id="fieldStatsContent">
+            <div class="text-center py-3 text-muted"><small>Run a search to see field stats</small></div>
+        </div>
+    </div>
+  </div>
+</div>
+
+<!-- Main Content -->
+<div class="col-md-9">
+<div id="searchResults">
+    <div id="searchWarnings" class="d-none"></div>
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div id="resultsInfo" class="text-muted"></div>
+        <div id="pagination"></div>
+    </div>
+    
+    <!-- Error Display Area -->
+    <div id="errorDisplay" class="d-none">
+        <div class="alert alert-dismissible fade show" role="alert" id="errorAlert">
+            <div id="errorContent"></div>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+    </div>
+    
+    <div id="logEntries"></div>
+    
+    <div id="loadingSpinner" class="text-center d-none">
+        <div class="spinner-border" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+        <p class="mt-2 text-muted">Searching logs...</p>
+    </div>
+    
+    <!-- Empty State -->
+    <div id="emptyState" class="text-center py-5 d-none">
+        <i class="fas fa-search fa-3x text-muted mb-3"></i>
+        <h4 class="text-muted">No logs found</h4>
+        <p class="text-muted">Try adjusting your search criteria or time range.</p>
+    </div>
+</div>
+</div><!-- close col-md-9 -->
+</div><!-- close row -->
+
+<!-- Log Details Modal -->
+<div class="modal fade" id="logModal" tabindex="-1" aria-labelledby="logModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="logModalTitle">Log Details</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="logModalBody">
+                <!-- Content will be populated by JavaScript -->
+            </div>
+            <div class="modal-footer">
+                <div class="me-auto" id="contextControls">
+                    <div class="btn-group btn-group-sm me-2">
+                        <button type="button" class="btn btn-outline-info" id="contextAllBtn">
+                            <i class="fas fa-stream"></i> View Context
+                        </button>
+                        <button type="button" class="btn btn-outline-info dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown"></button>
+                        <ul class="dropdown-menu">
+                            <li><a class="dropdown-item context-option" href="#" data-field="">All logs (time-based)</a></li>
+                            <li><a class="dropdown-item context-option" href="#" data-field="host">Same Host</a></li>
+                            <li><a class="dropdown-item context-option" href="#" data-field="correlation_id">Same Correlation ID</a></li>
+                            <li><a class="dropdown-item context-option" href="#" data-field="service.keyword">Same Service</a></li>
+                        </ul>
+                    </div>
+                </div>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+// Toggle custom date fields visibility
+document.getElementById('timeRange')?.addEventListener('change', function() {
+    const isCustom = this.value === 'custom';
+    document.getElementById('customStartGroup').classList.toggle('d-none', !isCustom);
+    document.getElementById('customEndGroup').classList.toggle('d-none', !isCustom);
+});
+
+// Initialize flatpickr datetime pickers
+const fpConfig = {
+    enableTime: true,
+    time_24hr: true,
+    dateFormat: 'Y-m-d H:i',
+    theme: 'dark',
+    allowInput: true
+};
+flatpickr('#startTime', fpConfig);
+flatpickr('#endTime', fpConfig);
+
+// Initialize log search functionality when page is ready
+document.addEventListener('DOMContentLoaded', function() {
+    // Ensure LogSearch is initialized
+    if (!window.logSearch && document.getElementById('searchForm')) {
+        console.log('Initializing LogSearch from template...');
+        window.logSearch = new LogSearch();
+        
+        // Perform initial search after a short delay to ensure everything is ready
+        setTimeout(() => {
+            if (window.logSearch && typeof window.logSearch.performSearch === 'function') {
+                window.logSearch.performSearch();
+            }
+        }, 200);
+    }
+});
+
+// Fallback initialization for post-login scenarios
+setTimeout(() => {
+    if (!window.logSearch && document.getElementById('searchForm')) {
+        console.log('Fallback LogSearch initialization...');
+        window.logSearch = new LogSearch();
+        
+        // Perform initial search
+        setTimeout(() => {
+            if (window.logSearch && typeof window.logSearch.performSearch === 'function') {
+                window.logSearch.performSearch();
+            }
+        }, 200);
+    }
+}, 500);
+</script>
+{% endblock %}

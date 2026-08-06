@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Set up WDash{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-6 col-lg-5">
+    <div class="card mt-5">
+      <div class="card-body p-4">
+        <h3 class="mb-1"><i class="fas fa-key text-primary"></i> Set up WDash</h3>
+        <p class="text-muted">
+          This installation has no accounts yet. Create the administrator.
+        </p>
+
+        <div class="alert alert-info py-2" style="font-size:.85rem">
+          <i class="fas fa-info-circle"></i>
+          This is a <strong>local</strong> account. It keeps working when the
+          identity provider does not, which is what makes it the way back in
+          after a bad OIDC change. Protect it accordingly.
+        </div>
+
+        {% if not secrets_available %}
+        <div class="alert alert-warning py-2" style="font-size:.85rem">
+          <i class="fas fa-triangle-exclamation"></i>
+          <code>WDASH_ENCRYPTION_KEY</code> is not set. Setup will work, but
+          OIDC and LDAP credentials cannot be saved until it is &mdash; WDash
+          refuses to store secrets as plain text.
+        </div>
+        {% endif %}
+
+        <form method="POST">
+          <div class="mb-3">
+            <label for="username" class="form-label">Username</label>
+            <input type="text" class="form-control" id="username" name="username"
+                   value="{{ username or '' }}" autocomplete="username"
+                   autofocus required>
+          </div>
+          <div class="mb-3">
+            <label for="email" class="form-label">
+              Email <span class="text-muted">(optional)</span>
+            </label>
+            <input type="email" class="form-control" id="email" name="email"
+                   value="{{ email or '' }}" autocomplete="email">
+          </div>
+          <div class="mb-3">
+            <label for="password" class="form-label">Password</label>
+            <input type="password" class="form-control" id="password"
+                   name="password" autocomplete="new-password" required>
+            <div class="form-text">
+              At least 12 characters. Length is what costs an attacker time;
+              there are no composition rules.
+            </div>
+          </div>
+          <div class="mb-3">
+            <label for="confirm" class="form-label">Confirm password</label>
+            <input type="password" class="form-control" id="confirm"
+                   name="confirm" autocomplete="new-password" required>
+          </div>
+          <button type="submit" class="btn btn-primary w-100">
+            <i class="fas fa-check"></i> Create administrator
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

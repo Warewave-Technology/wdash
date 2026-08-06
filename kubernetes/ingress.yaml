@@ -1,0 +1,90 @@
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: wdash-ingressroute
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: ingress
+spec:
+  entryPoints:
+    - web
+  routes:
+  - match: Host(`wdash.local`)  # Change to your domain
+    kind: Rule
+    services:
+    - name: wdash
+      port: 80
+    middlewares:
+    - name: wdash-security-headers
+    - name: wdash-rate-limit
+
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: wdash-ingressroute-tls
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: ingress-tls
+spec:
+  entryPoints:
+    - websecure
+  routes:
+  - match: Host(`wdash.yourdomain.com`)  # Change to your domain
+    kind: Rule
+    services:
+    - name: wdash
+      port: 80
+    middlewares:
+    - name: wdash-security-headers
+    - name: wdash-rate-limit
+    - name: wdash-redirect-https
+  tls:
+    certResolver: letsencrypt
+
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: wdash-security-headers
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: middleware
+spec:
+  headers:
+    customRequestHeaders:
+      X-Forwarded-Proto: https
+    customResponseHeaders:
+      X-Frame-Options: "SAMEORIGIN"
+      X-Content-Type-Options: "nosniff"
+      X-XSS-Protection: "1; mode=block"
+      Referrer-Policy: "strict-origin-when-cross-origin"
+      Strict-Transport-Security: "max-age=31536000; includeSubDomains"
+      Content-Security-Policy: "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com; img-src 'self' data:; connect-src 'self';"
+
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: wdash-rate-limit
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: middleware
+spec:
+  rateLimit:
+    average: 100
+    period: 1m
+    burst: 200
+
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: wdash-redirect-https
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: middleware
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true

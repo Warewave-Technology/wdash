@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block content %}
+{% if not current_user.is_authenticated %}
+<div class="landing-hero">
+    <!-- Animated background grid -->
+    <div class="landing-grid"></div>
+    
+    <div class="landing-content">
+        <div class="landing-logo">
+            <span class="landing-icon"><i class="fas fa-terminal"></i></span>
+            <h1>WDash</h1>
+        </div>
+        <p class="landing-tagline">A fast, lightweight alternative to Kibana</p>
+        
+        <!-- Terminal demo -->
+        <div class="landing-terminal">
+            <div class="terminal-bar">
+                <span class="terminal-dot red"></span>
+                <span class="terminal-dot yellow"></span>
+                <span class="terminal-dot green"></span>
+                <span class="terminal-title">wdash — log explorer</span>
+            </div>
+            <div class="terminal-body">
+                <div class="terminal-line"><span class="t-prompt">$</span> <span class="t-cmd">wdash search</span> <span class="t-flag">--query</span> <span class="t-str">"level:ERROR"</span> <span class="t-flag">--range</span> <span class="t-str">"1h"</span></div>
+                <div class="terminal-line t-muted">Searching 8 indices...</div>
+                <div class="terminal-line"><span class="t-ok">✓</span> Found <span class="t-num">2,847</span> results in <span class="t-num">21ms</span></div>
+                <div class="terminal-line t-muted">───────────────────────────────────</div>
+                <div class="terminal-line"><span class="t-err">ERROR</span> <span class="t-dim">payment-service</span> Connection timeout to database pool</div>
+                <div class="terminal-line"><span class="t-err">ERROR</span> <span class="t-dim">api-gateway</span> &nbsp;&nbsp;&nbsp;Upstream service unavailable: 503</div>
+                <div class="terminal-line"><span class="t-warn">WARN</span> &nbsp;<span class="t-dim">user-service</span> &nbsp;&nbsp;Rate limit approaching threshold</div>
+                <div class="terminal-line t-cursor">_</div>
+            </div>
+        </div>
+
+        <div class="landing-features">
+            <div class="feature-item">
+                <i class="fas fa-bolt"></i>
+                <div>
+                    <strong>Fast</strong>
+                    <span>search_after pagination, _source filtering, request caching</span>
+                </div>
+            </div>
+            <div class="feature-item">
+                <i class="fas fa-shield-alt"></i>
+                <div>
+                    <strong>Secure</strong>
+                    <span>OIDC auth, RBAC with index-level access control</span>
+                </div>
+            </div>
+            <div class="feature-item">
+                <i class="fas fa-feather-alt"></i>
+                <div>
+                    <strong>Lightweight</strong>
+                    <span>No JVM, no plugins — just Python + Elasticsearch</span>
+                </div>
+            </div>
+        </div>
+
+        <a href="{{ url_for('auth.login') }}" class="landing-cta">
+            <i class="fas fa-sign-in-alt"></i> Sign in to get started
+        </a>
+    </div>
+</div>
+
+{% else %}
+<div class="row mt-4 g-4">
+    <div class="col-md-6">
+        <div class="card h-100 landing-card">
+            <div class="card-body text-center py-5">
+                <i class="fas fa-file-alt fa-3x mb-3" style="color:var(--dark-accent-teal)"></i>
+                <h4>Log Explorer</h4>
+                <p class="text-muted">Search, filter and analyze your logs with field statistics and context viewing</p>
+                <a href="{{ url_for('logs.logs_page') }}" class="btn btn-primary btn-lg">
+                    <i class="fas fa-search"></i> Browse Logs
+                </a>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card h-100 landing-card">
+            <div class="card-body text-center py-5">
+                <i class="fas fa-chart-bar fa-3x mb-3" style="color:var(--syntax-green)"></i>
+                <h4>Dashboards</h4>
+                <p class="text-muted">Create custom dashboards with timeline, log level and service charts</p>
+                <a href="{{ url_for('dashboards.dashboards_page') }}" class="btn btn-outline-secondary btn-lg">
+                    <i class="fas fa-chart-bar"></i> View Dashboards
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+<div class="text-center mt-4">
+    <small class="text-muted">
+        Signed in as <strong>{{ current_user.username }}</strong>
+        <span class="badge bg-secondary ms-1">{{ current_user.role }}</span>
+    </small>
+</div>
+{% endif %}
+{% endblock %}

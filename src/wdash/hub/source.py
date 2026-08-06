@@ -1,0 +1,126 @@
+"""
+Source interfaces.
+
+Every method REQUIRES a `scope`. That follows directly from Basic-licence
+Elasticsearch having no document-level security: if authorization lives
+entirely in the application, it must be impossible to forget. Making scope
+optional would mean "one day somebody forgets"; making it required turns
+forgetting into a call error.
+"""
+
+from abc import ABC, abstractmethod
+
+
+class Capability:
+    """What a source is able to do.
+
+    No backend does everything. The UI consults this so it does not offer a
+    feature the backend cannot serve — the point of the hub is to make
+    differences visible, not to hide them.
+    """
+    SEARCH = "search"
+    FIELD_STATS = "field_stats"
+    CONTEXT = "context"          # records surrounding a given record
+    HISTOGRAM = "histogram"
+    RAW_DOCUMENT = "raw_document"   # the stored document, backend-shaped
+    AGGREGATION = "aggregation"
+    TRACE_LOOKUP = "trace_lookup"
+    TRACE_SEARCH = "trace_search"
+    SERVICE_LIST = "service_list"
+    LOG_TRACE_CORRELATION = "log_trace_correlation"
+
+
+class Source(ABC):
+    """Common base for every source."""
+
+    #: Name shown to the user
+    name = "unnamed"
+    #: Backend type — must match SourceRef.backend
+    backend = "unknown"
+
+    @property
+    def capabilities(self):
+        return frozenset()
+
+    def supports(self, capability):
+        return capability in self.capabilities
+
+    @abstractmethod
+    def health(self):
+        """Return (healthy, detail)."""
+
+    @abstractmethod
+    def containers(self, scope):
+        """Containers (indices, streams) the scope can reach."""
+
+
+class LogSource(Source):
+    @abstractmethod
+    def search(self, query, scope):
+        """LogQuery -> LogPage"""
+
+    @abstractmethod
+    def fetch(self, ref, scope):
+        """Fetch one record with all its fields, or None."""
+
+    def raw(self, ref, scope):
+        """The stored document exactly as the backend holds it, or None.
+
+        This is the ONE place the neutral model is deliberately bypassed, and
+        it is declared rather than leaked. The reason is diagnostic: `fetch`
+        returns what WDash understood, and when a field is missing the question
+        is always "is it absent, or did we fail to map it?". Only the raw
+        document answers that, and without it the answer is a shell on the
+        Elasticsearch host.
+
+        Callers must treat the result as opaque and display-only: its shape is
+        the backend's, it varies between backends, and nothing in WDash may
+        branch on it. Optional.
+        """
+        raise NotImplementedError(f"{self.name} does not expose raw documents")
+
+    def field_stats(self, query, scope):
+        """Field distributions in the current query context. Optional."""
+        raise NotImplementedError(f"{self.name} does not support field statistics")
+
+    def context(self, ref, scope, before=10, after=10, correlate_by=None):
+        """Records surrounding a given record. Optional."""
+        raise NotImplementedError(f"{self.name} does not support context view")
+
+    def histogram(self, query, scope):
+        """Time series bucket counts. Optional."""
+        raise NotImplementedError(f"{self.name} does not support histograms")
+
+    def aggregate(self, query, aggregations, scope):
+        """Run several aggregations in a SINGLE request.
+
+        Dashboard panels ask for different aggregations over the same query;
+        issuing one request per panel wastes backend capacity. Optional.
+        """
+        raise NotImplementedError(f"{self.name} does not support aggregation")
+
+    def multi_aggregate(self, requests, scope):
+        """Run several (query, aggregations) pairs in one round trip.
+
+        Comparing a window with the one before it needs two different queries,
+        which `aggregate` cannot express. Issuing them separately would double
+        the round trips for what a backend can answer in a single batch.
+
+        `requests` is a sequence of (LogQuery, aggregations). Returns one
+        AggregationResult per request, in order.
+        """
+        return [self.aggregate(query, aggs, scope) for query, aggs in requests]
+
+
+class TraceSource(Source):
+    @abstractmethod
+    def trace(self, trace_id, window, scope):
+        """Fetch one trace with all its spans, or None."""
+
+    @abstractmethod
+    def services(self, window, scope):
+        """Services observed within the window."""
+
+    def search(self, query, scope):
+        """TraceQuery -> trace summaries. Optional."""
+        raise NotImplementedError(f"{self.name} does not support trace search")

@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+
+{% block title %}Traces - WDash{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2><i class="fas fa-project-diagram"></i> Traces</h2>
+    <div class="d-flex align-items-center gap-2">
+        {% if source_choices %}
+        {# Offered only when there is a choice to make. With one source the
+           picker is a control with one option, which reads as a setting
+           somebody forgot to finish. #}
+        <select class="form-select form-select-sm" id="traceSource" style="width:auto">
+            {% for choice in source_choices %}
+            <option value="{{ choice.value }}">{{ choice.label }}</option>
+            {% endfor %}
+        </select>
+        {% endif %}
+        <select class="form-select form-select-sm" id="timeRange" style="width:auto">
+            <option value="1h">Last 1 hour</option>
+            <option value="6h">Last 6 hours</option>
+            <option value="24h" selected>Last 24 hours</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+        </select>
+        <span class="badge bg-secondary">Role: {{ user_role }}</span>
+    </div>
+</div>
+
+{% if allowed_services and '*' not in allowed_services %}
+<div class="alert alert-info py-2 px-3" style="font-size:0.85rem">
+    <i class="fas fa-filter"></i>
+    Your role can see spans from:
+    {% for pattern in allowed_services %}<code class="ms-1">{{ pattern }}</code>{% endfor %}.
+    Spans from other services are hidden and their timings are not included.
+</div>
+{% endif %}
+
+<div class="row g-3">
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                <strong><i class="fas fa-cubes"></i> Services</strong>
+                <span class="badge bg-secondary" id="spanTotal"></span>
+            </div>
+            <div class="card-body p-0" id="serviceList">
+                <div class="text-center py-4 text-muted"><small>Loading…</small></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-8">
+        <div class="card mb-3">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                <strong><i class="fas fa-list"></i> <span id="traceListTitle">Recent traces</span></strong>
+                <div class="d-flex align-items-center gap-2">
+                    <div class="input-group input-group-sm" style="width:auto">
+                        <input type="text" class="form-control font-monospace" id="traceIdInput"
+                               placeholder="trace ID" style="width:230px">
+                        <button class="btn btn-outline-primary" id="lookupBtn" title="Open trace">
+                            <i class="fas fa-arrow-right"></i>
+                        </button>
+                    </div>
+                    <select class="form-select form-select-sm" id="sortBy" style="width:auto">
+                        <option value="recent">Most recent</option>
+                        <option value="slowest">Slowest</option>
+                    </select>
+                    <div class="form-check form-check-inline mb-0">
+                        <input class="form-check-input" type="checkbox" id="errorsOnly">
+                        <label class="form-check-label" for="errorsOnly" style="font-size:0.8rem">
+                            Errors only
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="card-body p-0" id="traceList">
+                <div class="text-center py-4 text-muted"><small>Loading…</small></div>
+            </div>
+        </div>
+
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+(function () {
+    const el = (id) => document.getElementById(id);
+    const esc = (s) => String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+    let selectedService = null;
+
+    const range = () => el('timeRange').value;
+
+    function duration(us) {
+        if (us >= 1e6) return (us / 1e6).toFixed(2) + ' s';
+        if (us >= 1e3) return (us / 1e3).toFixed(1) + ' ms';
+        return us + ' µs';
+    }
+
+    // ---------------------------------------------------------------- services
+
+    /** The chosen source, or nothing when there is no choice.
+     *
+     * Sent only when a picker exists. Sending "the default" explicitly would
+     * turn a later change of default into a silent change of what a shared
+     * link means.
+     */
+    function sourceParam() {
+        const picker = el('traceSource');
+        return picker && picker.value ? picker.value : null;
+    }
+
+    async function loadServices() {
+        const box = el('serviceList');
+        box.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm"></div></div>';
+        try {
+            const serviceParams = new URLSearchParams({ time_range: range() });
+            if (sourceParam()) serviceParams.set('source', sourceParam());
+            const res = await fetch('/api/traces/services?' + serviceParams.toString());
+            const data = await res.json();
+
+            if (!res.ok) {
+                box.innerHTML = '<div class="p-3 text-danger"><small>' + esc(data.error) + '</small></div>';
+                return;
+            }
+            if (!data.services.length) {
+                box.innerHTML = '<div class="p-3 text-muted"><small>' +
+                    esc(data.suggestion || 'No spans in this time range.') + '</small></div>';
+                return;
+            }
+
+            el('spanTotal').textContent = data.total_spans.toLocaleString() + ' spans';
+            const max = Math.max(...data.services.map(s => s.span_count));
+
+            box.innerHTML = '<table class="table table-sm table-dark table-hover mb-0">' +
+                '<tbody>' + data.services.map(s => {
+                    const pct = (s.span_count / max * 100).toFixed(0);
+                    const err = s.error_rate > 0
+                        ? '<span class="badge bg-danger">' + (s.error_rate * 100).toFixed(1) + '%</span>'
+                        : '<span class="text-muted">—</span>';
+                    const active = s.name === selectedService ? ' table-active' : '';
+                    return '<tr class="service-row' + active + '" style="cursor:pointer" ' +
+                            'data-service="' + esc(s.name) + '">' +
+                        '<td style="width:45%"><code>' + esc(s.name) + '</code></td>' +
+                        '<td><div class="progress" style="height:6px">' +
+                            '<div class="progress-bar bg-info" style="width:' + pct + '%"></div>' +
+                        '</div></td>' +
+                        '<td class="text-end text-muted" style="width:20%"><small>' +
+                            s.span_count.toLocaleString() + '</small></td>' +
+                        '<td class="text-end" style="width:15%">' + err + '</td>' +
+                    '</tr>';
+                }).join('') + '</tbody></table>';
+
+            box.querySelectorAll('.service-row').forEach(row => {
+                row.addEventListener('click', () => selectService(row.dataset.service));
+            });
+        } catch (e) {
+            box.innerHTML = '<div class="p-3 text-danger"><small>Network error</small></div>';
+        }
+    }
+
+    function selectService(name) {
+        selectedService = (selectedService === name) ? null : name;
+        el('traceListTitle').textContent = selectedService
+            ? 'Traces through ' + selectedService
+            : 'Recent traces';
+        loadServices();     // repaint the selection highlight
+        loadTraces();
+    }
+
+    // ------------------------------------------------------------- trace list
+
+    async function loadTraces() {
+        const box = el('traceList');
+        box.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm"></div></div>';
+
+        const params = new URLSearchParams({
+            time_range: range(),
+            sort: el('sortBy').value,
+            limit: '25'
+        });
+        if (selectedService) params.set('service', selectedService);
+        if (el('errorsOnly').checked) params.set('errors', '1');
+        if (sourceParam()) params.set('source', sourceParam());
+
+        try {
+            const res = await fetch('/api/traces?' + params.toString());
+            const data = await res.json();
+
+            if (!res.ok) {
+                box.innerHTML = '<div class="p-3 text-danger"><small>' + esc(data.error) + '</small></div>';
+                return;
+            }
+            if (!data.traces.length) {
+                box.innerHTML = '<div class="p-3 text-muted"><small>No traces match.</small></div>';
+                return;
+            }
+
+            box.innerHTML = '<table class="table table-sm table-dark table-hover mb-0">' +
+                '<tbody>' + data.traces.map(t =>
+                    '<tr class="trace-row" style="cursor:pointer" data-trace="' + esc(t.trace_id) + '"' +
+                        (t.source ? ' data-source="' + esc(t.source) + '"' : '') + '>' +
+                        '<td style="width:28%"><code class="small">' +
+                            esc(t.trace_id.substring(0, 16)) + '…</code></td>' +
+                        '<td><small>' + esc(t.service) + '</small> ' +
+                            '<small class="text-muted">' + esc(t.name) + '</small>' +
+                            // Which backend answered. A trace can legitimately
+                            // appear twice with two sources — the same request
+                            // crossing services that export to different
+                            // stores — and without this the repetition looks
+                            // like a bug rather than the truth.
+                            (data.multiple_sources && t.source
+                                ? ' <span class="badge bg-secondary" ' +
+                                  'style="font-size:.6rem">' + esc(t.source) +
+                                  '</span>'
+                                : '') +
+                        '</td>' +
+                        '<td class="text-end text-nowrap" style="width:16%"><small>' +
+                            duration(t.duration_us) + '</small></td>' +
+                        '<td class="text-end text-nowrap" style="width:18%"><small class="text-muted">' +
+                            esc(new Date(t.start).toLocaleTimeString()) + '</small></td>' +
+                        '<td class="text-end" style="width:8%">' +
+                            (t.has_error ? '<span class="badge bg-danger">err</span>' : '') +
+                        '</td>' +
+                    '</tr>').join('') + '</tbody></table>';
+
+            // A trace opens on its own page: there is more to show than fits
+            // beside the list, and the URL becomes shareable.
+            box.querySelectorAll('.trace-row').forEach(row => {
+                row.addEventListener('click', () => {
+                    // The source travels with the click. Without it the
+                    // detail page looked in whichever source was first and
+                    // reported a Jaeger trace as missing.
+                    const params = new URLSearchParams({ time_range: range() });
+                    if (row.dataset.source) params.set('source', row.dataset.source);
+                    window.location.href = '/traces/' +
+                        encodeURIComponent(row.dataset.trace) + '?' + params;
+                });
+            });
+        } catch (e) {
+            box.innerHTML = '<div class="p-3 text-danger"><small>Network error</small></div>';
+        }
+    }
+
+    // ----------------------------------------------------------- trace detail
+
+    // ------------------------------------------------------------------ wiring
+
+    // Arriving from a log record: /traces?trace_id=...  This link is possible
+    // because the neutral model carries trace_id explicitly.
+    const incoming = new URLSearchParams(window.location.search).get('trace_id');
+    if (incoming) {
+        window.location.replace('/traces/' + encodeURIComponent(incoming) + '?time_range=7d');
+        return;
+    }
+
+    const goToTrace = () => {
+        const id = el('traceIdInput').value.trim();
+        // Deliberately no source: somebody pasting an id does not know which
+        // backend holds it, and the server looks everywhere when none is
+        // named.
+        if (id) window.location.href = '/traces/' + encodeURIComponent(id) +
+            '?time_range=' + encodeURIComponent(range());
+    };
+    el('lookupBtn').addEventListener('click', goToTrace);
+    el('traceIdInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') goToTrace(); });
+    el('sortBy').addEventListener('change', loadTraces);
+    el('errorsOnly').addEventListener('change', loadTraces);
+    el('timeRange').addEventListener('change', () => { loadServices(); loadTraces(); });
+    // Both lists: the services in one store are not the services in another,
+    // so leaving the sidebar behind would filter traces by a service the new
+    // source has never heard of.
+    el('traceSource')?.addEventListener('change', () => {
+        selectedService = null;
+        loadServices();
+        loadTraces();
+    });
+
+    loadServices();
+    loadTraces();
+})();
+</script>
+{% endblock %}

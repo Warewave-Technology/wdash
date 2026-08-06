@@ -1,0 +1,219 @@
+name: wdash-lab
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ES_VERSION}
+    container_name: wdash-lab-es01
+    environment:
+      - node.name=es01
+      - cluster.name=wdash-lab
+      # Real discovery rather than single-node, so adding a second node with
+      # the "cluster" profile needs no config change.
+      - discovery.seed_hosts=elasticsearch,elasticsearch2
+      - cluster.initial_master_nodes=es01
+      - xpack.security.enabled=${ES_SECURITY}
+      # Stops a trial licence from activating itself, so we never accidentally
+      # depend on Platinum features such as document-level security.
+      - xpack.license.self_generated.type=basic
+      - ES_JAVA_OPTS=-Xms${ES_HEAP} -Xmx${ES_HEAP}
+      # Deliberately false: exercises the Advisor's "memory lock off" rule.
+      - bootstrap.memory_lock=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "${ES_PORT}:9200"
+    volumes:
+      - es01_data:/usr/share/elasticsearch/data
+    healthcheck:
+      # 200 (security off) or 401 (security on) both mean Elasticsearch is up
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:9200/ | grep -qE '200|401'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  # Second data node, for exercising shard distribution, replica and
+  # allocation rules:  ./lab.sh up cluster
+  elasticsearch2:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ES_VERSION}
+    container_name: wdash-lab-es02
+    profiles: ["cluster"]
+    environment:
+      - node.name=es02
+      - cluster.name=wdash-lab
+      - discovery.seed_hosts=elasticsearch,elasticsearch2
+      - cluster.initial_master_nodes=es01
+      - xpack.security.enabled=${ES_SECURITY}
+      - xpack.license.self_generated.type=basic
+      - ES_JAVA_OPTS=-Xms${ES2_HEAP} -Xmx${ES2_HEAP}
+      - bootstrap.memory_lock=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - es02_data:/usr/share/elasticsearch/data
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:${REDIS_VERSION}
+    container_name: wdash-lab-redis
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # For comparison and debugging. Off by default — it costs memory.
+  #   ./lab.sh up kibana
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${KIBANA_VERSION}
+    container_name: wdash-lab-kibana
+    profiles: ["kibana"]
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "${KIBANA_PORT}:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # A real OpenTelemetry Collector, so the OTel path is exercised rather than
+  # assumed. Off by default because it costs memory:  ./lab.sh up otel
+  #
+  # WDash is not a collector and does not want to be. This is what a real
+  # deployment looks like: applications push to the collector, the collector
+  # writes to storage, WDash reads storage. Keeping WDash out of the data path
+  # is why it cannot lose telemetry.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:${OTEL_VERSION}
+    container_name: wdash-lab-otel
+    profiles: ["otel"]
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes:
+      - ./otel/collector.yaml:/etc/otel/collector.yaml:ro
+    ports:
+      - "${OTLP_GRPC_PORT}:4317"
+      - "${OTLP_HTTP_PORT}:4318"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Grafana Loki, so the second log backend is exercised rather than assumed —
+  # the same argument as the collector:  ./lab.sh up loki
+  loki:
+    image: grafana/loki:${LOKI_VERSION}
+    container_name: wdash-lab-loki
+    profiles: ["loki"]
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "${LOKI_PORT}:3100"
+    volumes:
+      - loki_data:/loki
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3100/ready | grep -q ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  victorialogs:
+    image: victoriametrics/victoria-logs:${VICTORIALOGS_VERSION}
+    container_name: wdash-lab-victorialogs
+    profiles: ["victorialogs"]
+    command:
+      - "-storageDataPath=/victoria-logs-data"
+      - "-httpListenAddr=:9428"
+      # The lab seeds data with timestamps spread over days. Without this,
+      # VictoriaLogs refuses anything older than its retention window and the
+      # seed looks like it worked while writing nothing.
+      - "-retentionPeriod=30d"
+    ports:
+      - "${VICTORIALOGS_PORT}:9428"
+    volumes:
+      - victorialogs_data:/victoria-logs-data
+    healthcheck:
+      # 127.0.0.1, not localhost: inside this image `localhost` resolves to
+      # ::1 first and VictoriaLogs listens on IPv4, so the check answered
+      # "connection refused" against a service that was serving perfectly.
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9428/health | grep -q OK"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/jaeger:${JAEGER_VERSION}
+    container_name: wdash-lab-jaeger
+    profiles: ["jaeger"]
+    ports:
+      - "${JAEGER_PORT}:16686"
+      # A second OTLP port: the collector already owns 4317/4318, and two
+      # containers cannot bind the same host port. Applications point here to
+      # send traces to Jaeger instead of to Elasticsearch.
+      - "${JAEGER_OTLP_PORT}:4318"
+    environment:
+      # In-memory storage. This is a lab: persistence would mean a volume, a
+      # schema and a reason to care about upgrades, none of which is what the
+      # adapter is being tested against.
+      - MEMORY_MAX_TRACES=50000
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:16686/api/services | grep -q data"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:${TEMPO_VERSION}
+    container_name: wdash-lab-tempo
+    profiles: ["tempo"]
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "${TEMPO_PORT}:3200"
+      # A third OTLP port. 4317/4318 belong to the standalone collector and
+      # 4319 to Jaeger; a host port can only be bound once.
+      - "${TEMPO_OTLP_PORT}:4318"
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    # The image runs as a non-root user that cannot create /var/tempo itself.
+    user: "0:0"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3200/ready | grep -q ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  tempo_data:
+  victorialogs_data:
+  loki_data:
+  es01_data:
+  es02_data:
+  redis_data:

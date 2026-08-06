@@ -1,0 +1,92 @@
+# WDash authorization configuration
+#
+# Each role declares three independent boundaries:
+#
+#   indices        log indices    (on the log side the unit is the index)
+#   trace_indices  trace stores   (usually a single store, so mostly "*")
+#   services       visible services (on the trace side the unit is the service)
+#
+# Important: these controls live in the APPLICATION layer. Elasticsearch's
+# Basic licence has no document-level security, so WDash must be the only door
+# to the cluster. Expose Elasticsearch only to WDash at the network level.
+#
+# Fail closed: a boundary that is NOT declared grants nothing. Access has to be
+# written out explicitly.
+#
+# Pattern semantics: a trailing wildcard is supported ("app-*"); a leading
+# wildcard is not ("*-service" will not work).
+
+roles:
+  admin:
+    permissions:
+      - logs:read
+      - traces:read
+      - dashboard:create
+      - dashboard:edit
+      - dashboard:delete
+      - dashboard:view
+      - system:admin
+    indices:
+      - "*"
+    trace_indices:
+      - "*"
+    services:
+      - "*"
+
+  developer:
+    permissions:
+      - logs:read
+      - traces:read
+      - dashboard:create
+      - dashboard:edit
+      - dashboard:view
+    indices:
+      - "app-*"
+      - "service-*"
+    trace_indices:
+      - "*"
+    # Application services are visible; infrastructure spans (postgres, redis,
+    # elasticsearch, stripe-api) are not.
+    services:
+      - "api-gateway"
+      - "auth-*"
+      - "payment-*"
+      - "user-*"
+      - "search-*"
+      - "notification-*"
+
+  viewer:
+    permissions:
+      - logs:read
+      - traces:read
+      - dashboard:view
+    indices:
+      - "app-*"
+    trace_indices:
+      - "*"
+    services:
+      - "api-gateway"
+
+user_roles:
+  # Maps users to roles from OIDC claims.
+  # Format: email or username -> role
+  yigit.basalma: admin
+  dev@company.com: developer
+
+  # Local users
+  admin: admin
+
+# Applied to authenticated users with no explicit mapping
+default_role: viewer
+
+# OIDC claim mapping
+claim_mappings:
+  email_claim: email
+  username_claim: preferred_username
+  groups_claim: groups
+
+# Group to role mapping
+group_roles:
+  admins: admin
+  developers: developer
+  viewers: viewer

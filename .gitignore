@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Environment files — NEVER COMMIT SECRETS
+#
+# Deny by default. `.env` alone missed `.env.lab`, which held a real
+# WDASH_ENCRYPTION_KEY — and the database holding what that key encrypts was
+# not ignored either, so the key and the ciphertext would have been committed
+# together.
+.env*
+!.env.example
+!lab/.env
+
+# Runtime data.
+#
+# `data/*.json` missed data/wdash.db — the metadata database, holding local
+# accounts with their password hashes, the audit trail and the encrypted
+# source credentials. It also missed every backup, because none of
+# `dashboards.json.yedek`, `wdash.db-wal` or `wdash.db.goc-oncesi-…` ends in
+# `.json`. Ignore the directory and name the exceptions.
+data/*
+!data/.gitkeep
+
+# Front-end tooling (dev only; the app ships the committed wdash.min.js)
+node_modules/
+
+# Editor and IDE tooling.
+#
+# Personal to whoever is working on the checkout, and nothing in the project
+# reads them: .kiro/hooks minifies wdash.js on save, which `npm run build`
+# also does, and .vscode/settings.json is empty.
+.DS_Store
+*.swp
+.vscode/
+.kiro/
+.idea/
