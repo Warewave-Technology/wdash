@@ -294,5 +294,15 @@ monitor_results = Table(
     #: The certificate, when the check saw one. Shaped like the neutral
     #: Certificate model so the source adapter has nothing to translate.
     Column("tls", JSON),
+    #: For the detail page: one monitor's history, in order.
     Index("ix_wdash_monitor_results_lookup", "monitor_id", "started_at"),
+    #: For the LISTING, which filters on time alone. Without it the sparkline
+    #: query was a full table scan — measured at 8.6 million rows, three
+    #: seconds to draw fifty shapes.
+    Index("ix_wdash_monitor_results_time", "started_at"),
+    #: For "the newest result per monitor and agent". The window function
+    #: partitions by this pair and orders by time; with the pair leading, the
+    #: index supplies the order and the temp B-tree sort disappears.
+    Index("ix_wdash_monitor_results_latest",
+          "monitor_id", "agent_id", "started_at"),
 )

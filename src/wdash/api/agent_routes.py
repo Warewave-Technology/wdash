@@ -136,6 +136,19 @@ def results():
         logger.error(f"agent {agent['name']}: could not store results: {exc}")
         return jsonify({"error": "Could not store the results."}), 500
 
+    # Retention runs here, at most once an hour across the installation. The
+    # endpoint that grows the table is the natural place to shrink it: no
+    # scheduler, no extra thread, and an installation nobody reports into has
+    # nothing to prune.
+    #
+    # After the response is decided, and never allowed to fail it: the agent's
+    # results are already safe, and losing them to a housekeeping error would
+    # be the worst possible trade.
+    try:
+        store.results.prune_if_due(store.settings)
+    except Exception as exc:
+        logger.error(f"could not prune monitor results: {exc}")
+
     # `accepted` rather than a bare 204: an agent that reported for a monitor
     # it does not run needs to know the difference between "stored" and
     # "received and dropped", or it keeps sending them for ever.

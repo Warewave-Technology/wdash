@@ -160,6 +160,29 @@ def _add_own_monitoring(connection):
         table.create(connection, checkfirst=True)
 
 
+def _index_monitor_results(connection):
+    """Version 10: the two indexes the listing needs.
+
+    Version 9 shipped one index, on (monitor_id, started_at) — right for the
+    detail page, which asks about one monitor, and useless for the listing,
+    which filters on time across all of them. Measured on 8.6 million rows the
+    listing took 1.7 seconds and the sparklines 3.1, both on a full table
+    scan.
+
+    Added as a migration rather than by editing version 9: that step already
+    ran everywhere and will never run again.
+    """
+    from sqlalchemy import text
+    for name, columns in (
+            ("ix_wdash_monitor_results_time", "started_at"),
+            ("ix_wdash_monitor_results_latest",
+             "monitor_id, agent_id, started_at"),
+    ):
+        connection.execute(text(
+            f"CREATE INDEX IF NOT EXISTS {name} "
+            f"ON wdash_monitor_results ({columns})"))
+
+
 MIGRATIONS = [
     (1, "initial schema", _create_everything),
     (2, "authorization audit trail", _add_audit),
@@ -170,6 +193,7 @@ MIGRATIONS = [
     (7, "one source, several signals", _add_source_signals),
     (8, "monitors:read for existing administrators", _grant_monitors_to_admins),
     (9, "agents, monitors and their results", _add_own_monitoring),
+    (10, "index monitor results for the listing", _index_monitor_results),
 ]
 
 

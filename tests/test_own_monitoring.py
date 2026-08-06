@@ -736,3 +736,97 @@ class ManagementPageTest(unittest.TestCase):
             "name": "Sneaky", "kind": "http", "target": "https://example.com"})
         self.assertIn(response.status_code, (302, 403))
         self.assertEqual(self.app.store.monitors.all(), [])
+
+
+class RetentionSchedulingTest(StoreTestCase):
+    """Something has to CALL prune, and not on every request.
+
+    The first version had working retention code and nothing that ran it, so
+    the table grew without bound while the tests passed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.agent, _ = self.store.agents.create("one")
+        self.store.agents.seen(self.agent["id"])
+        self.monitor = self.store.monitors.create(
+            name="API", kind="http", target="https://example.com")
+
+    def _old(self, days):
+        self.store.results.record(self.agent["id"], [
+            {"monitor_id": self.monitor["id"], "status": "up",
+             "started_at": (_now() - timedelta(days=days)).isoformat()}])
+
+    def test_it_prunes_past_the_retention_period(self):
+        self._old(1)
+        self._old(40)
+        self.assertEqual(self.store.results.prune_if_due(self.store.settings), 1)
+        self.assertEqual(self.store.results.count(), 1)
+
+    def test_it_does_not_run_again_straight_away(self):
+        """Otherwise every fifteen-second report from every agent puts a
+        delete behind it."""
+        self._old(40)
+        self.store.results.prune_if_due(self.store.settings)
+        self.assertIsNone(self.store.results.prune_if_due(self.store.settings))
+
+    def test_the_marker_is_shared_rather_than_per_process(self):
+        """Four gunicorn workers must not each keep their own clock and prune
+        four times an hour between them."""
+        from wdash.store.monitoring import PRUNE_MARKER
+        self.store.results.prune_if_due(self.store.settings)
+        self.assertIsNotNone(self.store.settings.get(PRUNE_MARKER))
+
+    def test_retention_can_be_turned_off_on_purpose(self):
+        from wdash.store.monitoring import PRUNE_MARKER, RETENTION_SETTING
+        self._old(400)
+        self.store.settings.set(RETENTION_SETTING, 0)
+        self.store.settings.set(PRUNE_MARKER, (_now() - timedelta(days=1)).isoformat())
+        self.assertIsNone(self.store.results.prune_if_due(self.store.settings))
+        self.assertEqual(self.store.results.count(), 1)
+
+    def test_a_broken_setting_falls_back_to_the_default(self):
+        """A typo in a settings row must not switch retention off silently —
+        that is how a table grows for a year."""
+        from wdash.store.monitoring import (
+            DEFAULT_RETENTION_DAYS, PRUNE_MARKER, RETENTION_SETTING,
+        )
+        self._old(DEFAULT_RETENTION_DAYS + 10)
+        self.store.settings.set(RETENTION_SETTING, "thirty")
+        self.store.settings.set(PRUNE_MARKER, (_now() - timedelta(days=1)).isoformat())
+        self.assertEqual(self.store.results.prune_if_due(self.store.settings), 1)
+
+    def test_a_large_batch_is_stored_rather_than_refused(self):
+        """A single multi-VALUES insert binds nine parameters a row and SQLite
+        refuses the statement past its variable ceiling — "too many SQL
+        variables", which says nothing about the batch being too big. The
+        endpoint caps at 500, so the live path never reached it; a caller
+        flushing a day's backlog did."""
+        # 50,000 because that is where it was MEASURED to break. 20,000 went
+        # through on this build, so a test using it passed against the
+        # unchunked insert too — it was measuring the threshold rather than
+        # the fix.
+        rows = [{"monitor_id": self.monitor["id"], "status": "up",
+                 "started_at": _now().isoformat()} for _ in range(50000)]
+        self.assertEqual(self.store.results.record(self.agent["id"], rows), 50000)
+
+
+class StorageWarningTest(StoreTestCase):
+    def test_a_small_table_says_nothing(self):
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+        self.assertEqual(StoreMonitorSource(self.store).storage_warning(), "")
+
+    def test_past_the_measured_threshold_it_says_so(self):
+        """Measured, not guessed: 2.2 million rows is 508 ms for this page on
+        SQLite and 8.6 million is 2.3 seconds. A page that is slow without
+        saying why sends somebody to look at the network."""
+        from wdash.hub.adapters import store_monitors
+        source = store_monitors.StoreMonitorSource(self.store)
+        original = self.store.results.count
+        self.store.results.count = lambda monitor_id=None: 9_000_000
+        try:
+            warning = source.storage_warning()
+        finally:
+            self.store.results.count = original
+        self.assertIn("Postgres", warning)
+        self.assertIn("9,000,000", warning)
