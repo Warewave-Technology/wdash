@@ -738,6 +738,34 @@ tr.monitor-row-warning {
     font-weight: 700;
 }
 
+/* Sparklines.
+   Server-rendered SVG, so the colours live here rather than in the markup —
+   a stroke written inline is a colour the theme cannot reach.
+
+   Only the sparklines. The detail chart is Chart.js, which takes its colours
+   from the CSS custom properties at draw time — the rules that used to style
+   an SVG version of it are gone rather than left behind, because unused CSS
+   shaped like styling is what somebody edits next and wonders why nothing
+   changes. */
+
+.sparkline polyline {
+    stroke: var(--dark-accent-teal);
+}
+
+.sparkline circle {
+    fill: var(--syntax-red);
+}
+
+.monitor-link {
+    color: var(--dark-text);
+    text-decoration: none;
+}
+
+.monitor-link:hover {
+    color: var(--dark-accent-teal);
+    text-decoration: underline;
+}
+
 /* What a finding is ABOUT — index names, source names. Teal because that is
    already this theme's colour for an identifier (links, code, focus rings),
    so these read as names rather than as another grey category chip. 7.29:1 on

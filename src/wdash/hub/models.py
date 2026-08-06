@@ -542,6 +542,10 @@ class Monitor:
     error: str = ""
     tags: tuple = field(default_factory=tuple)
     certificate: object = None
+    #: Recent history, coarse enough to draw in a table cell. Empty unless the
+    #: caller asked for it — the extra aggregation is not free, and the
+    #: certificate screen has no use for it.
+    series: tuple = field(default_factory=tuple)
     #: Which configured source this came from, so a merged page can say.
     source: str = ""
     #: Where the underlying document lives, for the raw view.
@@ -559,6 +563,34 @@ class Monitor:
             return ""
         parsed = urlparse(self.url)
         return parsed.netloc or self.url
+
+
+@dataclass
+class MonitorPoint:
+    """One bucket of a monitor's history.
+
+    A bucket rather than a check, because a sparkline over a day cannot draw
+    one mark per check without drawing thousands. `checks` is how many runs
+    the bucket covers, and it is here so an empty bucket — the agent stopped —
+    is distinguishable from a fast one.
+    """
+    timestamp: object
+    #: Mean response time over the bucket, or None when nothing ran.
+    duration_ms: float = None
+    #: How many of the runs in this bucket failed.
+    down: int = 0
+    checks: int = 0
+
+    @property
+    def has_data(self):
+        return self.checks > 0
+
+    @property
+    def is_down(self):
+        """Any failure in the bucket. A bucket that was down for one run out
+        of six is not healthy, and averaging the status away is how a
+        five-minute outage disappears from a day-long chart."""
+        return self.down > 0
 
 
 @dataclass

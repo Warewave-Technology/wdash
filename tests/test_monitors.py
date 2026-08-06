@@ -109,9 +109,28 @@ class FakeElasticsearch:
             raise RuntimeError("cluster unreachable")
         if kwargs.get("size", 0) > 0:          # a history query
             return NotADict({"hits": {"hits": self.documents}})
-        buckets = [{"key": d["_source"]["monitor"]["id"],
-                    "latest": {"hits": {"hits": [d]}}}
-                   for d in self.documents]
+        wants_series = "series" in json.dumps(kwargs.get("aggs") or {})
+        buckets = []
+        for document in self.documents:
+            bucket = {"key": document["_source"]["monitor"]["id"],
+                      "latest": {"hits": {"hits": [document]}}}
+            if wants_series:
+                # Shaped like the real response: three buckets, the middle one
+                # empty. A fake that answers the listing but not the histogram
+                # lets the wiring between them be deleted with the tests still
+                # green — which is exactly what happened.
+                bucket["series"] = {"buckets": [
+                    {"key_as_string": "2026-08-06T10:00:00.000Z",
+                     "doc_count": 3, "duration": {"value": 5000.0},
+                     "down": {"doc_count": 0}},
+                    {"key_as_string": "2026-08-06T10:05:00.000Z",
+                     "doc_count": 0, "duration": {"value": None},
+                     "down": {"doc_count": 0}},
+                    {"key_as_string": "2026-08-06T10:10:00.000Z",
+                     "doc_count": 3, "duration": {"value": 9000.0},
+                     "down": {"doc_count": 1}},
+                ]}
+            buckets.append(bucket)
         return NotADict({"hits": {"total": {"value": len(self.documents)}},
                          "aggregations": {"monitors": {"buckets": buckets}}})
 
@@ -446,3 +465,325 @@ class RoleUpgradeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SparklineTest(unittest.TestCase):
+    """The shape drawn beside each monitor.
+
+    Server-rendered SVG rather than a charting library: fifty rows would be
+    fifty chart instances, each holding a canvas and a redraw loop, to draw
+    fifty shapes that never change.
+    """
+
+    @staticmethod
+    def _points(values, downs=()):
+        from wdash.hub.models import MonitorPoint
+        return [MonitorPoint(timestamp=None, duration_ms=value,
+                             down=(1 if index in downs else 0),
+                             checks=(0 if value is None else 3))
+                for index, value in enumerate(values)]
+
+    def _spark(self, values, downs=()):
+        from wdash.api.monitor_routes import sparkline
+        return sparkline(self._points(values, downs))
+
+    def test_a_gap_breaks_the_line(self):
+        """Joining across a gap draws a monitor that was not reporting as one
+        that was reporting steadily — the outage becomes a straight line."""
+        spark = self._spark([10, 20, None, None, 30, 25])
+        self.assertEqual(len(spark["runs"]), 2)
+        self.assertEqual(spark["gaps"], 2)
+
+    def test_one_point_draws_nothing(self):
+        """A dot rendered as a chart reads as a trend."""
+        self.assertIsNone(self._spark([10]))
+
+    def test_no_data_at_all_draws_nothing(self):
+        """So the template can say "not enough data" instead of showing an
+        empty box, which reads as a flat line at zero."""
+        self.assertIsNone(self._spark([None, None, None]))
+
+    def test_failures_are_marked_where_they_happened(self):
+        spark = self._spark([10, 20, 15], downs={1})
+        self.assertEqual(len(spark["failures"]), 1)
+        # Second of three points, so halfway across.
+        self.assertAlmostEqual(spark["failures"][0][0], spark["width"] / 2,
+                               delta=1)
+
+    def test_the_peak_sits_at_the_top(self):
+        """Scaled to its own maximum: a monitor answering in 3 ms and one
+        answering in 3 s both need to show their shape."""
+        spark = self._spark([10, 40, 20])
+        heights = [float(pair.split(",")[1])
+                   for pair in spark["runs"][0].split()]
+        self.assertEqual(min(heights), 2.0)      # the padding, i.e. the top
+
+    def test_a_flat_line_is_still_drawn(self):
+        """Every value equal is a real answer — a monitor that is reliably
+        fast — not a reason to render nothing."""
+        spark = self._spark([10, 10, 10])
+        self.assertEqual(len(spark["runs"]), 1)
+
+
+class SeriesTest(MonitorListingTest):
+    """The aggregation behind the sparkline."""
+
+    def test_the_listing_can_carry_a_series(self):
+        source = self._source([_document("a")])
+        page = source.monitors(self.window, self.scope, series=True)
+        request = source._es.requests[0]
+        self.assertIn("series", json.dumps(request["aggs"]))
+
+    def test_it_is_one_query_not_one_per_monitor(self):
+        """A page issuing fifty requests to draw fifty sparklines stops
+        working at a hundred monitors."""
+        source = self._source([_document("a"), _document("b"), _document("c")])
+        source.monitors(self.window, self.scope, series=True)
+        self.assertEqual(len(source._es.requests), 1)
+
+    def test_it_is_not_asked_for_unless_wanted(self):
+        """The certificate screen has no use for it and should not pay for
+        the aggregation."""
+        source = self._source([_document("a")])
+        source.monitors(self.window, self.scope)
+        self.assertNotIn("series", json.dumps(source._es.requests[0]["aggs"]))
+
+    def test_every_series_spans_the_whole_window(self):
+        """Without extended_bounds a monitor added an hour ago produces fewer
+        buckets than its neighbours, and drawn to the same width the two
+        sparklines put different moments above each other."""
+        source = self._source([_document("a")])
+        source.monitors(self.window, self.scope, series=True)
+        histogram = source._es.requests[0]["aggs"]["monitors"]["aggs"]["series"]
+        self.assertIn("extended_bounds", histogram["date_histogram"])
+
+    def test_empty_buckets_are_kept(self):
+        """A gap means the agent stopped. Dropping the bucket would join the
+        line across it."""
+        source = self._source([_document("a")])
+        source.monitors(self.window, self.scope, series=True)
+        histogram = source._es.requests[0]["aggs"]["monitors"]["aggs"]["series"]
+        self.assertEqual(histogram["date_histogram"]["min_doc_count"], 0)
+
+    def test_the_series_reaches_the_monitor(self):
+        """The query can be perfect and the result never attached. Asserting
+        on the request shape alone leaves that wiring untested — and it was."""
+        source = self._source([_document("a")])
+        monitor = source.monitors(self.window, self.scope,
+                                  series=True).monitors[0]
+        self.assertEqual(len(monitor.series), 3)
+        self.assertAlmostEqual(monitor.series[0].duration_ms, 5.0)
+
+    def test_the_empty_bucket_survives_as_a_gap(self):
+        source = self._source([_document("a")])
+        monitor = source.monitors(self.window, self.scope,
+                                  series=True).monitors[0]
+        self.assertFalse(monitor.series[1].has_data)
+        self.assertIsNone(monitor.series[1].duration_ms)
+
+    def test_a_failing_bucket_is_marked(self):
+        source = self._source([_document("a")])
+        monitor = source.monitors(self.window, self.scope,
+                                  series=True).monitors[0]
+        self.assertTrue(monitor.series[2].is_down)
+
+    def test_without_the_flag_the_monitor_carries_no_series(self):
+        source = self._source([_document("a")])
+        monitor = source.monitors(self.window, self.scope).monitors[0]
+        self.assertEqual(monitor.series, ())
+
+    def test_a_bucket_with_one_failure_in_six_is_down(self):
+        """Averaging the status away is how a five-minute outage disappears
+        from a day-long chart."""
+        from wdash.hub.models import MonitorPoint
+        point = MonitorPoint(timestamp=None, duration_ms=10, down=1, checks=6)
+        self.assertTrue(point.is_down)
+
+
+class AvailabilityTest(unittest.TestCase):
+    """The numbers in the detail header."""
+
+    @staticmethod
+    def _checks(pairs):
+        from wdash.hub.models import MonitorCheck
+        return [MonitorCheck(timestamp=None, status=status, duration_ms=ms)
+                for status, ms in pairs]
+
+    def _summary(self, pairs):
+        from wdash.api.monitor_routes import _availability
+        return _availability([], self._checks(pairs))
+
+    def test_availability_counts_runs_not_buckets(self):
+        """A bucket holding six runs of which one failed is one failure in
+        six. Counting buckets would call it one in one."""
+        summary = self._summary([(UP, 10)] * 9 + [(DOWN, 5)])
+        self.assertEqual(summary["availability"], 90.0)
+        self.assertEqual(summary["checks"], 10)
+        self.assertEqual(summary["failed"], 1)
+
+    def test_p95_is_a_real_observation(self):
+        """Nearest-rank, so the number shown is one that actually happened
+        rather than an interpolation between two that did."""
+        summary = self._summary([(UP, float(n)) for n in range(1, 101)])
+        self.assertIn(summary["p95_ms"], (95.0, 96.0))
+
+    def test_nothing_measured_is_none_rather_than_zero(self):
+        """Zero milliseconds is the fastest possible answer, not the absence
+        of one."""
+        summary = self._summary([])
+        self.assertIsNone(summary["availability"])
+        self.assertIsNone(summary["median_ms"])
+
+    def test_a_check_with_no_duration_does_not_count_as_zero(self):
+        summary = self._summary([(UP, 10), (UP, None), (UP, 20)])
+        self.assertEqual(summary["worst_ms"], 20)
+        self.assertGreater(summary["median_ms"], 0)
+
+
+class HistoryPagingTest(MonitorListingTest):
+    """Paged in Elasticsearch, not in Python.
+
+    A monitor on a fifteen-second schedule writes 5,760 checks a day.
+    Fetching all of them to show twenty-five works in a lab and falls over on
+    the first real deployment.
+    """
+
+    def _source_with(self, count):
+        documents = [_document(f"c{n}") for n in range(count)]
+        return ElasticsearchMonitorSource(
+            FakeElasticsearch(documents), name="lab")
+
+    def test_the_offset_and_size_reach_the_query(self):
+        source = self._source_with(3)
+        source.history("m", self.window, self.scope, offset=50, limit=25)
+        request = source._es.requests[0]
+        self.assertEqual(request["from"], 50)
+        self.assertEqual(request["size"], 25)
+
+    def test_the_total_is_counted_exactly(self):
+        """This number is shown as "of N". Elasticsearch stops counting at
+        10,000 by default, and "of 10,000" on 12,000 checks is simply wrong."""
+        source = self._source_with(3)
+        source.history("m", self.window, self.scope)
+        self.assertTrue(source._es.requests[0]["track_total_hits"])
+
+    def test_a_negative_offset_becomes_zero(self):
+        source = self._source_with(3)
+        source.history("m", self.window, self.scope, offset=-10, limit=5)
+        self.assertEqual(source._es.requests[0]["from"], 0)
+
+    def test_the_page_size_is_capped(self):
+        """`?limit=100000` must not become a request for a hundred thousand
+        documents."""
+        source = self._source_with(3)
+        source.history("m", self.window, self.scope, limit=999999)
+        self.assertLessEqual(source._es.requests[0]["size"], 500)
+
+    def test_the_result_still_looks_like_a_list(self):
+        """Callers that predate paging — the fan-out, the chart — index and
+        iterate it. A tuple return would have been a signature change for
+        every implementation of MonitorSource."""
+        source = self._source_with(2)
+        checks = source.history("m", self.window, self.scope)
+        self.assertIsInstance(checks, list)
+        self.assertEqual(len(checks), 2)
+
+
+class PagerTest(unittest.TestCase):
+    def _pager(self, page, total):
+        from wdash.api.monitor_routes import _pager
+        return _pager(page, total)
+
+    def test_one_page_gets_no_pager(self):
+        """A control that cannot do anything is one somebody clicks before
+        believing it."""
+        self.assertIsNone(self._pager(1, 20))
+
+    def test_the_range_shown_matches_the_page(self):
+        pager = self._pager(3, 242)
+        self.assertEqual((pager["first"], pager["last"]), (51, 75))
+
+    def test_the_last_page_stops_at_the_total(self):
+        """Not 250. A range that runs past the end says rows exist that do
+        not."""
+        pager = self._pager(10, 242)
+        self.assertEqual(pager["last"], 242)
+
+    def test_a_page_past_the_end_lands_on_the_last_one(self):
+        pager = self._pager(99, 242)
+        self.assertEqual(pager["page"], 10)
+        self.assertFalse(pager["has_next"])
+
+    def test_the_number_list_is_a_window(self):
+        """231 pages of check history would otherwise be a pager wider than
+        the table."""
+        pager = self._pager(50, 10000)
+        self.assertLessEqual(len(pager["numbers"]), 5)
+        self.assertIn(50, pager["numbers"])
+
+    def test_the_window_does_not_run_off_either_end(self):
+        for page, total in ((1, 10000), (400, 10000)):
+            pager = self._pager(page, total)
+            self.assertTrue(all(1 <= n <= pager["pages"]
+                                for n in pager["numbers"]))
+
+
+class ChartDataTest(unittest.TestCase):
+    """What the detail chart is handed.
+
+    Chart.js rather than server-rendered SVG here, and the reason is measured
+    rather than assumed: base.html loads the library on every page already, so
+    one chart costs no download, and hovering to read an exact time and value
+    is most of why the page gets opened. The sparklines stay SVG because a
+    hundred rows would be a hundred canvases drawing shapes that never change.
+    """
+
+    @staticmethod
+    def _points(rows):
+        from wdash.hub.models import MonitorPoint
+        out = []
+        for average, worst, down in rows:
+            point = MonitorPoint(timestamp=dt.datetime(2026, 8, 6, 10, 0,
+                                                       tzinfo=dt.timezone.utc),
+                                 duration_ms=average, down=down,
+                                 checks=0 if average is None else 3)
+            point.worst_ms = worst
+            out.append(point)
+        return out
+
+    def _chart(self, rows):
+        from wdash.api.monitor_routes import response_chart
+        return response_chart(self._points(rows))
+
+    def test_a_gap_is_null_not_zero(self):
+        """Chart.js breaks a line at a null and draws straight through a
+        zero. Zero milliseconds would be the fastest reading on the chart at
+        the moment the agent stopped reporting."""
+        chart = self._chart([(10, 20, 0), (None, None, 0), (12, 22, 0)])
+        self.assertIsNone(chart["average"][1])
+        self.assertIsNone(chart["worst"][1])
+
+    def test_the_arrays_line_up_with_the_labels(self):
+        """The failure marks are drawn by index, so a shorter array would put
+        them under the wrong time."""
+        chart = self._chart([(10, 20, 0), (None, None, 0), (12, 22, 1)])
+        self.assertEqual(len(chart["labels"]), 3)
+        self.assertEqual(len(chart["average"]), 3)
+        self.assertEqual(len(chart["failures"]), 3)
+
+    def test_failures_are_counted_not_flagged(self):
+        """Three failures in a bucket and one are different facts, and the
+        tooltip says which."""
+        chart = self._chart([(10, 20, 0), (12, 22, 3)])
+        self.assertEqual(chart["failures"][1], 3)
+        self.assertEqual(chart["failure_count"], 3)
+
+    def test_too_little_data_draws_nothing(self):
+        """One point is a dot, and a dot drawn as a chart reads as a trend."""
+        self.assertIsNone(self._chart([(10, 20, 0)]))
+
+    def test_the_peak_covers_both_series(self):
+        """A y-axis scaled to the average alone clips the slowest line off the
+        top of the chart."""
+        chart = self._chart([(10, 100, 0), (10, 10, 0)])
+        self.assertEqual(chart["peak_ms"], 100)

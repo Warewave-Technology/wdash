@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 
 from ..models import (
     DOWN, UNKNOWN, UP, Certificate, Monitor, MonitorCheck, MonitorPage,
-    SourceRef,
+    MonitorPoint, SourceRef,
 )
 from ..source import Capability, MonitorSource
 
@@ -47,6 +47,11 @@ MAX_MONITORS = 500
 
 #: How many past checks a history returns.
 MAX_HISTORY = 500
+
+#: Buckets in the sparkline drawn beside each monitor in the list. Small
+#: because it is drawn in a table cell forty pixels tall — more points would
+#: be smaller than a pixel each and cost an aggregation to compute.
+SPARKLINE_POINTS = 24
 
 
 def _parse_time(value):
@@ -128,6 +133,18 @@ def _certificate(source):
     )
 
 
+class _CheckList(list):
+    """A list of checks that also knows how many there are in total.
+
+    A subclass rather than a (checks, total) tuple so that `history` keeps the
+    return type every caller already handles. A backend that cannot count says
+    nothing and the length stands in, which is exactly what an unpaged list
+    means.
+    """
+    total = 0
+    offset = 0
+
+
 class ElasticsearchMonitorSource(MonitorSource):
     """Reads what Heartbeat writes. Never writes anything itself."""
 
@@ -188,17 +205,64 @@ class ElasticsearchMonitorSource(MonitorSource):
             {"exists": {"field": "summary.status"}},
         ]}}
 
-    def monitors(self, window, scope):
+    @staticmethod
+    def _bucket_interval(window, points):
+        """A fixed interval that divides the window into roughly `points`.
+
+        Fixed rather than calendar-based: a sparkline is a shape, and a
+        calendar interval makes the buckets different widths across a daylight
+        saving boundary, which bends the shape for a reason that has nothing
+        to do with the monitor.
+        """
+        seconds = max(1, int((window.end - window.start).total_seconds()))
+        step = max(30, seconds // max(1, points))
+        return f"{step}s"
+
+    def monitors(self, window, scope, series=False):
+        aggregations = {
+            # One document per monitor: the most recent check. A terms
+            # aggregation alone would give counts, and a count cannot say
+            # whether the thing is up NOW.
+            "latest": {"top_hits": {
+                "size": 1, "sort": [{"@timestamp": {"order": "desc"}}]}},
+        }
+        if series:
+            # In the SAME query as the listing. A second round trip per
+            # monitor would be one request per row, and a page that issues
+            # fifty requests to draw fifty sparklines is a page that stops
+            # working at a hundred monitors.
+            aggregations["series"] = {
+                "date_histogram": {
+                    "field": "@timestamp",
+                    "fixed_interval": self._bucket_interval(
+                        window, SPARKLINE_POINTS),
+                    # Empty buckets are the point: a gap means the agent
+                    # stopped reporting, and dropping them would join the line
+                    # across an outage as though nothing happened.
+                    "min_doc_count": 0,
+                    # And the histogram has to span the WINDOW, not the
+                    # monitor's own documents. Without this a monitor added an
+                    # hour ago produces fifteen buckets while its neighbours
+                    # produce twenty-three, and drawn to the same width the
+                    # two sparklines put different moments above each other —
+                    # a chart whose x-axis means something different per row.
+                    "extended_bounds": {
+                        "min": int(window.start.timestamp() * 1000),
+                        "max": int(window.end.timestamp() * 1000),
+                    },
+                },
+                "aggs": {
+                    "duration": {"avg": {"field": "monitor.duration.us"}},
+                    "down": {"filter": {"term": {"summary.status": DOWN}}},
+                },
+            }
+
         body = {
             "size": 0,
             "query": self._summaries_only(window),
             "aggs": {"monitors": {
                 "terms": {"field": "monitor.id", "size": MAX_MONITORS},
-                # One document per monitor: the most recent check. A terms
-                # aggregation alone would give counts, and a count cannot say
-                # whether the thing is up NOW.
-                "aggs": {"latest": {"top_hits": {
-                    "size": 1, "sort": [{"@timestamp": {"order": "desc"}}]}}},
+                "aggs": aggregations,
             }},
         }
         try:
@@ -213,7 +277,10 @@ class ElasticsearchMonitorSource(MonitorSource):
             hits = _dig(bucket, "latest.hits.hits") or []
             if not hits:
                 continue
-            monitors.append(self._to_monitor(hits[0]))
+            monitor = self._to_monitor(hits[0])
+            if series:
+                monitor.series = self._to_series(bucket)
+            monitors.append(monitor)
 
         # Down first, then by name: a list sorted by id puts the one thing
         # that needs attention wherever the alphabet happens to place it.
@@ -244,9 +311,88 @@ class ElasticsearchMonitorSource(MonitorSource):
                           id=hit.get("_id", "")),
         )
 
-    def history(self, monitor_id, window, scope):
+    @staticmethod
+    def _to_series(bucket):
+        points = []
+        for point in _dig(bucket, "series.buckets") or ():
+            microseconds = _dig(point, "duration.value")
+            points.append(MonitorPoint(
+                timestamp=_parse_time(point.get("key_as_string")),
+                duration_ms=(microseconds / 1000.0
+                             if microseconds is not None else None),
+                down=int(_dig(point, "down.doc_count") or 0),
+                checks=int(point.get("doc_count") or 0)))
+        return tuple(points)
+
+    def series(self, monitor_id, window, scope, points=120):
+        """A finer history for one monitor, for the detail page.
+
+        Separate from `history` because they answer different questions: this
+        is a shape over time at a chosen resolution, that is the list of
+        individual runs with their error messages. Drawing a chart from the
+        run list would put a point per check on an axis that cannot hold
+        them; reading errors from this would have nothing to read.
+        """
         body = {
-            "size": MAX_HISTORY,
+            "size": 0,
+            "query": {"bool": {"filter": [
+                self._window_filter(window),
+                {"exists": {"field": "summary.status"}},
+                {"term": {"monitor.id": monitor_id}},
+            ]}},
+            "aggs": {"series": {
+                "date_histogram": {
+                    "field": "@timestamp",
+                    "fixed_interval": self._bucket_interval(window, points),
+                    "min_doc_count": 0,
+                    "extended_bounds": {
+                        "min": int(window.start.timestamp() * 1000),
+                        "max": int(window.end.timestamp() * 1000),
+                    },
+                },
+                "aggs": {
+                    "duration": {"avg": {"field": "monitor.duration.us"}},
+                    "down": {"filter": {"term": {"summary.status": DOWN}}},
+                    # The slowest run in the bucket. An average hides the one
+                    # request that took four seconds, which is usually the
+                    # thing being looked for.
+                    "worst": {"max": {"field": "monitor.duration.us"}},
+                },
+            }},
+        }
+        try:
+            response = self._search(body)
+        except Exception:
+            return []
+        points_out = []
+        for point in _dig(response, "aggregations.series.buckets") or ():
+            average = _dig(point, "duration.value")
+            worst = _dig(point, "worst.value")
+            entry = MonitorPoint(
+                timestamp=_parse_time(point.get("key_as_string")),
+                duration_ms=(average / 1000.0 if average is not None else None),
+                down=int(_dig(point, "down.doc_count") or 0),
+                checks=int(point.get("doc_count") or 0))
+            entry.worst_ms = (worst / 1000.0 if worst is not None else None)
+            points_out.append(entry)
+        return points_out
+
+    def history(self, monitor_id, window, scope, offset=0, limit=None):
+        """Past checks, newest LAST. `offset`/`limit` page at the backend.
+
+        Paged in Elasticsearch rather than in Python: a monitor on a
+        fifteen-second schedule writes 5,760 checks a day, and fetching all of
+        them to show twenty-five is the kind of thing that works in a lab and
+        falls over on the first real deployment.
+
+        `total` is reported alongside so a pager can say "of 5,760" — a page
+        list that has to guess how many pages there are guesses wrong at the
+        end.
+        """
+        size = MAX_HISTORY if limit is None else max(1, min(limit, MAX_HISTORY))
+        body = {
+            "size": size,
+            "from": max(0, int(offset)),
             "query": {"bool": {"filter": [
                 self._window_filter(window),
                 {"exists": {"field": "summary.status"}},
@@ -255,6 +401,10 @@ class ElasticsearchMonitorSource(MonitorSource):
             "sort": [{"@timestamp": {"order": "desc"}}],
             "_source": ["@timestamp", "summary.status", "monitor.status",
                         "monitor.duration.us", "error.message"],
+            # Exact rather than the 10,000 cap: this number is shown to
+            # somebody as "of N", and "of 10,000+" on a page of 12,000 checks
+            # is a number that is simply wrong.
+            "track_total_hits": True,
         }
         try:
             response = self._search(body)
@@ -272,6 +422,13 @@ class ElasticsearchMonitorSource(MonitorSource):
                 error=_dig(source, "error.message") or ""))
         # Oldest first: a chart reads left to right.
         checks.reverse()
+        # The total travels on the list rather than in a tuple, so every
+        # existing caller — the fan-out, the detail page's chart — keeps
+        # working unchanged. A second return value would have been a signature
+        # change for every implementation of MonitorSource.
+        checks = _CheckList(checks)
+        checks.total = int(_dig(response, "hits.total.value") or len(checks))
+        checks.offset = max(0, int(offset))
         return checks
 
     def certificates(self, window, scope):

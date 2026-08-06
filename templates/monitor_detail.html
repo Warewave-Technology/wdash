@@ -1,0 +1,370 @@
+{% extends "base.html" %}
+{% block title %}{{ monitor.name }} - Monitors - WDash{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-start mb-4">
+    <div>
+        <a href="{{ url_for('monitors.monitors_page', window=window) }}"
+           class="text-muted small text-decoration-none">
+            <i class="fas fa-arrow-left"></i> Monitors
+        </a>
+        <h2 class="mt-1 mb-1">
+            <span class="monitor-status {{ monitor.status }}">{{ monitor.status }}</span>
+            {{ monitor.name }}
+        </h2>
+        <code class="text-muted">{{ monitor.url or monitor.location }}</code>
+        {% if monitor.tags %}
+        {% for tag in monitor.tags %}
+        <span class="badge target-chip">{{ tag }}</span>
+        {% endfor %}
+        {% endif %}
+    </div>
+    <select class="form-select form-select-sm" id="monitorWindow" style="width:auto">
+        {% for value, text in [('15m','last 15m'), ('1h','last 1h'),
+                               ('6h','last 6h'), ('24h','last 24h')] %}
+        <option value="{{ value }}" {% if window == value %}selected{% endif %}>
+            {{ text }}
+        </option>
+        {% endfor %}
+    </select>
+</div>
+
+{% if monitor.error %}
+<div class="alert alert-danger py-2">
+    <i class="fas fa-circle-xmark"></i>
+    <strong>Last check failed.</strong> {{ monitor.error }}
+</div>
+{% endif %}
+
+{# Availability and percentiles are computed from the RUNS, not the chart
+   buckets: a bucket holding six runs of which one failed is one failure in
+   six, and counting buckets would call it one in one. #}
+<div class="row g-3 mb-4">
+    {% for label, value, unit, hint in [
+        ('Availability', summary.availability, '%', 'of checks that answered'),
+        ('Median', summary.median_ms, 'ms', 'typical response'),
+        ('p95', summary.p95_ms, 'ms', 'nearest-rank, a real observation'),
+        ('Slowest', summary.worst_ms, 'ms', 'over this window')] %}
+    <div class="col-6 col-md-3">
+        <div class="card h-100"><div class="card-body py-3">
+            <div class="text-muted" style="font-size:.7rem; text-transform:uppercase;
+                                           letter-spacing:1px">{{ label }}</div>
+            <div class="h4 mb-0 mt-1">
+                {% if value is not none %}{{ value }}<small
+                    class="text-muted">{{ unit }}</small>
+                {% else %}<span class="text-muted">—</span>{% endif %}
+            </div>
+            <small class="text-muted" style="font-size:.7rem">{{ hint }}</small>
+        </div></div>
+    </div>
+    {% endfor %}
+</div>
+
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="fas fa-chart-line"></i> Response time</span>
+        <small class="text-muted">
+            {{ summary.checks }} check(s){% if summary.failed %},
+            <span class="text-danger">{{ summary.failed }} failed</span>{% endif %}
+        </small>
+    </div>
+    <div class="card-body">
+        {% if not chart %}
+        <div class="text-center text-muted py-5">
+            <i class="fas fa-chart-line fa-2x"></i>
+            <div class="mt-2"><small>
+                Not enough checks in this window to draw a line. Two points is
+                the minimum &mdash; one is a dot, and a dot drawn as a chart
+                reads as a trend.
+            </small></div>
+        </div>
+        {% else %}
+        {# Chart.js rather than the SVG the sparklines use, and the reason
+           is measured: base.html loads the library on every page already, so
+           one chart here costs no download. What it buys is the part a static
+           drawing cannot do — hover a point and read the exact time and
+           value, which is most of why this page gets opened.
+
+           The sparklines stay SVG for the opposite reason: a hundred rows
+           would be a hundred canvases with a hundred resize observers to draw
+           a hundred shapes that never change. #}
+        <div style="height:260px"><canvas id="responseChart"></canvas></div>
+        <script nonce="{{ csp_nonce }}" type="application/json" id="chartData">
+          {{ chart | tojson }}
+        </script>
+        <p class="text-muted mb-0 mt-2" style="font-size:.7rem">
+            Peak {{ chart.peak_ms }} ms. Both lines are drawn because the
+            average hides the thing usually being looked for: one slow request
+            in a hundred moves the mean by a percent and the maximum by a
+            factor.
+        </p>
+        {% endif %}
+    </div>
+</div>
+
+{% if monitor.certificate %}
+{% set c = monitor.certificate %}
+<div class="card mb-4">
+    <div class="card-header"><i class="fas fa-lock"></i> TLS certificate</div>
+    <div class="card-body">
+        <div class="row g-3">
+            <div class="col-md-3">
+                <div class="text-muted" style="font-size:.7rem">EXPIRES</div>
+                {% if c.expired %}
+                <span class="expiry-chip expired">expired</span>
+                {% else %}
+                <span class="expiry-chip {{ c.state }}">{{ c.days_remaining }}d</span>
+                {% endif %}
+                <div><small class="text-muted"
+                            data-timestamp="{{ c.not_after }}"></small></div>
+            </div>
+            {% for label, value in [('Common name', c.common_name),
+                                    ('Issuer', c.issuer),
+                                    ('Key', c.key),
+                                    ('Signature', c.signature_algorithm)] %}
+            <div class="col-md-3">
+                <div class="text-muted" style="font-size:.7rem">{{ label|upper }}</div>
+                <div><code>{{ value or '—' }}</code></div>
+            </div>
+            {% endfor %}
+            {% if c.fingerprint %}
+            <div class="col-12">
+                <div class="text-muted" style="font-size:.7rem">SHA-256</div>
+                <code class="text-muted" style="font-size:.7rem; word-break:break-all"
+                >{{ c.fingerprint }}</code>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header">
+        <i class="fas fa-list"></i> Recent checks
+        <small class="text-muted ms-2">newest first</small>
+    </div>
+    {% if not history_supported %}
+    <div class="card-body">
+        <div class="alert alert-secondary mb-0">
+            This source keeps no per-check history. The chart above is all it
+            can say &mdash; which is a limit of the backend, not evidence that
+            nothing ran.
+        </div>
+    </div>
+    {% elif not checks %}
+    <div class="card-body text-center text-muted py-5">
+        <i class="fas fa-inbox fa-2x"></i>
+        <div class="mt-2"><small>No check in this window.</small></div>
+    </div>
+    {% else %}
+    <div class="table-responsive">
+        <table class="table table-hover mb-0" style="font-size:.85rem">
+            <thead><tr>
+                <th style="width:6rem">Status</th>
+                <th style="width:13rem">When</th>
+                <th style="width:7rem" class="text-end">Response</th>
+                <th>Detail</th>
+            </tr></thead>
+            <tbody>
+            {% for check in checks %}
+            <tr{% if check.status == 'down' %} class="monitor-row-down"{% endif %}>
+                <td><span class="monitor-status {{ check.status }}"
+                    >{{ check.status }}</span></td>
+                <td><small class="text-muted"
+                           data-timestamp="{{ check.timestamp }}"></small></td>
+                <td class="text-end">
+                    {% if check.duration_ms is not none %}{{ check.duration_ms }} ms
+                    {% else %}<span class="text-muted">—</span>{% endif %}
+                </td>
+                <td>
+                    {% if check.error %}
+                    <span class="text-danger">{{ check.error }}</span>
+                    {% else %}<span class="text-muted">—</span>{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if pager %}
+    {# Paged in Elasticsearch, not here: a monitor on a fifteen-second
+       schedule writes 5,760 checks a day, and fetching all of them to show
+       twenty-five works in a lab and falls over on the first real
+       deployment. #}
+    <div class="card-footer d-flex justify-content-between align-items-center">
+        <small class="text-muted">
+            {{ pager.first }}&ndash;{{ pager.last }} of
+            {{ "{:,}".format(pager.total) }} checks
+        </small>
+        <nav>
+            <ul class="pagination pagination-sm mb-0">
+                <li class="page-item {% if not pager.has_previous %}disabled{% endif %}">
+                    <a class="page-link"
+                       href="{{ url_for('monitors.monitor_detail',
+                                        monitor_id=monitor.id, window=window,
+                                        page=pager.page - 1) }}">&laquo;</a>
+                </li>
+                {% if pager.numbers and pager.numbers[0] > 1 %}
+                <li class="page-item">
+                    <a class="page-link"
+                       href="{{ url_for('monitors.monitor_detail',
+                                        monitor_id=monitor.id, window=window,
+                                        page=1) }}">1</a>
+                </li>
+                <li class="page-item disabled"><span class="page-link">&hellip;</span></li>
+                {% endif %}
+                {% for number in pager.numbers %}
+                <li class="page-item {% if number == pager.page %}active{% endif %}">
+                    <a class="page-link"
+                       href="{{ url_for('monitors.monitor_detail',
+                                        monitor_id=monitor.id, window=window,
+                                        page=number) }}">{{ number }}</a>
+                </li>
+                {% endfor %}
+                {% if pager.numbers and pager.numbers[-1] < pager.pages %}
+                <li class="page-item disabled"><span class="page-link">&hellip;</span></li>
+                <li class="page-item">
+                    <a class="page-link"
+                       href="{{ url_for('monitors.monitor_detail',
+                                        monitor_id=monitor.id, window=window,
+                                        page=pager.pages) }}">{{ pager.pages }}</a>
+                </li>
+                {% endif %}
+                <li class="page-item {% if not pager.has_next %}disabled{% endif %}">
+                    <a class="page-link"
+                       href="{{ url_for('monitors.monitor_detail',
+                                        monitor_id=monitor.id, window=window,
+                                        page=pager.page + 1) }}">&raquo;</a>
+                </li>
+            </ul>
+        </nav>
+    </div>
+    {% endif %}
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+(function drawResponseChart() {
+    const holder = document.getElementById('chartData');
+    const canvas = document.getElementById('responseChart');
+    if (!holder || !canvas || typeof Chart === 'undefined') { return; }
+
+    const data = JSON.parse(holder.textContent);
+    const style = getComputedStyle(document.documentElement);
+    const teal = style.getPropertyValue('--dark-accent-teal').trim() || '#39c5cf';
+    const red = style.getPropertyValue('--syntax-red').trim() || '#ff7b72';
+    const muted = style.getPropertyValue('--dark-text-secondary').trim() || '#7d8590';
+    const grid = style.getPropertyValue('--dark-border').trim() || '#30363d';
+
+    const times = data.labels.map(v => v ? new Date(v) : null);
+    const label = i => times[i] ? times[i].toLocaleTimeString() : '';
+
+    new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: data.labels.map((_, i) => label(i)),
+            datasets: [
+                {
+                    label: 'slowest in bucket',
+                    data: data.worst,
+                    borderColor: teal,
+                    borderDash: [3, 3],
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    // The failure of the whole exercise would be joining the
+                    // line across a bucket with no check: a gap means the
+                    // agent stopped, and a continuous line says it did not.
+                    spanGaps: false,
+                    tension: .25,
+                },
+                {
+                    label: 'average',
+                    data: data.average,
+                    borderColor: teal,
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    spanGaps: false,
+                    tension: .25,
+                    fill: false,
+                },
+            ],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            interaction: { mode: 'index', intersect: false },
+            scales: {
+                x: { ticks: { color: muted, maxTicksLimit: 8 },
+                     grid: { color: grid, drawOnChartArea: false } },
+                y: { beginAtZero: true,
+                     ticks: { color: muted, callback: v => v + ' ms' },
+                     grid: { color: grid } },
+            },
+            plugins: {
+                legend: { labels: { color: muted, boxHeight: 2 } },
+                tooltip: {
+                    callbacks: {
+                        // The count of failed checks in the hovered bucket.
+                        // Without it a dip in the line and an outage look the
+                        // same, and only one of them needs acting on.
+                        afterBody(items) {
+                            const failed = data.failures[items[0].dataIndex];
+                            return failed ? `${failed} failed check(s)` : '';
+                        },
+                        title(items) {
+                            const when = times[items[0].dataIndex];
+                            return when ? when.toLocaleString() : '';
+                        },
+                    },
+                },
+            },
+        },
+    });
+
+    // Failures as vertical marks behind the lines. Chart.js has no built-in
+    // annotation without a plugin, and a plugin from a CDN is a dependency
+    // this needs less than it needs twelve lines.
+    Chart.register({
+        id: 'failureMarks',
+        beforeDatasetsDraw(chart) {
+            const context = chart.ctx;
+            const area = chart.chartArea;
+            const axis = chart.scales.x;
+            context.save();
+            context.strokeStyle = red;
+            context.globalAlpha = .35;
+            context.lineWidth = 1;
+            data.failures.forEach((failed, index) => {
+                if (!failed) { return; }
+                const x = axis.getPixelForValue(index);
+                context.beginPath();
+                context.moveTo(x, area.top);
+                context.lineTo(x, area.bottom);
+                context.stroke();
+            });
+            context.restore();
+        },
+    });
+})();
+
+document.getElementById('monitorWindow')?.addEventListener('change', function () {
+    const url = new URL(window.location.href);
+    url.searchParams.set('window', this.value);
+    window.location.href = url.toString();
+});
+
+// Timestamps arrive as ISO strings so the server does not have to guess the
+// reader's timezone.
+document.querySelectorAll('[data-timestamp]').forEach(function (el) {
+    const raw = el.getAttribute('data-timestamp');
+    if (!raw || raw === 'None') { el.textContent = '—'; return; }
+    const when = new Date(raw);
+    if (!isNaN(when)) { el.textContent = when.toLocaleString(); }
+});
+</script>
+{% endblock %}

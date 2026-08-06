@@ -118,7 +118,8 @@
                     <th>Monitor</th>
                     <th>Endpoint</th>
                     <th style="width:5rem">Type</th>
-                    <th style="width:7rem" class="text-end">Response</th>
+                    <th style="width:8rem">Response time</th>
+                    <th style="width:7rem" class="text-end">Latest</th>
                     <th style="width:11rem">Last check</th>
                 </tr></thead>
                 <tbody>
@@ -128,7 +129,11 @@
                         <span class="monitor-status {{ m.status }}">{{ m.status }}</span>
                     </td>
                     <td>
-                        <div>{{ m.name }}</div>
+                        <a class="monitor-link"
+                           href="{{ url_for('monitors.monitor_detail',
+                                            monitor_id=m.id, window=window,
+                                            source=request.args.get('source') or None) }}"
+                        >{{ m.name }}</a>
                         {% if m.error %}
                         <small class="text-danger">{{ m.error }}</small>
                         {% endif %}
@@ -144,6 +149,31 @@
                         {% endif %}
                     </td>
                     <td><span class="badge bg-secondary">{{ m.type }}</span></td>
+                    <td>
+                        {% set spark = sparklines.get(m.id) %}
+                        {% if spark %}
+                        {# Server-rendered SVG. Fifty rows would otherwise be
+                           fifty chart instances holding fifty canvases to
+                           draw fifty shapes that never change. #}
+                        <svg class="sparkline" width="{{ spark.width }}"
+                             height="{{ spark.height }}"
+                             viewBox="0 0 {{ spark.width }} {{ spark.height }}"
+                             role="img"
+                             aria-label="peak {{ spark.peak_ms }} ms">
+                          <title>peak {{ spark.peak_ms }} ms{% if spark.gaps %},
+                            {{ spark.gaps }} bucket(s) with no check{% endif %}</title>
+                          {% for run in spark.runs %}
+                          <polyline points="{{ run }}" fill="none"
+                                    stroke-width="1.5" stroke-linejoin="round"/>
+                          {% endfor %}
+                          {% for x, y in spark.failures %}
+                          <circle cx="{{ x }}" cy="{{ y }}" r="2"/>
+                          {% endfor %}
+                        </svg>
+                        {% else %}
+                        <span class="text-muted small">not enough data</span>
+                        {% endif %}
+                    </td>
                     <td class="text-end">
                         {% if m.duration_ms is not none %}
                             {{ m.duration_ms }} ms
