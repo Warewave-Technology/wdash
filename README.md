@@ -655,8 +655,16 @@ Stated plainly, because they affect whether this fits your deployment:
 - **Query language is a subset.** Fuzzy matching, boosting and regular
   expressions are not supported; unsupported syntax is rejected rather than
   silently misinterpreted.
-- **Traces are Elasticsearch only.** The log side has two backends
-  (Elasticsearch and Loki); no second trace backend has been written.
+- **No metrics signal.** Logs, traces and synthetic monitors. Metrics have a
+  genuinely different query model, and a screen that renders Prometheus badly
+  would be worse than not having one.
+- **Browser checks are read, not run.** WDash lists `monitor.type: browser`
+  monitors that Elastic Synthetics reports, with their summary status. Its own
+  agent runs http and tcp checks; journeys through a real browser are a
+  separate piece of work.
+
+What is planned, and what is missing on purpose, is in
+[ROADMAP.md](ROADMAP.md).
 
 ## Licence
 
