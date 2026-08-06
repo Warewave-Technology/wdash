@@ -4,6 +4,7 @@
 #
 #   ./lab.sh up [profile...]   start the stack
 #                             profiles: kibana, cluster, otel, loki, victorialogs,
+#                                       synthetics (Heartbeat + probe targets),
 #                                       jaeger, tempo
 #   ./lab.sh seed [args...]    load sample data into every running backend
 #                             (args go to seed.py; Loki and VictoriaLogs are
@@ -69,6 +70,12 @@ cmd_up() {
     local profile_args=()
     for p in "$@"; do
         profile_args+=(--profile "$p")
+        # The TLS targets need certificates before nginx starts, and the
+        # certificates are generated rather than committed — a repository with
+        # a private key in it teaches whoever reads it that this is normal.
+        if [ "$p" = "synthetics" ]; then
+            bash "$(dirname "$0")/synthetics/make-certs.sh"
+        fi
     done
 
     # bash 3.2 (the macOS default) errors on empty array expansion under

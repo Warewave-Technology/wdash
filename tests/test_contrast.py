@@ -172,3 +172,211 @@ class TemplateUsesTheStyleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def composite(foreground_rgba, backdrop):
+    """Flatten `rgba(r, g, b, a)` onto an opaque colour.
+
+    Row tints are translucent, so the colour a reader actually sees is the
+    blend — measuring the declared rgba against anything would be measuring a
+    colour that never appears on screen.
+    """
+    red, green, blue, alpha = foreground_rgba
+    base = _rgb(backdrop)
+    blended = tuple(round(alpha * channel + (1 - alpha) * base[i])
+                    for i, channel in enumerate((red, green, blue)))
+    return "#%02x%02x%02x" % blended
+
+
+def _parse_rgba(value):
+    match = re.search(r"rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)"
+                      r"(?:[,\s/]+([\d.]+))?\s*\)", value or "")
+    if not match:
+        return None
+    red, green, blue = (float(match.group(i)) for i in (1, 2, 3))
+    alpha = float(match.group(4)) if match.group(4) else 1.0
+    return (red, green, blue, alpha)
+
+
+def _gradient_stops(value):
+    """Every hex colour in a `linear-gradient(...)`, in order."""
+    return re.findall(r"#[0-9a-fA-F]{3,8}", value or "")
+
+
+class MonitorColourTest(unittest.TestCase):
+    """The Monitors page, in this theme rather than Bootstrap's.
+
+    `.table-danger` and `.table-warning` are built for a light page: they
+    paint an opaque pastel row. On a near-black table that arrived as a strip
+    of near-white — the loudest thing on screen, and louder than the text it
+    was drawing attention to.
+
+    What replaced them is the palette `.log-level` already uses, so a red row
+    here is the same red as an ERROR badge on the Logs page. A product with
+    two reds has two vocabularies.
+    """
+
+    def setUp(self):
+        with open(CSS) as handle:
+            self.css = handle.read()
+        self.variables = _variables(self.css)
+        self.card = _resolve("var(--dark-card)", self.variables)
+        self.page = _resolve("var(--dark-bg)", self.variables)
+
+    def _block(self, selector):
+        block = _rule(self.css, selector)
+        self.assertIsNotNone(block, f"{selector} is not in wdash.css")
+        return block
+
+    # ---------- status badges ----------
+
+    def test_every_status_badge_is_legible(self):
+        """The text colour comes from `.monitor-status`; each state only
+        supplies a gradient. Both ends of the gradient have to work, because a
+        badge is wide enough to show both."""
+        text = _resolve(_declaration(self._block(".monitor-status"), "color"),
+                        self.variables)
+        for state in ("up", "down"):
+            background = _declaration(self._block(f".monitor-status.{state}"),
+                                      "background")
+            stops = _gradient_stops(background)
+            self.assertTrue(stops, f"{state} has no colour")
+            for stop in stops:
+                ratio = contrast(text, stop)
+                self.assertGreaterEqual(
+                    ratio, AA_NORMAL,
+                    f".monitor-status.{state}: {text} on {stop} is {ratio:.2f}:1")
+
+    def test_unknown_carries_its_own_text_colour(self):
+        """The grey it sits on is dark, so the dark text the others use would
+        vanish. It declares its own rather than inheriting one that does not
+        work."""
+        block = self._block(".monitor-status.unknown")
+        text = _resolve(_declaration(block, "color"), self.variables)
+        self.assertIsNotNone(text, "unknown inherits a colour that does not fit")
+        stops = _gradient_stops(_declaration(block, "background"))
+        # Asserted rather than looped over: an empty list would make the loop
+        # below a no-op and this test would pass against a badge with no
+        # background at all.
+        self.assertTrue(stops, "unknown has no background to measure")
+        for stop in stops:
+            ratio = contrast(text, stop)
+            self.assertGreaterEqual(
+                ratio, AA_NORMAL, f"{text} on {stop} is {ratio:.2f}:1")
+
+    def test_every_log_level_badge_is_legible_too(self):
+        """One standard, not one for the new page.
+
+        `.log-level.TRACE` was the only badge in the theme below AA — light
+        text on mid-grey, 2.83:1, on the smallest text on the page. It was
+        found by holding the monitor badges to this and noticing they had
+        inherited exactly the same pair.
+        """
+        import re
+        pattern = re.compile(r"(\.log-level\.[A-Z,\s.\-]+?)\s*\{([^}]*)\}")
+        checked = 0
+        for match in pattern.finditer(self.css):
+            selector, block = match.group(1).strip(), match.group(2)
+            background = _declaration(block, "background")
+            text = _resolve(_declaration(block, "color"), self.variables)
+            stops = _gradient_stops(background)
+            if not stops or not text:
+                continue
+            checked += 1
+            for stop in stops:
+                ratio = contrast(text, stop)
+                self.assertGreaterEqual(
+                    ratio, AA_NORMAL,
+                    f"{selector}: {text} on {stop} is {ratio:.2f}:1")
+        self.assertGreaterEqual(checked, 6, "the badges were not found at all")
+
+    def test_down_is_the_same_red_the_log_levels_use(self):
+        """One vocabulary. A red here that is not the ERROR red teaches the
+        reader that the two mean different things."""
+        down = _gradient_stops(
+            _declaration(self._block(".monitor-status.down"), "background"))
+        error = _gradient_stops(
+            _declaration(_rule(self.css, ".log-level.ERROR,\n.log-level.FATAL")
+                         or _rule(self.css, ".log-level.FATAL"), "background"))
+        self.assertEqual([c.lower() for c in down], [c.lower() for c in error])
+
+    # ---------- row tints ----------
+
+    def test_a_tinted_row_keeps_its_text_readable(self):
+        """The tint is translucent, so what matters is the blend — and the
+        body text still has to be readable on it."""
+        body = _resolve("var(--dark-text)", self.variables)
+        for selector in ("tr.monitor-row-down,\ntr.monitor-row-critical",
+                         "tr.monitor-row-warning"):
+            block = _rule(self.css, selector)
+            self.assertIsNotNone(block, f"{selector} is not in wdash.css")
+            rgba = _parse_rgba(_declaration(block, "background"))
+            self.assertIsNotNone(rgba, f"{selector} has no translucent tint")
+            blended = composite(rgba, self.card)
+            ratio = contrast(body, blended)
+            self.assertGreaterEqual(
+                ratio, AA_NORMAL,
+                f"{selector} blends to {blended}, text {ratio:.2f}:1")
+
+    def test_the_tint_is_a_wash_rather_than_a_fill(self):
+        """An opaque row is what Bootstrap did, and it is what made the page
+        unreadable. Anything above about a fifth is a fill."""
+        for selector in ("tr.monitor-row-down,\ntr.monitor-row-critical",
+                         "tr.monitor-row-warning"):
+            rgba = _parse_rgba(_declaration(_rule(self.css, selector),
+                                            "background"))
+            self.assertLess(rgba[3], 0.2, f"{selector} is opaque enough to fill")
+
+    def test_a_tinted_row_also_carries_an_edge(self):
+        """Colour alone excludes anybody who cannot see it. The bar down the
+        left says the same thing without needing hue."""
+        for selector in ("tr.monitor-row-down,\ntr.monitor-row-critical",
+                         "tr.monitor-row-warning"):
+            self.assertIn("inset", _declaration(_rule(self.css, selector),
+                                                "box-shadow") or "")
+
+    # ---------- expiry chips ----------
+
+    def test_every_expiry_state_is_legible_on_its_own_tint(self):
+        for state in ("ok", "warning", "critical", "expired"):
+            block = _rule(self.css, f".expiry-chip.{state}")
+            self.assertIsNotNone(block, f"{state} is not in wdash.css")
+            text = _resolve(_declaration(block, "color"), self.variables)
+            rgba = _parse_rgba(_declaration(block, "background"))
+            blended = composite(rgba, self.card)
+            ratio = contrast(text, blended)
+            self.assertGreaterEqual(
+                ratio, AA_NORMAL,
+                f".expiry-chip.{state}: {text} on {blended} is {ratio:.2f}:1")
+
+    def test_expired_is_not_just_another_number_in_the_series(self):
+        """It has already happened. Reading it as "very few days left" is
+        reading it as the same kind of fact as 3 days."""
+        block = self._block(".expiry-chip.expired")
+        self.assertIn("uppercase", _declaration(block, "text-transform") or "")
+
+
+class MonitorTemplateTest(unittest.TestCase):
+    """The page has to use the classes, or the CSS is decoration."""
+
+    def setUp(self):
+        with open(os.path.join(ROOT, "templates", "monitors.html")) as handle:
+            self.template = handle.read()
+
+    def test_no_bootstrap_table_state_survives(self):
+        for offender in ("table-danger", "table-warning", "table-success"):
+            self.assertNotIn(offender, self.template)
+
+    def test_the_status_cell_uses_the_theme_badge(self):
+        self.assertIn("monitor-status", self.template)
+        self.assertNotIn("badge bg-danger", self.template)
+
+    def test_the_expiry_cell_uses_the_theme_chip(self):
+        self.assertIn("expiry-chip", self.template)
+
+    def test_the_row_state_comes_from_the_server(self):
+        """`_certificate_state` owns the thresholds. A template deciding its
+        own bands from a number gives the product two, and the one in the HTML
+        is the one nobody remembers."""
+        self.assertIn("monitor-row-{{ c.state }}", self.template)
+        self.assertNotIn("days_remaining <", self.template)

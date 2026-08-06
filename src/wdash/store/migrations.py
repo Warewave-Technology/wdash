@@ -111,6 +111,43 @@ def _add_source_signals(connection):
             {"signals": json.dumps([row["signal"]]), "id": row["id"]})
 
 
+def _grant_monitors_to_admins(connection):
+    """Version 8: `monitors:read` for roles that already administer.
+
+    DEFAULT_ROLES only applies to a database being seeded. An existing
+    installation upgrading to a version with a Monitors screen would find
+    nobody able to open it — including the administrator — and a permission
+    nobody holds looks exactly like a broken page.
+
+    Only roles that already hold `system:admin` are touched. That is the
+    narrowest defensible rule: `system:admin` already means "everything", so
+    this grants nothing that was not already implied. Editors and viewers are
+    left alone, because giving somebody sight of every monitored endpoint is
+    a decision, not a migration.
+    """
+    import json
+
+    from sqlalchemy import text
+
+    # `name` is the primary key here; there is no `id` column.
+    rows = connection.execute(text(
+        "SELECT name, permissions FROM wdash_roles")).mappings().all()
+    for row in rows:
+        try:
+            permissions = json.loads(row["permissions"] or "[]")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(permissions, list):
+            continue
+        if "system:admin" not in permissions or "monitors:read" in permissions:
+            continue
+        permissions.append("monitors:read")
+        connection.execute(
+            text("UPDATE wdash_roles SET permissions = :permissions "
+                 "WHERE name = :name"),
+            {"permissions": json.dumps(permissions), "name": row["name"]})
+
+
 MIGRATIONS = [
     (1, "initial schema", _create_everything),
     (2, "authorization audit trail", _add_audit),
@@ -119,6 +156,7 @@ MIGRATIONS = [
     (5, "actor address on audit rows", _add_audit_address),
     (6, "audit forwarding queue marker", _add_audit_forwarding),
     (7, "one source, several signals", _add_source_signals),
+    (8, "monitors:read for existing administrators", _grant_monitors_to_admins),
 ]
 
 

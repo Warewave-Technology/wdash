@@ -74,11 +74,15 @@ function build() {
       <div class="form-check" data-signal="traces">
         <input type="checkbox" name="signals" value="traces" id="sourceSignalTraces">
       </div>
+      <div class="form-check" data-signal="monitors">
+        <input type="checkbox" name="signals" value="monitors" id="sourceSignalMonitors">
+      </div>
       <input type="hidden" name="signals" id="sourceSignalFixed" disabled value="">
       <div data-kind="elasticsearch" data-needs="logs" id="logPatternField"></div>
       <div data-kind="elasticsearch" data-needs="traces" id="tracePatternField"></div>
+      <div data-kind="elasticsearch" data-needs="monitors" id="monitorPatternField"></div>
       <script type="application/json" id="sourceSignals">
-        {"elasticsearch": ["logs", "traces"], "loki": ["logs"],
+        {"elasticsearch": ["logs", "traces", "monitors"], "loki": ["logs"],
          "jaeger": ["traces"], "tempo": ["traces"],
          "victorialogs": ["logs"]}
       </script>
@@ -292,6 +296,38 @@ function type(w, id, value) {
     check('a field for an unticked signal goes',
           fields.document.getElementById('tracePatternField')
                 .classList.contains('d-none'));
+
+    // --- a third signal, and what it broke --------------------------------
+
+    const three = build().w;
+    three.applyKind('elasticsearch');
+    const all = signalState(three);
+    check('a type serving three signals offers all three',
+          all.logs.shown && all.traces.shown && all.monitors.shown,
+          `logs=${all.logs.shown} traces=${all.traces.shown} ` +
+          `monitors=${all.monitors.shown}`);
+
+    // `d-none` hides a checkbox from the reader, not from the form: a hidden
+    // CHECKED box is still submitted. Switching type therefore used to send a
+    // signal the new type has never heard of.
+    const switched = build().w;
+    switched.document.getElementById('sourceSignalMonitors').checked = true;
+    switched.applyKind('loki');
+    check('switching away unticks a signal the new type cannot serve',
+          !switched.document.getElementById('sourceSignalMonitors').checked);
+    const wouldSubmit = Array.from(switched.document.querySelectorAll(
+        '[data-signal] input:checked')).map(box => box.value);
+    check('so it is not in what the form would submit',
+          !wouldSubmit.includes('monitors'), `would submit ${wouldSubmit}`);
+
+    // Ticking it has to bring somewhere to say WHERE the monitors live, or
+    // the source is saved pointing at the log indices.
+    const monitorFields = build().w;
+    monitorFields.document.getElementById('sourceSignalMonitors').checked = true;
+    monitorFields.applyKind('elasticsearch');
+    check('ticking monitors reveals its index-pattern field',
+          !monitorFields.document.getElementById('monitorPatternField')
+                        .classList.contains('d-none'));
 
     console.log(failures.length ? `\n${failures.length} failure(s)`
                                 : '\nall role editor checks passed');

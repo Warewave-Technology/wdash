@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_ROLES = {
     "admin": {
         "description": "Full access, including cluster tools and others' dashboards.",
-        "permissions": ["logs:read", "traces:read",
+        "permissions": ["logs:read", "traces:read", "monitors:read",
                         "dashboard:view", "dashboard:create", "dashboard:edit",
                         "dashboard:delete", "system:admin"],
         "containers": ["*"],
@@ -39,7 +39,7 @@ DEFAULT_ROLES = {
     },
     "editor": {
         "description": "Can build dashboards, cannot administer the system.",
-        "permissions": ["logs:read", "traces:read",
+        "permissions": ["logs:read", "traces:read", "monitors:read",
                         "dashboard:view", "dashboard:create", "dashboard:edit"],
         "containers": ["*"],
         "trace_containers": ["*"],

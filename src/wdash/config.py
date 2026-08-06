@@ -134,4 +134,11 @@ class Config:
     #: lets a client name its own address and step around a per-address rate
     #: limit by changing a header. Set this to the real number, and the
     #: address is counted in from the right.
+    #: Where synthetic monitors are stored. Heartbeat and the Fleet Synthetics
+    #: integration write to these by default; a deployment that renamed them
+    #: says so here.
+    MONITOR_INDEX_PATTERNS = tuple(
+        p.strip() for p in
+        (os.environ.get('MONITOR_INDEX_PATTERNS') or '').split(',') if p.strip())
+
     TRUSTED_PROXY_COUNT = int(os.environ.get('TRUSTED_PROXY_COUNT', 0))

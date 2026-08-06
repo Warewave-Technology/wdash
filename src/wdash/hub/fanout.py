@@ -35,8 +35,10 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 from .aggregation import AggregationResult, Bucket
-from .models import FieldStat, FieldValue, LogPage, Service, Trace
-from .source import Capability, LogSource, TraceSource
+from .models import (
+    DOWN, FieldStat, FieldValue, LogPage, MonitorPage, Service, Trace,
+)
+from .source import Capability, LogSource, MonitorSource, TraceSource
 
 logger = logging.getLogger(__name__)
 
@@ -537,3 +539,94 @@ class FanOutTraceSource(TraceSource):
         summaries.sort(key=lambda summary: summary.start or _EPOCH, reverse=True)
         limit = getattr(query, "limit", None)
         return summaries[:limit] if limit else summaries
+
+
+class FanOutMonitorSource(MonitorSource):
+    """Several monitor backends behind one.
+
+    Two agents watching the same endpoint from different places is not a
+    mistake to be deduplicated away — it is the entire point of synthetic
+    monitoring. "Up from Frankfurt, down from Singapore" is the answer, and
+    collapsing it to one row throws away the only thing the second agent was
+    installed to tell you.
+
+    So monitors are keyed by (source, monitor id) rather than by monitor id.
+    The list is longer and it is honest; the alternative silently picks a
+    winner, and which one wins depends on dictionary order.
+    """
+
+    backend = "fanout"
+
+    def __init__(self, sources, name="all-sources"):
+        if not sources:
+            raise ValueError("a fan-out needs at least one source")
+        self.name = name
+        self._sources = list(sources)
+
+    #: Nothing extra: every capability here is delegated, so the intersection
+    #: is the whole rule.
+    MERGED_CAPABILITIES = frozenset()
+
+    sources = FanOutLogSource.sources
+    capabilities = FanOutLogSource.capabilities
+    contributors = FanOutLogSource.contributors
+    health = FanOutLogSource.health
+    _parallel = FanOutLogSource._parallel
+
+    def containers(self, scope):
+        seen = []
+        for _, containers, _ in self._parallel(
+                lambda source: source.containers(scope)):
+            for name in containers or []:
+                if name not in seen:
+                    seen.append(name)
+        return seen
+
+    def monitors(self, window, scope):
+        merged, warnings, answered, missing = [], [], [], []
+        for source, page, error in self._parallel(
+                lambda s: s.monitors(window, scope)):
+            if error is not None or page is None:
+                missing.append(source.name)
+                warnings.append(f"{source.name}: {error}")
+                continue
+            answered.append(source.name)
+            merged.extend(page.monitors)
+            warnings.extend(page.warnings)
+            if page.partial:
+                missing.append(source.name)
+
+        merged.sort(key=lambda m: (m.status != DOWN, m.name.lower(),
+                                   m.source, m.id))
+        return MonitorPage(
+            monitors=merged, warnings=tuple(warnings),
+            # Partial when ANY source failed. A page that is missing a whole
+            # region's monitors and does not say so reads as "those checks
+            # were deleted".
+            partial=bool(missing), sources=tuple(answered),
+            missing_sources=tuple(dict.fromkeys(missing)))
+
+    def history(self, monitor_id, window, scope):
+        """Whichever sources know this monitor, merged by time.
+
+        A monitor id is unique within an agent, not across agents. Asking all
+        of them and merging is what makes a history complete when the same
+        check runs from two places.
+        """
+        merged = []
+        for _, checks, error in self._parallel(
+                lambda s: s.history(monitor_id, window, scope)):
+            if error is None and checks:
+                merged.extend(checks)
+        merged.sort(key=lambda check: check.timestamp or 0)
+        return merged
+
+    def certificates(self, window, scope):
+        merged = []
+        for _, certificates, error in self._parallel(
+                lambda s: s.certificates(window, scope)):
+            if error is None and certificates:
+                merged.extend(certificates)
+        merged.sort(key=lambda m: (m.certificate.days_remaining is None,
+                                   m.certificate.days_remaining or 0))
+        return merged

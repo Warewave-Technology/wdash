@@ -16,24 +16,29 @@
             </div>
             <div class="col-md-3">
               <label class="form-label small">Serves</label>
-              {# Checkboxes, not a dropdown. One cluster holding both signals
-                 used to need two sources — two credentials to rotate, two TLS
-                 settings that could drift apart, and two health rows for one
-                 system. The boxes a type cannot serve are hidden by
-                 applyKind. #}
-              <div class="d-flex gap-3 pt-1">
-                <div class="form-check" data-signal="logs">
+              {# Checkboxes, not a dropdown. One cluster holding several
+                 signals used to need one source each — one credential to
+                 rotate per signal, TLS settings that could drift apart, and a
+                 health row per signal for one system. The boxes a type cannot
+                 serve are hidden by applyKind.
+
+                 GENERATED from SOURCE_KINDS, not written out. Two of them
+                 were hand-written here while `signal_map` beside them was
+                 derived, so adding `monitors` to the catalogue gave the page
+                 a signal it knew about and could not offer — the
+                 configuration screen and the thing it configures disagreed,
+                 which is the trap the comment on signal_map warns about. #}
+              <div class="d-flex flex-wrap gap-3 pt-1">
+                {% for signal in all_signals %}
+                <div class="form-check" data-signal="{{ signal }}">
                   <input class="form-check-input" type="checkbox" name="signals"
-                         value="logs" id="sourceSignalLogs" checked>
-                  <label class="form-check-label small" for="sourceSignalLogs">
-                    logs</label>
+                         value="{{ signal }}"
+                         id="sourceSignal-{{ signal }}"
+                         {% if loop.first %}checked{% endif %}>
+                  <label class="form-check-label small"
+                         for="sourceSignal-{{ signal }}">{{ signal }}</label>
                 </div>
-                <div class="form-check" data-signal="traces">
-                  <input class="form-check-input" type="checkbox" name="signals"
-                         value="traces" id="sourceSignalTraces">
-                  <label class="form-check-label small" for="sourceSignalTraces">
-                    traces</label>
-                </div>
+                {% endfor %}
               </div>
               {# A disabled checkbox submits nothing, so a type with one signal
                  needs this to carry the value. Filled in by applyKind and
@@ -82,6 +87,17 @@
               <label class="form-label small">Trace index patterns</label>
               <input class="form-control form-control-sm" name="traces_index_patterns"
                      id="sourceTracePatterns" placeholder="*traces*, *apm*">
+            </div>
+            <div class="col-md-6" data-kind="elasticsearch" data-needs="monitors">
+              <label class="form-label small">Monitor index patterns</label>
+              <input class="form-control form-control-sm" name="monitors_index_patterns"
+                     id="sourceMonitorPatterns" placeholder="heartbeat-*, synthetics-*">
+              <div class="form-text" style="font-size:.7rem">
+                Where synthetic checks are written. Left empty this defaults to
+                <code>heartbeat-*, synthetics-*</code> &mdash; Heartbeat's own
+                names. Pointing it at <code>*</code> makes every listing read
+                the whole cluster to find nothing.
+              </div>
             </div>
             <div class="col-md-6 d-none" data-kind="elasticsearch" data-needs="logs">
               <label class="form-label small">Exclude patterns</label>

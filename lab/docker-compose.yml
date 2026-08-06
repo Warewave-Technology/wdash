@@ -210,6 +210,42 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # Targets for the synthetic monitors: one healthy, one broken, and two TLS
+  # endpoints whose certificates expire a year and twelve days from now.
+  #   ./lab.sh up synthetics
+  synthetics-targets:
+    image: nginx:${NGINX_VERSION}
+    container_name: wdash-lab-targets
+    profiles: ["synthetics"]
+    volumes:
+      - ./synthetics/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./synthetics/certs:/etc/nginx/certs:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/ | grep -q ok"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # The real Elastic Heartbeat. WDash reads what it writes and knows nothing
+  # about it otherwise — the same relationship it has with Loki and Tempo.
+  # Running the real agent is what makes the document shape a measurement
+  # rather than a recollection.
+  heartbeat:
+    image: docker.elastic.co/beats/heartbeat:${HEARTBEAT_VERSION}
+    container_name: wdash-lab-heartbeat
+    profiles: ["synthetics"]
+    user: root
+    command: ["--strict.perms=false", "-e"]
+    volumes:
+      - ./synthetics/heartbeat.yml:/usr/share/heartbeat/heartbeat.yml:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      synthetics-targets:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   tempo_data:
   victorialogs_data:

@@ -344,8 +344,12 @@ body {
     color: var(--dark-bg);
 }
 
+/* Light text on mid-grey measured 2.83:1 — the only log level below the
+   4.5:1 that normal text needs, and the smallest text on the page. Darkened
+   so the light text works, rather than lightened so dark text does: TRACE
+   should stay the quietest badge, and a pale grey chip would shout. */
 .log-level.TRACE {
-    background: linear-gradient(135deg, #8b949e 0%, #6c757d 100%);
+    background: linear-gradient(135deg, #3d444d 0%, #30363d 100%);
     color: var(--dark-text);
 }
 
@@ -616,6 +620,122 @@ body {
     background: var(--dark-bg-tertiary) !important;
     color: var(--dark-text) !important;
     border-color: var(--dark-border) !important;
+}
+
+/* ---------------------------------------------------------------------------
+   Monitors
+   ---------------------------------------------------------------------------
+   Bootstrap's `.table-danger` and `.table-warning` are built for a light
+   page: they paint an opaque pastel row. On this theme a down monitor
+   therefore arrived as a strip of near-white across a near-black table — the
+   loudest thing on screen, and louder than the text it was meant to draw
+   attention to.
+
+   The palette here is the one `.log-level` already uses for ERROR, WARN and
+   SUCCESS, so a red row on the Monitors page is the same red as an ERROR
+   badge on the Logs page. A product with two reds has two vocabularies.
+
+   The row is TINTED, not filled: a translucent wash of the same colour plus a
+   solid bar down the left edge. The bar is what carries the signal at a
+   glance; the wash only has to be enough to group the row, and the text on it
+   keeps the contrast it had (10.5:1 for the yellow, 6.4:1 for the red against
+   the card). */
+
+.monitor-status {
+    font-weight: bold;
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: .7rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-family: 'SF Mono', monospace;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, .3);
+    color: var(--dark-bg);
+}
+
+.monitor-status.up {
+    background: linear-gradient(135deg, #7ee787 0%, #51cf66 100%);
+}
+
+.monitor-status.down {
+    background: linear-gradient(135deg, #ff7b72 0%, #ff6b6b 100%);
+}
+
+/* The same grey TRACE uses, for the same reason: an unknown monitor is not a
+   warning. Nothing has said it is broken, only that nothing has said
+   anything, and a colour would claim more than that. */
+.monitor-status.unknown {
+    background: linear-gradient(135deg, #3d444d 0%, #30363d 100%);
+    color: var(--dark-text);
+}
+
+/* Row states. `!important` because Bootstrap's own `.table-*` variables sit
+   on `<tr>` with higher specificity than a plain class. */
+tr.monitor-row-down,
+tr.monitor-row-critical {
+    background: rgba(255, 123, 114, .09) !important;
+    box-shadow: inset 3px 0 0 var(--syntax-red);
+}
+
+tr.monitor-row-warning {
+    background: rgba(242, 204, 96, .08) !important;
+    box-shadow: inset 3px 0 0 var(--syntax-yellow);
+}
+
+/* Hovering must not wash the state away — a row you are pointing at is the
+   one whose colour you most want to keep. */
+.table-hover > tbody > tr.monitor-row-down:hover,
+.table-hover > tbody > tr.monitor-row-critical:hover,
+.table-hover > tbody > tr.monitor-row-warning:hover {
+    background: rgba(255, 255, 255, .04) !important;
+}
+
+.table-hover > tbody > tr.monitor-row-down:hover,
+.table-hover > tbody > tr.monitor-row-critical:hover {
+    box-shadow: inset 3px 0 0 var(--syntax-red);
+}
+
+/* The expiry chip. Days remaining is a number people compare, so it is
+   monospace and the colour only says which band it falls in. */
+.expiry-chip {
+    font-family: 'SF Mono', monospace;
+    font-weight: 600;
+    font-size: .72rem;
+    padding: 3px 9px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+}
+
+.expiry-chip.ok {
+    color: var(--syntax-green);
+    background: rgba(126, 231, 135, .10);
+    border-color: rgba(126, 231, 135, .30);
+}
+
+.expiry-chip.warning {
+    color: var(--syntax-yellow);
+    background: rgba(242, 204, 96, .10);
+    border-color: rgba(242, 204, 96, .35);
+}
+
+.expiry-chip.critical {
+    color: var(--syntax-red);
+    background: rgba(255, 123, 114, .12);
+    border-color: rgba(255, 123, 114, .40);
+}
+
+/* Expired is not "very soon" — it has already happened, and it should not be
+   read as another number in the same series. Colours repeated rather than
+   inherited from the `.critical` block above so this rule stands on its own:
+   a reader checking what `expired` looks like should not have to find a
+   second selector to know. */
+.expiry-chip.expired {
+    color: var(--syntax-red);
+    background: rgba(255, 123, 114, .12);
+    border-color: rgba(255, 123, 114, .40);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 700;
 }
 
 /* What a finding is ABOUT — index names, source names. Teal because that is

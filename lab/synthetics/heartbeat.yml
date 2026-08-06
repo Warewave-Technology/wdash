@@ -1,0 +1,105 @@
+# Elastic Heartbeat, writing real synthetic-monitor documents.
+#
+# The lab runs the real thing rather than a seeder, because the whole value of
+# this data is its SHAPE — `monitor.*`, `summary.*`, `tls.*`, `url.*` — and a
+# shape somebody typed from memory is a guess that looks like a measurement.
+# WDash reads these indices; it does not run Heartbeat and does not depend on
+# it, in the same way it speaks HTTP to Loki without becoming Loki.
+#
+# Off by default:  ./lab.sh up synthetics
+
+heartbeat.monitors:
+  # --- plain HTTP ------------------------------------------------------
+  - type: http
+    id: lab-http-up
+    name: Lab endpoint (up)
+    urls: ["http://synthetics-targets:8080/"]
+    schedule: '@every 15s'
+    check.response.status: [200]
+    tags: ["lab", "http"]
+
+  - type: http
+    id: lab-http-down
+    name: Lab endpoint (down)
+    urls: ["http://synthetics-targets:8081/"]
+    schedule: '@every 15s'
+    # 200 is expected and 500 is what it returns, so this monitor is down on
+    # purpose. A monitoring page that has never rendered a failure has never
+    # been tested.
+    check.response.status: [200]
+    tags: ["lab", "http"]
+
+  - type: http
+    id: lab-elasticsearch
+    name: Elasticsearch
+    urls: ["http://elasticsearch:9200/"]
+    schedule: '@every 30s'
+    check.response.status: [200]
+    tags: ["lab", "infrastructure"]
+
+  # --- TLS -------------------------------------------------------------
+  #
+  # `verification_mode: none` because these are self-signed. The certificate
+  # is still fetched and reported in `tls.*`, which is the part that matters:
+  # a TLS monitor is mostly an expiry clock.
+  - type: http
+    id: lab-tls-healthy
+    name: TLS endpoint (valid)
+    urls: ["https://synthetics-targets:8443/"]
+    schedule: '@every 20s'
+    ssl.verification_mode: none
+    check.response.status: [200]
+    tags: ["lab", "tls"]
+
+  - type: http
+    id: lab-tls-expiring
+    name: TLS endpoint (expiring)
+    urls: ["https://synthetics-targets:8444/"]
+    schedule: '@every 20s'
+    ssl.verification_mode: none
+    check.response.status: [200]
+    tags: ["lab", "tls"]
+
+  # --- a real endpoint on the real internet -----------------------------
+  #
+  # Everything above probes the lab's own containers with certificates the
+  # lab generated. This is the only monitor that exercises the TLS path
+  # against a certificate somebody else issued: a real CA, a real issuer
+  # chain, and an expiry measured in weeks rather than one the lab chose.
+  #
+  # It also makes the lab honest about a machine with no internet: the
+  # monitor goes down and says why, which is a genuine failure to render
+  # rather than one that had to be arranged.
+  - type: http
+    id: lab-google
+    name: google.com
+    urls: ["https://www.google.com"]
+    schedule: '@every 30s'
+    check.response.status: [200]
+    # Public DNS returns AAAA records that a container without an IPv6 route
+    # cannot use. Asking for IPv4 keeps a working check from failing on the
+    # lab host's networking rather than on the target.
+    mode: any
+    ipv4: true
+    ipv6: false
+    tags: ["lab", "tls", "external"]
+
+  # --- TCP -------------------------------------------------------------
+  - type: tcp
+    id: lab-loki-tcp
+    name: Loki (tcp)
+    hosts: ["loki:3100"]
+    schedule: '@every 30s'
+    tags: ["lab", "tcp"]
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+
+# No Kibana in the picture, so Heartbeat manages its own index template and
+# nothing tries to install dashboards that would fail the container.
+setup.kibana.enabled: false
+setup.dashboards.enabled: false
+setup.ilm.enabled: false
+setup.template.enabled: true
+
+logging.level: info

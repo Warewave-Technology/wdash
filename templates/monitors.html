@@ -1,0 +1,254 @@
+{% extends "base.html" %}
+{% block title %}Monitors - WDash{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2><i class="fas fa-heart-pulse"></i> Monitors</h2>
+    <div class="d-flex align-items-center gap-2">
+        {% if sources and sources|length > 1 %}
+        <select class="form-select form-select-sm" id="monitorSource" style="width:auto">
+            <option value="">All sources</option>
+            {% for name in sources %}
+            <option value="{{ name }}"
+                    {% if request.args.get('source') == name %}selected{% endif %}>
+                {{ name }}
+            </option>
+            {% endfor %}
+        </select>
+        {% endif %}
+        {# The window is how far back to look for each monitor's LAST check,
+           not a search range. A monitor on a six-hour schedule needs a window
+           longer than six hours or it looks deleted. #}
+        <select class="form-select form-select-sm" id="monitorWindow" style="width:auto">
+            {% for value, text in [('15m','last 15m'), ('1h','last 1h'),
+                                   ('6h','last 6h'), ('24h','last 24h')] %}
+            <option value="{{ value }}" {% if window == value %}selected{% endif %}>
+                {{ text }}
+            </option>
+            {% endfor %}
+        </select>
+        <a class="btn btn-sm btn-primary" href="{{ url_for('monitors.monitors_page',
+               window=window, source=request.args.get('source') or None) }}">
+            <i class="fas fa-sync"></i> Refresh
+        </a>
+    </div>
+</div>
+
+{% if no_source %}
+<div class="alert alert-warning">
+    <h5><i class="fas fa-exclamation-circle"></i> No monitor source is configured</h5>
+    <p class="mb-0">
+        WDash reads synthetic checks that something else runs — Elastic
+        Heartbeat, or the Synthetics integration — from <code>heartbeat-*</code>
+        and <code>synthetics-*</code>. Add an Elasticsearch source with the
+        <strong>monitors</strong> signal on the
+        <a href="{{ url_for('config.config_page') }}">configuration page</a>,
+        or set <code>ELASTICSEARCH_URL</code>.
+    </p>
+</div>
+{% else %}
+
+{% if data.partial %}
+<div class="alert alert-warning py-2" style="font-size:.85rem">
+    <i class="fas fa-triangle-exclamation"></i>
+    <strong>This list is incomplete.</strong>
+    {% if data.missing_sources %}
+    No answer from: {{ data.missing_sources|join(', ') }}. Monitors those
+    sources watch are missing from this page — they are not down, they are
+    unknown.
+    {% endif %}
+    {% for warning in data.warnings %}<div class="small mt-1">{{ warning }}</div>{% endfor %}
+</div>
+{% endif %}
+
+<div class="row g-3 mb-4">
+    {# `text-muted` for unknown rather than a colour: nothing is wrong with an
+       unknown monitor, nothing has reported one. Giving it a colour of its
+       own would put a third signal on a card that has nothing to signal. #}
+    {% for key, label, colour, icon in [
+        ('down', 'Down', 'danger', 'circle-xmark'),
+        ('up', 'Up', 'success', 'circle-check'),
+        ('unknown', 'Unknown', 'muted', 'circle-question')] %}
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-body py-3 d-flex align-items-center gap-3">
+                <i class="fas fa-{{ icon }} fa-2x text-{{ colour }}"></i>
+                <div>
+                    <div class="h3 mb-0">{{ data.counts[key] }}</div>
+                    <small class="text-muted">{{ label }}</small>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<ul class="nav nav-tabs mb-3" role="tablist">
+    <li class="nav-item">
+        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#checksTab">
+            <i class="fas fa-heart-pulse"></i> Checks
+            <span class="badge bg-secondary ms-1">{{ data.monitors|length }}</span>
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tlsTab">
+            <i class="fas fa-lock"></i> TLS certificates
+            <span class="badge bg-secondary ms-1">{{ data.certificates|length }}</span>
+        </button>
+    </li>
+</ul>
+
+<div class="tab-content">
+    {# ---------------- checks ---------------- #}
+    <div class="tab-pane fade show active" id="checksTab">
+        {% if not data.monitors %}
+        <div class="card"><div class="card-body text-center text-muted py-5">
+            <i class="fas fa-inbox fa-2x"></i>
+            <div class="mt-2"><small>
+                No check has reported in the last {{ window }}. That is not the
+                same as everything being up — it means nothing wrote a result.
+                A monitor on a longer schedule needs a longer window.
+            </small></div>
+        </div></div>
+        {% else %}
+        <div class="card"><div class="table-responsive">
+            <table class="table table-hover mb-0" style="font-size:.9rem">
+                <thead><tr>
+                    <th style="width:5rem">Status</th>
+                    <th>Monitor</th>
+                    <th>Endpoint</th>
+                    <th style="width:5rem">Type</th>
+                    <th style="width:7rem" class="text-end">Response</th>
+                    <th style="width:11rem">Last check</th>
+                </tr></thead>
+                <tbody>
+                {% for m in data.monitors %}
+                <tr{% if m.status == 'down' %} class="monitor-row-down"{% endif %}>
+                    <td>
+                        <span class="monitor-status {{ m.status }}">{{ m.status }}</span>
+                    </td>
+                    <td>
+                        <div>{{ m.name }}</div>
+                        {% if m.error %}
+                        <small class="text-danger">{{ m.error }}</small>
+                        {% endif %}
+                        {% if m.tags %}
+                        <div>{% for tag in m.tags %}
+                            <span class="badge target-chip">{{ tag }}</span>
+                        {% endfor %}</div>
+                        {% endif %}
+                    </td>
+                    <td><code class="text-muted">{{ m.location }}</code>
+                        {% if data.sources|length > 1 %}
+                        <div><small class="text-muted">{{ m.source }}</small></div>
+                        {% endif %}
+                    </td>
+                    <td><span class="badge bg-secondary">{{ m.type }}</span></td>
+                    <td class="text-end">
+                        {% if m.duration_ms is not none %}
+                            {{ m.duration_ms }} ms
+                        {% else %}
+                            <span class="text-muted">—</span>
+                        {% endif %}
+                    </td>
+                    <td><small class="text-muted"
+                               data-timestamp="{{ m.checked_at }}">{{ m.checked_at }}</small></td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div></div>
+        {% endif %}
+    </div>
+
+    {# ---------------- certificates ---------------- #}
+    <div class="tab-pane fade" id="tlsTab">
+        {% if not certificates_supported %}
+        <div class="alert alert-secondary">
+            This source does not report TLS certificates. That is a gap in what
+            can be read here, not evidence that the endpoints have none.
+        </div>
+        {% elif not data.certificates %}
+        <div class="card"><div class="card-body text-center text-muted py-5">
+            <i class="fas fa-lock-open fa-2x"></i>
+            <div class="mt-2"><small>
+                None of the checks in this window used TLS. An HTTPS monitor
+                reports its certificate on every run.
+            </small></div>
+        </div></div>
+        {% else %}
+        <div class="card"><div class="table-responsive">
+            <table class="table table-hover mb-0" style="font-size:.9rem">
+                <thead><tr>
+                    <th style="width:8rem">Expires in</th>
+                    <th>Common name</th>
+                    <th>Endpoint</th>
+                    <th>Issuer</th>
+                    <th style="width:8rem">Key</th>
+                    <th style="width:11rem">Not after</th>
+                </tr></thead>
+                <tbody>
+                {% for m in data.certificates %}
+                {% set c = m.certificate %}
+                {# The row state is computed on the server — see
+                   `_certificate_state`. A template that decides its own bands
+                   from a number gives the product two thresholds, and the one
+                   in the HTML is the one nobody remembers. #}
+                <tr class="monitor-row-{{ c.state }}">
+                    <td>
+                        {% if c.expired %}
+                        <span class="expiry-chip expired">expired</span>
+                        {% else %}
+                        <span class="expiry-chip {{ c.state }}">
+                            {{ c.days_remaining }}d
+                        </span>
+                        {% endif %}
+                    </td>
+                    <td><code>{{ c.common_name or '—' }}</code></td>
+                    <td><code class="text-muted">{{ m.location }}</code>
+                        <div><small class="text-muted">{{ m.name }}</small></div>
+                    </td>
+                    <td><small>{{ c.issuer or '—' }}</small></td>
+                    <td><small class="text-muted">{{ c.key or '—' }}</small></td>
+                    <td><small class="text-muted"
+                               data-timestamp="{{ c.not_after }}">{{ c.not_after }}</small></td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div></div>
+        <p class="text-muted small mt-2 mb-0">
+            Warning below {{ warning_days }} days, urgent below {{ critical_days }}.
+            Sorted by what expires first — the only order this list is read in.
+        </p>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+// Changing either selector reloads. The page is a table of current state, so
+// there is nothing to swap in place, and a half-swapped table would show one
+// window's monitors above another window's certificates.
+['monitorSource', 'monitorWindow'].forEach(function (id) {
+    document.getElementById(id)?.addEventListener('change', function () {
+        const url = new URL(window.location.href);
+        const key = id === 'monitorSource' ? 'source' : 'window';
+        if (this.value) { url.searchParams.set(key, this.value); }
+        else { url.searchParams.delete(key); }
+        window.location.href = url.toString();
+    });
+});
+
+// Timestamps arrive as ISO strings so the server does not have to guess the
+// reader's timezone.
+document.querySelectorAll('[data-timestamp]').forEach(function (el) {
+    const raw = el.getAttribute('data-timestamp');
+    if (!raw || raw === 'None') { el.textContent = '—'; return; }
+    const when = new Date(raw);
+    if (!isNaN(when)) { el.textContent = when.toLocaleString(); }
+});
+</script>
+{% endblock %}

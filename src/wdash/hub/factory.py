@@ -59,6 +59,20 @@ def build_source(record, credential, catalogue=None, signal=None):
                                           patterns=patterns or ("*",),
                                           exclude=excludes,
                                           catalogue=catalogue)
+        if signal == "monitors":
+            from .adapters.es_monitors import (
+                DEFAULT_PATTERNS, ElasticsearchMonitorSource,
+            )
+            # Read AGAIN, without the `("*",)` default above. `patterns` is
+            # never empty by the time it gets here, so `patterns or
+            # DEFAULT_PATTERNS` would always take the first branch and every
+            # monitor listing would scan every index in the cluster to find
+            # nothing — slowly, and looking like "no monitors configured".
+            configured = _signal_config(config, signal, "index_patterns", ())
+            return ElasticsearchMonitorSource(
+                client, name=record["name"],
+                patterns=tuple(configured) or DEFAULT_PATTERNS,
+                catalogue=catalogue)
         return ElasticsearchTraceSource(client, name=record["name"],
                                         patterns=patterns or ("*",),
                                         catalogue=catalogue)
@@ -146,6 +160,8 @@ def register_configured_sources(hub, store, catalogue=None):
 
             if signal == "logs":
                 hub.add_logs(source)
+            elif signal == "monitors":
+                hub.add_monitors(source)
             else:
                 hub.add_traces(source)
             registered += 1

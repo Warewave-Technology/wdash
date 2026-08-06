@@ -57,6 +57,7 @@ class Hub:
     def __init__(self):
         self._logs = {}
         self._traces = {}
+        self._monitors = {}
 
     def add_logs(self, source):
         self._logs[source.name] = source
@@ -66,7 +67,11 @@ class Hub:
         self._traces[source.name] = source
         return source
 
-    def replace_all(self, logs=(), traces=()):
+    def add_monitors(self, source):
+        self._monitors[source.name] = source
+        return source
+
+    def replace_all(self, logs=(), traces=(), monitors=()):
         """Swap every registered source out.
 
         For tests that assert on what a scope reaches. The app factory always
@@ -78,6 +83,7 @@ class Hub:
         """
         self._logs = {source.name: source for source in logs}
         self._traces = {source.name: source for source in traces}
+        self._monitors = {source.name: source for source in monitors}
 
     #: Reserved name for "search everything". Not a registered source, so it
     #: cannot collide with one an operator configures.
@@ -120,6 +126,24 @@ class Hub:
             return FanOutTraceSource(sources)
         return self._pick(self._traces, name, "trace")
 
+    def monitors(self, name=None):
+        """One monitor source, or the fan-out over all of them.
+
+        Same shape as `logs` and `traces`. A deployment can easily have two:
+        Heartbeat writing to the production cluster and a second agent
+        watching from another region, which is the whole point of running
+        checks from outside.
+        """
+        if name == self.ALL_SOURCES:
+            sources = self.monitor_sources
+            if not sources:
+                return None
+            if len(sources) == 1:
+                return sources[0]
+            from .fanout import FanOutMonitorSource
+            return FanOutMonitorSource(sources)
+        return self._pick(self._monitors, name, "monitor")
+
     @staticmethod
     def _pick(registry, name, kind):
         if name:
@@ -138,16 +162,36 @@ class Hub:
     def trace_sources(self):
         return list(self._traces.values())
 
+    @property
+    def monitor_sources(self):
+        return list(self._monitors.values())
+
+    def _all(self):
+        """Every registered source, once each.
+
+        Deduplicated by identity: one configured Elasticsearch serving logs,
+        traces and monitors is three adapters, but two adapters sharing a name
+        would otherwise report health twice under the same key and the second
+        would silently win.
+        """
+        seen, out = set(), []
+        for registry in (self._logs, self._traces, self._monitors):
+            for source in registry.values():
+                if id(source) not in seen:
+                    seen.add(id(source))
+                    out.append(source)
+        return out
+
     def capabilities(self):
         """Union of the capabilities of every registered source."""
         result = set()
-        for source in list(self._logs.values()) + list(self._traces.values()):
+        for source in self._all():
             result |= set(source.capabilities)
         return frozenset(result)
 
     def health(self):
         report = {}
-        for source in list(self._logs.values()) + list(self._traces.values()):
+        for source in self._all():
             healthy, detail = source.health()
             report[source.name] = {"healthy": healthy, "detail": detail}
         return report

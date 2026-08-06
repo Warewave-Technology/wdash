@@ -23,6 +23,7 @@ from wdash.store import SecretBox, Store
 from wdash.models import SavedSearch
 from wdash.utils import timerange
 from wdash.api.advisor_routes import advisor_bp
+from wdash.api.monitor_routes import monitor_bp
 from wdash.api.trace_routes import trace_bp
 from wdash.api.log_routes import log_bp
 from wdash.api.config_routes import config_bp
@@ -58,6 +59,7 @@ def create_app(config_class=Config):
     app.register_blueprint(config_bp)
     app.register_blueprint(advisor_bp)
     app.register_blueprint(trace_bp)
+    app.register_blueprint(monitor_bp)
     app.register_blueprint(log_bp)
     app.register_blueprint(dashboard_bp)
     
@@ -183,6 +185,19 @@ def create_app(config_class=Config):
         else:
             app.logger.info(
                 "TRACE_INDEX_PATTERNS is empty: no environment trace source")
+
+        # Synthetic monitors from the same cluster. Registered unconditionally
+        # because the index names are Heartbeat's own — `heartbeat-*` and
+        # `synthetics-*` — and a cluster without them simply reports no
+        # monitors. There is nothing to overlap with the way the trace and log
+        # patterns can overlap with each other.
+        from wdash.hub.adapters.es_monitors import (
+            DEFAULT_PATTERNS as MONITOR_PATTERNS, ElasticsearchMonitorSource,
+        )
+        monitor_patterns = app.config.get("MONITOR_INDEX_PATTERNS") or MONITOR_PATTERNS
+        hub.add_monitors(ElasticsearchMonitorSource(
+            es_client.es, name="elasticsearch-monitors",
+            patterns=monitor_patterns, catalogue=catalogue))
 
     # Sources added through the config page. Registered AFTER the
     # environment-configured ones so a deployment that has always worked keeps

@@ -522,3 +522,86 @@ class DuplicateSourceTest(ConfigTestCase):
         # asserting it here passes even when the warning body is dropped.
         # This sentence exists nowhere else on the page.
         self.assertIn("counts every matching record twice", body)
+
+
+class SignalFormTest(ConfigTestCase):
+    """The form has to offer every signal the catalogue declares.
+
+    `signal_map` was derived from SOURCE_KINDS with a comment saying a copy in
+    JavaScript would give the product two answers to one question. The
+    checkboxes beside it were hand-written — two of them — so adding
+    `monitors` to the catalogue produced a page that knew about a signal and
+    could not offer it. The Monitors screen then said "no monitor source is
+    configured", which was true and unfixable from the configuration page.
+    """
+
+    def _page(self):
+        return self.client.get("/admin/config").get_data(as_text=True)
+
+    def test_every_declared_signal_has_a_checkbox(self):
+        from wdash.store.sources import SOURCE_KINDS
+        body = self._page()
+        declared = {signal for kind in SOURCE_KINDS.values()
+                    for signal in kind["signals"]}
+        missing = sorted(s for s in declared
+                         if f'data-signal="{s}"' not in body)
+        self.assertEqual(missing, [], f"no checkbox for: {missing}")
+
+    def test_the_map_the_form_reads_matches_the_catalogue(self):
+        from wdash.store.sources import SOURCE_KINDS
+        import json
+        import re
+        body = self._page()
+        match = re.search(r'id="sourceSignals"[^>]*>\s*(\{.*?\})\s*</script>',
+                          body, re.S)
+        self.assertIsNotNone(match, "the page ships no signal map")
+        served = json.loads(match.group(1))
+        self.assertEqual(
+            served, {k: list(v["signals"]) for k, v in SOURCE_KINDS.items()})
+
+    def test_a_signal_with_per_signal_fields_has_somewhere_to_put_them(self):
+        """A signal that can be ticked but has no index-pattern box saves a
+        source pointing at whatever the default is, with no way to say
+        otherwise."""
+        body = self._page()
+        for signal in ("logs", "traces", "monitors"):
+            self.assertIn(f'data-needs="{signal}"', body,
+                          f"{signal} can be ticked with nowhere to configure it")
+
+    def test_a_source_can_be_saved_serving_all_three(self):
+        response = self.client.post("/admin/sources", data={
+            "name": "cluster", "kind": "elasticsearch",
+            "signals": ["logs", "traces", "monitors"],
+            "url": "http://cluster:9200", "enabled": "on",
+            "logs_index_patterns": "app-*",
+            "traces_index_patterns": "*apm*",
+            "monitors_index_patterns": "heartbeat-*",
+        }, follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        row = next(r for r in self.app.store.sources.all()
+                   if r["name"] == "cluster")
+        self.assertEqual(row["signals"], ["logs", "traces", "monitors"])
+        self.assertEqual(row["config"]["monitors"]["index_patterns"],
+                         ["heartbeat-*"])
+
+    def test_saving_it_registers_a_monitor_adapter(self):
+        """Stored and unreachable is worse than absent: the configuration page
+        says it is there."""
+        from wdash.hub import Hub
+        from wdash.hub.factory import register_configured_sources
+
+        self.client.post("/admin/sources", data={
+            "name": "cluster", "kind": "elasticsearch",
+            "signals": ["logs", "monitors"],
+            "url": "http://cluster:9200", "enabled": "on",
+            "logs_index_patterns": "app-*",
+            "monitors_index_patterns": "",
+        }, follow_redirects=True)
+
+        hub = Hub()
+        register_configured_sources(hub, self.app.store)
+        self.assertEqual([s.name for s in hub.monitor_sources], ["cluster"])
+        # Left empty, it must fall back to Heartbeat's own names rather than
+        # to `*`, which would read every index in the cluster to find nothing.
+        self.assertEqual(hub.monitor_sources[0]._patterns,
+                         ("heartbeat-*", "synthetics-*"))

@@ -33,6 +33,15 @@ PERMISSIONS = OrderedDict([
         "Open the Traces screen, search it, and open a trace waterfall. Which "
         "traces are visible is decided by the role's trace stores and "
         "services.")),
+    ("monitors:read", (
+        "Monitors", "Read synthetic monitors",
+        "Open the Monitors screen: which endpoints are being probed, whether "
+        "they answered, and the TLS certificates the checks saw. Unlike logs "
+        "and traces this is NOT narrowed further by the role's containers — "
+        "a monitor is about an endpoint, not about an index, and the role's "
+        "log patterns say nothing about which endpoints somebody may see. "
+        "Grant it to whoever should see the uptime of everything it "
+        "watches.")),
     ("dashboard:view", (
         "Dashboards", "View dashboards",
         "See the dashboard list and open any dashboard. Panel data is still "

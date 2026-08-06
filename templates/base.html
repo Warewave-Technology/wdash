@@ -43,6 +43,11 @@
                             <i class="fas fa-project-diagram"></i> Traces
                         </a>
                         {% endif %}
+                        {% if current_user.has_permission('monitors:read') %}
+                        <a class="nav-link" href="{{ url_for('monitors.monitors_page') }}">
+                            <i class="fas fa-heart-pulse"></i> Monitors
+                        </a>
+                        {% endif %}
                         <div class="nav-item dropdown">
                             <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
                                 <i class="fas fa-user"></i> {{ current_user.username }} 

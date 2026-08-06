@@ -29,7 +29,10 @@ from .schema import sources
 SOURCE_KINDS = {
     "elasticsearch": {
         "label": "Elasticsearch",
-        "signals": ("logs", "traces"),
+        # `monitors` is the synthetic-check signal: Heartbeat and the Fleet
+        # Synthetics integration write into the same cluster, and a third
+        # index pattern is all that separates them from logs and traces.
+        "signals": ("logs", "traces", "monitors"),
         # Shared across every signal this source serves.
         "fields": ("url", "username", "verify_certs"),
         # Per signal, because one cluster holding both needs a different

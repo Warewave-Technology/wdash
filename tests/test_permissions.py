@@ -41,8 +41,12 @@ class CatalogueTest(unittest.TestCase):
         self.assertIn("NOT a superuser", PERMISSIONS["system:admin"][2])
 
     def test_groups_keep_declaration_order(self):
+        """The role editor renders these top to bottom, so the order is what
+        somebody granting permissions reads. Signals first — logs, traces,
+        monitors — then what is built on them, then administration."""
         self.assertEqual(list(grouped()),
-                         ["Logs", "Traces", "Dashboards", "Administration"])
+                         ["Logs", "Traces", "Monitors", "Dashboards",
+                          "Administration"])
 
     def test_retired_names_point_at_something_real(self):
         for old_name, replacement in RETIRED.items():

@@ -28,6 +28,9 @@ class Capability:
     TRACE_SEARCH = "trace_search"
     SERVICE_LIST = "service_list"
     LOG_TRACE_CORRELATION = "log_trace_correlation"
+    MONITOR_LIST = "monitor_list"          # current state of every monitor
+    MONITOR_HISTORY = "monitor_history"    # past checks for one monitor
+    TLS_CERTIFICATES = "tls_certificates"  # what the monitors saw on the wire
 
 
 class Source(ABC):
@@ -124,3 +127,42 @@ class TraceSource(Source):
     def search(self, query, scope):
         """TraceQuery -> trace summaries. Optional."""
         raise NotImplementedError(f"{self.name} does not support trace search")
+
+
+class MonitorSource(Source):
+    """Synthetic monitors: is this reachable from outside?
+
+    A third signal alongside logs and traces, because it answers a question
+    neither of them can. An application that has stopped serving requests
+    writes no logs and emits no spans, so both of those go quiet — which looks
+    exactly like a quiet night. Only something probing from outside can tell
+    the difference between "nothing is happening" and "nothing can happen".
+
+    TLS is part of this rather than its own signal: the certificate is
+    something a monitor observes while checking, not a separate act of
+    measurement. Splitting it would mean two sources probing the same endpoint
+    and two answers to one question.
+    """
+
+    @abstractmethod
+    def monitors(self, window, scope):
+        """The latest state of every monitor -> MonitorPage."""
+
+    def history(self, monitor_id, window, scope):
+        """Past checks for one monitor -> [MonitorCheck], newest last.
+
+        Optional: a backend that keeps only the current state can serve
+        MONITOR_LIST without this. Declare MONITOR_HISTORY only if it works.
+        """
+        raise NotImplementedError(
+            f"{self.name} does not keep monitor history.")
+
+    def certificates(self, window, scope):
+        """TLS certificates seen -> [Monitor] carrying a certificate.
+
+        Returns monitors rather than bare certificates so the page can say
+        WHICH endpoint each one belongs to. A certificate with no endpoint
+        attached is a fingerprint nobody can act on.
+        """
+        raise NotImplementedError(
+            f"{self.name} does not report TLS certificates.")

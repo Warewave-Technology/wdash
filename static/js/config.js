@@ -64,12 +64,17 @@ function applyKind(kind) {
         element.classList.toggle('d-none', !offered);
         if (!box) return;
         box.disabled = single;
-        // Only the single case needs to set anything. With two signals in
-        // existence, "serves more than one" means "serves both", so there is
-        // no offered/unoffered distinction left to handle — a branch for it
-        // was unreachable, and unreachable code shaped like a check is what
-        // somebody reaches for next.
-        if (single) box.checked = offered;
+        // A box the type cannot serve must never stay ticked. Hiding it is
+        // not enough: `d-none` hides it from the reader, not from the form,
+        // and a hidden checked box is still submitted — so a source switched
+        // from Elasticsearch to Loki would arrive claiming to serve a signal
+        // Loki has never heard of.
+        //
+        // This used to read "only the single case needs to set anything,
+        // because with two signals `more than one` means `both`". That was
+        // true while there were two. It stopped being true the moment there
+        // were three, and it stopped being true silently.
+        box.checked = single ? offered : (box.checked && offered);
     });
 
     const carrier = document.getElementById('sourceSignalFixed');

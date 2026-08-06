@@ -422,3 +422,172 @@ class Service:
     def to_dict(self):
         return {"name": self.name, "span_count": self.span_count,
                 "error_count": self.error_count, "error_rate": self.error_rate}
+
+
+# ---------------------------------------------------------------------------
+# Synthetic monitors
+# ---------------------------------------------------------------------------
+#
+# A third signal. Logs say what happened inside the system; traces say how a
+# request moved through it; a monitor says whether somebody outside can reach
+# it at all. The three answer different questions and none substitutes for
+# another — an application that logs nothing because it is unreachable looks
+# healthy in the log search.
+#
+# The shape below is neutral, as everywhere else in the hub. It was derived
+# from real Heartbeat 8.19 documents produced by the lab rather than from the
+# documentation, because the two disagree in small ways that matter: `summary`
+# is absent from non-final attempts, `monitor.status` and `summary.status` are
+# different fields with different meanings, and the certificate lives under
+# `tls.server.x509` while an older duplicate sits at `tls.certificate_*`.
+
+#: A monitor is either reachable or it is not. Anything a backend cannot say
+#: is UNKNOWN rather than assumed up — "no answer" is not "yes".
+UP = "up"
+DOWN = "down"
+UNKNOWN = "unknown"
+
+
+@dataclass
+class Certificate:
+    """The TLS certificate a monitor saw on its last check.
+
+    Separate from the monitor because it is a different question with a
+    different audience: "is the site up" is watched continuously, "when does
+    this expire" is a diary entry. Kibana splits them into two tabs for the
+    same reason.
+    """
+    common_name: str = ""
+    issuer: str = ""
+    not_before: object = None
+    not_after: object = None
+    #: Hex SHA-256, which is what a fingerprint comparison uses.
+    fingerprint: str = ""
+    key_algorithm: str = ""
+    #: RSA certificates carry a size; ECDSA ones carry a curve and no size.
+    #: Both are here because neither substitutes for the other, and reporting
+    #: a missing size as `0` invents a fact — `ECDSA-0` is not a key.
+    key_size: int = 0
+    key_curve: str = ""
+    signature_algorithm: str = ""
+    serial_number: str = ""
+
+    def _remaining(self):
+        if self.not_after is None:
+            return None
+        from datetime import datetime, timezone
+        expiry = self.not_after
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return expiry - datetime.now(timezone.utc)
+
+    @property
+    def days_remaining(self):
+        """Days until expiry, ROUNDED. Negative once it has expired.
+
+        Rounded rather than truncated, because `timedelta.days` throws away
+        the remainder: a certificate with eleven days left is almost never
+        exactly eleven days out, it is ten days and twenty-three hours, and
+        `.days` calls that ten. Every number on the page would be one low,
+        consistently, in the direction that makes an expiry look further away
+        than it is.
+
+        None when the backend gave no expiry — which must not become zero,
+        because zero reads as "expires today" and is the loudest thing on the
+        page.
+        """
+        remaining = self._remaining()
+        if remaining is None:
+            return None
+        return round(remaining.total_seconds() / 86400)
+
+    @property
+    def key_description(self):
+        """`RSA-2048`, `ECDSA P-256`, or empty. Never a fabricated number."""
+        if not self.key_algorithm:
+            return ""
+        if self.key_curve:
+            return f"{self.key_algorithm} {self.key_curve}"
+        if self.key_size:
+            return f"{self.key_algorithm}-{self.key_size}"
+        return self.key_algorithm
+
+    @property
+    def expired(self):
+        """From the timestamp, not from the rounded day count.
+
+        A certificate that expired an hour ago rounds to zero days, and zero
+        is not expired — it is "expires today". The sign of the interval is
+        the only thing that answers this.
+        """
+        remaining = self._remaining()
+        return remaining is not None and remaining.total_seconds() < 0
+
+
+@dataclass
+class Monitor:
+    """One synthetic check, as it stood at its most recent run."""
+    id: str
+    name: str = ""
+    #: http, tcp, icmp, browser — the backend's own word, lowercased.
+    type: str = ""
+    url: str = ""
+    status: str = UNKNOWN
+    #: When the last check ran.
+    checked_at: object = None
+    #: How long the check took. None when unknown; NOT zero, which would read
+    #: as an instant response.
+    duration_ms: float = None
+    #: Why it is down. Empty when it is up.
+    error: str = ""
+    tags: tuple = field(default_factory=tuple)
+    certificate: object = None
+    #: Which configured source this came from, so a merged page can say.
+    source: str = ""
+    #: Where the underlying document lives, for the raw view.
+    ref: object = None
+
+    @property
+    def is_down(self):
+        return self.status == DOWN
+
+    @property
+    def location(self):
+        """Host and port, for a list that has to fit on one line."""
+        from urllib.parse import urlparse
+        if not self.url:
+            return ""
+        parsed = urlparse(self.url)
+        return parsed.netloc or self.url
+
+
+@dataclass
+class MonitorCheck:
+    """One run of one monitor. The history behind the current status."""
+    timestamp: object
+    status: str = UNKNOWN
+    duration_ms: float = None
+    error: str = ""
+
+
+@dataclass
+class MonitorPage:
+    """What a monitor listing returns.
+
+    Carries the same partial/warning machinery as LogPage, and for the same
+    reason: with several sources merged, one of them failing must not look
+    like "those monitors are gone".
+    """
+    monitors: list = field(default_factory=list)
+    warnings: tuple = ()
+    partial: bool = False
+    #: Sources that answered, and sources that were asked and did not.
+    sources: tuple = ()
+    missing_sources: tuple = ()
+
+    @property
+    def counts(self):
+        out = {UP: 0, DOWN: 0, UNKNOWN: 0}
+        for monitor in self.monitors:
+            out[monitor.status if monitor.status in out else UNKNOWN] += 1
+        return out

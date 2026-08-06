@@ -109,6 +109,12 @@ def config_page():
         # disagreeing about what it serves.
         signal_map={kind: list(d["signals"])
                     for kind, d in SOURCE_KINDS.items()},
+        # Every signal any backend can serve, in declaration order. The form's
+        # checkboxes are rendered from this rather than written out, so a
+        # signal added to SOURCE_KINDS cannot end up known to the page and
+        # impossible to tick.
+        all_signals=list(dict.fromkeys(
+            signal for d in SOURCE_KINDS.values() for signal in d["signals"])),
         roles=store.roles.all(),
         permission_groups=permission_groups(),
         default_role=store.settings.get("rbac.default_role", "viewer"),
@@ -123,6 +129,17 @@ def config_page():
 # --------------------------------------------------------------------------
 # Sources
 # --------------------------------------------------------------------------
+
+def _signals_with_fields():
+    """Signals whose configuration is per-signal rather than shared.
+
+    Read from the catalogue so a new signal cannot be offered by the form and
+    ignored by the save.
+    """
+    return [signal for kind in SOURCE_KINDS.values()
+            if kind.get("signal_fields")
+            for signal in kind["signals"]]
+
 
 @config_bp.route("/sources", methods=["POST"])
 @login_required
@@ -148,16 +165,22 @@ def save_source():
         "stream_label": form.get("stream_label"),
         "stream_field": form.get("stream_field"),
         "verify_certs": form.get("verify_certs") == "on",
-        # Per signal, because one cluster holding both needs a different
-        # pattern for each.
-        "logs": {
-            "index_patterns": form.get("logs_index_patterns"),
-            "exclude_patterns": form.get("logs_exclude_patterns"),
-        },
-        "traces": {
-            "index_patterns": form.get("traces_index_patterns"),
-        },
     }
+
+    # Per-signal blocks, because one cluster holding several signals needs a
+    # different pattern for each — flattened into one key, a trace search
+    # scans the log indices.
+    #
+    # BUILT FROM THE CATALOGUE, not written out. Two blocks were listed here
+    # by hand while SOURCE_KINDS declared which fields each signal takes, so
+    # adding `monitors` gave the form a box somebody could type into and the
+    # save silently dropped it. A field that accepts input and discards it is
+    # worse than one that is missing.
+    for signal in _signals_with_fields():
+        block = {}
+        for field in SOURCE_KINDS["elasticsearch"]["signal_fields"]:
+            block[field] = form.get(f"{signal}_{field}")
+        config[signal] = block
     password = form.get("password") or None
 
     try:
