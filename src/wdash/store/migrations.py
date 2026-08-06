@@ -183,6 +183,25 @@ def _index_monitor_results(connection):
             f"ON wdash_monitor_results ({columns})"))
 
 
+def _add_monitor_request(connection):
+    """Version 11: request configuration and its secrets.
+
+    Two columns rather than widening `assertions`, because they answer
+    different questions: assertions are about the RESPONSE and are safe to
+    show anywhere, while the request carries credentials that must never be
+    read back to a screen.
+    """
+    from sqlalchemy import inspect, text
+    columns = {column["name"] for column
+               in inspect(connection).get_columns("wdash_monitors")}
+    if "request" not in columns:
+        connection.execute(text(
+            "ALTER TABLE wdash_monitors ADD COLUMN request TEXT"))
+    if "secrets" not in columns:
+        connection.execute(text(
+            "ALTER TABLE wdash_monitors ADD COLUMN secrets TEXT"))
+
+
 MIGRATIONS = [
     (1, "initial schema", _create_everything),
     (2, "authorization audit trail", _add_audit),
@@ -194,6 +213,7 @@ MIGRATIONS = [
     (8, "monitors:read for existing administrators", _grant_monitors_to_admins),
     (9, "agents, monitors and their results", _add_own_monitoring),
     (10, "index monitor results for the listing", _index_monitor_results),
+    (11, "monitor request configuration and its secrets", _add_monitor_request),
 ]
 
 

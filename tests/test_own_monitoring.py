@@ -830,3 +830,230 @@ class StorageWarningTest(StoreTestCase):
             self.store.results.count = original
         self.assertIn("Postgres", warning)
         self.assertIn("9,000,000", warning)
+
+
+class RequestConfigurationTest(StoreTestCase):
+    """Headers, cookies and authentication on an http check.
+
+    Everything here is about one property: a credential goes into the
+    database encrypted, comes out only for the agent, and appears on no
+    screen and in no stored error. The rest is validation of things that turn
+    a monitor definition into a way to send a request nobody configured.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from wdash.store.secrets import SecretBox
+        # A store WITH a key. The default fixture has none, and a check with
+        # credentials must refuse to save rather than store them in clear.
+        self.store.engine.dispose()
+        self.store = Store.open(f"sqlite:///{self.database}",
+                                secret_box=SecretBox(SecretBox.generate_key()))
+
+    def _monitor(self, **kwargs):
+        options = dict(name="API", kind="http", target="https://x.example",
+                       interval_seconds=30, timeout_seconds=5)
+        options.update(kwargs)
+        return self.store.monitors.create(**options)
+
+    # ---------- the split ----------
+
+    def test_a_credential_header_is_sealed_wherever_it_is_typed(self):
+        """Somebody pasting a bearer token into the plain header box should
+        not have it stored in clear because of a checkbox they did not
+        notice."""
+        monitor = self._monitor(request={
+            "headers": {"X-Api-Version": "2", "Authorization": "Bearer abc"}})
+        self.assertEqual(monitor["request"]["headers"], {"X-Api-Version": "2"})
+        self.assertEqual(
+            self.store.monitors.credentials(monitor["id"])["headers"],
+            {"Authorization": "Bearer abc"})
+
+    def test_cookie_names_are_shown_and_values_are_not(self):
+        """A cookie is a session token far more often than a preference. The
+        names are enough for a screen to say what is being sent."""
+        monitor = self._monitor(request={"cookies": {"session": "s3cr3t"}})
+        self.assertEqual(monitor["request"]["cookie_names"], ["session"])
+        self.assertNotIn("s3cr3t", json.dumps(monitor, default=str))
+
+    def test_nothing_secret_survives_into_the_public_shape(self):
+        monitor = self._monitor(request={
+            "headers": {"Authorization": "Bearer abc"},
+            "cookies": {"session": "s3cr3t"},
+            "auth": {"type": "basic", "username": "svc", "password": "p@ss"}})
+        rendered = json.dumps(monitor, default=str)
+        for secret in ("Bearer abc", "s3cr3t", "p@ss"):
+            self.assertNotIn(secret, rendered)
+        self.assertTrue(monitor["has_credentials"])
+
+    def test_it_is_encrypted_on_disk(self):
+        import sqlite3
+        monitor = self._monitor(request={
+            "auth": {"type": "basic", "username": "svc", "password": "p@ss"}})
+        self.store.engine.dispose()
+        with sqlite3.connect(self.database) as connection:
+            stored = connection.execute(
+                "SELECT secrets FROM wdash_monitors").fetchone()[0]
+        self.assertNotIn("p@ss", stored or "")
+
+    def test_without_a_key_it_refuses_rather_than_storing_in_clear(self):
+        plain = Store.open(f"sqlite:///{self.database}", secret_box=None)
+        with self.assertRaises(MonitoringError) as caught:
+            plain.monitors.create(
+                name="API", kind="http", target="https://x.example",
+                request={"auth": {"type": "bearer", "token": "abc"}})
+        self.assertIn("WDASH_ENCRYPTION_KEY", str(caught.exception))
+        plain.engine.dispose()
+
+    def test_an_edit_that_supplies_no_credential_keeps_the_stored_one(self):
+        """A form that submits an empty password box must not wipe the
+        credential every time somebody changes the interval."""
+        monitor = self._monitor(request={
+            "auth": {"type": "basic", "username": "svc", "password": "p@ss"}})
+        self.store.monitors.update(monitor["id"], interval_seconds=90, request={
+            "auth": {"type": "basic", "username": "svc"}})
+        self.assertEqual(
+            self.store.monitors.credentials(monitor["id"])["auth_password"],
+            "p@ss")
+
+    # ---------- validation ----------
+
+    def test_a_newline_in_a_header_value_is_refused(self):
+        """A value containing CR or LF ends the header and starts another —
+        turning a monitor definition into a way to add arbitrary headers."""
+        with self.assertRaises(MonitoringError):
+            self._monitor(request={"headers": {"X-A": "a\r\nX-Injected: b"}})
+
+    def test_a_transport_header_cannot_be_overridden(self):
+        """A wrong Host reaches a different vhost; a wrong Content-Length
+        truncates the body."""
+        for name in ("Host", "Content-Length", "Transfer-Encoding"):
+            with self.assertRaises(MonitoringError):
+                self._monitor(request={"headers": {name: "x"}})
+
+    def test_a_header_name_with_a_space_is_refused(self):
+        with self.assertRaises(MonitoringError):
+            self._monitor(request={"headers": {"bad name": "x"}})
+
+    def test_an_unknown_authentication_type_is_refused(self):
+        with self.assertRaises(MonitoringError):
+            self._monitor(request={"auth": {"type": "ntlm", "username": "x"}})
+
+    def test_basic_auth_without_a_username_is_refused(self):
+        with self.assertRaises(MonitoringError):
+            self._monitor(request={"auth": {"type": "basic"}})
+
+    def test_a_tcp_check_cannot_carry_headers(self):
+        """A tcp check opens a socket. Boxes that will never be used teach
+        that they work."""
+        with self.assertRaises(MonitoringError):
+            self._monitor(kind="tcp", target="db:5432",
+                          request={"headers": {"X-A": "b"}})
+
+    def test_matching_a_header_against_nothing_is_refused(self):
+        """That is the presence check with extra steps, and two ways to say
+        one thing is how they drift apart."""
+        with self.assertRaises(MonitoringError):
+            self._monitor(assertions={"headers_match": {"Content-Type": ""}})
+
+    # ---------- what the agent receives ----------
+
+    def test_the_agent_gets_the_credentials_filled_back_in(self):
+        from wdash.api.agent_routes import _request_for
+        monitor = self._monitor(request={
+            "headers": {"X-Api-Version": "2", "Authorization": "Bearer abc"},
+            "cookies": {"session": "s3cr3t"},
+            "auth": {"type": "basic", "username": "svc", "password": "p@ss"}})
+        request = _request_for(self.store, self.store.monitors.get(monitor["id"]))
+        self.assertEqual(request["headers"],
+                         {"X-Api-Version": "2", "Authorization": "Bearer abc"})
+        self.assertEqual(request["cookies"], {"session": "s3cr3t"})
+        self.assertEqual(request["auth"]["password"], "p@ss")
+        # `cookie_names` is for a screen; the agent has the cookies.
+        self.assertNotIn("cookie_names", request)
+
+    def test_rotating_a_credential_changes_the_configuration_version(self):
+        """`has_credentials` does not move when a password is REPLACED, so a
+        rotated credential would never reach the agent. `updated_at` does."""
+        from wdash.api.agent_routes import _configuration_version
+        monitor = self._monitor(request={
+            "auth": {"type": "basic", "username": "svc", "password": "old"}})
+        before = _configuration_version([self.store.monitors.get(monitor["id"])])
+        self.store.monitors.update(monitor["id"], request={
+            "auth": {"type": "basic", "username": "svc", "password": "new"}})
+        after = _configuration_version([self.store.monitors.get(monitor["id"])])
+        self.assertNotEqual(before, after)
+
+
+class CredentialRedactionTest(unittest.TestCase):
+    """A failing check must not put its credentials on the page.
+
+    urllib3 puts the failing request into some of its exceptions, and the
+    error is both shown on the Monitors screen and stored in the results
+    table — so a leak here is a credential in a table people read.
+    """
+
+    def test_a_secret_is_removed_from_a_message(self):
+        from wdash.agent.checks import _redact
+        request = {"headers": {"Authorization": "Bearer SUPERSECRET"},
+                   "cookies": {"session": "C00KIE-VALUE"},
+                   "auth": {"type": "basic", "password": "P4SSWORD"}}
+        message = ("failed with Bearer SUPERSECRET and C00KIE-VALUE "
+                   "and P4SSWORD")
+        cleaned = _redact(message, request)
+        for secret in ("SUPERSECRET", "C00KIE-VALUE", "P4SSWORD"):
+            self.assertNotIn(secret, cleaned)
+
+    def test_a_non_secret_header_is_left_alone(self):
+        """Redacting everything would remove the reason along with the
+        secret."""
+        from wdash.agent.checks import _redact
+        message = "X-Api-Version: 2 was rejected"
+        self.assertEqual(
+            _redact(message, {"headers": {"X-Api-Version": "2"}}), message)
+
+    def test_the_redaction_is_applied_at_the_call_site(self):
+        """Through `run_check`, with an exception that actually carries one.
+
+        Testing `_redact` alone leaves the CALL SITE untested, and a redaction
+        that is never applied does nothing — removing it from the failure path
+        passed every test until this existed.
+
+        The exception is injected rather than provoked. A refused connection
+        does not carry the request, so a real failure against a dead port
+        proves nothing; what has to be tested is that whatever the message
+        says goes through the filter. This is defence in depth against
+        libraries that render a request into an error, not a reproduction of
+        one that does.
+        """
+        import requests
+
+        from wdash.agent.checks import run_check
+
+        class Leaky:
+            def get(self, *args, **kwargs):
+                raise requests.exceptions.ConnectionError(
+                    "refused while sending Bearer SUPERSECRET "
+                    "with cookie C00KIE-VALUE and password P4SSWORD")
+
+        monitor = {
+            "id": "x", "name": "t", "kind": "http",
+            "target": "http://127.0.0.1:59998/",
+            "timeout_seconds": 2, "assertions": {},
+            "request": {"headers": {"Authorization": "Bearer SUPERSECRET"},
+                        "cookies": {"session": "C00KIE-VALUE"},
+                        "auth": {"type": "basic", "username": "u",
+                                 "password": "P4SSWORD"}},
+        }
+        result = run_check(monitor, session=Leaky())
+        self.assertEqual(result["status"], "down")
+        self.assertTrue(result["error"], "the reason was lost entirely")
+        for secret in ("SUPERSECRET", "C00KIE-VALUE", "P4SSWORD"):
+            self.assertNotIn(secret, result["error"])
+
+    def test_a_very_short_value_is_not_redacted(self):
+        """Replacing every occurrence of a two-character secret would blank
+        out most of the sentence."""
+        from wdash.agent.checks import _redact
+        message = "could not connect to db"
+        self.assertEqual(_redact(message, {"cookies": {"s": "db"}}), message)

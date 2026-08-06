@@ -58,7 +58,7 @@ class Store:
         #: Checks WDash runs itself, through its own agents. Separate from
         #: `sources`, which is where it reads checks something else ran.
         self.agents = AgentRepository(engine)
-        self.monitors = MonitorRepository(engine)
+        self.monitors = MonitorRepository(engine, self.secrets)
         self.results = ResultRepository(engine)
 
     @classmethod

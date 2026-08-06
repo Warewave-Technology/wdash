@@ -70,13 +70,25 @@ def _http(monitor, session=None):
     assertions = monitor.get("assertions") or {}
     client = session or requests
 
+    request = monitor.get("request") or {}
+    headers = {"User-Agent": "wdash-agent"}
+    headers.update(request.get("headers") or {})
+
+    auth = request.get("auth") or {}
+    credentials = None
+    if auth.get("type") == "basic":
+        credentials = (auth.get("username") or "", auth.get("password") or "")
+    elif auth.get("type") == "bearer" and auth.get("token"):
+        headers["Authorization"] = f"Bearer {auth['token']}"
+
     try:
         response = client.get(
             monitor["target"], timeout=timeout, stream=True,
             # Redirects followed, because a monitor that reports 301 as a
             # failure reports every site that moved to https as down.
             allow_redirects=True,
-            headers={"User-Agent": "wdash-agent"})
+            headers=headers, auth=credentials,
+            cookies=request.get("cookies") or None)
     except Exception as exc:
         elapsed = int((time.monotonic() - clock) * 1_000_000)
         # The certificate is read even though the request failed, and
@@ -85,7 +97,8 @@ def _http(monitor, session=None):
         # show is the one case where the check never got far enough to look.
         # A monitor that goes down for a certificate and cannot say which
         # certificate is a monitor that has told you nothing.
-        return _result(monitor, started, "down", _reason(exc),
+        return _result(monitor, started, "down",
+                       _redact(_reason(exc), request),
                        duration_us=elapsed,
                        tls=_certificate(monitor["target"], timeout))
 
@@ -105,7 +118,8 @@ def _http(monitor, session=None):
     except Exception as exc:
         elapsed = int((time.monotonic() - clock) * 1_000_000)
         return _result(monitor, started, "down",
-                       f"reading the response failed: {_reason(exc)}",
+                       _redact(f"reading the response failed: {_reason(exc)}",
+                               request),
                        duration_us=elapsed, http_status=response.status_code)
     finally:
         response.close()
@@ -140,11 +154,64 @@ def _assert_http(response, body, elapsed_us, assertions):
         if needle not in text:
             return f"the response body does not contain {needle!r}"
 
+    # Response headers. Two checks, because they answer different questions:
+    # "did the proxy add a request id at all" and "is this JSON".
+    for name in (assertions.get("headers_present") or ()):
+        if name not in response.headers:
+            return f"the response has no {name} header"
+
+    for name, expected in (assertions.get("headers_match") or {}).items():
+        actual = response.headers.get(name)
+        if actual is None:
+            return f"the response has no {name} header"
+        # Substring, not equality. `Content-Type: application/json` arrives as
+        # `application/json; charset=utf-8` from half the servers in the
+        # world, and a monitor that calls that a failure is a monitor somebody
+        # turns off.
+        if str(expected) not in actual:
+            return (f"{name} is {actual!r}, which does not contain "
+                    f"{str(expected)!r}")
+
     ceiling = assertions.get("max_duration_ms")
     if ceiling and elapsed_us > int(ceiling) * 1000:
         return (f"answered in {elapsed_us / 1000:.0f} ms, "
                 f"over the {ceiling} ms limit")
     return ""
+
+
+#: Header names whose value must never reach a stored error message. A check
+#: that fails against an authenticated endpoint puts its exception on a page
+#: any reader of the Monitors screen can see.
+_SECRET_IN_MESSAGES = ("authorization", "proxy-authorization", "cookie",
+                       "x-api-key", "x-auth-token", "api-key", "set-cookie")
+
+
+def _redact(text, request=None):
+    """Remove anything that came out of the request's credentials.
+
+    urllib3 puts the failing request into some of its exceptions, and
+    `requests` will happily render a header dictionary into one. The error is
+    shown on the Monitors page and stored in the results table, so a leak here
+    is a credential in a table people read.
+    """
+    text = str(text)
+    for value in _credential_values(request):
+        if value and len(value) > 3:
+            text = text.replace(value, "***")
+    return text
+
+
+def _credential_values(request):
+    request = request or {}
+    for name, value in (request.get("headers") or {}).items():
+        if name.lower() in _SECRET_IN_MESSAGES:
+            yield str(value)
+    for value in (request.get("cookies") or {}).values():
+        yield str(value)
+    auth = request.get("auth") or {}
+    for key in ("password", "token"):
+        if auth.get(key):
+            yield str(auth[key])
 
 
 def _reason(exception):

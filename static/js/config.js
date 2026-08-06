@@ -660,9 +660,54 @@ function fillMonitor(monitor) {
         box.checked = assigned.has(box.value);
     });
 
+    const request = (monitor && monitor.request) || {};
+    value('monitorRequestHeaders', Object.entries(request.headers || {})
+        .map(([k, v]) => `${k}: ${v}`).join('\n'));
+    // Names only. The values are encrypted and there is no screen that can
+    // show them — printing empty ones would look like they had been lost.
+    value('monitorRequestCookies', (request.cookie_names || [])
+        .map(name => `${name}: `).join('\n'));
+    value('monitorHeadersPresent', (assertions.headers_present || []).join('\n'));
+    value('monitorHeadersMatch', Object.entries(assertions.headers_match || {})
+        .map(([k, v]) => `${k}: ${v}`).join('\n'));
+
+    const auth = request.auth || {};
+    const authType = document.getElementById('monitorAuthType');
+    if (authType) { authType.value = auth.type || ''; }
+    value('monitorAuthUsername', auth.username || '');
+    // Never refilled: only the hash-equivalent is stored, and an empty box
+    // that keeps the stored credential is the same contract the source form
+    // uses.
+    value('monitorAuthPassword', '');
+    value('monitorAuthToken', '');
+
+    applyMonitorKind();
+
     const title = document.getElementById('monitorModalTitle');
     if (title) { title.textContent = monitor ? 'Edit check' : 'Add check'; }
 }
+
+/**
+ * Show the request and response-header fields only for http checks.
+ *
+ * A tcp check opens a socket. Headers and auth on one are boxes somebody
+ * fills in that will never be used, and a form that accepts them teaches that
+ * they work.
+ */
+function applyMonitorKind() {
+    const kind = document.getElementById('monitorKind')?.value;
+    document.querySelectorAll('[data-http-only]').forEach(element => {
+        element.classList.toggle('d-none', kind !== 'http');
+    });
+    const auth = document.getElementById('monitorAuthType')?.value || '';
+    document.querySelectorAll('[data-auth]').forEach(element => {
+        element.classList.toggle(
+            'd-none', kind !== 'http' || element.dataset.auth !== auth);
+    });
+}
+
+document.getElementById('monitorKind')?.addEventListener('change', applyMonitorKind);
+document.getElementById('monitorAuthType')?.addEventListener('change', applyMonitorKind);
 
 document.getElementById('addMonitorBtn')?.addEventListener('click', () => {
     fillMonitor(null);

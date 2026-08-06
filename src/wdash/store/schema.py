@@ -255,6 +255,14 @@ monitors = Table(
     #: What makes a check pass: expected status codes, a string the body must
     #: contain, a response-time ceiling. Empty means "it answered at all".
     Column("assertions", JSON),
+    #: How to make the request: headers, the username of a basic-auth pair,
+    #: which cookies exist. Everything here is safe to show back.
+    Column("request", JSON),
+    #: Encrypted, and never read back out to a screen: the basic-auth
+    #: password, bearer token, cookie VALUES and any header whose value is a
+    #: credential. Same treatment as a source's password, for the same reason
+    #: — WDash hands these to an agent and to nobody else.
+    Column("secrets", Text),
     Column("labels", JSON),
     Column("enabled", Boolean, nullable=False, default=True),
     Column("created_by", String(255)),

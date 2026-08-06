@@ -424,6 +424,88 @@
                      id="monitorMaxDuration" type="number" min="1"
                      placeholder="2000">
             </div>
+
+            {# http only. A tcp check opens a socket; headers and auth on one
+               are boxes somebody fills in that will never be used, and a form
+               that accepts them teaches that they work. #}
+            <div class="col-md-6" data-http-only>
+              <label class="form-label small">Response headers that must exist</label>
+              <textarea class="form-control form-control-sm" name="headers_present"
+                        id="monitorHeadersPresent" rows="2"
+                        placeholder="X-Request-Id"></textarea>
+              <div class="form-text" style="font-size:.7rem">One a line.</div>
+            </div>
+            <div class="col-md-6" data-http-only>
+              <label class="form-label small">Response headers that must match</label>
+              <textarea class="form-control form-control-sm" name="headers_match"
+                        id="monitorHeadersMatch" rows="2"
+                        placeholder="Content-Type: application/json"></textarea>
+              <div class="form-text" style="font-size:.7rem">
+                <code>Name: value</code>, one a line. The value has to be
+                CONTAINED in what came back &mdash;
+                <code>application/json</code> matches
+                <code>application/json; charset=utf-8</code>, which is what
+                half the servers in the world send.
+              </div>
+            </div>
+
+            <div class="col-12" data-http-only><hr class="my-1"></div>
+            <div class="col-12" data-http-only>
+              <label class="form-label small">How to make the request</label>
+              <div class="form-text mb-2" style="font-size:.7rem">
+                Credentials are encrypted and never shown again &mdash; the
+                same treatment a source's password gets. Leave a credential
+                box empty when editing and the stored one is kept.
+              </div>
+            </div>
+            <div class="col-md-6" data-http-only>
+              <label class="form-label small">Request headers</label>
+              <textarea class="form-control form-control-sm" name="request_headers"
+                        id="monitorRequestHeaders" rows="3"
+                        placeholder="X-Api-Version: 2&#10;Authorization: Bearer …"></textarea>
+              <div class="form-text" style="font-size:.7rem">
+                <code>Name: value</code>, one a line &mdash; paste them
+                straight out of a curl command. <code>Authorization</code>,
+                <code>Cookie</code> and the api-key headers are encrypted
+                wherever they are typed.
+              </div>
+            </div>
+            <div class="col-md-6" data-http-only>
+              <label class="form-label small">Cookies</label>
+              <textarea class="form-control form-control-sm" name="request_cookies"
+                        id="monitorRequestCookies" rows="3"
+                        placeholder="session: …"></textarea>
+              <div class="form-text" style="font-size:.7rem">
+                <code>name: value</code>, one a line. Values are encrypted;
+                the names are shown so a screen can say what is being sent.
+              </div>
+            </div>
+            <div class="col-md-4" data-http-only>
+              <label class="form-label small">Authentication</label>
+              <select class="form-select form-select-sm" name="auth_type"
+                      id="monitorAuthType">
+                <option value="">none</option>
+                <option value="basic">basic</option>
+                <option value="bearer">bearer token</option>
+              </select>
+            </div>
+            <div class="col-md-4" data-auth="basic">
+              <label class="form-label small">Username</label>
+              <input class="form-control form-control-sm" name="auth_username"
+                     id="monitorAuthUsername">
+            </div>
+            <div class="col-md-4" data-auth="basic">
+              <label class="form-label small">Password</label>
+              <input class="form-control form-control-sm" type="password"
+                     name="auth_password" id="monitorAuthPassword"
+                     autocomplete="new-password">
+            </div>
+            <div class="col-md-8" data-auth="bearer">
+              <label class="form-label small">Token</label>
+              <input class="form-control form-control-sm" type="password"
+                     name="auth_token" id="monitorAuthToken"
+                     autocomplete="new-password">
+            </div>
           </div>
         </div>
         <div class="modal-footer">

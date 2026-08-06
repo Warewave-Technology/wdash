@@ -136,6 +136,24 @@ def config_page():
 # Sources
 # --------------------------------------------------------------------------
 
+def _pairs(text):
+    """`Name: value` a line at a time.
+
+    A textarea rather than a repeating row widget: an operator pasting five
+    headers out of a curl command should be able to paste them, and the
+    parsing is one line of code against a control that is several hundred.
+    """
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        name, _, value = line.partition(":")
+        if name.strip():
+            out[name.strip()] = value.strip()
+    return out
+
+
 def _signals_with_fields():
     """Signals whose configuration is per-signal rather than shared.
 
@@ -1055,12 +1073,39 @@ def save_monitor():
     if (form.get("max_duration_ms") or "").strip().isdigit():
         assertions["max_duration_ms"] = int(form["max_duration_ms"])
 
+    present = [h.strip() for h in
+               (form.get("headers_present") or "").replace(",", "\n").split("\n")
+               if h.strip()]
+    if present:
+        assertions["headers_present"] = present
+    matches = _pairs(form.get("headers_match"))
+    if matches:
+        assertions["headers_match"] = matches
+
+    # NOT named `request`: that is Flask's, and assigning to the name here
+    # makes Python treat every mention in this function as local — including
+    # `request.form` twenty lines above, which then raises UnboundLocalError
+    # before anything else runs.
+    request_config = {
+        "headers": _pairs(form.get("request_headers")),
+        "cookies": _pairs(form.get("request_cookies")),
+    }
+    auth_type = (form.get("auth_type") or "").strip()
+    if auth_type == "basic":
+        request_config["auth"] = {"type": "basic",
+                                  "username": form.get("auth_username"),
+                                  "password": form.get("auth_password") or None}
+    elif auth_type == "bearer":
+        request_config["auth"] = {"type": "bearer",
+                                  "token": form.get("auth_token") or None}
+
     fields = dict(
         name=form.get("name"), kind=form.get("kind"),
         target=form.get("target"),
         interval_seconds=form.get("interval_seconds"),
         timeout_seconds=form.get("timeout_seconds"),
         assertions=assertions,
+        request=request_config,
         agent_ids=form.getlist("agent_ids"))
 
     try:

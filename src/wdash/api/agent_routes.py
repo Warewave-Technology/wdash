@@ -84,12 +84,43 @@ def config():
             "interval_seconds": m["interval_seconds"],
             "timeout_seconds": m["timeout_seconds"],
             "assertions": m["assertions"],
+            # The agent makes the request, so it needs the credentials. This
+            # is the ONLY place they leave the database — not the config page,
+            # not the audit trail, not a result. Over TLS, to a caller that
+            # proved it holds this agent's token.
+            "request": _request_for(store, m),
         } for m in monitors],
         # A version the agent can compare against what it already has, so a
         # poll that changes nothing costs one comparison rather than a
         # reschedule of everything.
         "version": _configuration_version(monitors),
     })
+
+
+def _request_for(store, monitor):
+    """The public request configuration with its credentials filled back in."""
+    request = dict(monitor.get("request") or {})
+    if not monitor.get("has_credentials"):
+        return request
+
+    secrets = store.monitors.credentials(monitor["id"])
+    headers = dict(request.get("headers") or {})
+    headers.update(secrets.get("headers") or {})
+    if headers:
+        request["headers"] = headers
+    if secrets.get("cookies"):
+        request["cookies"] = secrets["cookies"]
+    # `cookie_names` is for a screen; the agent has the cookies themselves.
+    request.pop("cookie_names", None)
+
+    auth = dict(request.get("auth") or {})
+    if auth.get("type") == "basic" and secrets.get("auth_password"):
+        auth["password"] = secrets["auth_password"]
+    if auth.get("type") == "bearer" and secrets.get("auth_token"):
+        auth["token"] = secrets["auth_token"]
+    if auth:
+        request["auth"] = auth
+    return request
 
 
 def _configuration_version(monitors):
@@ -101,9 +132,19 @@ def _configuration_version(monitors):
     """
     import hashlib
     import json
+    # The request configuration is part of what the agent runs, so a change
+    # to a header has to move the version — otherwise the agent keeps sending
+    # the old one until something else happens to change.
+    #
+    # `updated_at` rather than the credentials themselves. Hashing a secret
+    # would put it in a value that is logged and compared; hashing
+    # `has_credentials` would not move when a password is REPLACED, so a
+    # rotated credential would never reach the agent. Every edit bumps the
+    # timestamp, including one that only changes a secret.
     payload = json.dumps(
         [[m["id"], m["kind"], m["target"], m["interval_seconds"],
-          m["timeout_seconds"], m["assertions"]] for m in monitors],
+          m["timeout_seconds"], m["assertions"], m.get("request"),
+          m.get("updated_at")] for m in monitors],
         sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 

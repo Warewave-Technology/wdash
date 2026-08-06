@@ -225,9 +225,128 @@ class AgentRepository:
         }
 
 
+#: Headers a check may not set. Each is decided by the transport or by the
+#: agent, and letting a monitor override it produces a request that is not the
+#: one anybody configured — a wrong Host reaches a different vhost, a wrong
+#: Content-Length truncates the body.
+RESERVED_HEADERS = frozenset({
+    "host", "content-length", "transfer-encoding", "connection",
+    "upgrade", "te", "trailer", "expect",
+})
+
+#: Header names whose VALUE is a credential wherever it appears. Stored
+#: encrypted whatever the operator ticks, because somebody pasting a bearer
+#: token into the plain header box should not have it stored in clear as a
+#: result of a checkbox they did not notice.
+ALWAYS_SECRET_HEADERS = frozenset({
+    "authorization", "proxy-authorization", "cookie",
+    "x-api-key", "x-auth-token", "api-key",
+})
+
+
+def _check_header(name, value):
+    """Refuse anything that would inject a second header.
+
+    A value containing CR or LF ends the header and starts another one. That
+    turns a monitor definition into a way to add arbitrary headers — and, on
+    a proxy that reads them, arbitrary requests.
+    """
+    name = (name or "").strip()
+    if not name:
+        raise MonitoringError("A header needs a name.")
+    if any(character in name for character in "\r\n:\0 \t"):
+        raise MonitoringError(
+            f"'{name}' is not a header name: no spaces, colons or newlines.")
+    if name.lower() in RESERVED_HEADERS:
+        raise MonitoringError(
+            f"'{name}' is set by the transport and cannot be overridden.")
+    text = "" if value is None else str(value)
+    if any(character in text for character in "\r\n\0"):
+        raise MonitoringError(
+            f"The value of '{name}' contains a newline, which would inject a "
+            f"second header.")
+    return name, text
+
+
+def split_request(request):
+    """Separate a request configuration into what is safe to show and what is not.
+
+    Returns (public, secret). The split is by header NAME as well as by which
+    box it was typed into: `Authorization` is a credential wherever somebody
+    puts it, and storing it in clear because a checkbox went unticked is a
+    mistake the form should not be able to make.
+    """
+    request = dict(request or {})
+    public = {}
+    secret = {}
+
+    headers = {}
+    secret_headers = {}
+    for name, value in (request.get("headers") or {}).items():
+        name, value = _check_header(name, value)
+        if name.lower() in ALWAYS_SECRET_HEADERS:
+            secret_headers[name] = value
+        else:
+            headers[name] = value
+    for name, value in (request.get("secret_headers") or {}).items():
+        name, value = _check_header(name, value)
+        secret_headers[name] = value
+    if headers:
+        public["headers"] = headers
+    if secret_headers:
+        secret["headers"] = secret_headers
+
+    # Cookies are session tokens far more often than they are preferences, so
+    # the NAMES are shown and the values are sealed. A screen that lists the
+    # names is enough to say what is being sent.
+    cookies = {}
+    for name, value in (request.get("cookies") or {}).items():
+        if any(character in str(name) for character in "\r\n;="):
+            raise MonitoringError(f"'{name}' is not a cookie name.")
+        if any(character in str(value) for character in "\r\n;"):
+            raise MonitoringError(
+                f"The value of cookie '{name}' contains a separator.")
+        cookies[str(name)] = str(value)
+    if cookies:
+        public["cookie_names"] = sorted(cookies)
+        secret["cookies"] = cookies
+
+    auth = request.get("auth") or {}
+    kind = (auth.get("type") or "").strip().lower()
+    if kind == "basic":
+        username = (auth.get("username") or "").strip()
+        if not username:
+            raise MonitoringError("Basic auth needs a username.")
+        public["auth"] = {"type": "basic", "username": username}
+        if auth.get("password"):
+            secret["auth_password"] = auth["password"]
+    elif kind == "bearer":
+        public["auth"] = {"type": "bearer"}
+        if auth.get("token"):
+            secret["auth_token"] = auth["token"]
+    elif kind:
+        raise MonitoringError(
+            f"'{kind}' is not an authentication type. Available: basic, bearer.")
+
+    return public, secret
+
+
+#: Response assertions that name a header.
+def _check_response_headers(assertions):
+    for name in (assertions.get("headers_present") or ()):
+        _check_header(name, "")
+    for name, value in (assertions.get("headers_match") or {}).items():
+        _check_header(name, "")
+        if not str(value).strip():
+            raise MonitoringError(
+                f"Expecting header '{name}' to match nothing is the same as "
+                f"expecting it to exist — use the presence check instead.")
+
+
 class MonitorRepository:
-    def __init__(self, engine):
+    def __init__(self, engine, secret_box=None):
         self._engine = engine
+        self._secrets = secret_box
 
     # ---------- validation ----------
 
@@ -273,19 +392,30 @@ class MonitorRepository:
 
     def create(self, name, kind, target, interval_seconds=60,
                timeout_seconds=10, assertions=None, labels=None,
-               agent_ids=(), created_by=None):
+               agent_ids=(), created_by=None, request=None):
         kind, target, interval, timeout = self.validate(
             kind, target, interval_seconds, timeout_seconds)
         name = (name or "").strip()
         if not name:
             raise MonitoringError("A monitor needs a name.")
+        assertions = assertions or {}
+        _check_response_headers(assertions)
+        public, secret = split_request(request)
+        if kind != "http" and (public or secret):
+            # A tcp check opens a socket. Headers and auth on one are boxes
+            # somebody filled in that will never be used, and a form that
+            # accepts them teaches that they work.
+            raise MonitoringError(
+                "Headers, cookies and authentication apply to http checks only.")
 
         now = _now()
         row = {
             "id": str(uuid.uuid4()),
             "name": name, "kind": kind, "target": target,
             "interval_seconds": interval, "timeout_seconds": timeout,
-            "assertions": assertions or {},
+            "assertions": assertions,
+            "request": public,
+            "secrets": self._seal(secret),
             "labels": labels or {},
             "enabled": True,
             "created_by": created_by,
@@ -296,10 +426,20 @@ class MonitorRepository:
             self._assign(connection, row["id"], agent_ids)
         return self.get(row["id"])
 
-    def update(self, monitor_id, agent_ids=None, **changes):
+    def update(self, monitor_id, agent_ids=None, request=None, **changes):
         allowed = {"name", "kind", "target", "interval_seconds",
                    "timeout_seconds", "assertions", "labels", "enabled"}
         values = {k: v for k, v in changes.items() if k in allowed}
+        if "assertions" in values:
+            _check_response_headers(values["assertions"] or {})
+        if request is not None:
+            public, secret = split_request(request)
+            values["request"] = public
+            # Only replaced when something new was supplied. A form that
+            # submits an empty password box would otherwise wipe the stored
+            # credential every time somebody edited the interval.
+            if secret:
+                values["secrets"] = self._seal(secret)
         if {"kind", "target", "interval_seconds", "timeout_seconds"} & set(values):
             current = self.get(monitor_id)
             if current is None:
@@ -394,6 +534,44 @@ class MonitorRepository:
             out.setdefault(row["monitor_id"], []).append(row["agent_id"])
         return out
 
+    def _seal(self, secret):
+        if not secret:
+            return None
+        import json
+
+        from .secrets import SecretsUnavailable
+        if self._secrets is None:
+            raise MonitoringError(
+                "WDASH_ENCRYPTION_KEY is not set, so credentials cannot be "
+                "stored. Set it, or define this check without them.")
+        try:
+            return self._secrets.seal(json.dumps(secret))
+        except SecretsUnavailable as exc:
+            # Translated rather than propagated: the route catches
+            # MonitoringError and flashes it, so letting this through turns
+            # "you have no encryption key" into a 500 — a page that says
+            # nothing about the one thing the person has to fix.
+            raise MonitoringError(str(exc)) from exc
+
+    def credentials(self, monitor_id):
+        """The decrypted request secrets. For the AGENT endpoint only.
+
+        Never on the public shape and never in a template: the agent needs
+        them to make the request, and there is nowhere else they belong.
+        """
+        import json
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(monitors.c.secrets).where(
+                    monitors.c.id == monitor_id)).first()
+        if not row or not row[0] or self._secrets is None:
+            return {}
+        try:
+            return json.loads(self._secrets.open(row[0]) or "{}")
+        except Exception:
+            logger.error(f"could not read the credentials for {monitor_id}")
+            return {}
+
     @staticmethod
     def _public(row, agent_ids):
         return {
@@ -402,9 +580,20 @@ class MonitorRepository:
             "interval_seconds": row["interval_seconds"],
             "timeout_seconds": row["timeout_seconds"],
             "assertions": row["assertions"] or {},
+            #: What the request looks like, minus every value that is a
+            #: credential. `has_credentials` says one exists without saying
+            #: what it is — enough to answer "is this check authenticating?"
+            #: without a screen that can leak the answer.
+            "request": row["request"] or {},
+            "has_credentials": bool(row["secrets"]),
             "labels": row["labels"] or {},
             "enabled": bool(row["enabled"]),
             "created_by": row["created_by"],
+            #: Bumped by every edit, including one that only rotates a
+            #: credential. The agent's configuration version is derived from
+            #: it, so a new password reaches the agent — `has_credentials`
+            #: alone does not move when a secret is REPLACED.
+            "updated_at": row["updated_at"],
             "agent_ids": list(agent_ids),
         }
 
