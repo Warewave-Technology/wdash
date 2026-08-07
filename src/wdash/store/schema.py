@@ -314,3 +314,111 @@ monitor_results = Table(
     Index("ix_wdash_monitor_results_latest",
           "monitor_id", "agent_id", "started_at"),
 )
+
+
+
+# ---------------------------------------------------------------------------
+# Alerting
+# ---------------------------------------------------------------------------
+#
+# `alert_state` is the load-bearing one. Without stored state there is no way
+# to express "failing for the third time running", no way to know a thing has
+# recovered, and no way to avoid sending the same sentence every fifteen
+# seconds for an hour — which is how a channel gets muted, and a muted channel
+# is worse than none because it looks like coverage.
+
+alert_channels = Table(
+    "wdash_alert_channels", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("name", String(128), nullable=False, unique=True),
+    Column("kind", String(32), nullable=False),          # webhook
+    Column("config", JSON, nullable=False),              # url, headers
+    #: Encrypted: an Authorization header or a token in the URL. Same
+    #: treatment as a source password or a monitor's credentials.
+    Column("secrets", Text),
+    Column("enabled", Boolean, nullable=False, default=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+alert_rules = Table(
+    "wdash_alert_rules", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("name", String(128), nullable=False),
+    #: monitor_down | agent_silent | certificate_expiring. Three because they
+    #: are three different facts with three different audiences — a target
+    #: that stopped answering, a probe that stopped looking, and a diary entry
+    #: about a certificate. Sending them down one channel with one wording is
+    #: how people learn to ignore all three.
+    Column("kind", String(32), nullable=False),
+    #: Which monitors this rule watches: {} means every one. A label selector
+    #: rather than a list of ids, so a monitor added later is covered without
+    #: anybody remembering to add it — the omission nobody notices until the
+    #: outage.
+    Column("selector", JSON),
+    #: How many consecutive failures before it fires. One is flapping; the
+    #: default is three, which at a 30-second schedule is 90 seconds of
+    #: genuine failure.
+    Column("threshold", Integer, nullable=False, default=3),
+    #: For certificate_expiring: days remaining. Ignored by the others.
+    Column("days_before", Integer),
+    #: Least time between repeat notifications while something stays broken.
+    #: Zero means notify once and stay quiet until it recovers.
+    Column("repeat_minutes", Integer, nullable=False, default=0),
+    Column("channel_id", String(64), nullable=False),
+    Column("enabled", Boolean, nullable=False, default=True),
+    Column("created_by", String(255)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+alert_state = Table(
+    "wdash_alert_state", metadata,
+    Column("rule_id", String(64), nullable=False),
+    #: What the rule is firing ABOUT — a monitor id, an agent id. One row per
+    #: (rule, subject), so a rule watching fifty monitors fires fifty times
+    #: rather than once for "something is wrong".
+    Column("subject", String(128), nullable=False),
+    Column("state", String(16), nullable=False),         # ok | firing
+    #: How many consecutive evaluations have seen it bad. Reset by any good
+    #: one — that is what makes the threshold mean "in a row".
+    Column("failures", Integer, nullable=False, default=0),
+    #: When it entered the current state, so a notification can say how long.
+    Column("since", DateTime(timezone=True)),
+    Column("last_notified_at", DateTime(timezone=True)),
+    #: The most recent reason, for the history screen and so a repeat
+    #: notification can say what changed.
+    Column("detail", Text),
+    Index("ix_wdash_alert_state_key", "rule_id", "subject", unique=True),
+)
+
+alert_silences = Table(
+    "wdash_alert_silences", metadata,
+    Column("id", String(64), primary_key=True),
+    #: A monitor id, an agent id, or `*` for everything. Without silencing,
+    #: a known maintenance window means muting the channel — and a channel
+    #: muted by hand stays muted.
+    Column("subject", String(128), nullable=False, index=True),
+    Column("until", DateTime(timezone=True), nullable=False),
+    Column("reason", Text),
+    Column("created_by", String(255)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+alert_history = Table(
+    "wdash_alert_history", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("at", DateTime(timezone=True), nullable=False, index=True),
+    Column("rule_id", String(64), nullable=False),
+    Column("subject", String(128), nullable=False, index=True),
+    #: The name at the time it fired. Stored rather than looked up, because
+    #: history is most often read about something that has since been deleted
+    #: — and a row that says `4f2c-…` is a row nobody can act on.
+    Column("subject_label", String(255)),
+    Column("transition", String(16), nullable=False),    # firing | resolved
+    Column("detail", Text),
+    #: Whether the notification actually went out. A delivery that failed and
+    #: was never recorded is an alert nobody received and nobody knows was
+    #: missed — the worst of both.
+    Column("delivered", Boolean, nullable=False, default=False),
+    Column("delivery_error", Text),
+)

@@ -24,6 +24,7 @@ from wdash.models import SavedSearch
 from wdash.utils import timerange
 from wdash.api.advisor_routes import advisor_bp
 from wdash.api.agent_routes import agent_bp
+from wdash.api.alert_routes import alert_bp
 from wdash.api.monitor_routes import monitor_bp
 from wdash.api.trace_routes import trace_bp
 from wdash.api.log_routes import log_bp
@@ -63,6 +64,7 @@ def create_app(config_class=Config):
     app.register_blueprint(monitor_bp)
     # No session login on this one: an agent has no browser and no cookie.
     app.register_blueprint(agent_bp)
+    app.register_blueprint(alert_bp)
     app.register_blueprint(log_bp)
     app.register_blueprint(dashboard_bp)
     

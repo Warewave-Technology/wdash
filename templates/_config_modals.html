@@ -517,3 +517,228 @@
     </div>
   </div>
 </div>
+
+<!-- ======================= ALERT CHANNEL ======================= -->
+<div class="modal fade" id="channelModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="post" action="{{ url_for('config.save_channel') }}">
+        <div class="modal-header">
+          <h5 class="modal-title">Add channel</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-5">
+              <label class="form-label small">Name</label>
+              <input class="form-control form-control-sm" name="name" required
+                     placeholder="on-call">
+            </div>
+            <div class="col-md-7">
+              <label class="form-label small">Webhook URL</label>
+              <input class="form-control form-control-sm" name="url" required
+                     type="password" autocomplete="off"
+                     placeholder="https://hooks.slack.com/services/…">
+              <div class="form-text" style="font-size:.7rem">
+                Encrypted and never shown again. For Slack and Teams the path
+                IS the credential &mdash; anybody holding this URL can post
+                into the channel.
+              </div>
+            </div>
+            <div class="col-12">
+              <label class="form-label small">Extra headers</label>
+              <textarea class="form-control form-control-sm" name="headers"
+                        rows="2" placeholder="X-Routing-Key: platform"></textarea>
+              <div class="form-text" style="font-size:.7rem">
+                <code>Name: value</code>, one a line. Not encrypted &mdash;
+                use the box below for anything that authenticates.
+              </div>
+            </div>
+            <div class="col-12">
+              <label class="form-label small">Headers that are credentials</label>
+              <textarea class="form-control form-control-sm" name="secret_headers"
+                        rows="2" placeholder="Authorization: Bearer …"></textarea>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-sm btn-secondary"
+                  data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-sm btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= ALERT RULE ======================= -->
+<div class="modal fade" id="ruleModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <form method="post" action="{{ url_for('config.save_rule') }}">
+        <div class="modal-header">
+          <h5 class="modal-title">Add rule</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label small">Name</label>
+              <input class="form-control form-control-sm" name="name" required
+                     placeholder="Payments API is down">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small">Watches</label>
+              <select class="form-select form-select-sm" name="kind"
+                      id="ruleKind">
+                {% for kind in rule_kinds %}
+                {# The title, not the identifier. `monitor_down` is what the
+                   database calls it; nobody should have to learn that to
+                   configure an alert. #}
+                <option value="{{ kind }}">
+                  {{ rule_descriptions[kind][0] }}</option>
+                {% endfor %}
+              </select>
+              {% for kind in rule_kinds %}
+              <div class="form-text" style="font-size:.7rem"
+                   data-rule="{{ kind }}">{{ rule_descriptions[kind][1] }}</div>
+              {% endfor %}
+            </div>
+
+            <div class="col-md-4" data-rule="monitor_down agent_silent">
+              <label class="form-label small">Fires after</label>
+              <input class="form-control form-control-sm" name="threshold"
+                     type="number" min="1" max="100" value="3">
+              <div class="form-text" style="font-size:.7rem">
+                Failures in a row. One means every blip wakes somebody.
+              </div>
+            </div>
+            <div class="col-md-4" data-rule="certificate_expiring">
+              <label class="form-label small">Warn this many days before</label>
+              <input class="form-control form-control-sm" name="days_before"
+                     type="number" min="1" max="365" value="30">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Repeat every (minutes)</label>
+              <input class="form-control form-control-sm" name="repeat_minutes"
+                     type="number" min="0" value="0">
+              <div class="form-text" style="font-size:.7rem">
+                Zero says it once. Repeating too often is how a channel gets
+                muted, and a muted channel looks like coverage.
+              </div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Sends to</label>
+              <select class="form-select form-select-sm" name="channel_id"
+                      required>
+                {% for channel in channels %}
+                <option value="{{ channel.id }}">{{ channel.name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+
+            <div class="col-12" data-rule="monitor_down certificate_expiring">
+              <label class="form-label small">Only these monitors</label>
+              <textarea class="form-control form-control-sm" name="selector"
+                        rows="2" placeholder="team: payments"></textarea>
+              <div class="form-text" style="font-size:.7rem">
+                <code>label: value</code>, one a line. Empty means every
+                monitor &mdash; so one added later is covered without anybody
+                remembering, which is the omission nobody notices until the
+                outage.
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-sm btn-secondary"
+                  data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-sm btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+
+<!-- ======================= SILENCE ======================= -->
+<div class="modal fade" id="silenceModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="post" action="{{ url_for('config.save_silence') }}">
+        <div class="modal-header">
+          <h5 class="modal-title">Silence alerts</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted" style="font-size:.8rem">
+            A silence suppresses the alert, not the state. When it ends, a
+            thing that is still broken is still recorded as broken &mdash; and
+            recoveries are sent throughout, because silencing the noise of
+            something being broken is not the same as wanting to believe it
+            still is.
+          </p>
+          <div class="row g-3">
+            <div class="col-md-7">
+              <label class="form-label small">What to silence</label>
+              <select class="form-select form-select-sm" name="subject" required
+                      id="silenceSubject">
+                <option value="*">Everything</option>
+                {% if own_monitors %}
+                <optgroup label="Checks">
+                  {% for monitor in own_monitors %}
+                  <option value="{{ monitor.id }}">{{ monitor.name }}</option>
+                  {% endfor %}
+                </optgroup>
+                {% endif %}
+                {% if own_agents %}
+                <optgroup label="Agents">
+                  {% for agent in own_agents %}
+                  <option value="{{ agent.id }}">{{ agent.name }}</option>
+                  {% endfor %}
+                </optgroup>
+                {% endif %}
+              </select>
+              <div class="form-text" style="font-size:.7rem">
+                {# A list rather than a text box. The subject is an id, and
+                   asking somebody to paste a uuid is asking them to silence
+                   the wrong thing. #}
+                Monitors read from Heartbeat are not listed &mdash; they have
+                no id anybody types. Silence everything, or the rule.
+              </div>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label small">For how long</label>
+              <select class="form-select form-select-sm" name="hours">
+                <option value="0.5">30 minutes</option>
+                <option value="1" selected>1 hour</option>
+                <option value="4">4 hours</option>
+                <option value="8">8 hours</option>
+                <option value="24">1 day</option>
+                <option value="72">3 days</option>
+              </select>
+              <div class="form-text" style="font-size:.7rem">
+                Always ends. A silence with no end is a channel muted by
+                hand, and those stay muted.
+              </div>
+            </div>
+            <div class="col-12">
+              <label class="form-label small">Why</label>
+              <input class="form-control form-control-sm" name="reason"
+                     placeholder="database migration, planned">
+              <div class="form-text" style="font-size:.7rem">
+                Shown in the list, so whoever sees it at 03:00 knows whether
+                it is still true.
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-sm btn-secondary"
+                  data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-sm btn-primary">Silence</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>

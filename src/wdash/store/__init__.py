@@ -10,6 +10,10 @@ right up until Elasticsearch became optional.
 
 from .database import DatabaseError, build_engine, describe, is_sqlite
 from .migrations import migrate
+from .alerting import (
+    AlertHistoryRepository, AlertStateRepository, AlertingError,
+    ChannelRepository, RuleRepository, SilenceRepository,
+)
 from .monitoring import AgentRepository, MonitorRepository, ResultRepository
 from .objects import (
     DashboardRepository, ObjectConflict, SavedSearchRepository,
@@ -60,6 +64,13 @@ class Store:
         self.agents = AgentRepository(engine)
         self.monitors = MonitorRepository(engine, self.secrets)
         self.results = ResultRepository(engine)
+        #: Alerting. `alert_state` is the memory the state machine runs on;
+        #: the rest is configuration.
+        self.channels = ChannelRepository(engine, self.secrets)
+        self.rules = RuleRepository(engine)
+        self.alert_state = AlertStateRepository(engine)
+        self.silences = SilenceRepository(engine)
+        self.alert_history = AlertHistoryRepository(engine)
 
     @classmethod
     def open(cls, url=None, rbac_file=None, secret_box=None):

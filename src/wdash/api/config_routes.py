@@ -34,6 +34,8 @@ from ..hub import Scope, TimeWindow
 from ..permissions import grouped as permission_groups
 from ..permissions import normalise as normalise_permissions
 from ..store import SOURCE_KINDS, SourceError
+from ..alerts.evaluate import RULE_KINDS
+from ..store.alerting import AlertingError
 from ..store.monitoring import MONITOR_KINDS, MonitoringError
 from ..store.secrets import SecretsUnavailable
 from ..store.settings_repo import AUDIT_FORWARDING, LDAP, OIDC
@@ -118,6 +120,22 @@ def config_page():
             signal for d in SOURCE_KINDS.values() for signal in d["signals"])),
         # The checks WDash runs itself. Separate from `sources`, which is
         # where it reads checks something else ran.
+        # Alerting. `alert_state` is not shown: it is the state machine's
+        # memory, and a screen full of failure counters invites somebody to
+        # edit one.
+        channels=store.channels.all(),
+        rules=store.rules.all(),
+        silences=store.silences.all(),
+        rule_kinds=RULE_KINDS,
+        rule_descriptions=RULE_DESCRIPTIONS,
+        # Each rule rendered as a sentence. Built here rather than in the
+        # template because it is a statement about what the rule DOES, and a
+        # template assembling it out of `kind`, `threshold` and `selector`
+        # produces three jargon fragments side by side — which is what the
+        # first version did, and nobody could read it.
+        rule_sentences={r["id"]: _describe_rule(r, store.channels.all())
+                        for r in store.rules.all()},
+        undelivered=store.alert_history.count(undelivered_only=True),
         own_agents=store.agents.all(),
         own_monitors=store.monitors.all(),
         monitor_kinds=MONITOR_KINDS,
@@ -1150,3 +1168,238 @@ def delete_monitor(monitor_id):
         flash(f"Monitor '{monitor['name']}' and its results were removed.",
               "success")
     return redirect(url_for("config.config_page") + "#tab-monitors")
+
+
+# ---------------------------------------------------------------------------
+# Alerting
+# ---------------------------------------------------------------------------
+
+#: What each rule kind watches, in a sentence somebody can check against what
+#: they meant. The identifiers — monitor_down, agent_silent — are for the
+#: database; nobody should have to learn them to configure an alert.
+RULE_DESCRIPTIONS = {
+    "monitor_down": (
+        "A check stops answering",
+        "Fires when a monitor fails. NOT when its agent goes quiet — that "
+        "says nothing about the target, and paging somebody because a probe "
+        "restarted is how a channel gets muted."),
+    "agent_silent": (
+        "A probe stops reporting",
+        "Fires when an agent has not checked in. A different fact with a "
+        "different audience: whoever runs the probes, not whoever owns the "
+        "thing being probed."),
+    "certificate_expiring": (
+        "A certificate is running out",
+        "Fires once a certificate is inside the warning window. A diary "
+        "entry rather than an outage — it is still working when this "
+        "arrives."),
+}
+
+
+def _describe_rule(rule, channels):
+    """One sentence saying what this rule does."""
+    channel = next((c["name"] for c in channels
+                    if c["id"] == rule["channel_id"]), None)
+
+    selector = rule.get("selector") or {}
+    # SINGULAR. A rule watching fifty monitors fires fifty times, once per
+    # monitor — "monitors labelled x fails" is both ungrammatical and the
+    # wrong mental model: it reads as one alert for the whole group.
+    which = ("any monitor" if not selector else
+             "any monitor labelled " + ", ".join(
+                 f"{k}={v}" for k, v in selector.items()))
+
+    kind = rule.get("kind")
+    if kind == "certificate_expiring":
+        what = (f"a certificate on {which} is within "
+                f"{rule.get('days_before') or 30} days of expiring")
+    elif kind == "agent_silent":
+        what = "an agent stops reporting"
+    else:
+        times = rule.get("threshold") or 1
+        what = (f"{which} fails "
+                f"{'one check' if times == 1 else f'{times} checks in a row'}")
+
+    repeat = rule.get("repeat_minutes") or 0
+    again = (f", and again every {repeat} minutes until it recovers"
+             if repeat else ", once")
+
+    if channel is None:
+        # Said as a fault rather than folded into the sentence: a rule with no
+        # channel fires into nothing, and that is the thing to notice.
+        return (f"Fires when {what}{again} — but its channel no longer "
+                f"exists, so nobody is told.")
+    return f"Tells {channel} when {what}{again}."
+
+
+def _alerts_tab():
+    return redirect(url_for("config.config_page") + "#tab-alerts")
+
+
+@config_bp.route("/channels", methods=["POST"])
+@login_required
+def save_channel():
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    try:
+        channel = _store().channels.create(
+            name=request.form.get("name"),
+            url=request.form.get("url"),
+            headers=_pairs(request.form.get("headers")),
+            secret_headers=_pairs(request.form.get("secret_headers")))
+    except AlertingError as exc:
+        flash(str(exc), "error")
+        return _alerts_tab()
+
+    # The URL is NOT audited. For Slack and Teams the path is the credential,
+    # and an audit trail every administrator can read is a worse place for it
+    # than the form that is about to be closed.
+    _audit("alert channel added", subject=channel["name"],
+           host=channel["host"])
+    flash(f"Alerts can now be sent to '{channel['name']}' ({channel['host']}). "
+          f"The URL is stored encrypted and is not shown again.", "success")
+    return _alerts_tab()
+
+
+@config_bp.route("/channels/<channel_id>/delete", methods=["POST"])
+@login_required
+def delete_channel(channel_id):
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    channel = store.channels.get(channel_id)
+    if channel is None:
+        flash("No such channel.", "error")
+        return _alerts_tab()
+
+    using = [r["name"] for r in store.rules.all()
+             if r["channel_id"] == channel_id]
+    if using:
+        # Refused rather than cascaded. Deleting the channel would leave those
+        # rules evaluating and failing to deliver — alerts that fire into
+        # nothing, which is the failure mode this whole feature exists to
+        # prevent.
+        flash(f"'{channel['name']}' is still used by: {', '.join(using)}. "
+              f"Point those rules somewhere else first.", "error")
+        return _alerts_tab()
+
+    store.channels.delete(channel_id)
+    _audit("alert channel removed", subject=channel["name"])
+    flash(f"Channel '{channel['name']}' removed.", "success")
+    return _alerts_tab()
+
+
+@config_bp.route("/rules", methods=["POST"])
+@login_required
+def save_rule():
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    form = request.form
+    rule_id = form.get("id") or None
+    selector = _pairs(form.get("selector"))
+
+    try:
+        if rule_id:
+            saved = store.rules.update(
+                rule_id, name=form.get("name"),
+                threshold=int(form.get("threshold") or 3),
+                repeat_minutes=int(form.get("repeat_minutes") or 0),
+                days_before=(int(form["days_before"])
+                             if (form.get("days_before") or "").isdigit()
+                             else None),
+                selector=selector, channel_id=form.get("channel_id"),
+                enabled=form.get("enabled") == "on")
+            if saved is None:
+                flash("No such rule.", "error")
+                return _alerts_tab()
+            _audit("alert rule updated", subject=saved["name"])
+        else:
+            saved = store.rules.create(
+                name=form.get("name"), kind=form.get("kind"),
+                channel_id=form.get("channel_id"),
+                threshold=form.get("threshold") or 3,
+                repeat_minutes=form.get("repeat_minutes") or 0,
+                days_before=form.get("days_before"),
+                selector=selector,
+                created_by=getattr(current_user, "username", None))
+            _audit("alert rule created", subject=saved["name"],
+                   kind=saved["kind"])
+    except (AlertingError, ValueError) as exc:
+        flash(str(exc), "error")
+        return _alerts_tab()
+
+    flash(f"Rule '{saved['name']}' saved. It is evaluated by "
+          f"`python -m wdash.alerts`, which has to be running — nothing in "
+          f"the web process sends alerts.", "success")
+    return _alerts_tab()
+
+
+@config_bp.route("/rules/<rule_id>/delete", methods=["POST"])
+@login_required
+def delete_rule(rule_id):
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    rule = store.rules.get(rule_id)
+    if rule is None:
+        flash("No such rule.", "error")
+    else:
+        store.rules.delete(rule_id)
+        _audit("alert rule removed", subject=rule["name"])
+        # State goes with it. Keeping it would mean a rule recreated with the
+        # same name inherits failure counters from a previous life.
+        flash(f"Rule '{rule['name']}' removed.", "success")
+    return _alerts_tab()
+
+
+@config_bp.route("/silences", methods=["POST"])
+@login_required
+def save_silence():
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    from datetime import datetime, timedelta, timezone
+    hours = request.form.get("hours") or "1"
+    try:
+        until = datetime.now(timezone.utc) + timedelta(hours=float(hours))
+    except ValueError:
+        flash("That is not a number of hours.", "error")
+        return _alerts_tab()
+
+    try:
+        _store().silences.create(
+            subject=request.form.get("subject"), until=until,
+            reason=request.form.get("reason"),
+            created_by=getattr(current_user, "username", None))
+    except AlertingError as exc:
+        flash(str(exc), "error")
+        return _alerts_tab()
+
+    subject = request.form.get("subject")
+    _audit("alerts silenced", subject=subject, until=until.isoformat())
+    flash(f"Alerts for '{subject}' are silenced until "
+          f"{until:%H:%M}. Recoveries are still sent — silencing the noise of "
+          f"something being broken is not the same as wanting to believe it "
+          f"still is.", "success")
+    return _alerts_tab()
+
+
+@config_bp.route("/silences/<silence_id>/delete", methods=["POST"])
+@login_required
+def delete_silence(silence_id):
+    denied = _require_admin()
+    if denied:
+        return denied
+    _store().silences.delete(silence_id)
+    _audit("silence lifted", subject=silence_id)
+    return _alerts_tab()

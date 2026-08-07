@@ -747,3 +747,33 @@ document.querySelectorAll('[data-timestamp]').forEach(element => {
     const when = new Date(raw);
     if (!isNaN(when)) { element.textContent = when.toLocaleString(); }
 });
+
+
+// ---------------------------------------------------------------------------
+// Alert rules
+// ---------------------------------------------------------------------------
+
+/**
+ * Show only the fields the chosen rule kind uses.
+ *
+ * A threshold on a certificate rule is a box that does nothing — certificates
+ * do not flap, so the store forces it to one — and a form that offers it
+ * teaches that it works.
+ */
+function applyRuleKind() {
+    const kind = document.getElementById('ruleKind')?.value;
+    document.querySelectorAll('[data-rule]').forEach(element => {
+        const kinds = (element.dataset.rule || '').split(/\s+/);
+        element.classList.toggle('d-none', !kinds.includes(kind));
+    });
+}
+
+document.getElementById('ruleKind')?.addEventListener('change', applyRuleKind);
+applyRuleKind();
+
+if (window.location.hash === '#tab-alerts') {
+    const trigger = document.querySelector('[data-bs-target="#tab-alerts"]');
+    if (trigger && window.bootstrap) {
+        window.bootstrap.Tab.getOrCreateInstance(trigger).show();
+    }
+}

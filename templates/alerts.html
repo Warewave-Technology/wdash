@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}Alerts - WDash{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2><i class="fas fa-bell"></i> Alerts</h2>
+    <div class="btn-group btn-group-sm">
+        <a class="btn btn-outline-secondary {% if not undelivered_only %}active{% endif %}"
+           href="{{ url_for('alerts.history') }}">Everything</a>
+        <a class="btn btn-outline-danger {% if undelivered_only %}active{% endif %}"
+           href="{{ url_for('alerts.history', undelivered='1') }}">
+            Never delivered
+            {% if undelivered %}
+            <span class="badge bg-danger ms-1">{{ undelivered }}</span>
+            {% endif %}
+        </a>
+    </div>
+</div>
+
+{% if undelivered and not undelivered_only %}
+<div class="alert alert-warning py-2" style="font-size:.85rem">
+    <i class="fas fa-triangle-exclamation"></i>
+    {# An alert that failed to send and was not noticed is the worst of both:
+       nobody was told, and nobody knows they were not. The runner retries a
+       firing state it never announced, so this list should drain by itself —
+       an entry that stays is a channel that is still broken. #}
+    <strong>{{ undelivered }} alert(s) never reached anybody.</strong>
+    The runner keeps retrying anything still firing, so this drains by itself
+    once the channel works &mdash; an entry that stays is a channel that is
+    still broken.
+</div>
+{% endif %}
+
+<div class="card">
+    {% if not entries %}
+    <div class="card-body text-center text-muted py-5">
+        <i class="fas fa-bell-slash fa-2x"></i>
+        <div class="mt-2"><small>
+            {% if undelivered_only %}
+            Everything that fired was delivered.
+            {% else %}
+            Nothing has fired. That is either quiet or no rules &mdash;
+            <a href="{{ url_for('config.config_page') }}#tab-alerts">the
+            configuration page</a> says which.
+            {% endif %}
+        </small></div>
+    </div>
+    {% else %}
+    <div class="table-responsive">
+        <table class="table table-hover mb-0" style="font-size:.85rem">
+            <thead><tr>
+                <th style="width:6rem">What</th>
+                <th style="width:12rem">When</th>
+                <th>Rule</th><th>Subject</th><th>Detail</th>
+                <th style="width:6rem">Sent</th>
+            </tr></thead>
+            <tbody>
+            {% for entry in entries %}
+            <tr{% if not entry.delivered %} class="monitor-row-down"{% endif %}>
+                <td>
+                    <span class="monitor-status {{ 'down' if entry.transition == 'firing' else 'up' }}">
+                        {{ entry.transition }}
+                    </span>
+                </td>
+                <td><small class="text-muted"
+                           data-timestamp="{{ entry.at.isoformat() }}"></small></td>
+                <td><small>{{ rules.get(entry.rule_id, {}).get('name', '—') }}</small></td>
+                <td>
+                    {{ entry.subject_label or entry.subject }}
+                    {% if entry.subject_label
+                          and entry.subject_label != entry.subject %}
+                    <div><code class="text-muted"
+                         style="font-size:.7rem">{{ entry.subject }}</code></div>
+                    {% endif %}
+                </td>
+                <td><small>{{ entry.detail or '—' }}</small></td>
+                <td>
+                    {% if entry.delivered %}
+                    <i class="fas fa-check text-success"></i>
+                    {% else %}
+                    <i class="fas fa-xmark text-danger"
+                       title="{{ entry.delivery_error }}"></i>
+                    <div><small class="text-danger" style="font-size:.7rem"
+                        >{{ (entry.delivery_error or '')[:60] }}</small></div>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if pager %}
+    <div class="card-footer d-flex justify-content-between align-items-center">
+        <small class="text-muted">
+            {{ pager.first }}&ndash;{{ pager.last }} of
+            {{ "{:,}".format(pager.total) }}
+        </small>
+        <nav><ul class="pagination pagination-sm mb-0">
+            {% for number in pager.numbers %}
+            <li class="page-item {% if number == pager.page %}active{% endif %}">
+                <a class="page-link" href="{{ url_for('alerts.history',
+                    page=number, undelivered='1' if undelivered_only else None) }}"
+                >{{ number }}</a>
+            </li>
+            {% endfor %}
+        </ul></nav>
+    </div>
+    {% endif %}
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+document.querySelectorAll('[data-timestamp]').forEach(function (el) {
+    const raw = el.getAttribute('data-timestamp');
+    if (!raw) { return; }
+    const when = new Date(raw);
+    if (!isNaN(when)) { el.textContent = when.toLocaleString(); }
+});
+</script>
+{% endblock %}

@@ -202,6 +202,31 @@ def _add_monitor_request(connection):
             "ALTER TABLE wdash_monitors ADD COLUMN secrets TEXT"))
 
 
+def _add_alerting(connection):
+    """Version 12: rules, channels, state, silences and history."""
+    from .schema import (
+        alert_channels, alert_history, alert_rules, alert_silences, alert_state,
+    )
+    for table in (alert_channels, alert_rules, alert_state, alert_silences,
+                  alert_history):
+        table.create(connection, checkfirst=True)
+
+
+def _add_alert_label(connection):
+    """Version 13: the name a history row is about.
+
+    Version 12 stored the subject id alone, so the history screen showed a
+    uuid. Looking the name up at render time does not work either: history is
+    most often read about a monitor that has since been deleted.
+    """
+    from sqlalchemy import inspect, text
+    columns = {column["name"] for column
+               in inspect(connection).get_columns("wdash_alert_history")}
+    if "subject_label" not in columns:
+        connection.execute(text(
+            "ALTER TABLE wdash_alert_history ADD COLUMN subject_label VARCHAR(255)"))
+
+
 MIGRATIONS = [
     (1, "initial schema", _create_everything),
     (2, "authorization audit trail", _add_audit),
@@ -214,6 +239,8 @@ MIGRATIONS = [
     (9, "agents, monitors and their results", _add_own_monitoring),
     (10, "index monitor results for the listing", _index_monitor_results),
     (11, "monitor request configuration and its secrets", _add_monitor_request),
+    (12, "alert rules, channels, state and history", _add_alerting),
+    (13, "the name an alert was about", _add_alert_label),
 ]
 
 

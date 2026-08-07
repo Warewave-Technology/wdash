@@ -39,6 +39,12 @@
       data-bs-target="#tab-monitors" type="button">
       <i class="fas fa-heart-pulse"></i> Checks &amp; agents</button></li>
   <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
+      data-bs-target="#tab-alerts" type="button">
+      <i class="fas fa-bell"></i> Alerts
+      {% if undelivered %}
+      <span class="badge bg-danger ms-1">{{ undelivered }}</span>
+      {% endif %}</button></li>
+  <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
       data-bs-target="#tab-roles" type="button">
       <i class="fas fa-user-shield"></i> Roles &amp; access</button></li>
 </ul>
@@ -364,6 +370,194 @@
               <button class="btn btn-sm btn-outline-danger">
                 <i class="fas fa-trash"></i>
               </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ============================ ALERTS ============================ -->
+<div class="tab-pane fade" id="tab-alerts">
+
+  <div class="alert alert-secondary py-2" style="font-size:.85rem">
+    <i class="fas fa-circle-info"></i>
+    Rules are evaluated by <code>python -m wdash.alerts</code>, which has to be
+    running &mdash; nothing in the web process sends alerts. It is a separate
+    process because the evaluation must run when NOTHING is arriving: an agent
+    going completely silent produces no requests at all, and that is exactly
+    when somebody needs telling.
+  </div>
+
+  {% if undelivered %}
+  <div class="alert alert-warning py-2" style="font-size:.85rem">
+    <i class="fas fa-triangle-exclamation"></i>
+    <strong>{{ undelivered }} alert(s) were never delivered.</strong>
+    An alert that failed to send and was not noticed is the worst of both:
+    nobody was told, and nobody knows they were not.
+    <a href="{{ url_for('alerts.history', undelivered='1') }}">See which.</a>
+  </div>
+  {% endif %}
+
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="mb-0">Where alerts go</h5>
+      <button class="btn btn-sm btn-primary" data-bs-toggle="modal"
+              data-bs-target="#channelModal">
+        <i class="fas fa-plus"></i> Add channel
+      </button>
+    </div>
+    {% if not channels %}
+    <div class="card-body text-muted text-center py-4">
+      <small>No channel. Slack, Teams, PagerDuty, Opsgenie and Alertmanager
+      all accept a webhook.</small>
+    </div>
+    {% else %}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0" style="font-size:.85rem">
+        <thead><tr><th>Channel</th><th>Type</th><th>Host</th><th></th></tr></thead>
+        <tbody>
+        {% for channel in channels %}
+        <tr>
+          <td>{{ channel.name }}</td>
+          <td><span class="badge bg-secondary">{{ channel.kind }}</span></td>
+          <td>
+            <code class="text-muted">{{ channel.host }}</code>
+            {# The host, not the URL. For Slack and Teams the PATH is the
+               credential, so a screen that shows it is a screen that leaks
+               the ability to post. #}
+            <div><small class="text-muted" style="font-size:.7rem">
+              the full URL is encrypted and not shown</small></div>
+          </td>
+          <td class="text-end">
+            <form method="post" class="d-inline"
+                  action="{{ url_for('config.delete_channel',
+                                     channel_id=channel.id) }}">
+              <button class="btn btn-sm btn-outline-danger">
+                <i class="fas fa-trash"></i></button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="mb-0">Rules</h5>
+      {# With no channel there is nowhere to send, so a rule cannot be saved.
+         The button used to be `disabled` with the reason in a `title` —
+         which browsers do not show on a disabled control, so it was a dead
+         end with no visible explanation. An action that leads somewhere
+         beats a control that cannot do anything. #}
+      {% if channels %}
+      <button class="btn btn-sm btn-primary" data-bs-toggle="modal"
+              data-bs-target="#ruleModal" id="addRuleAlertBtn">
+        <i class="fas fa-plus"></i> Add rule
+      </button>
+      {% else %}
+      <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal"
+              data-bs-target="#channelModal">
+        <i class="fas fa-arrow-up"></i> Add a channel first
+      </button>
+      {% endif %}
+    </div>
+    {% if not rules %}
+    <div class="card-body text-muted text-center py-4">
+      {% if not channels %}
+      <small>
+        <strong>A rule needs somewhere to send.</strong>
+        Add a channel above &mdash; a webhook reaches Slack, Teams,
+        PagerDuty, Opsgenie and Alertmanager &mdash; and this becomes
+        available.
+      </small>
+      {% else %}
+      <small>No rule. Until there is one, somebody has to be looking at the
+      Monitors page to find out that something is down.</small>
+      {% endif %}
+    </div>
+    {% else %}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0" style="font-size:.85rem">
+        <thead><tr>
+          <th style="width:16rem">Rule</th>
+          <th>What it does</th>
+          <th style="width:3rem"></th>
+        </tr></thead>
+        <tbody>
+        {% for rule in rules %}
+        <tr>
+          <td>
+            {{ rule.name }}
+            {% if not rule.enabled %}
+            <span class="badge bg-secondary ms-1">disabled</span>{% endif %}
+          </td>
+          <td>
+            {# One sentence, built on the server. Three columns of `kind`,
+               `threshold` and `selector` are three jargon fragments side by
+               side — which is what this was, and it could not be read. #}
+            {{ rule_sentences.get(rule.id, '') }}
+          </td>
+          <td class="text-end">
+            <form method="post" class="d-inline"
+                  action="{{ url_for('config.delete_rule', rule_id=rule.id) }}">
+              <button class="btn btn-sm btn-outline-danger">
+                <i class="fas fa-trash"></i></button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="mb-0">Silences</h5>
+      {# A button and a modal, like every other section here. Three inputs
+         sitting in a card header read as a search bar — somebody types into
+         them expecting a filter. #}
+      <button class="btn btn-sm btn-primary" data-bs-toggle="modal"
+              data-bs-target="#silenceModal">
+        <i class="fas fa-bell-slash"></i> Add silence
+      </button>
+    </div>
+    <div class="card-body py-2">
+      <small class="text-muted" style="font-size:.75rem">
+        A silence suppresses the alert, not the state &mdash; and recoveries
+        are still sent. Silencing the noise of something being broken is not
+        the same as wanting to believe it still is.
+      </small>
+    </div>
+    {% if silences %}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0" style="font-size:.85rem">
+        <thead><tr><th>Subject</th><th>Until</th><th>Reason</th>
+          <th>By</th><th></th></tr></thead>
+        <tbody>
+        {% for silence in silences %}
+        <tr>
+          <td><code>{{ silence.subject }}</code></td>
+          <td><small class="text-muted"
+                     data-timestamp="{{ silence.until.isoformat() }}"></small></td>
+          <td><small>{{ silence.reason or '—' }}</small></td>
+          <td><small class="text-muted">{{ silence.created_by or '—' }}</small></td>
+          <td class="text-end">
+            <form method="post" class="d-inline"
+                  action="{{ url_for('config.delete_silence',
+                                     silence_id=silence.id) }}">
+              <button class="btn btn-sm btn-outline-secondary"
+                      title="Lift this silence">
+                <i class="fas fa-bell"></i></button>
             </form>
           </td>
         </tr>
