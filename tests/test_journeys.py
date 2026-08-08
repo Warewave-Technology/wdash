@@ -879,3 +879,72 @@ class JourneyPageTest(unittest.TestCase):
         page = self.client.get(
             f"/monitors/{journey['id']}?window=1h").get_data(as_text=True)
         self.assertNotIn("/monitors/screenshot/", page)
+
+
+class JourneyDeletionTest(unittest.TestCase):
+    """Deleting a journey has to take its screenshots with it.
+
+    They are the only thing a monitor owns that lives in its own table, and the
+    first version of `delete()` did not know about it — the pictures sat there
+    until a retention sweep happened to reach them, belonging to nothing.
+    Found while cleaning up a lab, which is later than a test would have.
+    """
+
+    def setUp(self):
+        import tempfile
+        from wdash.store import Store
+        from wdash.store.secrets import SecretBox
+        handle, self.database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        self.store = Store.open(f"sqlite:///{self.database}",
+                                secret_box=SecretBox(SecretBox.generate_key()))
+
+    def tearDown(self):
+        self.store.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.database + suffix):
+                os.unlink(self.database + suffix)
+
+    def _shots(self):
+        from sqlalchemy import func, select
+        from wdash.store.schema import journey_screenshots
+        with self.store.engine.connect() as connection:
+            return connection.execute(
+                select(func.count()).select_from(journey_screenshots)).scalar()
+
+    def _journey_with_a_failure(self, name="Sign in"):
+        from datetime import datetime, timezone
+        agent, _token = self.store.agents.create(name + " probe")
+        journey = self.store.monitors.create(
+            name=name, kind="browser", target=None, interval_seconds=300,
+            timeout_seconds=60, agent_ids=[agent["id"]],
+            steps=[{"kind": "goto", "value": "https://x.example/login"},
+                   {"kind": "expect_url", "value": "/home"}])
+        self.store.results.record(agent["id"], [{
+            "monitor_id": journey["id"],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "status": "down", "error": "step 2 failed",
+            "screenshot": {"base64": base64.b64encode(
+                b"\xff\xd8\xff" + b"x" * 2000).decode()}}])
+        return journey
+
+    def test_deleting_a_journey_removes_its_screenshots(self):
+        journey = self._journey_with_a_failure()
+        self.assertEqual(self._shots(), 1)
+        self.store.monitors.delete(journey["id"])
+        self.assertEqual(self._shots(), 0)
+
+    def test_it_leaves_another_journeys_screenshots_alone(self):
+        """A DELETE with the wrong WHERE would pass the test above."""
+        first = self._journey_with_a_failure("First")
+        self._journey_with_a_failure("Second")
+        self.assertEqual(self._shots(), 2)
+        self.store.monitors.delete(first["id"])
+        self.assertEqual(self._shots(), 1)
+
+    def test_the_results_go_too(self):
+        journey = self._journey_with_a_failure()
+        self.assertEqual(self.store.results.count(journey["id"]), 1)
+        self.store.monitors.delete(journey["id"])
+        self.assertEqual(self.store.results.count(journey["id"]), 0)

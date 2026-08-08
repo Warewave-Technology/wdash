@@ -528,6 +528,13 @@ class MonitorRepository:
                 monitor_agents.c.monitor_id == monitor_id))
             connection.execute(delete(monitor_results).where(
                 monitor_results.c.monitor_id == monitor_id))
+            # And the screenshots. They are the only thing a monitor owns that
+            # lives in its own table, and leaving them behind means a deleted
+            # journey's pictures sit there until a retention sweep happens to
+            # reach them — a week of images of a page nobody is checking any
+            # more, and rows that no longer belong to anything.
+            connection.execute(delete(journey_screenshots).where(
+                journey_screenshots.c.monitor_id == monitor_id))
             result = connection.execute(
                 delete(monitors).where(monitors.c.id == monitor_id))
         return bool(result.rowcount)
