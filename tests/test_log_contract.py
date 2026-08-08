@@ -104,6 +104,12 @@ class FakeES:
 class TestConfig(Config):
     TESTING = True
     SECRET_KEY = "contract"
+    # This module is about WIRING — that the log source is built excluding the
+    # trace patterns. It needs a source to exist, not one that answers, so the
+    # address is deliberately unresolvable: nothing here should be able to
+    # reach a real cluster by accident, which is how these tests spent a year
+    # quietly talking to the development lab on port 9200.
+    ELASTICSEARCH_URL = "http://elasticsearch.invalid:9200"
 
 
 def _session(permissions, indices=("*",)):

@@ -246,6 +246,64 @@ class EnvironmentIsolationTest(unittest.TestCase):
             self.assertNotIn(name, os.environ,
                              f"{name} survived into the test process")
 
+    def test_the_forced_ones_hold_the_value_they_were_given(self):
+        from tests import FORCED
+        for name, value in FORCED.items():
+            self.assertEqual(os.environ.get(name), value)
+
+    def test_removing_a_name_is_not_the_same_as_switching_it_off(self):
+        """The bug this whole split exists for.
+
+        `ELASTICSEARCH_URL` was on the removal list, was faithfully removed,
+        and `Config` fell back to `http://localhost:9200` — the development
+        lab's own address. Fourteen tests talked to a real cluster for as long
+        as anybody had one running, and said so only by failing on the day it
+        was switched off.
+
+        The old guard asserted the NAME was absent. That was true, and it
+        meant nothing. What matters is the value the application ends up with,
+        so that is what is asserted.
+        """
+        from wdash.config import Config
+
+        class Fresh(Config):
+            pass
+
+        self.assertFalse(
+            Fresh.ELASTICSEARCH_URL,
+            "the suite computes an Elasticsearch URL, so any test that does "
+            "not declare its own source may be talking to a real cluster")
+
+    def test_every_name_with_a_live_default_is_forced_rather_than_removed(self):
+        """A default that is an address or a path points at something real.
+        Removing the variable hands the test whatever is there."""
+        import inspect
+        import re
+
+        from tests import FORCED, NEUTRALISED
+        from wdash import config as config_module
+
+        source = inspect.getsource(config_module)
+        live = []
+        for line in source.splitlines():
+            found = re.search(r"os\.environ\.get\(\s*['\"](\w+)['\"]\s*,\s*"
+                              r"['\"]([^'\"]+)['\"]", line)
+            if not found:
+                continue
+            name, default = found.groups()
+            if name not in NEUTRALISED and name not in FORCED:
+                continue
+            # An address or a filesystem path. A default like `file` or a
+            # list of index names is inert on its own.
+            if "://" in default or default.startswith("/"):
+                live.append((name, default))
+
+        wrong = [name for name, _ in live if name not in FORCED]
+        self.assertEqual(
+            wrong, [],
+            f"these have a default pointing at something real and are only "
+            f"REMOVED, which lands the suite on it: {live}")
+
     def test_every_config_value_that_means_off_when_empty_is_listed(self):
         """The two that read with a default rather than `or` are exactly the
         two where empty means "off" — so those are the dangerous ones."""
@@ -253,7 +311,8 @@ class EnvironmentIsolationTest(unittest.TestCase):
 
         from wdash import config as config_module
         source = inspect.getsource(config_module)
-        from tests import NEUTRALISED
+        from tests import FORCED, NEUTRALISED
+        handled = set(NEUTRALISED) | set(FORCED)
 
         missing = []
         for line in source.splitlines():
@@ -262,7 +321,7 @@ class EnvironmentIsolationTest(unittest.TestCase):
             # `os.environ.get('X', default)` — a default rather than `or`,
             # which is the shape that lets an empty value through.
             for name in ("ELASTICSEARCH_URL", "TRACE_INDEX_PATTERNS"):
-                if f"'{name}'" in line and name not in NEUTRALISED:
+                if f"'{name}'" in line and name not in handled:
                     missing.append(name)
         self.assertEqual(missing, [])
 

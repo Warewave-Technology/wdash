@@ -223,6 +223,14 @@ class AuthSettingsTest(ConfigTestCase):
 
 
 class RoleEditingTest(ConfigTestCase):
+    def setUp(self):
+        super().setUp()
+        # One test here probes `/api/search` to show an edit reaching a live
+        # session. Declared rather than inherited from whatever is listening
+        # on port 9200 — which is what it used to be.
+        from tests.support import with_stub_logs
+        with_stub_logs(self.app)
+
     def save_role(self, **overrides):
         form = {"name": "auditor", "permissions": "logs:read\ntraces:read",
                 "containers": "audit-*", "trace_containers": "",

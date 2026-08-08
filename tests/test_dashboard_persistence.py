@@ -223,15 +223,22 @@ class StorageTest(unittest.TestCase):
     """The manager on its own, without Flask."""
 
     def setUp(self):
-        handle, self.storage = tempfile.mkstemp(suffix=".json")
-        os.close(handle)
+        # A directory of its own, not the shared system temp.
+        #
+        # `test_a_failed_save_leaves_no_temporary_file_behind` lists the
+        # directory before and after and asserts nothing was left. Pointed at
+        # /tmp that is an assertion about every other process on the machine,
+        # and it failed once in a full run and passed on its own — which reads
+        # as flakiness and is really a test asking the wrong question.
+        self.directory = tempfile.mkdtemp(prefix="wdash-dashboards-")
+        self.storage = os.path.join(self.directory, "dashboards.json")
         with open(self.storage, "w") as file:
             file.write("[]")
         self.manager = DashboardManager(self.storage)
 
     def tearDown(self):
-        if os.path.exists(self.storage):
-            os.unlink(self.storage)
+        import shutil
+        shutil.rmtree(self.directory, ignore_errors=True)
 
     def test_save_raises_rather_than_swallowing(self):
         self.manager.storage_path = "/nonexistent-directory/dashboards.json"

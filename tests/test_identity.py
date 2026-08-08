@@ -165,6 +165,12 @@ class PerRequestAuthorizationTest(IdentityTestCase):
     def setUp(self):
         super().setUp()
         self.complete_setup()
+        # `/api/search` is the probe; what it searches is beside the point.
+        # Said out loud, because without it these answered from whatever was
+        # listening on port 9200 and a permission test failed the day the
+        # development lab was switched off.
+        from tests.support import with_stub_logs
+        with_stub_logs(self.app)
 
     def search(self):
         """An endpoint that genuinely gates on a permission."""

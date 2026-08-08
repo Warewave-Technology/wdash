@@ -40,6 +40,11 @@ class TestConfig(Config):
     TESTING = True
     SECRET_KEY = "test-secret-key"
     WTF_CSRF_ENABLED = False
+    # The Advisor needs a source to have a report ABOUT; `analyze()` is
+    # replaced below, so it never has to answer. Unresolvable on purpose:
+    # these tests used to inherit `http://localhost:9200` and pass against
+    # whatever cluster a developer happened to be running.
+    ELASTICSEARCH_URL = "http://elasticsearch.invalid:9200"
 
 
 class AdvisorRouteTest(unittest.TestCase):

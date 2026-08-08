@@ -172,6 +172,12 @@ class GateTestCase(unittest.TestCase):
             OIDC_CLIENT_ID = None
 
         self.app = create_app(TestConfig)
+        # Declared, not inherited. These tests are about AUTHORIZATION and use
+        # `/api/search` as the probe; what it searches is beside the point.
+        # Without this they answered from whatever was listening on port 9200,
+        # which for a year was the development lab.
+        from tests.support import with_stub_logs
+        self.logs = with_stub_logs(self.app)
         self.client = self.app.test_client()
         self.client.post("/setup", data={
             "username": "owner", "password": PASSWORD, "confirm": PASSWORD})

@@ -138,3 +138,96 @@ def search_body(kwargs):
     return {KEYWORD_TO_BODY.get(key, key): value
             for key, value in kwargs.items()
             if key not in SEARCH_OPTIONS}
+
+
+# ---------------------------------------------------------------------------
+# A log source that answers without a network
+# ---------------------------------------------------------------------------
+
+class StubLogSource:
+    """Enough of `LogSource` for a test that is about something else.
+
+    Most of the tests that reach for this are about AUTHORIZATION: does a role
+    with `logs:read` get a 200, does revoking it take effect without signing
+    out. `/api/search` is the probe, and what it searches is beside the point.
+
+    Which is exactly how they came to depend on a live cluster. `Config`
+    defaults `ELASTICSEARCH_URL` to `http://localhost:9200`, so with the
+    development lab running they passed against real Elasticsearch and nobody
+    could tell — until the lab was switched off and fourteen tests failed at
+    once, none of which was about Elasticsearch.
+
+    A stub keeps the dependency where a reader can see it: the test declares
+    the source it wants and the assertion is about the permission again.
+    """
+
+    backend = "stub"
+
+    def __init__(self, name="stub-logs", containers=("logs-app", "logs-web"),
+                 records=(), fail=None):
+        self.name = name
+        self._containers = tuple(containers)
+        self._records = list(records)
+        #: Set to an exception to make every call raise, for the paths that
+        #: are about a source being down.
+        self.fail = fail
+        self.searches = []
+
+    # ---------- Source ----------
+
+    @property
+    def capabilities(self):
+        from wdash.hub.source import Capability
+        return frozenset({Capability.LOG_SEARCH, Capability.LOG_HISTOGRAM})
+
+    def supports(self, capability):
+        return capability in self.capabilities
+
+    def health(self):
+        if self.fail:
+            return False, str(self.fail)
+        return True, "stub"
+
+    def containers(self, scope):
+        if self.fail:
+            raise self.fail
+        # Through the scope, not around it: a stub that ignores boundaries
+        # would make every RBAC test pass.
+        return tuple(c for c in self._containers
+                     if scope.allows_container(c, self.name))
+
+    # ---------- LogSource ----------
+
+    def search(self, query, scope):
+        from wdash.hub.models import LogPage
+        if self.fail:
+            raise self.fail
+        self.searches.append(query)
+        reachable = self.containers(scope)
+        records = list(self._records) if reachable else []
+        return LogPage(records=records, total=len(records),
+                       containers=reachable, sources=[
+                           {"name": self.name, "count": len(records),
+                            "total": len(records), "failed": False}])
+
+    def fetch(self, ref, scope):
+        return next((r for r in self._records
+                     if r.ref and r.ref.id == ref.id), None)
+
+    def histogram(self, query, scope):
+        if self.fail:
+            raise self.fail
+        return []
+
+
+def with_stub_logs(app, **kwargs):
+    """Give an app a log source that answers. Returns the stub.
+
+    Replaces whatever the environment produced, so a test says what it depends
+    on instead of inheriting it.
+    """
+    source = StubLogSource(**kwargs)
+    app.hub.replace_all(logs=[source],
+                        traces=list(app.hub._traces.values()),
+                        monitors=list(app.hub._monitors.values()))
+    return source
