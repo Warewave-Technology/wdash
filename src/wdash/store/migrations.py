@@ -227,6 +227,31 @@ def _add_alert_label(connection):
             "ALTER TABLE wdash_alert_history ADD COLUMN subject_label VARCHAR(255)"))
 
 
+def _add_browser_journeys(connection):
+    """Version 14: browser journeys and the evidence from a failed one.
+
+    Three additions, none of which touch an existing row: a step list on the
+    monitor, the per-step results on each run, and the screenshots in their
+    own table so retention can drop pictures long before it drops history.
+    """
+    from sqlalchemy import inspect, text
+    from .schema import journey_screenshots
+
+    inspector = inspect(connection)
+    json_type = "JSONB" if connection.dialect.name == "postgresql" else "TEXT"
+
+    for table, column, kind in (
+            ("wdash_monitors", "steps", json_type),
+            ("wdash_monitor_results", "steps", json_type),
+            ("wdash_monitor_results", "screenshot_id", "VARCHAR(64)")):
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        if column not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN {column} {kind}"))
+
+    journey_screenshots.create(connection, checkfirst=True)
+
+
 MIGRATIONS = [
     (1, "initial schema", _create_everything),
     (2, "authorization audit trail", _add_audit),
@@ -241,6 +266,8 @@ MIGRATIONS = [
     (11, "monitor request configuration and its secrets", _add_monitor_request),
     (12, "alert rules, channels, state and history", _add_alerting),
     (13, "the name an alert was about", _add_alert_label),
+    (14, "browser journeys, their steps and their screenshots",
+     _add_browser_journeys),
 ]
 
 

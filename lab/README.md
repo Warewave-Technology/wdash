@@ -109,6 +109,39 @@ licence activating itself. That way we never accidentally build a dependency on
 Platinum features such as document- or field-level security — all RBAC has to
 stay in the application layer.
 
+## Synthetic targets
+
+`./lab.sh up synthetics` starts nginx with six endpoints, each of which exists
+to produce a specific document. A monitoring page that only ever shows green
+proves nothing.
+
+| Port | What it is |
+|------|------------|
+| 18080 | a plain 200 |
+| 18081 | a 500, so `monitor.status: down` and `error.*` appear |
+| 18082 | echoes headers, cookies and auth back as JSON |
+| 18083 | a sign-in form and a dashboard, for browser journeys |
+| 18443 | TLS with a certificate valid for a year |
+| 18444 | TLS with a certificate valid for twelve days |
+
+The expiring certificate is the point of a TLS monitor: waiting a year to see
+the warning is not a test.
+
+The journey site on 18083 is static, and the "authentication" happens in the
+page — `hunter2` signs in, anything else stays on the form and shows the error
+banner. That is enough, because a journey drives a BROWSER: what it has to
+exercise is a form, a submit, a navigation, and a page that says something
+different afterwards. A real session would add a backend to the lab and prove
+nothing extra about the thing under test.
+
+A journey against it needs an agent with a browser:
+
+```bash
+docker build -t wdash-browser --target browser ..
+docker run --rm --add-host=host.docker.internal:host-gateway wdash-browser \
+    --server http://host.docker.internal:5000 --token <the agent token>
+```
+
 ## Port conflicts
 
 The project-root `docker-compose.yml` also contains Elasticsearch, Redis and

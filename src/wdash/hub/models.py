@@ -600,6 +600,76 @@ class MonitorCheck:
     status: str = UNKNOWN
     duration_ms: float = None
     error: str = ""
+    #: StepResult per step, for a browser journey. Empty for every other kind
+    #: — which is what lets one table render both without a second page.
+    steps: tuple = field(default_factory=tuple)
+    #: The failure screenshot, when there is one.
+    screenshot_id: str = None
+
+    @property
+    def failed_step(self):
+        return next((s for s in self.steps if s.status == STEP_FAILED), None)
+
+
+#: How a step turned out. `skipped` is the important one — see JourneyRun.
+STEP_PASSED = "passed"
+STEP_FAILED = "failed"
+STEP_SKIPPED = "skipped"
+
+
+@dataclass
+class StepResult:
+    """One step of one journey run.
+
+    Timed individually, because that is the whole reason a journey is not a
+    request. "The checkout takes nine seconds" is a fact nobody can act on;
+    "the basket page takes eight of the nine" is a fact somebody can fix.
+    """
+    index: int
+    kind: str = ""
+    #: What the step was, rendered — "Type into #password". Stored rather than
+    #: derived so a run stays readable after the journey has been edited: the
+    #: alternative shows last week's failure against this week's step 4.
+    description: str = ""
+    status: str = STEP_SKIPPED
+    duration_us: int = None
+    error: str = ""
+
+    @property
+    def duration_ms(self):
+        return None if self.duration_us is None else self.duration_us / 1000.0
+
+
+@dataclass
+class JourneyRun:
+    """One run of a browser journey.
+
+    A journey stops at the first failing step. The steps after it are
+    `skipped`, NOT failed: marking them failed says seven things broke when
+    one did, and the seven include every step that never ran.
+    """
+    monitor_id: str
+    started_at: object = None
+    status: str = UNKNOWN
+    duration_us: int = None
+    error: str = ""
+    steps: tuple = field(default_factory=tuple)
+    #: Set when a step failed and the agent could still reach the page.
+    screenshot_id: str = None
+    agent: str = ""
+
+    @property
+    def duration_ms(self):
+        return None if self.duration_us is None else self.duration_us / 1000.0
+
+    @property
+    def failed_step(self):
+        return next((s for s in self.steps if s.status == STEP_FAILED), None)
+
+    @property
+    def completed(self):
+        """Steps that actually ran. The denominator on a progress line."""
+        return sum(1 for s in self.steps if s.status != STEP_SKIPPED)
 
 
 @dataclass

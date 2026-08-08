@@ -22,8 +22,8 @@ joins nobody performs.
 """
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Index, Integer, MetaData, String, Table, Text,
-    UniqueConstraint,
+    Boolean, Column, DateTime, Index, Integer, LargeBinary, MetaData, String,
+    Table, Text, UniqueConstraint,
 )
 from sqlalchemy.types import JSON
 
@@ -243,12 +243,16 @@ monitors = Table(
     "wdash_monitors", metadata,
     Column("id", String(64), primary_key=True),
     Column("name", String(128), nullable=False),
-    #: http | tcp. Deliberately short: ICMP needs a raw socket and therefore a
-    #: privileged container, and a browser check needs a browser. Both are
-    #: real, and both are a decision to make on purpose rather than a type
-    #: that quietly appears in a dropdown.
+    #: http | tcp | browser. Still short: ICMP needs a raw socket and
+    #: therefore a privileged container, which is a decision to make on
+    #: purpose rather than a type that quietly appears in a dropdown. `browser`
+    #: is here because it earned the same decision — it needs an agent built
+    #: on a different image, and one that is not deployed simply reports the
+    #: journey as unknown rather than pretending.
     Column("kind", String(16), nullable=False),
-    #: A URL for http, host:port for tcp.
+    #: A URL for http, host:port for tcp. For a browser journey it is the
+    #: first step's URL, copied here so a listing that shows "where" for every
+    #: other kind does not have a blank column for this one.
     Column("target", String(1024), nullable=False),
     Column("interval_seconds", Integer, nullable=False, default=60),
     Column("timeout_seconds", Integer, nullable=False, default=10),
@@ -263,6 +267,10 @@ monitors = Table(
     #: credential. Same treatment as a source's password, for the same reason
     #: — WDash hands these to an agent and to nobody else.
     Column("secrets", Text),
+    #: The step list, for a browser journey. NULL for every other kind — a
+    #: journey is the only check whose definition is a sequence, and giving
+    #: http checks an empty steps column would invite somebody to fill it in.
+    Column("steps", JSON),
     Column("labels", JSON),
     Column("enabled", Boolean, nullable=False, default=True),
     Column("created_by", String(255)),
@@ -299,6 +307,17 @@ monitor_results = Table(
     Column("duration_us", Integer),
     Column("error", Text),
     Column("http_status", Integer),
+    #: A browser journey's per-step results, as a list. NOT a row per step:
+    #: this table was measured comfortable at two million rows and unusable at
+    #: eight, and a seven-step journey would reach either seven times sooner.
+    #: The dominant read is "show me this run", which wants them together
+    #: anyway; "which step fails most" is an analysis nobody has asked for and
+    #: would be a different table when they do.
+    Column("steps", JSON),
+    #: The screenshot taken when a step failed, if one was. A reference rather
+    #: than the image: a query that selects a day of results should not drag
+    #: a megabyte of PNG per row behind it.
+    Column("screenshot_id", String(64)),
     #: The certificate, when the check saw one. Shaped like the neutral
     #: Certificate model so the source adapter has nothing to translate.
     Column("tls", JSON),
@@ -326,6 +345,27 @@ monitor_results = Table(
 # recovered, and no way to avoid sending the same sentence every fifteen
 # seconds for an hour — which is how a channel gets muted, and a muted channel
 # is worse than none because it looks like coverage.
+
+#: Evidence from a failed journey.
+#:
+#: Its own table so retention can drop images long before it drops results.
+#: "Step 4 failed" a month later is still a data point; the picture of a login
+#: page from a month ago is a megabyte nobody will open.
+journey_screenshots = Table(
+    "wdash_journey_screenshots", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("monitor_id", String(64), nullable=False),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+    #: JPEG. Not PNG: a screenshot of a web page compresses to roughly a tenth
+    #: the size and nobody is reading pixel values off it.
+    Column("content_type", String(64), nullable=False, default="image/jpeg"),
+    Column("bytes", Integer, nullable=False),
+    Column("image", LargeBinary, nullable=False),
+    #: Retention sweeps by age, and the detail page looks one up by monitor.
+    Index("ix_wdash_journey_screenshots_age", "captured_at"),
+    Index("ix_wdash_journey_screenshots_monitor", "monitor_id", "captured_at"),
+)
+
 
 alert_channels = Table(
     "wdash_alert_channels", metadata,

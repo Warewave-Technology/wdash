@@ -139,6 +139,7 @@ def config_page():
         own_agents=store.agents.all(),
         own_monitors=store.monitors.all(),
         monitor_kinds=MONITOR_KINDS,
+        step_kinds=journey_step_kinds(),
         roles=store.roles.all(),
         permission_groups=permission_groups(),
         default_role=store.settings.get("rbac.default_role", "viewer"),
@@ -1126,6 +1127,26 @@ def save_monitor():
         request=request_config,
         agent_ids=form.getlist("agent_ids"))
 
+    if form.get("kind") == "browser":
+        # A journey has no request configuration and no HTTP assertions: a
+        # browser sends its own headers, and what makes a journey pass is its
+        # expect steps. Passing them anyway would store boxes the http form
+        # left filled in from a previous edit.
+        fields.update(assertions={}, request=None,
+                      target=None, steps=form.get("steps") or "[]")
+        # `journey_secret_<name>`, one per placeholder the steps mention.
+        #
+        # Passed through as submitted, blanks included. The store drops empty
+        # values and keeps what is already stored — an edit that does not
+        # retype the password keeps it. Filtering here as well could not be
+        # made to fail: every case the route would catch the store catches
+        # too, and untestable redundancy is what somebody edits next while
+        # believing it does something.
+        fields["journey_secrets"] = {
+            key[len("journey_secret_"):]: value
+            for key, value in form.items()
+            if key.startswith("journey_secret_")}
+
     try:
         if monitor_id:
             saved = store.monitors.update(
@@ -1177,6 +1198,21 @@ def delete_monitor(monitor_id):
 #: What each rule kind watches, in a sentence somebody can check against what
 #: they meant. The identifiers — monitor_down, agent_silent — are for the
 #: database; nobody should have to learn them to configure an alert.
+def journey_step_kinds():
+    """The step vocabulary, for the editor.
+
+    Rendered from the same dictionary the server validates against rather than
+    written out again in JavaScript: a form that offers a verb the validator
+    does not have is a form that produces an error on save, and a validator
+    with a verb the form does not offer is a feature nobody can reach.
+    """
+    from ..journeys.steps import STEP_KINDS
+    return {name: {"label": spec.label, "selector": spec.selector,
+                   "value": spec.value, "value_label": spec.value_label,
+                   "asserts": spec.asserts, "hint": spec.hint}
+            for name, spec in STEP_KINDS.items()}
+
+
 RULE_DESCRIPTIONS = {
     "monitor_down": (
         "A check stops answering",

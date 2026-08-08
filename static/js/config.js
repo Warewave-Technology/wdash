@@ -681,6 +681,11 @@ function fillMonitor(monitor) {
     value('monitorAuthPassword', '');
     value('monitorAuthToken', '');
 
+    if (window.wdashFillSteps) {
+        window.wdashFillSteps((monitor && monitor.steps) || [],
+                              (monitor && monitor.secret_names) || []);
+    }
+
     applyMonitorKind();
 
     const title = document.getElementById('monitorModalTitle');
@@ -698,6 +703,20 @@ function applyMonitorKind() {
     const kind = document.getElementById('monitorKind')?.value;
     document.querySelectorAll('[data-http-only]').forEach(element => {
         element.classList.toggle('d-none', kind !== 'http');
+    });
+    document.querySelectorAll('[data-browser-only]').forEach(element => {
+        element.classList.toggle('d-none', kind !== 'browser');
+    });
+    // The address of a journey comes from its first step. A second box asking
+    // the same question has two answers, and they drift the first time
+    // somebody edits one of them.
+    document.querySelectorAll('[data-not-browser]').forEach(element => {
+        element.classList.toggle('d-none', kind === 'browser');
+        element.querySelectorAll('[required]').forEach(input => {
+            // A hidden required field blocks submission with a validation
+            // message pointing at something nobody can see.
+            input.disabled = (kind === 'browser');
+        });
     });
     const auth = document.getElementById('monitorAuthType')?.value || '';
     document.querySelectorAll('[data-auth]').forEach(element => {
@@ -777,3 +796,181 @@ if (window.location.hash === '#tab-alerts') {
         window.bootstrap.Tab.getOrCreateInstance(trigger).show();
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// Browser journeys
+// ---------------------------------------------------------------------------
+
+/**
+ * The step editor.
+ *
+ * A row per step, and the fields on a row follow the verb: `Expect URL` has no
+ * element to act on, `Click` has no value. Showing all three boxes for every
+ * verb produces steps with a selector on an assertion that ignores it, and
+ * somebody wrote it believing it narrowed the check.
+ *
+ * The verb list is not hard-coded here. It is rendered from the same
+ * dictionary the server validates against, so a form that accepts a step
+ * cannot be one the agent does not understand.
+ */
+(function setUpSteps() {
+    const rows = document.getElementById('stepRows');
+    if (!rows) return;
+
+    const KINDS = JSON.parse(
+        document.getElementById('stepKinds')?.textContent || '{}');
+    const field = document.getElementById('stepsField');
+    const secretRows = document.getElementById('secretRows');
+
+    function serialise() {
+        const steps = [];
+        rows.querySelectorAll('.step-row').forEach(row => {
+            const kind = row.querySelector('.step-kind').value;
+            const spec = KINDS[kind] || {};
+            const step = {kind: kind};
+            if (spec.selector) {
+                step.selector = row.querySelector('.step-selector').value.trim();
+            }
+            if (spec.value) {
+                step.value = row.querySelector('.step-value').value.trim();
+            }
+            steps.push(step);
+        });
+        field.value = JSON.stringify(steps);
+        renumber();
+        showSecrets(steps);
+    }
+
+    function renumber() {
+        rows.querySelectorAll('.step-row').forEach((row, index) => {
+            row.querySelector('.step-number').textContent = index + 1;
+        });
+    }
+
+    /**
+     * A box for every `{{ secret.name }}` the steps mention.
+     *
+     * Driven by the steps rather than kept as its own list: a credential that
+     * outlives the step that used it is a credential nobody knows is there.
+     * Existing values are never refilled — only whether one is stored.
+     */
+    function showSecrets(steps) {
+        if (!secretRows) return;
+        const wanted = [];
+        steps.forEach(step => {
+            const matches = String(step.value || '')
+                .matchAll(/\{\{\s*secret\.([A-Za-z0-9_-]{1,64})\s*\}\}/g);
+            for (const match of matches) {
+                if (!wanted.includes(match[1])) wanted.push(match[1]);
+            }
+        });
+
+        const known = new Set();
+        secretRows.querySelectorAll('input').forEach(input => {
+            if (wanted.includes(input.dataset.secret)) {
+                known.add(input.dataset.secret);
+            } else {
+                input.parentElement.remove();
+            }
+        });
+        const stored = new Set(JSON.parse(
+            document.getElementById('stepsField').dataset.stored || '[]'));
+        wanted.filter(name => !known.has(name)).forEach(name => {
+            const group = document.createElement('div');
+            group.className = 'input-group input-group-sm mb-1';
+            group.innerHTML =
+                `<span class="input-group-text" style="min-width:9rem">${
+                    escapeHtml(name)}</span>
+                 <input type="password" class="form-control"
+                        name="journey_secret_${escapeHtml(name)}"
+                        data-secret="${escapeHtml(name)}" autocomplete="off"
+                        placeholder="${stored.has(name)
+                            ? 'stored — leave empty to keep it'
+                            : 'required'}">`;
+            secretRows.appendChild(group);
+        });
+        document.getElementById('journeySecrets')
+            ?.classList.toggle('d-none', wanted.length === 0);
+    }
+
+    function applyRow(row) {
+        const spec = KINDS[row.querySelector('.step-kind').value] || {};
+        const selector = row.querySelector('.step-selector');
+        const value = row.querySelector('.step-value');
+        selector.classList.toggle('d-none', !spec.selector);
+        value.classList.toggle('d-none', !spec.value);
+        value.placeholder = spec.value_label || '';
+        row.querySelector('.step-hint').textContent = spec.hint || '';
+    }
+
+    function addRow(step) {
+        step = step || {};
+        const row = document.createElement('div');
+        row.className = 'mb-2 step-row';
+        row.innerHTML =
+            `<div class="input-group input-group-sm">
+               <span class="input-group-text step-number"
+                     style="min-width:2.2rem; justify-content:center"></span>
+               <select class="form-select step-kind" style="max-width:11rem">
+                 ${Object.entries(KINDS).map(([name, spec]) =>
+                     `<option value="${name}"${
+                         name === step.kind ? ' selected' : ''}>${
+                         escapeHtml(spec.label)}</option>`).join('')}
+               </select>
+               <input type="text" class="form-control step-selector"
+                      placeholder="#email" value="${
+                          escapeHtml(step.selector || '')}">
+               <input type="text" class="form-control step-value" value="${
+                          escapeHtml(step.value || '')}">
+               <button type="button" class="btn btn-outline-secondary step-up"
+                       title="Move up">&uarr;</button>
+               <button type="button" class="btn btn-outline-secondary step-down"
+                       title="Move down">&darr;</button>
+               <button type="button" class="btn btn-outline-danger step-remove"
+                       title="Remove">&times;</button>
+             </div>
+             <div class="form-text step-hint" style="font-size:.7rem"></div>`;
+        rows.appendChild(row);
+
+        row.querySelector('.step-remove').addEventListener('click', () => {
+            row.remove();
+            serialise();
+        });
+        // Order is the whole meaning of a journey, and rewriting three rows to
+        // move one step is how somebody ends up with a sign-in after the
+        // checkout.
+        row.querySelector('.step-up').addEventListener('click', () => {
+            const previous = row.previousElementSibling;
+            if (previous) rows.insertBefore(row, previous);
+            serialise();
+        });
+        row.querySelector('.step-down').addEventListener('click', () => {
+            const next = row.nextElementSibling;
+            if (next) rows.insertBefore(next, row);
+            serialise();
+        });
+        row.querySelector('.step-kind').addEventListener('change', () => {
+            applyRow(row);
+            serialise();
+        });
+        row.querySelectorAll('input').forEach(input => {
+            input.addEventListener('input', serialise);
+        });
+        applyRow(row);
+        serialise();
+    }
+
+    document.getElementById('addStepRow')?.addEventListener('click',
+                                                             () => addRow());
+    window.wdashFillSteps = function (steps, storedSecrets) {
+        rows.innerHTML = '';
+        if (secretRows) secretRows.innerHTML = '';
+        field.dataset.stored = JSON.stringify(storedSecrets || []);
+        (steps || []).forEach(addRow);
+        // A new journey starts with the one step every journey must have,
+        // rather than an empty box and an error on save.
+        if (!(steps || []).length) addRow({kind: 'goto'});
+        serialise();
+    };
+})();

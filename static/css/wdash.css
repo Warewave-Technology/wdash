@@ -1469,3 +1469,46 @@ code {
     .landing-logo h1 { font-size: 2.5rem; }
     .landing-terminal { font-size: 0.72rem; }
 }
+
+/* Journey steps.
+   -------------------------------------------------------------------------
+   Quieter than `.monitor-status`, on purpose. Those pills say what a check
+   found and belong in the eye's first pass; these sit inside a fold that
+   somebody opened deliberately, and seven shouting pills in a row make the
+   one that failed harder to find rather than easier.
+
+   `skipped` is the one that matters. It is not a third failure state and must
+   not read as one — the step never ran, because an earlier one stopped the
+   journey. Grey, the same grey `unknown` uses, for the same reason: nothing
+   has said this step is broken, only that nothing has said anything. */
+.journey-step {
+    display: inline-block;
+    min-width: 4.6rem;
+    text-align: center;
+    padding: 1px 8px;
+    border-radius: 4px;
+    font-size: .65rem;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    font-family: 'SF Mono', monospace;
+    border: 1px solid transparent;
+}
+
+.journey-step.passed {
+    color: #7ee787;
+    border-color: rgba(126, 231, 135, .35);
+    background: rgba(126, 231, 135, .08);
+}
+
+.journey-step.failed {
+    color: #ff7b72;
+    border-color: rgba(255, 123, 114, .45);
+    background: rgba(255, 123, 114, .12);
+    font-weight: bold;
+}
+
+.journey-step.skipped {
+    color: var(--dark-text-muted);
+    border-color: rgba(139, 148, 158, .3);
+    background: transparent;
+}

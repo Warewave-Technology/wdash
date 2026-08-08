@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- Where a successful sign-in lands. The basket button gives the journey a
+     second thing to do after the login, so a check exercises more than the
+     one navigation. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Lab Shop — dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 30rem; margin: 4rem auto; }
+  button { padding: .5rem 1rem; }
+  #basket { margin-top: 1rem; font-weight: bold; }
+</style></head>
+<body>
+  <h1>Dashboard</h1>
+  <p>Signed in as the lab user.</p>
+  <button class="add-to-basket" id="add">Add to basket</button>
+  <div id="basket"></div>
+  <script>
+    document.getElementById('add').addEventListener('click', function () {
+      // Deliberately not instant. A journey that only ever measures
+      // synchronous clicks never exercises the waiting, and the waiting is
+      // where a real site spends its time.
+      setTimeout(function () {
+        document.getElementById('basket').innerText = '1 item in your basket';
+      }, 400);
+    });
+  </script>
+</body>
+</html>

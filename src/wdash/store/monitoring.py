@@ -31,7 +31,9 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, insert, select, update
 
-from .schema import agents, monitor_agents, monitor_results, monitors
+from .schema import (
+    agents, journey_screenshots, monitor_agents, monitor_results, monitors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +42,29 @@ logger = logging.getLogger(__name__)
 #: alarm, short enough that a dead agent is noticed within minutes.
 AGENT_STALE_AFTER = timedelta(minutes=5)
 
-#: What a check can be. Short on purpose — ICMP needs a raw socket and so a
-#: privileged container, and a browser check needs a browser. Both are real,
-#: and both are a decision rather than a type that quietly appears in a list.
-MONITOR_KINDS = ("http", "tcp")
+#: What a check can be. Still short on purpose — ICMP needs a raw socket and
+#: so a privileged container, which is a decision rather than a type that
+#: quietly appears in a list. `browser` earned the same decision and got it:
+#: it runs on a different agent image, and where no such agent is assigned the
+#: journey reports as unknown instead of pretending to pass.
+MONITOR_KINDS = ("http", "tcp", "browser")
+BROWSER = "browser"
+
+#: A journey does more than one thing, so it needs longer than a request. Ten
+#: minutes is the ceiling; the default per journey is far below it.
+MAX_JOURNEY_TIMEOUT = 600
+
+#: How long a failure screenshot is kept. Much shorter than results: "step 4
+#: failed" a month later is still a data point, the picture of a login page
+#: from a month ago is a megabyte nobody will open.
+SCREENSHOT_RETENTION_DAYS = 7
+SCREENSHOT_RETENTION_SETTING = "monitoring.screenshot_retention_days"
+
+#: Largest screenshot accepted from an agent. A full-page capture of a long
+#: page can be several megabytes, and an agent that sends one every minute
+#: fills the database faster than the results do. The agent downscales; this
+#: is the backstop for one that does not.
+MAX_SCREENSHOT_BYTES = 512 * 1024
 
 #: How long results are kept, unless an operator says otherwise. Thirty days
 #: because a monitoring page is used to answer "when did this start", and a
@@ -361,6 +382,11 @@ class MonitorRepository:
         target = (target or "").strip()
         if not target:
             raise MonitoringError("A monitor needs something to check.")
+        if kind == BROWSER and not target.startswith(("http://", "https://")):
+            # The caller derives this from step one rather than asking for it
+            # twice; reaching here means the steps were not validated first.
+            raise MonitoringError(
+                "A journey's address comes from its first step.")
         if kind == "http" and not target.startswith(("http://", "https://")):
             raise MonitoringError(
                 "An http check needs a URL beginning http:// or https://.")
@@ -377,9 +403,12 @@ class MonitorRepository:
                 f"{MAX_INTERVAL} seconds.")
 
         timeout = int(timeout or 10)
-        if not 1 <= timeout <= MAX_TIMEOUT:
+        # A journey is a sequence, so its ceiling is the sum of its steps
+        # rather than one request's patience.
+        ceiling = MAX_JOURNEY_TIMEOUT if kind == BROWSER else MAX_TIMEOUT
+        if not 1 <= timeout <= ceiling:
             raise MonitoringError(
-                f"The timeout has to be between 1 and {MAX_TIMEOUT} seconds.")
+                f"The timeout has to be between 1 and {ceiling} seconds.")
         if timeout >= interval:
             # Otherwise a slow check is still running when the next one is due,
             # and the agent either overlaps them or silently skips.
@@ -392,7 +421,9 @@ class MonitorRepository:
 
     def create(self, name, kind, target, interval_seconds=60,
                timeout_seconds=10, assertions=None, labels=None,
-               agent_ids=(), created_by=None, request=None):
+               agent_ids=(), created_by=None, request=None, steps=None,
+               journey_secrets=None):
+        steps, target = self._journey(kind, steps, target)
         kind, target, interval, timeout = self.validate(
             kind, target, interval_seconds, timeout_seconds)
         name = (name or "").strip()
@@ -401,7 +432,13 @@ class MonitorRepository:
         assertions = assertions or {}
         _check_response_headers(assertions)
         public, secret = split_request(request)
-        if kind != "http" and (public or secret):
+        if kind == BROWSER:
+            # A journey's credentials are named, because its steps refer to
+            # them by name. Nothing else about the request shape applies: a
+            # browser sends its own headers.
+            secret = self._journey_secrets(steps, journey_secrets)
+            public = None
+        elif kind != "http" and (public or secret):
             # A tcp check opens a socket. Headers and auth on one are boxes
             # somebody filled in that will never be used, and a form that
             # accepts them teaches that they work.
@@ -416,6 +453,7 @@ class MonitorRepository:
             "assertions": assertions,
             "request": public,
             "secrets": self._seal(secret),
+            "steps": [x.as_dict() for x in steps] if steps else None,
             "labels": labels or {},
             "enabled": True,
             "created_by": created_by,
@@ -426,10 +464,29 @@ class MonitorRepository:
             self._assign(connection, row["id"], agent_ids)
         return self.get(row["id"])
 
-    def update(self, monitor_id, agent_ids=None, request=None, **changes):
+    def update(self, monitor_id, agent_ids=None, request=None, steps=None,
+               journey_secrets=None, **changes):
         allowed = {"name", "kind", "target", "interval_seconds",
                    "timeout_seconds", "assertions", "labels", "enabled"}
         values = {k: v for k, v in changes.items() if k in allowed}
+        if steps is not None:
+            current = self.get(monitor_id)
+            if current is None:
+                return None
+            kind = values.get("kind", current["kind"])
+            parsed, values["target"] = self._journey(kind, steps, None)
+            values["steps"] = [x.as_dict() for x in parsed]
+            # Written even when empty, unlike the http path.
+            #
+            # There, an empty submission means "the password box was left
+            # alone" and wiping the credential would break the check on every
+            # unrelated edit. Here the merge with what is stored has already
+            # happened, so empty means something else entirely: no step refers
+            # to a secret any more. Leaving the old one behind keeps a
+            # credential nobody can see and nobody knows is there.
+            secret = self._journey_secrets(parsed, journey_secrets,
+                                           existing=self.credentials(monitor_id))
+            values["secrets"] = self._seal(secret) if secret else None
         if "assertions" in values:
             _check_response_headers(values["assertions"] or {})
         if request is not None:
@@ -534,6 +591,46 @@ class MonitorRepository:
             out.setdefault(row["monitor_id"], []).append(row["agent_id"])
         return out
 
+    @staticmethod
+    def _journey(kind, steps, target):
+        """Validate a journey's steps and take its address from step one.
+
+        Derived rather than asked for a second time: a form with both a URL
+        box and a `goto` step has two answers to one question, and they drift
+        the first time somebody edits only one of them.
+        """
+        from ..journeys import StepError, parse
+        if kind != BROWSER:
+            if steps:
+                raise MonitoringError(
+                    "Only a browser journey has steps.")
+            return None, target
+        try:
+            parsed = parse(steps)
+        except StepError as exc:
+            raise MonitoringError(str(exc)) from exc
+        return parsed, parsed[0].value
+
+    @staticmethod
+    def _journey_secrets(steps, supplied, existing=None):
+        """The named secrets a journey's steps refer to.
+
+        Anything supplied that no step uses is dropped rather than stored: a
+        credential kept for a step somebody deleted is a credential nobody
+        knows is there.
+        """
+        from ..journeys import secret_names
+        wanted = secret_names(steps or ())
+        have = dict(existing or {})
+        have.update({k: v for k, v in (supplied or {}).items() if v})
+        kept = {name: have[name] for name in wanted if name in have}
+        missing = [n for n in wanted if n not in kept]
+        if missing:
+            raise MonitoringError(
+                f"This journey uses {{{{ secret.{missing[0]} }}}} and there is "
+                f"no such secret. Add it, or correct the step.")
+        return kept
+
     def _seal(self, secret):
         if not secret:
             return None
@@ -586,6 +683,13 @@ class MonitorRepository:
             #: without a screen that can leak the answer.
             "request": row["request"] or {},
             "has_credentials": bool(row["secrets"]),
+            #: The step list, for a journey. The placeholders are shown as
+            #: written — `{{ secret.password }}` is not a password.
+            "steps": row["steps"] or [],
+            #: WHICH secrets are stored, never their values. Enough for the
+            #: editor to say "stored — leave empty to keep it" rather than
+            #: showing an empty box that looks like the password was lost.
+            "secret_names": _journey_secret_names(row),
             "labels": row["labels"] or {},
             "enabled": bool(row["enabled"]),
             "created_by": row["created_by"],
@@ -596,6 +700,51 @@ class MonitorRepository:
             "updated_at": row["updated_at"],
             "agent_ids": list(agent_ids),
         }
+
+
+def _journey_secret_names(row):
+    """The placeholder names a journey's steps mention. No values.
+
+    Read off the STEPS rather than by decrypting the secrets: this runs on
+    every listing, and a screen that opens the box to count what is in it is a
+    screen that can drop one.
+    """
+    from ..journeys import SECRET_PATTERN
+    names = []
+    for step in (row["steps"] or []):
+        for name in SECRET_PATTERN.findall(str(step.get("value") or "")):
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _steps_of(result):
+    """The per-step results an agent reported, trimmed to what is storable.
+
+    Trimmed HERE rather than trusted: this arrives over an ingest endpoint
+    that a compromised agent can post to, and an unbounded list of unbounded
+    strings inside a JSON column is a way to fill a disk without a single
+    failed check.
+    """
+    from ..journeys import MAX_STEPS
+    steps = result.get("steps")
+    if not isinstance(steps, (list, tuple)) or not steps:
+        return None
+    out = []
+    for index, step in enumerate(steps[:MAX_STEPS], start=1):
+        if not isinstance(step, dict):
+            continue
+        status = step.get("status")
+        out.append({
+            "index": index,
+            "kind": str(step.get("kind") or "")[:32],
+            "description": str(step.get("description") or "")[:255],
+            "status": status if status in ("passed", "failed", "skipped")
+                      else "skipped",
+            "duration_us": step.get("duration_us"),
+            "error": str(step.get("error") or "")[:1000] or None,
+        })
+    return out or None
 
 
 class ResultRepository:
@@ -637,12 +786,14 @@ class ResultRepository:
                 "error": (result.get("error") or "")[:2000] or None,
                 "http_status": result.get("http_status"),
                 "tls": result.get("tls"),
+                "steps": _steps_of(result),
+                "screenshot_id": self._keep_screenshot(monitor_id, result),
             })
         if not rows:
             return 0
         with self._engine.begin() as connection:
-            # Chunked. A single multi-VALUES insert binds nine parameters per
-            # row, and SQLite refuses the statement past its variable limit —
+            # Chunked. A single multi-VALUES insert binds eleven parameters
+            # per row, and SQLite refuses the statement past its limit —
             # "too many SQL variables", which says nothing about the batch
             # being too big. The endpoint caps at 500, so the live path never
             # reached it; this is a public repository method, and a caller
@@ -652,6 +803,63 @@ class ResultRepository:
                 connection.execute(
                     insert(monitor_results).values(rows[start:start + INSERT_CHUNK]))
         return len(rows)
+
+    def _keep_screenshot(self, monitor_id, result):
+        """Store the failure screenshot, if the agent sent one usable.
+
+        Returns its id, or None. Never raises: a picture that could not be
+        decoded must not cost the result it came with — the fact that the
+        journey failed is the part somebody needs.
+        """
+        shot = result.get("screenshot")
+        if not shot:
+            return None
+        try:
+            import base64
+            raw = shot.get("base64") if isinstance(shot, dict) else shot
+            image = base64.b64decode(raw or "", validate=True)
+        except Exception:
+            logger.warning(f"monitor {monitor_id} sent a screenshot that "
+                           f"could not be decoded")
+            return None
+        if not image:
+            return None
+        if len(image) > MAX_SCREENSHOT_BYTES:
+            logger.warning(
+                f"monitor {monitor_id} sent a {len(image) // 1024}KB "
+                f"screenshot; the ceiling is "
+                f"{MAX_SCREENSHOT_BYTES // 1024}KB")
+            return None
+        row = {
+            "id": str(uuid.uuid4()), "monitor_id": monitor_id,
+            "captured_at": _now(),
+            "content_type": (shot.get("content_type")
+                             if isinstance(shot, dict) else None)
+                            or "image/jpeg",
+            "bytes": len(image), "image": image,
+        }
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(insert(journey_screenshots).values(**row))
+        except Exception as exc:
+            logger.warning(f"could not store a screenshot: {exc}")
+            return None
+        return row["id"]
+
+    def screenshot(self, screenshot_id):
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(journey_screenshots).where(
+                    journey_screenshots.c.id == screenshot_id)).mappings().first()
+        return dict(row) if row else None
+
+    def prune_screenshots(self, older_than_days):
+        """Drop images past their own, shorter retention."""
+        cutoff = _now() - timedelta(days=max(1, int(older_than_days)))
+        with self._engine.begin() as connection:
+            return connection.execute(
+                delete(journey_screenshots).where(
+                    journey_screenshots.c.captured_at < cutoff)).rowcount or 0
 
     def prune(self, older_than_days):
         """Delete results past the retention period. Returns how many went.
@@ -785,6 +993,20 @@ class ResultRepository:
         if removed:
             logger.info(f"pruned {removed:,} monitor result(s) older than "
                         f"{days} days")
+
+        # Screenshots on the same pass, by their own and shorter clock. On the
+        # same pass because a second schedule is a second thing that can be
+        # off; by their own clock because they are a hundred times the size
+        # per row and worth a fraction as much a month later.
+        try:
+            shot_days = int(settings.get(SCREENSHOT_RETENTION_SETTING,
+                                         SCREENSHOT_RETENTION_DAYS))
+        except (TypeError, ValueError):
+            shot_days = SCREENSHOT_RETENTION_DAYS
+        if shot_days > 0:
+            gone = self.prune_screenshots(min(shot_days, days))
+            if gone:
+                logger.info(f"pruned {gone:,} journey screenshot(s)")
         return removed
 
     def count(self, monitor_id=None):

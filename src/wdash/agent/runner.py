@@ -40,6 +40,18 @@ BATCH = 500
 #: two hundred sockets at the same instant.
 MAX_CONCURRENCY = 16
 
+#: Browsers running at once. Not sixteen: a Chromium is a few hundred
+#: megabytes of resident memory, and sixteen of them is five gigabytes on a
+#: probe sized for a Python process. Two is enough to keep journeys from
+#: queueing behind each other and small enough to run beside the http checks
+#: on the same host.
+#:
+#: A separate limit rather than a lower MAX_CONCURRENCY, because the two are
+#: bounded by different things — sockets for one, memory for the other — and
+#: dropping the shared limit to two would make an agent with two hundred http
+#: monitors take a hundred times as long to get round them.
+BROWSER_CONCURRENCY = 2
+
 #: Backoff when the server cannot be reached, in seconds. Ends at a minute:
 #: long enough not to hammer a server that is down, short enough that recovery
 #: is noticed quickly.
@@ -60,6 +72,7 @@ class Agent:
         #: monitor id -> when it should next run, on the monotonic clock.
         self._due = {}
         self._monitors = {}
+        self._browsers = threading.Semaphore(BROWSER_CONCURRENCY)
         self._config_version = None
 
     # ---------- HTTP to WDash ----------
@@ -203,6 +216,13 @@ class Agent:
 
     def _run_one(self, monitor):
         try:
+            if (monitor.get("kind") or "").lower() == "browser":
+                # Queued behind the browser limit rather than the pool's. A
+                # journey waiting here still holds a pool worker, which is
+                # right: the alternative is running it late and reporting a
+                # duration that includes the wait.
+                with self._browsers:
+                    return run_check(monitor)
             return run_check(monitor)
         except Exception as exc:
             # A check must never take the loop down. This is a bug in the

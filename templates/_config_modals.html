@@ -336,7 +336,8 @@
               </select>
               <div class="form-text" style="font-size:.7rem">
                 No ICMP: a ping needs a raw socket and so a privileged
-                container. No browser check: that needs a browser.
+                container. <code>browser</code> needs an agent built on the
+                browser image.
               </div>
             </div>
             <div class="col-md-3 d-flex align-items-end">
@@ -348,7 +349,7 @@
               </div>
             </div>
 
-            <div class="col-12">
+            <div class="col-12" data-not-browser>
               <label class="form-label small">Target</label>
               <input class="form-control form-control-sm" name="target"
                      id="monitorTarget" required
@@ -398,6 +399,40 @@
                 None ticked means every agent runs it.
               </div>
             </div>
+
+            <!-- ---------------- browser journey ---------------- -->
+            <div class="col-12" data-browser-only>
+              <hr class="my-2">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <label class="form-label small mb-0">Steps</label>
+                <button type="button" class="btn btn-sm btn-outline-primary"
+                        id="addStepRow">
+                  <i class="fas fa-plus"></i> Add step</button>
+              </div>
+              <div id="stepRows"></div>
+              <input type="hidden" name="steps" id="stepsField">
+              <div class="form-text" style="font-size:.7rem">
+                Run in order. The journey stops at the first step that fails,
+                and the address it starts at comes from the first
+                <code>Go to</code>.
+                {# The one thing somebody will otherwise get wrong: a list of
+                   clicks passes as long as the browser did not crash. #}
+                At least one <strong>Expect</strong> step is required &mdash;
+                without one the journey passes whatever the site shows.
+              </div>
+            </div>
+
+            <div class="col-12" data-browser-only id="journeySecrets">
+              <label class="form-label small">Secrets used by these steps</label>
+              <div id="secretRows"></div>
+              <div class="form-text" style="font-size:.7rem">
+                Write <code>{{ '{{ secret.password }}' }}</code> in a step's
+                value and the box for it appears here. Encrypted, sent only to
+                the agent that runs the journey, and never shown again &mdash;
+                an empty box on an edit keeps what is stored.
+              </div>
+            </div>
+
 
             <div class="col-12"><hr class="my-1"></div>
             <div class="col-12">

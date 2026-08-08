@@ -53,6 +53,12 @@ def run_check(monitor, session=None):
         return _http(monitor, session)
     if kind == "tcp":
         return _tcp(monitor)
+    if kind == "browser":
+        # Imported here, not at module scope: the plain agent image has no
+        # Playwright, and an import at the top would stop it from running http
+        # checks at all.
+        from .browser import run_journey
+        return run_journey(monitor, secrets=monitor.get("secrets"))
     return _result(monitor, _now(), "down",
                    f"unknown check type '{kind}'")
 

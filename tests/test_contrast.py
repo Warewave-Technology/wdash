@@ -380,3 +380,64 @@ class MonitorTemplateTest(unittest.TestCase):
         is the one nobody remembers."""
         self.assertIn("monitor-row-{{ c.state }}", self.template)
         self.assertNotIn("days_remaining <", self.template)
+
+
+class JourneyStepColourTest(unittest.TestCase):
+    """The step pills inside a journey run.
+
+    Quieter than `.monitor-status` on purpose — they sit in a fold somebody
+    opened, and seven shouting pills make the one that failed harder to find.
+    Quieter still has to mean legible, and a tinted background over a tinted
+    row is exactly where that stops being true by accident.
+    """
+
+    def setUp(self):
+        with open(CSS) as handle:
+            self.css = handle.read()
+        self.variables = _variables(self.css)
+        # The steps table sits on `.bg-body-tertiary` inside a card. The card
+        # is the darker of the two surfaces it can land on, so it is the one
+        # to check against.
+        self.card = _resolve("var(--dark-card)", self.variables)
+
+    def _block(self, selector):
+        block = _rule(self.css, selector)
+        self.assertIsNotNone(block, f"{selector} is not in wdash.css")
+        return block
+
+    def test_every_step_state_is_legible(self):
+        for state in ("passed", "failed", "skipped"):
+            block = self._block(f".journey-step.{state}")
+            text = _resolve(_declaration(block, "color"), self.variables)
+            ratio = contrast(text, self.card)
+            self.assertGreaterEqual(
+                ratio, AA_NORMAL,
+                f".journey-step.{state}: {text} on the card is {ratio:.2f}:1")
+
+    def test_skipped_does_not_read_as_a_failure(self):
+        """A skipped step never ran, because an earlier one stopped the
+        journey. Colouring it like a failure says four things broke when one
+        did — which is the exact mistake the runner goes out of its way not to
+        make."""
+        skipped = _resolve(
+            _declaration(self._block(".journey-step.skipped"), "color"),
+            self.variables)
+        failed = _resolve(
+            _declaration(self._block(".journey-step.failed"), "color"),
+            self.variables)
+        self.assertNotEqual(skipped, failed)
+        # And it is the palette's muted grey rather than a fourth colour
+        # invented for this table. `--dark-text-muted` is what the product
+        # already uses for "nothing to report here".
+        self.assertEqual(skipped.lower(),
+                         _resolve("var(--dark-text-muted)",
+                                  self.variables).lower())
+
+    def test_failed_is_the_same_red_the_rest_of_the_product_uses(self):
+        """A product with two reds has two vocabularies."""
+        failed = _resolve(
+            _declaration(self._block(".journey-step.failed"), "color"),
+            self.variables).lower()
+        down = _gradient_stops(
+            _declaration(self._block(".monitor-status.down"), "background"))
+        self.assertIn(failed, [stop.lower() for stop in down])

@@ -436,6 +436,19 @@ def _check(check):
         "duration_ms": (round(check.duration_ms, 1)
                         if check.duration_ms is not None else None),
         "error": check.error,
+        "steps": [_step(s) for s in getattr(check, "steps", ())],
+        "screenshot_id": getattr(check, "screenshot_id", None),
+    }
+
+
+def _step(step):
+    return {
+        "index": step.index,
+        "description": step.description,
+        "status": step.status,
+        "duration_ms": (round(step.duration_ms, 1)
+                        if step.duration_ms is not None else None),
+        "error": step.error,
     }
 
 
@@ -520,3 +533,37 @@ def response_chart(points):
         "failure_count": sum(f for f in failures if f),
         "peak_ms": round(max(peaks + measured), 1),
     }
+
+
+@monitor_bp.route("/monitors/screenshot/<screenshot_id>")
+@login_required
+def journey_screenshot(screenshot_id):
+    """The picture taken when a journey step failed.
+
+    Served from here rather than inlined into the page as a data URI: a run
+    list of twenty-five checks would carry twenty-five images in the HTML,
+    most of which nobody opens. Behind the same permission as the rest of the
+    monitoring pages — a screenshot of a signed-in session is at least as
+    sensitive as the check that produced it.
+    """
+    if not _require():
+        flash("Access denied: monitors require the monitors:read permission.",
+              "error")
+        return redirect(url_for("index"))
+
+    store = getattr(current_app, "store", None)
+    image = store.results.screenshot(screenshot_id) if store else None
+    if image is None:
+        # 404 rather than a redirect: this is an <img> target, and a redirect
+        # to a page renders as a broken image with no explanation.
+        return ("No such screenshot. They are kept for a week — long enough "
+                "to look at a failure, short enough not to fill the database "
+                "with pictures of pages that were fine.", 404)
+
+    response = current_app.response_class(image["image"],
+                                          mimetype=image["content_type"])
+    # Immutable: the id is content, not a name that gets reused.
+    response.headers["Cache-Control"] = "private, max-age=86400, immutable"
+    response.headers["Content-Disposition"] = (
+        f'inline; filename="journey-{screenshot_id[:8]}.jpg"')
+    return response

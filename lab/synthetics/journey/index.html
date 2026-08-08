@@ -1,0 +1,43 @@
+<!doctype html>
+<!--
+  A sign-in form for the lab's browser journey.
+  -----------------------------------------------------------------------
+  Static, and the "authentication" happens in the page. That is enough: a
+  journey drives a BROWSER, and what it needs to exercise is a form, a
+  submit, a navigation and a page that says something different afterwards.
+  A real session would add a backend to the lab and prove nothing extra
+  about the thing under test.
+
+  Two outcomes on purpose, because a lab that only goes green proves
+  nothing:
+    hunter2       signs in
+    anything else stays here and shows the error banner
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Lab Shop — sign in</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 24rem; margin: 4rem auto; }
+  input, button { display: block; width: 100%; padding: .5rem; margin: .4rem 0; }
+  .error { color: #b00; font-weight: bold; }
+</style></head>
+<body>
+  <h1>Lab Shop</h1>
+  <form id="signin">
+    <input id="email" name="email" placeholder="Email" autocomplete="off">
+    <input id="password" name="password" type="password" placeholder="Password">
+    <button type="submit">Sign in</button>
+  </form>
+  <p id="banner"></p>
+  <script>
+    document.getElementById('signin').addEventListener('submit', function (event) {
+      event.preventDefault();
+      if (document.getElementById('password').value === 'hunter2') {
+        window.location = '/dashboard.html';
+      } else {
+        document.getElementById('banner').className = 'error';
+        document.getElementById('banner').innerText = 'Wrong email or password';
+      }
+    });
+  </script>
+</body>
+</html>

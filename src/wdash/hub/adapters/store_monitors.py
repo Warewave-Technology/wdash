@@ -24,8 +24,8 @@ evidence.
 import logging
 from datetime import timezone
 
-from ..models import DOWN, UNKNOWN, UP, Certificate, Monitor, MonitorCheck, \
-    MonitorPage, MonitorPoint, SourceRef
+from ..models import DOWN, STEP_SKIPPED, UNKNOWN, UP, Certificate, Monitor, \
+    MonitorCheck, MonitorPage, MonitorPoint, SourceRef, StepResult
 from ..source import Capability, MonitorSource
 
 logger = logging.getLogger(__name__)
@@ -261,7 +261,9 @@ class StoreMonitorSource(MonitorSource):
             timestamp=_aware(r["started_at"]),
             status=DOWN if r["status"] == DOWN else UP,
             duration_ms=(r["duration_us"] or 0) / 1000.0,
-            error=r["error"] or "") for r in rows]
+            error=r["error"] or "",
+            steps=_steps(r.get("steps")),
+            screenshot_id=r.get("screenshot_id")) for r in rows]
 
         # Paged here rather than in SQL. The metadata store holds one
         # deployment's own checks, not a cluster's worth of logs, and the
@@ -348,6 +350,33 @@ class StoreMonitorSource(MonitorSource):
             key=lambda m: (m.certificate.days_remaining is None,
                            m.certificate.days_remaining or 0))
         return with_certificates
+
+
+def _steps(raw):
+    """Stored step results as StepResult. Never raises.
+
+    A journey whose steps came back malformed is still a check with a status
+    and a duration, and losing the whole row over the decoration would turn a
+    rendering problem into a gap in the history.
+    """
+    if not raw:
+        return ()
+    if isinstance(raw, str):
+        import json
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return ()
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(StepResult(
+        index=s.get("index") or i,
+        kind=s.get("kind") or "",
+        description=s.get("description") or "",
+        status=s.get("status") or STEP_SKIPPED,
+        duration_us=s.get("duration_us"),
+        error=s.get("error") or "")
+        for i, s in enumerate(raw, start=1) if isinstance(s, dict))
 
 
 class _CountedChecks(list):

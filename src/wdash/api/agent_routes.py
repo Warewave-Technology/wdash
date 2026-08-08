@@ -89,6 +89,7 @@ def config():
             # not the audit trail, not a result. Over TLS, to a caller that
             # proved it holds this agent's token.
             "request": _request_for(store, m),
+            **_journey_for(store, m),
         } for m in monitors],
         # A version the agent can compare against what it already has, so a
         # poll that changes nothing costs one comparison rather than a
@@ -121,6 +122,22 @@ def _request_for(store, monitor):
     if auth:
         request["auth"] = auth
     return request
+
+
+def _journey_for(store, monitor):
+    """A journey's steps and the secrets they name. Empty for other kinds.
+
+    Sent as a pair rather than with the placeholders already substituted: the
+    agent resolves them at the moment it types, so a password is one value in
+    one call and not a string that has been through a step list, a JSON body
+    and a log line on the way.
+    """
+    if monitor.get("kind") != "browser":
+        return {}
+    out = {"steps": monitor.get("steps") or []}
+    if monitor.get("has_credentials"):
+        out["secrets"] = store.monitors.credentials(monitor["id"])
+    return out
 
 
 def _configuration_version(monitors):

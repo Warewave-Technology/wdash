@@ -27,53 +27,80 @@ pulls configuration and pushes results back. Both appear on one page, with
 response-time history, per-monitor detail and the TLS certificates the checks
 saw.
 
-## Phase 3
+**Browser journeys.** Multi-step checks through real Chromium: sign in, add to
+basket, check out. A journey is a step list rather than a script, every step is
+timed on its own, and a failure names the step and keeps a screenshot of the
+page as it was. The browser rides in its own image so nobody pulls it to run
+uptime checks.
+
+**Alerting.** Rules over monitors, webhook delivery, silences, and a history
+that records what was NOT delivered as well as what was. Evaluation is its own
+process, because an agent going silent produces no requests to piggyback on
+and that is the moment somebody needs telling.
+
+## Phase 3 — done
 
 ### Alerting
 
-Nothing tells anybody when a monitor goes down. Somebody has to be looking at
-the page, which is a poor way to find out about an outage at three in the
-morning. This is probably the most valuable single addition the product can
-make.
+Rules, channels, silences and delivery. Evaluation runs as its own process
+(`python -m wdash.alerts`) because it has to evaluate when NOTHING is
+arriving — an agent going completely silent produces no requests at all, and
+that is exactly the moment somebody needs telling.
 
-The shape to follow already exists: `src/wdash/store/forwarding.py` sends the
-audit trail to Splunk or Elasticsearch through a `Sink` interface, and an
-alert destination is the same problem.
+The two things it had to get right, and did:
 
-Two things it must get right, both of which the model already supports:
-
-* **Read sources, not tables.** An alert rule that queries
-  `wdash_monitor_results` directly works for WDash's own agent and is blind to
-  every Heartbeat monitor on the same page. `MonitorSource` is what both go
-  through.
+* **It reads sources, not tables.** A rule that queried
+  `wdash_monitor_results` would work for WDash's own agent and be blind to
+  every Heartbeat monitor on the same page. Everything goes through
+  `MonitorSource`.
 * **`unknown` is not `down`.** A silent agent and a failing target are
-  different facts, and the source layer already tells them apart. Paging
-  somebody because an agent restarted is how a monitoring system gets muted,
-  and a muted monitoring system is worse than none — it is the same blindness
-  with a false sense of coverage.
+  different facts with different audiences, so they are different rule kinds.
+  Paging somebody because an agent restarted is how a monitoring system gets
+  muted, and a muted one is worse than none.
 
 ### Browser checks
 
 Multi-step journeys through a real browser: sign in, add to basket, check out.
-The single-request checks WDash runs today cannot say that a login form stopped
-submitting.
+Playwright, which is Apache-2.0.
 
-Playwright is the obvious tool and is Apache-2.0, so it satisfies the licensing
-rule below. It is a separate phase rather than a third entry in
-`MONITOR_KINDS` for two reasons:
+Both of the reasons this was held back turned out to be right, and both were
+answered rather than dodged:
 
-* it brings hundreds of megabytes of browser, which is a different deployment
-  question from an agent that is one Python process;
-* a journey is not a request with a duration. It is a script with steps, each
-  timed and each capable of failing on its own, and the neutral model would
-  have to grow a shape for that. Bolting it onto `Monitor` would produce a
-  page that shows a journey as one number.
+* **The browser is a deployment question.** It is a separate image —
+  `--target browser`, measured at 1.77GB against the server's 265MB. Anybody
+  running a probe for uptime checks does not pull it. Where no browser agent
+  is assigned, a journey reports as unknown rather than pretending.
+* **A journey is not a request with a duration.** It is a sequence, and the
+  model grew `JourneyRun` and `StepResult` to say so. Every step is timed on
+  its own, and the first failure stops the run — the steps after it are
+  `skipped`, not `failed`, because step 5 could not find the basket button
+  when step 4's sign-in failed.
 
-The Elasticsearch adapter already lists `monitor.type: browser` documents with
-their summary status, which is real. The per-step detail is what is missing,
-and it is missing because that document shape has never been measured against
-a running Synthetics service — guessing it would produce a screen that looks
-complete and is wrong.
+A journey is a step list, not a script. Nine verbs, rendered from the same
+dictionary the server validates against. That is a real limit and it bought
+three things: a journey that can be shown as rows rather than as one number, a
+failure that names the step, and an edit form that is not remote code
+execution on every probe host.
+
+What is still missing is the per-step detail from ELASTIC's browser monitors.
+The adapter lists `monitor.type: browser` documents with their summary status,
+which is real; the steps inside one have never been measured against a running
+Synthetics service, and guessing that document shape would produce a screen
+that looks complete and is wrong.
+
+## Phase 4 — candidates
+
+Nothing is committed. The strongest three, in the order they would help:
+
+* **Journeys from more than one place.** A journey already runs on every agent
+  assigned to it, but the page shows one status. "Slow from Frankfurt, fine
+  from Dublin" is a different question from "is it up".
+* **More alert destinations.** Webhook reaches Slack, Teams, PagerDuty,
+  Opsgenie and Alertmanager, which is most of it. Email is the obvious gap and
+  brings an SMTP configuration screen with it.
+* **Per-step history.** "Which step got slower this week" is answerable from
+  what is already stored, and would need a chart per step rather than per
+  journey.
 
 ## Deliberately absent
 

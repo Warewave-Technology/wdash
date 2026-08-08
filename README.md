@@ -57,6 +57,23 @@ issues carries an explicit authorization scope.
   run against it — a clean report for Jaeger is a much narrower statement than
   a clean one for Elasticsearch, and hiding that would be the misleading
   version.
+- **Synthetic monitors, two ways** — WDash reads what Elastic Heartbeat and the
+  Synthetics integration write, AND runs its own checks through an agent that
+  pulls configuration and pushes results back. Both appear on one page with
+  response-time history, per-monitor detail and the TLS certificates the checks
+  saw. A silent agent leaves its monitors `unknown` rather than `down`: a probe
+  that stopped looking is not a site that stopped answering.
+- **Browser journeys** — multi-step checks through real Chromium: sign in, add
+  to basket, check out. A journey is a step list rather than a script, so it
+  can be shown as rows, every step is timed on its own, and a failure names the
+  step and keeps a screenshot of the page as it was. Passwords are encrypted
+  and referred to as `{{ secret.name }}`, never typed into a step. The browser
+  ships in its own image so nobody pulls it to run uptime checks.
+- **Alerting** — rules over monitors, agents and expiring certificates, sent to
+  a webhook, with silences and a history that records what was NOT delivered as
+  well as what was. Evaluation runs as its own process, because an agent going
+  completely silent produces no requests to piggyback on and that is exactly
+  when somebody needs telling.
 - **Sign-in** — OIDC, LDAP, and a local break-glass account created at first
   run that keeps working when the identity provider does not. Repeated failures
   are throttled per account, per address and per pair.
@@ -589,6 +606,36 @@ correct right up until Elasticsearch became one source among several.
 - Enable Elasticsearch security and give WDash a dedicated user.
 - Run the Advisor against your cluster before going live.
 
+### Probes
+
+An agent runs the checks. It pulls its configuration and pushes results back,
+so it works behind NAT and restarting WDash misses no check.
+
+```bash
+docker build -t wdash .                                  # server, 265MB
+docker build -t wdash-browser --target browser .         # + Chromium, 1.77GB
+
+docker run -d wdash-browser \
+    --server https://wdash.example.com --token <the agent token>
+```
+
+- **Two images, and the small one is the default.** The browser is most of the
+  second one and nothing in the first needs it. Anybody running a probe for
+  http and tcp checks should use `wdash`.
+- **A journey needs a browser agent.** Assign the journey to one. Where no
+  browser agent runs it, the journey reports as unknown rather than as down —
+  a probe that is not there says nothing about the site.
+- **Two journeys run at a time per agent.** A Chromium is a few hundred
+  megabytes of resident memory, and the agent's normal limit of sixteen
+  concurrent checks would be five gigabytes on a host sized for a Python
+  process. Http checks keep the wider limit — sockets and memory are bounded
+  by different things, and dropping the shared limit to two would make an
+  agent with two hundred http monitors a hundred times slower round them.
+- **Failure screenshots are kept for a week**, results for thirty days.
+  `monitoring.screenshot_retention_days` changes it. "Step 4 failed" a month
+  later is still a data point; the picture of a login page from a month ago is
+  a megabyte nobody will open.
+
 ## Current limitations
 
 Stated plainly, because they affect whether this fits your deployment:
@@ -658,10 +705,18 @@ Stated plainly, because they affect whether this fits your deployment:
 - **No metrics signal.** Logs, traces and synthetic monitors. Metrics have a
   genuinely different query model, and a screen that renders Prometheus badly
   would be worse than not having one.
-- **Browser checks are read, not run.** WDash lists `monitor.type: browser`
-  monitors that Elastic Synthetics reports, with their summary status. Its own
-  agent runs http and tcp checks; journeys through a real browser are a
-  separate piece of work.
+- **A journey is a step list, not a script.** Nine verbs — go to, click, type
+  into, expect text, expect URL and so on — rather than arbitrary Playwright
+  code. That is a real limit: a journey that needs to compute something cannot
+  be written. It buys a journey that can be shown as rows rather than as one
+  number, a failure that names the step, and an edit form that is not remote
+  code execution on every probe host.
+- **Elastic's browser monitors are still read as one status.** WDash lists
+  `monitor.type: browser` documents that Elastic Synthetics reports with their
+  summary status. The per-step detail inside one of those documents has never
+  been measured against a running Synthetics service, and guessing the shape
+  would produce a screen that looks complete and is wrong. WDash's own
+  journeys have full per-step detail.
 
 What is planned, and what is missing on purpose, is in
 [ROADMAP.md](ROADMAP.md).

@@ -656,6 +656,9 @@
                 a name that does not exist grants nothing, silently.
               </div>
             </div>
+            <script nonce="{{ csp_nonce }}" type="application/json" id="stepKinds">
+              {{ step_kinds | tojson }}
+            </script>
             <script nonce="{{ csp_nonce }}" type="application/json" id="mappingData">
               {{ user_roles | tojson }}
             </script>

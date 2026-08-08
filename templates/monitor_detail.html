@@ -180,9 +180,74 @@
                 <td>
                     {% if check.error %}
                     <span class="text-danger">{{ check.error }}</span>
-                    {% else %}<span class="text-muted">—</span>{% endif %}
+                    {% else %}<span class="text-muted">&mdash;</span>{% endif %}
+                    {% if check.steps %}
+                    {# A journey's steps, folded away. Shown open would put
+                       seven rows behind every run and turn a page of
+                       twenty-five checks into a hundred and seventy-five. #}
+                    <button class="btn btn-link btn-sm p-0 ms-1 align-baseline"
+                            type="button" data-bs-toggle="collapse"
+                            data-bs-target="#steps-{{ loop.index }}"
+                            style="font-size:.75rem">
+                        {{ check.steps | length }} steps</button>
+                    {% endif %}
                 </td>
             </tr>
+            {% if check.steps %}
+            <tr class="collapse" id="steps-{{ loop.index }}">
+                <td colspan="4" class="bg-body-tertiary">
+                    <div class="d-flex gap-3 flex-wrap align-items-start">
+                        <table class="table table-sm mb-0 flex-grow-1"
+                               style="max-width:44rem">
+                            <tbody>
+                            {% for step in check.steps %}
+                            <tr>
+                                <td class="text-muted" style="width:2rem">
+                                    {{ step.index }}</td>
+                                <td>
+                                    <span class="journey-step {{ step.status }}"
+                                    >{{ step.status }}</span>
+                                </td>
+                                <td><code style="font-size:.75rem"
+                                    >{{ step.description }}</code>
+                                    {% if step.error %}
+                                    <div class="text-danger"
+                                         style="font-size:.75rem"
+                                    >{{ step.error }}</div>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end text-muted"
+                                    style="width:6rem; font-size:.75rem">
+                                    {% if step.duration_ms is not none
+                                    %}{{ step.duration_ms }} ms{% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                        {% if check.screenshot_id %}
+                        <div>
+                            {# The page as it was when the step failed. Linked
+                               rather than inlined: twenty-five runs would put
+                               twenty-five images in the HTML, and nobody
+                               opens more than one. #}
+                            <a href="{{ url_for('monitors.journey_screenshot',
+                                                screenshot_id=check.screenshot_id) }}"
+                               target="_blank" rel="noopener">
+                                <img src="{{ url_for('monitors.journey_screenshot',
+                                                     screenshot_id=check.screenshot_id) }}"
+                                     alt="The page when the step failed"
+                                     class="border rounded"
+                                     style="max-width:20rem; max-height:12rem">
+                            </a>
+                            <div class="text-muted text-center"
+                                 style="font-size:.7rem">kept for a week</div>
+                        </div>
+                        {% endif %}
+                    </div>
+                </td>
+            </tr>
+            {% endif %}
             {% endfor %}
             </tbody>
         </table>
