@@ -84,6 +84,62 @@ heartbeat.monitors:
     ipv6: false
     tags: ["lab", "tls", "external"]
 
+  # --- browser journeys -------------------------------------------------
+  #
+  # The reason these are here: `monitor.type: browser` writes a document shape
+  # nothing else does — one per STEP, plus a journey/end summary — and WDash
+  # only ever showed the summary because that shape had never been measured.
+  # Guessing it would have produced a per-step table that looks complete and
+  # is wrong.
+  #
+  # The image carries its own Chromium and the @elastic/synthetics runner, so
+  # this is the real thing rather than a document somebody typed.
+  - type: browser
+    id: lab-journey-up
+    name: Lab shop journey
+    schedule: '@every 60s'
+    tags: ["lab", "browser"]
+    source:
+      inline:
+        script: |-
+          step('open the sign-in page', async () => {
+            await page.goto('http://synthetics-targets:8083/');
+          });
+          step('sign in', async () => {
+            await page.fill('#email', 'lab@example.com');
+            await page.fill('#password', 'hunter2');
+            await page.click('button[type=submit]');
+            await page.waitForSelector('#add');
+          });
+          step('add to basket', async () => {
+            await page.click('#add');
+            await page.waitForSelector('text=1 item in your basket');
+          });
+
+  # Fails on purpose, at the SECOND step. A per-step view earns its place by
+  # naming which step broke; a journey that has only ever passed cannot show
+  # that, and neither can one that fails on the first thing it does.
+  - type: browser
+    id: lab-journey-down
+    name: Lab shop journey (bad password)
+    schedule: '@every 60s'
+    tags: ["lab", "browser"]
+    source:
+      inline:
+        script: |-
+          step('open the sign-in page', async () => {
+            await page.goto('http://synthetics-targets:8083/');
+          });
+          step('sign in', async () => {
+            await page.fill('#email', 'lab@example.com');
+            await page.fill('#password', 'wrong-password');
+            await page.click('button[type=submit]');
+            await page.waitForSelector('#add', { timeout: 5000 });
+          });
+          step('add to basket', async () => {
+            await page.click('#add');
+          });
+
   # --- TCP -------------------------------------------------------------
   - type: tcp
     id: lab-loki-tcp

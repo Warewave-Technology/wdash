@@ -247,7 +247,12 @@ services:
     image: docker.elastic.co/beats/heartbeat:${HEARTBEAT_VERSION}
     container_name: wdash-lab-heartbeat
     profiles: ["synthetics"]
-    user: root
+    # NOT root. Heartbeat refuses to start a browser monitor as root — "script
+    # monitors cannot be run as root" — and refuses it per monitor, so the
+    # HTTP and TCP checks carried on working and the two journeys reported
+    # `down` with a zero duration. Which is to say the lab would have gone on
+    # looking healthy while the thing being measured never ran once.
+    user: heartbeat
     command: ["--strict.perms=false", "-e"]
     volumes:
       - ./synthetics/heartbeat.yml:/usr/share/heartbeat/heartbeat.yml:ro

@@ -31,7 +31,9 @@ saw.
 basket, check out. A journey is a step list rather than a script, every step is
 timed on its own, and a failure names the step and keeps a screenshot of the
 page as it was. The browser rides in its own image so nobody pulls it to run
-uptime checks.
+uptime checks. Elastic's own browser monitors are read down to the step too,
+onto the same screen — measured against a running Heartbeat rather than
+transcribed from the reference.
 
 **Alerting.** Rules over monitors, webhook delivery, silences, and a history
 that records what was NOT delivered as well as what was. Evaluation is its own
@@ -82,11 +84,22 @@ three things: a journey that can be shown as rows rather than as one number, a
 failure that names the step, and an edit form that is not remote code
 execution on every probe host.
 
-What is still missing is the per-step detail from ELASTIC's browser monitors.
-The adapter lists `monitor.type: browser` documents with their summary status,
-which is real; the steps inside one have never been measured against a running
-Synthetics service, and guessing that document shape would produce a screen
-that looks complete and is wrong.
+Elastic's own browser monitors now show their steps too, on the same screen
+and through the same model. That was held back for a phase because the
+document shape had never been measured, and it turned out not to be what
+reading a summary would suggest:
+
+* a browser monitor writes nothing at all into `heartbeat-*` — it goes to the
+  `synthetics-browser-*` data stream, with network requests and screenshots
+  in two more beside it;
+* one check is six documents, tied together by `monitor.check_group`;
+* Elastic's three step outcomes are `succeeded`, `failed` and `skipped`, and
+  the third means what WDash's own `skipped` means: the step never ran because
+  an earlier one stopped the journey.
+
+One thing is deliberately not read: `synthetics.payload.source`, which is the
+step's own code and arrives with whatever literal the author typed into it.
+The lab's failing journey has a password in it, and so would a real one.
 
 ## Phase 4 — candidates
 

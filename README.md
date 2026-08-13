@@ -711,12 +711,13 @@ Stated plainly, because they affect whether this fits your deployment:
   be written. It buys a journey that can be shown as rows rather than as one
   number, a failure that names the step, and an edit form that is not remote
   code execution on every probe host.
-- **Elastic's browser monitors are still read as one status.** WDash lists
-  `monitor.type: browser` documents that Elastic Synthetics reports with their
-  summary status. The per-step detail inside one of those documents has never
-  been measured against a running Synthetics service, and guessing the shape
-  would produce a screen that looks complete and is wrong. WDash's own
-  journeys have full per-step detail.
+- **Elastic's browser monitors show their steps, but not their screenshots.**
+  A `monitor.type: browser` check from Heartbeat or the Synthetics integration
+  is read down to the individual step — name, outcome, duration, and the error
+  on the one that broke — from the `synthetics-browser-*` data stream, and
+  rendered by the same screen as WDash's own journeys. Elastic also writes the
+  screenshots, split into blocks across `synthetics-browser.screenshot-*`;
+  those are not read yet. WDash keeps its own journeys' screenshots.
 
 What is planned, and what is missing on purpose, is in
 [ROADMAP.md](ROADMAP.md).

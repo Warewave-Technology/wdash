@@ -22,18 +22,36 @@ whether the page is right:
     fingerprint, so that is the one read here, with the flat field as a
     fallback for older agents.
 
-  * **Browser monitors are not covered.** `monitor.type: browser` writes
-    journey and step documents in a shape this adapter has never seen, and
-    guessing it would produce a page that looks complete and is wrong. They
-    are reported as monitors with their summary status — which is real — and
-    the per-step detail is left for when it can be measured.
+  * **Browser monitors write somewhere else entirely.** Not into
+    `heartbeat-*`: a `type: browser` monitor writes to the
+    `synthetics-browser-*` data stream, with its network requests and its
+    screenshots in two more beside it. An adapter reading only the heartbeat
+    indices sees no browser monitors at all and says so by showing none.
+
+  * **A browser check is six documents, not one.** `synthetics/metadata`,
+    `journey/start`, one `step/end` per step, `journey/end`, and the
+    `heartbeat/summary` that carries `summary.status` and the total duration.
+    `monitor.check_group` is what ties them together — the same value on the
+    summary and on every step of that run.
+
+  * **`synthetics.payload.source` is the step's SOURCE CODE, and it is not
+    read here.** It arrives with whatever the journey's author typed into it,
+    which in the lab's own failing journey is a literal password. WDash
+    redacts secrets out of its own journeys; putting Elastic's script bodies
+    on the same page would hand back the thing that redaction exists to
+    prevent.
+
+Measured against a real Heartbeat 8.19.9 running @elastic/synthetics 1.22.0,
+not transcribed from the reference. One complete run of each of the lab's two
+journeys — one passing, one failing at its second step — is kept in
+`tests/fixtures/elastic-browser-journey.json`.
 """
 
 from datetime import datetime, timezone
 
 from ..models import (
-    DOWN, UNKNOWN, UP, Certificate, Monitor, MonitorCheck, MonitorPage,
-    MonitorPoint, SourceRef,
+    DOWN, STEP_FAILED, STEP_PASSED, STEP_SKIPPED, UNKNOWN, UP, Certificate,
+    Monitor, MonitorCheck, MonitorPage, MonitorPoint, SourceRef, StepResult,
 )
 from ..source import Capability, MonitorSource
 
@@ -47,6 +65,30 @@ MAX_MONITORS = 500
 
 #: How many past checks a history returns.
 MAX_HISTORY = 500
+
+#: What Elastic calls a step outcome, in the words WDash already uses for its
+#: own journeys. The three mean the same thing on both sides, including the
+#: one that matters: a step after a failure is `skipped`, not failed, because
+#: it never ran.
+STEP_STATUS = {
+    "succeeded": STEP_PASSED,
+    "failed": STEP_FAILED,
+    "skipped": STEP_SKIPPED,
+}
+
+#: Steps read per check. A journey longer than this has a different problem.
+MAX_STEPS = 50
+
+#: Ceiling on one step lookup. Elasticsearch refuses a plain search asking for
+#: more than `index.max_result_window`, which is 10,000 by default — and the
+#: refusal would arrive as an exception, which this adapter turns into "no
+#: steps", which reads on the page as "these runs had no steps".
+#:
+#: 500 checks × 50 steps is 25,000, so the cap is real rather than defensive.
+#: When it bites, the newest runs keep their steps: the query takes them
+#: newest-first, so what gets dropped is the far end of the history rather
+#: than a scattering of rows somebody is looking at.
+MAX_STEP_DOCUMENTS = 10_000
 
 #: Buckets in the sparkline drawn beside each monitor in the list. Small
 #: because it is drawn in a table cell forty pixels tall — more points would
@@ -400,7 +442,10 @@ class ElasticsearchMonitorSource(MonitorSource):
             ]}},
             "sort": [{"@timestamp": {"order": "desc"}}],
             "_source": ["@timestamp", "summary.status", "monitor.status",
-                        "monitor.duration.us", "error.message"],
+                        "monitor.duration.us", "error.message",
+                        # A browser check's steps are separate documents,
+                        # joined to this one by check_group.
+                        "monitor.type", "monitor.check_group"],
             # Exact rather than the 10,000 cap: this number is shown to
             # somebody as "of N", and "of 10,000+" on a page of 12,000 checks
             # is a number that is simply wrong.
@@ -411,15 +456,18 @@ class ElasticsearchMonitorSource(MonitorSource):
         except Exception:
             return []
 
+        hits = _dig(response, "hits.hits") or []
+        steps = self._steps_for(hits)
         checks = []
-        for hit in _dig(response, "hits.hits") or []:
+        for hit in hits:
             source = hit.get("_source") or {}
             duration = _dig(source, "monitor.duration.us")
             checks.append(MonitorCheck(
                 timestamp=_parse_time(source.get("@timestamp")),
                 status=_status(source),
                 duration_ms=(duration / 1000.0) if duration is not None else None,
-                error=_dig(source, "error.message") or ""))
+                error=_dig(source, "error.message") or "",
+                steps=steps.get(_dig(source, "monitor.check_group"), ())))
         # Oldest first: a chart reads left to right.
         checks.reverse()
         # The total travels on the list rather than in a tuple, so every
@@ -430,6 +478,86 @@ class ElasticsearchMonitorSource(MonitorSource):
         checks.total = int(_dig(response, "hits.total.value") or len(checks))
         checks.offset = max(0, int(offset))
         return checks
+
+    def _steps_for(self, hits):
+        """The steps of every browser check in `hits`, by check group.
+
+        One extra query for a whole page, not one per check: a page of
+        twenty-five journeys would otherwise be twenty-six round trips, and
+        that is the shape of page that works in a lab and stops working on a
+        deployment with any latency to its cluster.
+
+        Only for browser checks. An HTTP monitor has no steps, and asking for
+        them would be a second request per page for nothing.
+
+        For every check in the response, not only for a page of them. The
+        first version fetched steps only when the caller had asked for a
+        bounded page — which sounded careful and meant that steps never
+        appeared at all in the normal case: the fan-out pages in Python, on
+        purpose, so it asks every source for the whole window and every
+        journey came back with no steps on any deployment with more than one
+        monitor source. Measuring it through the adapter alone hid that
+        completely.
+        """
+        groups = [_dig(hit.get("_source") or {}, "monitor.check_group")
+                  for hit in hits
+                  if (_dig(hit.get("_source") or {}, "monitor.type") or
+                      "").lower() == "browser"]
+        groups = [group for group in groups if group]
+        if not groups:
+            return {}
+
+        body = {
+            "size": min(len(groups) * MAX_STEPS, MAX_STEP_DOCUMENTS),
+            "query": {"bool": {"filter": [
+                {"terms": {"monitor.check_group": groups}},
+                {"term": {"synthetics.type": "step/end"}},
+            ]}},
+            # Newest first, so the cap costs the far end of the history rather
+            # than the rows anybody is reading. Order WITHIN a run is put back
+            # below, in Python.
+            "sort": [{"@timestamp": {"order": "desc"}}],
+            "_source": ["monitor.check_group", "synthetics.step",
+                        "synthetics.error.message", "error.message"],
+        }
+        try:
+            response = self._search(body)
+        except Exception:
+            # No steps rather than no history. The check itself is real and
+            # already read; losing the detail should not lose the page.
+            return {}
+
+        found = {}
+        for hit in _dig(response, "hits.hits") or []:
+            source = hit.get("_source") or {}
+            group = _dig(source, "monitor.check_group")
+            if not group:
+                continue
+            status = (_dig(source, "synthetics.step.status") or "").lower()
+            duration = _dig(source, "synthetics.step.duration.us")
+            found.setdefault(group, []).append(StepResult(
+                index=_dig(source, "synthetics.step.index") or 0,
+                kind="browser",
+                # What the journey's author called the step. Not
+                # `synthetics.payload.source`, which is the step's code and
+                # carries whatever literal was typed into it.
+                description=_dig(source, "synthetics.step.name") or "",
+                # Passed through when it is not one of the three measured
+                # values: an agent that reports something new should show what
+                # it said, rather than have it translated into one of ours.
+                status=STEP_STATUS.get(status, status or STEP_SKIPPED),
+                duration_us=duration,
+                # The synthetics message, which is the browser's own; the ECS
+                # one prefixes it with "error executing step: ".
+                error=(_dig(source, "synthetics.error.message")
+                       or _dig(source, "error.message") or "")))
+        # By step index, so a run reads in the order it ran. Sorted here
+        # rather than by the query, which is sorted by time to make the cap
+        # drop the oldest runs — and because two steps finishing inside the
+        # same millisecond would then be in whichever order the cluster
+        # happened to return them.
+        return {group: tuple(sorted(steps, key=lambda step: step.index))
+                for group, steps in found.items()}
 
     def certificates(self, window, scope):
         """Every monitor that saw a certificate, its certificate attached.

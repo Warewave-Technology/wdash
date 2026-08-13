@@ -142,6 +142,27 @@ docker run --rm --add-host=host.docker.internal:host-gateway wdash-browser \
     --server http://host.docker.internal:5000 --token <the agent token>
 ```
 
+Heartbeat drives the same two pages as well — `lab-journey-up` signs in and
+adds to the basket, `lab-journey-down` uses the wrong password and fails at
+its second step. They are what the ELASTIC side of browser monitoring was
+measured against, and they write somewhere the HTTP monitors do not:
+
+```
+synthetics-browser-default              journey and step documents
+synthetics-browser.network-default      one per request the page made
+synthetics-browser.screenshot-default   the screenshots, split into blocks
+```
+
+Two things about running them, both learned the hard way:
+
+* **Heartbeat must not run as root.** It refuses a browser monitor with
+  "script monitors cannot be run as root" — and refuses it per monitor, so
+  the HTTP checks carry on and the journeys report `down` with a zero
+  duration. The compose service therefore runs as `heartbeat`.
+* **The browser is in the image already.** `docker.elastic.co/beats/heartbeat`
+  ships `@elastic/synthetics` and its own Chromium, which is most of why it is
+  2.58GB.
+
 ## Port conflicts
 
 The project-root `docker-compose.yml` also contains Elasticsearch, Redis and

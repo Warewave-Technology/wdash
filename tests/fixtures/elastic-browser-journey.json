@@ -1,0 +1,1671 @@
+{
+ "measured_against": "docker.elastic.co/beats/heartbeat:8.19.9, @elastic/synthetics 1.22.0, against the lab's journey site \u2014 not transcribed from the reference",
+ "runs": [
+  {
+   "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+   "documents": [
+    {
+     "@timestamp": "2026-08-13T13:59:46.243Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "journey/start"
+     },
+     "monitor": {
+      "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "timespan": {
+       "gte": "2026-08-13T13:59:46.243Z",
+       "lt": "2026-08-13T14:00:46.243Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 0,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "({ page, context, browser, params, request }) => {\n        scriptFn.apply(null, [\n            core_1.step,\n            page,\n            context,\n            browser,\n            params,\n            expect_1.expect,\n            request,\n            mfa,\n        ]);\n    }"
+      },
+      "type": "journey/start"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ]
+    },
+    {
+     "@timestamp": "2026-08-13T13:59:46.297Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "timespan": {
+       "gte": "2026-08-13T13:59:46.297Z",
+       "lt": "2026-08-13T14:00:46.297Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 1,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.goto('http://synthetics-targets:8083/');\n}",
+       "status": "succeeded",
+       "url": "http://synthetics-targets:8083/"
+      },
+      "step": {
+       "duration": {
+        "us": 53456
+       },
+       "index": 1,
+       "name": "open the sign-in page",
+       "status": "succeeded"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/",
+      "path": "/",
+      "port": 8083,
+      "scheme": "http"
+     }
+    },
+    {
+     "@timestamp": "2026-08-13T13:59:51.394Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "error": {
+      "code": "",
+      "message": "error executing step: page.waitForSelector: Timeout 5000ms exceeded.",
+      "stack_trace": "\npage.waitForSelector: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('#add') to be visible\n",
+      "type": "TimeoutError"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "timespan": {
+       "gte": "2026-08-13T13:59:51.406Z",
+       "lt": "2026-08-13T14:00:51.406Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "error": {
+       "message": "page.waitForSelector: Timeout 5000ms exceeded.",
+       "name": "TimeoutError",
+       "stack": "\npage.waitForSelector: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('#add') to be visible\n"
+      },
+      "index": 2,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.fill('#email', 'lab@example.com');\n  await page.fill('#password', 'wrong-password');\n  await page.click('button[type=submit]');\n  await page.waitForSelector('#add', { timeout: 5000 });\n}",
+       "status": "failed",
+       "url": "http://synthetics-targets:8083/"
+      },
+      "step": {
+       "duration": {
+        "us": 5096617
+       },
+       "index": 2,
+       "name": "sign in",
+       "status": "failed"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/",
+      "path": "/",
+      "port": 8083,
+      "scheme": "http"
+     }
+    },
+    {
+     "@timestamp": "2026-08-13T13:59:51.396Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "timespan": {
+       "gte": "2026-08-13T13:59:51.406Z",
+       "lt": "2026-08-13T14:00:51.406Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 3,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.click('#add');\n}",
+       "status": "skipped"
+      },
+      "step": {
+       "duration": {
+        "us": 11
+       },
+       "index": 3,
+       "name": "add to basket",
+       "status": "skipped"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ]
+    },
+    {
+     "@timestamp": "2026-08-13T13:59:51.397Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "error": {
+      "code": "",
+      "message": "error executing step: page.waitForSelector: Timeout 5000ms exceeded.",
+      "stack_trace": "\npage.waitForSelector: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('#add') to be visible\n",
+      "type": "TimeoutError"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "journey/end"
+     },
+     "monitor": {
+      "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "timespan": {
+       "gte": "2026-08-13T13:59:51.558Z",
+       "lt": "2026-08-13T14:00:51.558Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "error": {
+       "message": "page.waitForSelector: Timeout 5000ms exceeded.",
+       "name": "TimeoutError",
+       "stack": "\npage.waitForSelector: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('#add') to be visible\n"
+      },
+      "index": 135,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "browser_delay_us": 175733,
+       "process_startup_epoch_us": 1786629585726282.0,
+       "status": "failed"
+      },
+      "type": "journey/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ]
+    },
+    {
+     "@timestamp": "2026-08-13T13:59:51.721Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "error": {
+      "code": "",
+      "message": "error executing step: page.waitForSelector: Timeout 5000ms exceeded.",
+      "stack_trace": "\npage.waitForSelector: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('#add') to be visible\n",
+      "type": "TimeoutError"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "heartbeat/summary"
+     },
+     "monitor": {
+      "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+      "duration": {
+       "us": 5154064
+      },
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "status": "down",
+      "timespan": {
+       "gte": "2026-08-13T13:59:51.716Z",
+       "lt": "2026-08-13T14:00:51.716Z"
+      },
+      "type": "browser"
+     },
+     "state": {
+      "checks": 2,
+      "down": 2,
+      "duration_ms": "52100",
+      "ends": null,
+      "flap_history": [],
+      "id": "default-19ffb6b4725-0",
+      "started_at": "2026-08-13T13:58:59.621079032Z",
+      "status": "down",
+      "up": 0
+     },
+     "summary": {
+      "attempt": 1,
+      "down": 1,
+      "final_attempt": true,
+      "max_attempts": 1,
+      "retry_group": "3d851ee8-971f-11f1-a108-92bde760a856",
+      "status": "down",
+      "up": 0
+     },
+     "synthetics": {
+      "type": "heartbeat/summary"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/",
+      "path": "/",
+      "port": 8083,
+      "scheme": "http"
+     }
+    }
+   ],
+   "monitor": "lab-journey-down"
+  },
+  {
+   "check_group": "6148df90-971f-11f1-a108-92bde760a856-1",
+   "documents": [
+    {
+     "@timestamp": "2026-08-13T14:00:46.044Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "journey/start"
+     },
+     "monitor": {
+      "check_group": "6148df90-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "timespan": {
+       "gte": "2026-08-13T14:00:46.044Z",
+       "lt": "2026-08-13T14:01:46.044Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 0,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "({ page, context, browser, params, request }) => {\n        scriptFn.apply(null, [\n            core_1.step,\n            page,\n            context,\n            browser,\n            params,\n            expect_1.expect,\n            request,\n            mfa,\n        ]);\n    }"
+      },
+      "type": "journey/start"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ]
+    },
+    {
+     "@timestamp": "2026-08-13T14:00:46.112Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "6148df90-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "timespan": {
+       "gte": "2026-08-13T14:00:46.112Z",
+       "lt": "2026-08-13T14:01:46.112Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 1,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.goto('http://synthetics-targets:8083/');\n}",
+       "status": "succeeded",
+       "url": "http://synthetics-targets:8083/"
+      },
+      "step": {
+       "duration": {
+        "us": 67117
+       },
+       "index": 1,
+       "name": "open the sign-in page",
+       "status": "succeeded"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/",
+      "path": "/",
+      "port": 8083,
+      "scheme": "http"
+     }
+    },
+    {
+     "@timestamp": "2026-08-13T14:00:51.207Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "error": {
+      "code": "",
+      "message": "error executing step: page.waitForSelector: Timeout 5000ms exceeded.",
+      "stack_trace": "\npage.waitForSelector: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('#add') to be visible\n",
+      "type": "TimeoutError"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "6148df90-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "timespan": {
+       "gte": "2026-08-13T14:00:51.207Z",
+       "lt": "2026-08-13T14:01:51.207Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "error": {
+       "message": "page.waitForSelector: Timeout 5000ms exceeded.",
+       "name": "TimeoutError",
+       "stack": "\npage.waitForSelector: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('#add') to be visible\n"
+      },
+      "index": 2,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.fill('#email', 'lab@example.com');\n  await page.fill('#password', 'wrong-password');\n  await page.click('button[type=submit]');\n  await page.waitForSelector('#add', { timeout: 5000 });\n}",
+       "status": "failed",
+       "url": "http://synthetics-targets:8083/"
+      },
+      "step": {
+       "duration": {
+        "us": 5095095
+       },
+       "index": 2,
+       "name": "sign in",
+       "status": "failed"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/",
+      "path": "/",
+      "port": 8083,
+      "scheme": "http"
+     }
+    },
+    {
+     "@timestamp": "2026-08-13T14:00:51.208Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "6148df90-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "timespan": {
+       "gte": "2026-08-13T14:00:51.208Z",
+       "lt": "2026-08-13T14:01:51.208Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 3,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.click('#add');\n}",
+       "status": "skipped"
+      },
+      "step": {
+       "duration": {
+        "us": 4
+       },
+       "index": 3,
+       "name": "add to basket",
+       "status": "skipped"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ]
+    },
+    {
+     "@timestamp": "2026-08-13T14:00:51.208Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "error": {
+      "code": "",
+      "message": "error executing step: page.waitForSelector: Timeout 5000ms exceeded.",
+      "stack_trace": "\npage.waitForSelector: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('#add') to be visible\n",
+      "type": "TimeoutError"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "journey/end"
+     },
+     "monitor": {
+      "check_group": "6148df90-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "timespan": {
+       "gte": "2026-08-13T14:00:51.362Z",
+       "lt": "2026-08-13T14:01:51.362Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "error": {
+       "message": "page.waitForSelector: Timeout 5000ms exceeded.",
+       "name": "TimeoutError",
+       "stack": "\npage.waitForSelector: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('#add') to be visible\n"
+      },
+      "index": 135,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "browser_delay_us": 43825,
+       "process_startup_epoch_us": 1786629645728198.0,
+       "status": "failed"
+      },
+      "type": "journey/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ]
+    },
+    {
+     "@timestamp": "2026-08-13T14:00:51.511Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "error": {
+      "code": "",
+      "message": "error executing step: page.waitForSelector: Timeout 5000ms exceeded.",
+      "stack_trace": "\npage.waitForSelector: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('#add') to be visible\n",
+      "type": "TimeoutError"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "heartbeat/summary"
+     },
+     "monitor": {
+      "check_group": "6148df90-971f-11f1-a108-92bde760a856-1",
+      "duration": {
+       "us": 5164185
+      },
+      "id": "lab-journey-down",
+      "name": "Lab shop journey (bad password)",
+      "status": "down",
+      "timespan": {
+       "gte": "2026-08-13T14:00:51.511Z",
+       "lt": "2026-08-13T14:01:51.511Z"
+      },
+      "type": "browser"
+     },
+     "state": {
+      "checks": 3,
+      "down": 3,
+      "duration_ms": "111890",
+      "ends": null,
+      "flap_history": [],
+      "id": "default-19ffb6b4725-0",
+      "started_at": "2026-08-13T13:58:59.621079032Z",
+      "status": "down",
+      "up": 0
+     },
+     "summary": {
+      "attempt": 1,
+      "down": 1,
+      "final_attempt": true,
+      "max_attempts": 1,
+      "retry_group": "6148df90-971f-11f1-a108-92bde760a856",
+      "status": "down",
+      "up": 0
+     },
+     "synthetics": {
+      "type": "heartbeat/summary"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/",
+      "path": "/",
+      "port": 8083,
+      "scheme": "http"
+     }
+    }
+   ],
+   "monitor": "lab-journey-down"
+  },
+  {
+   "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+   "documents": [
+    {
+     "@timestamp": "2026-08-13T13:59:46.242Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "journey/start"
+     },
+     "monitor": {
+      "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "timespan": {
+       "gte": "2026-08-13T13:59:46.243Z",
+       "lt": "2026-08-13T14:00:46.243Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 0,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "({ page, context, browser, params, request }) => {\n        scriptFn.apply(null, [\n            core_1.step,\n            page,\n            context,\n            browser,\n            params,\n            expect_1.expect,\n            request,\n            mfa,\n        ]);\n    }"
+      },
+      "type": "journey/start"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ]
+    },
+    {
+     "@timestamp": "2026-08-13T13:59:46.297Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "timespan": {
+       "gte": "2026-08-13T13:59:46.297Z",
+       "lt": "2026-08-13T14:00:46.297Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 1,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.goto('http://synthetics-targets:8083/');\n}",
+       "status": "succeeded",
+       "url": "http://synthetics-targets:8083/"
+      },
+      "step": {
+       "duration": {
+        "us": 53964
+       },
+       "index": 1,
+       "name": "open the sign-in page",
+       "status": "succeeded"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/",
+      "path": "/",
+      "port": 8083,
+      "scheme": "http"
+     }
+    },
+    {
+     "@timestamp": "2026-08-13T13:59:46.409Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "timespan": {
+       "gte": "2026-08-13T13:59:46.409Z",
+       "lt": "2026-08-13T14:00:46.409Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 2,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.fill('#email', 'lab@example.com');\n  await page.fill('#password', 'hunter2');\n  await page.click('button[type=submit]');\n  await page.waitForSelector('#add');\n}",
+       "status": "succeeded",
+       "url": "http://synthetics-targets:8083/dashboard.html"
+      },
+      "step": {
+       "duration": {
+        "us": 111493
+       },
+       "index": 2,
+       "name": "sign in",
+       "status": "succeeded"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/dashboard.html",
+      "path": "/dashboard.html",
+      "port": 8083,
+      "scheme": "http"
+     }
+    },
+    {
+     "@timestamp": "2026-08-13T13:59:47.243Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "timespan": {
+       "gte": "2026-08-13T13:59:47.243Z",
+       "lt": "2026-08-13T14:00:47.243Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 3,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.click('#add');\n  await page.waitForSelector('text=1 item in your basket');\n}",
+       "status": "succeeded",
+       "url": "http://synthetics-targets:8083/dashboard.html"
+      },
+      "step": {
+       "duration": {
+        "us": 834146
+       },
+       "index": 3,
+       "name": "add to basket",
+       "status": "succeeded"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/dashboard.html",
+      "path": "/dashboard.html",
+      "port": 8083,
+      "scheme": "http"
+     }
+    },
+    {
+     "@timestamp": "2026-08-13T13:59:47.244Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "journey/end"
+     },
+     "monitor": {
+      "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "timespan": {
+       "gte": "2026-08-13T13:59:47.442Z",
+       "lt": "2026-08-13T14:00:47.442Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 201,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "browser_delay_us": 176167,
+       "process_startup_epoch_us": 1786629585726443.0,
+       "status": "succeeded"
+      },
+      "type": "journey/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ]
+    },
+    {
+     "@timestamp": "2026-08-13T13:59:47.466Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "heartbeat/summary"
+     },
+     "monitor": {
+      "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+      "duration": {
+       "us": 1001128
+      },
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "status": "up",
+      "timespan": {
+       "gte": "2026-08-13T13:59:47.460Z",
+       "lt": "2026-08-13T14:00:47.460Z"
+      },
+      "type": "browser"
+     },
+     "state": {
+      "checks": 1,
+      "down": 0,
+      "duration_ms": "0",
+      "ends": {
+       "checks": 1,
+       "down": 1,
+       "duration_ms": "0",
+       "ends": null,
+       "flap_history": null,
+       "id": "default-19ffb6b4700-0",
+       "started_at": "2026-08-13T13:58:59.584459404Z",
+       "status": "down",
+       "up": 0
+      },
+      "flap_history": [],
+      "id": "default-19ffb6c020a-0",
+      "started_at": "2026-08-13T13:59:47.466818175Z",
+      "status": "up",
+      "up": 1
+     },
+     "summary": {
+      "attempt": 1,
+      "down": 0,
+      "final_attempt": true,
+      "max_attempts": 1,
+      "retry_group": "3d851932-971f-11f1-a108-92bde760a856",
+      "status": "up",
+      "up": 1
+     },
+     "synthetics": {
+      "type": "heartbeat/summary"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/",
+      "path": "/",
+      "port": 8083,
+      "scheme": "http"
+     }
+    }
+   ],
+   "monitor": "lab-journey-up"
+  },
+  {
+   "check_group": "6148f411-971f-11f1-a108-92bde760a856-1",
+   "documents": [
+    {
+     "@timestamp": "2026-08-13T14:00:46.045Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "journey/start"
+     },
+     "monitor": {
+      "check_group": "6148f411-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "timespan": {
+       "gte": "2026-08-13T14:00:46.045Z",
+       "lt": "2026-08-13T14:01:46.045Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 0,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "({ page, context, browser, params, request }) => {\n        scriptFn.apply(null, [\n            core_1.step,\n            page,\n            context,\n            browser,\n            params,\n            expect_1.expect,\n            request,\n            mfa,\n        ]);\n    }"
+      },
+      "type": "journey/start"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ]
+    },
+    {
+     "@timestamp": "2026-08-13T14:00:46.112Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "6148f411-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "timespan": {
+       "gte": "2026-08-13T14:00:46.112Z",
+       "lt": "2026-08-13T14:01:46.112Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 1,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.goto('http://synthetics-targets:8083/');\n}",
+       "status": "succeeded",
+       "url": "http://synthetics-targets:8083/"
+      },
+      "step": {
+       "duration": {
+        "us": 66522
+       },
+       "index": 1,
+       "name": "open the sign-in page",
+       "status": "succeeded"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/",
+      "path": "/",
+      "port": 8083,
+      "scheme": "http"
+     }
+    },
+    {
+     "@timestamp": "2026-08-13T14:00:46.223Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "6148f411-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "timespan": {
+       "gte": "2026-08-13T14:00:46.224Z",
+       "lt": "2026-08-13T14:01:46.224Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 2,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.fill('#email', 'lab@example.com');\n  await page.fill('#password', 'hunter2');\n  await page.click('button[type=submit]');\n  await page.waitForSelector('#add');\n}",
+       "status": "succeeded",
+       "url": "http://synthetics-targets:8083/dashboard.html"
+      },
+      "step": {
+       "duration": {
+        "us": 111731
+       },
+       "index": 2,
+       "name": "sign in",
+       "status": "succeeded"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/dashboard.html",
+      "path": "/dashboard.html",
+      "port": 8083,
+      "scheme": "http"
+     }
+    },
+    {
+     "@timestamp": "2026-08-13T14:00:47.083Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "step/end"
+     },
+     "monitor": {
+      "check_group": "6148f411-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "timespan": {
+       "gte": "2026-08-13T14:00:47.083Z",
+       "lt": "2026-08-13T14:01:47.083Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 3,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "source": "async () => {\n  await page.click('#add');\n  await page.waitForSelector('text=1 item in your basket');\n}",
+       "status": "succeeded",
+       "url": "http://synthetics-targets:8083/dashboard.html"
+      },
+      "step": {
+       "duration": {
+        "us": 858921
+       },
+       "index": 3,
+       "name": "add to basket",
+       "status": "succeeded"
+      },
+      "type": "step/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/dashboard.html",
+      "path": "/dashboard.html",
+      "port": 8083,
+      "scheme": "http"
+     }
+    },
+    {
+     "@timestamp": "2026-08-13T14:00:47.083Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "journey/end"
+     },
+     "monitor": {
+      "check_group": "6148f411-971f-11f1-a108-92bde760a856-1",
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "timespan": {
+       "gte": "2026-08-13T14:00:47.269Z",
+       "lt": "2026-08-13T14:01:47.269Z"
+      },
+      "type": "browser"
+     },
+     "os": {
+      "platform": "linux"
+     },
+     "package": {
+      "name": "@elastic/synthetics",
+      "version": "1.22.0"
+     },
+     "synthetics": {
+      "index": 201,
+      "journey": {
+       "id": "inline",
+       "name": "inline"
+      },
+      "package_version": "1.22.0",
+      "payload": {
+       "browser_delay_us": 44196,
+       "process_startup_epoch_us": 1786629645728228.0,
+       "status": "succeeded"
+      },
+      "type": "journey/end"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ]
+    },
+    {
+     "@timestamp": "2026-08-13T14:00:47.290Z",
+     "agent": {
+      "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+      "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+      "name": "c89599f13847",
+      "type": "heartbeat",
+      "version": "8.19.9"
+     },
+     "data_stream": {
+      "dataset": "browser",
+      "namespace": "default",
+      "type": "synthetics"
+     },
+     "ecs": {
+      "version": "8.0.0"
+     },
+     "event": {
+      "dataset": "browser",
+      "type": "heartbeat/summary"
+     },
+     "monitor": {
+      "check_group": "6148f411-971f-11f1-a108-92bde760a856-1",
+      "duration": {
+       "us": 1038709
+      },
+      "id": "lab-journey-up",
+      "name": "Lab shop journey",
+      "status": "up",
+      "timespan": {
+       "gte": "2026-08-13T14:00:47.290Z",
+       "lt": "2026-08-13T14:01:47.290Z"
+      },
+      "type": "browser"
+     },
+     "state": {
+      "checks": 2,
+      "down": 0,
+      "duration_ms": "59823",
+      "ends": null,
+      "flap_history": [],
+      "id": "default-19ffb6c020a-0",
+      "started_at": "2026-08-13T13:59:47.466818175Z",
+      "status": "up",
+      "up": 2
+     },
+     "summary": {
+      "attempt": 1,
+      "down": 0,
+      "final_attempt": true,
+      "max_attempts": 1,
+      "retry_group": "6148f411-971f-11f1-a108-92bde760a856",
+      "status": "up",
+      "up": 1
+     },
+     "synthetics": {
+      "type": "heartbeat/summary"
+     },
+     "tags": [
+      "lab",
+      "browser"
+     ],
+     "url": {
+      "domain": "synthetics-targets",
+      "full": "http://synthetics-targets:8083/",
+      "path": "/",
+      "port": 8083,
+      "scheme": "http"
+     }
+    }
+   ],
+   "monitor": "lab-journey-up"
+  }
+ ]
+}

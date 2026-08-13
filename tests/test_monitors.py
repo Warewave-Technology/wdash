@@ -63,7 +63,12 @@ def _document(monitor_id="lab-http-up", name="Lab endpoint", status=UP,
               summary_status=None, tls_days=None, error=None, kind="http"):
     source = {
         "@timestamp": _now().isoformat().replace("+00:00", "Z"),
+        # `check_group` is on EVERY check, not only a browser one — measured
+        # on the lab's HTTP monitors. Which is the reason the step lookup has
+        # to decide on `monitor.type`: a group id being present says nothing
+        # about there being steps to fetch.
         "monitor": {"id": monitor_id, "name": name, "type": kind,
+                    "check_group": f"{monitor_id}-group-1",
                     "status": status, "duration": {"us": 5974}},
         "url": {"full": f"https://{monitor_id}.example:8443/"},
         "summary": {"status": summary_status or status, "up": 1, "down": 0},
@@ -925,3 +930,358 @@ class FanOutCompletenessTest(unittest.TestCase):
         # the mean of means would be 505.
         self.assertLess(point.duration_ms, 100)
         self.assertEqual(point.checks, 51)
+
+
+# ---------------------------------------------------------------------------
+# Elastic's own browser journeys
+# ---------------------------------------------------------------------------
+
+#: TWO complete runs of each of the lab's two browser journeys, captured from
+#: `synthetics-browser-*` after a real Heartbeat 8.19.9 ran them against the
+#: lab's sign-in page. One journey passes; one fails at its second step
+#: because the password is wrong, which is the only way to measure what a
+#: failure looks like.
+#:
+#: Two runs each rather than one, because with one run per monitor a join on
+#: `monitor.id` and a join on `monitor.check_group` return exactly the same
+#: documents — so the fixture could not tell the correct join from a wrong
+#: one, and a mutation showed it did not.
+BROWSER_FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures",
+                               "elastic-browser-journey.json")
+
+
+def _browser_runs(monitor=None):
+    with open(BROWSER_FIXTURE) as handle:
+        runs = json.load(handle)["runs"]
+    return [r for r in runs if monitor is None or r["monitor"] == monitor]
+
+
+def _many_runs(monitor, count, steps_per_run=None):
+    """One measured run, repeated with fresh identities and timestamps.
+
+    The SHAPE stays measured — these are the documents Heartbeat wrote — and
+    only the volume is made up, which is the part a lab of two journeys
+    cannot supply. Anything asserted on the CONTENTS of a run belongs in a
+    test that uses the fixture directly.
+
+    `steps_per_run` lengthens the journey by repeating its measured steps.
+    The document cap is 10,000 and history stops at 500 checks, so a
+    three-step journey cannot reach it however long it runs: without a long
+    journey, a test of the cap passes without the cap ever being applied.
+    """
+    template = _browser_runs(monitor)[0]["documents"]
+    measured_steps = [d for d in template
+                      if _dig(d, "synthetics.type") == "step/end"]
+    other = [d for d in template
+             if _dig(d, "synthetics.type") != "step/end"]
+
+    runs = []
+    for number in range(count):
+        moment = _now() - dt.timedelta(minutes=count - number)
+        group = f"{monitor}-{number}"
+        steps = []
+        wanted = steps_per_run or len(measured_steps)
+        for index in range(wanted):
+            copy = json.loads(json.dumps(measured_steps[
+                index % len(measured_steps)]))
+            copy["synthetics"]["step"]["index"] = index + 1
+            copy["synthetics"]["index"] = index + 1
+            steps.append(copy)
+
+        documents = []
+        for offset, document in enumerate(other + steps):
+            copy = document if document in steps \
+                else json.loads(json.dumps(document))
+            copy["monitor"]["check_group"] = group
+            copy["@timestamp"] = (moment + dt.timedelta(seconds=offset)) \
+                .isoformat().replace("+00:00", "Z")
+            documents.append(copy)
+        runs.append({"monitor": monitor, "check_group": group,
+                     "documents": documents})
+    return runs
+
+
+class ReplayElasticsearch:
+    """Answers the two queries a browser history issues, from real documents.
+
+    It routes on what the query ASKS for rather than on call order, so an
+    adapter that stops filtering by `synthetics.type` or by check group gets
+    the wrong documents back instead of the right ones by luck.
+
+    Order is not preserved. Elasticsearch returns hits in an unspecified order
+    without a `sort`, and the adapter depends on step order being right — so a
+    fake that hands back fixture order would hold that dependency up whether
+    or not the adapter ever asked for it.
+    """
+
+    def __init__(self, runs):
+        self.documents = [document for run in runs
+                          for document in run["documents"]]
+        self.requests = []
+
+    def ping(self):
+        return True
+
+    def search(self, index=None, **kwargs):
+        self.requests.append(kwargs)
+        filters = _dig(kwargs, "query.bool.filter") or []
+        wanted_types = set()
+        groups = None
+        monitors = set()
+        for clause in filters:
+            for field, value in (clause.get("term") or {}).items():
+                if field == "synthetics.type":
+                    wanted_types.add(value)
+                if field == "monitor.id":
+                    monitors.add(value)
+            for field, values in (clause.get("terms") or {}).items():
+                if field == "monitor.check_group":
+                    groups = set(values)
+            if "exists" in clause:
+                wanted_types.add("heartbeat/summary")
+
+        hits = []
+        for document in self.documents:
+            kind = _dig(document, "synthetics.type")
+            if wanted_types and kind not in wanted_types:
+                continue
+            if groups is not None \
+                    and _dig(document, "monitor.check_group") not in groups:
+                continue
+            if monitors and _dig(document, "monitor.id") not in monitors:
+                continue
+            hits.append({"_index": ".ds-synthetics-browser-default-000001",
+                         "_id": f"{kind}-{len(hits)}", "_source": document})
+
+        # Fixture order destroyed first, then the requested sort applied, then
+        # `size` honoured — which is what a cluster does, and what makes both
+        # the ordering and the cap something a test can hold.
+        hits.reverse()
+        total = len(hits)
+        for sort in reversed(kwargs.get("sort") or ()):
+            field, options = next(iter(sort.items()))
+            descending = (options or {}).get("order") == "desc"
+            hits.sort(key=lambda hit: _dig(hit["_source"], field) or 0,
+                      reverse=descending)
+        size = kwargs.get("size")
+        if size is not None:
+            hits = hits[:size]
+        return NotADict({"hits": {"total": {"value": total}, "hits": hits}})
+
+
+class ElasticBrowserJourneyTest(unittest.TestCase):
+    """Per-step detail from Elastic's browser monitors.
+
+    Held back through two phases because the document shape had never been
+    measured and a guessed one produces a page that looks complete and is
+    wrong. It has now been measured, and the shape was not what reading a
+    summary document would suggest: a browser check is six documents in a
+    different data stream, tied together by `monitor.check_group`.
+    """
+
+    def setUp(self):
+        self.runs = _browser_runs()
+        self.client = ReplayElasticsearch(self.runs)
+        self.source = ElasticsearchMonitorSource(self.client)
+        self.window = TimeWindow(start=_now() - dt.timedelta(hours=1),
+                                 end=_now())
+
+    def _history(self, monitor_id, limit=25):
+        return self.source.history(monitor_id, self.window,
+                                   Scope.unrestricted(), limit=limit)
+
+    def test_a_passing_journey_reports_every_step(self):
+        check = self._history("lab-journey-up")[-1]
+        self.assertEqual([s.description for s in check.steps],
+                         ["open the sign-in page", "sign in", "add to basket"])
+        self.assertEqual({s.status for s in check.steps}, {"passed"})
+
+    def test_the_steps_are_in_the_order_they_ran(self):
+        """By `synthetics.step.index`, not by timestamp: two steps finishing
+        inside the same millisecond agree on the second and not the first."""
+        check = self._history("lab-journey-up")[-1]
+        self.assertEqual([s.index for s in check.steps], [1, 2, 3])
+
+    def test_a_failure_names_the_step_that_broke(self):
+        """The whole point of a per-step view. "The journey failed" is a fact
+        nobody can act on; "sign in failed" is one somebody can."""
+        check = self._history("lab-journey-down")[-1]
+        self.assertEqual(check.failed_step.description, "sign in")
+        self.assertEqual(check.failed_step.index, 2)
+
+    def test_the_step_after_a_failure_is_skipped_not_failed(self):
+        """It never ran. Reporting it as failed says the basket is broken when
+        what is broken is the sign-in in front of it — and that is where
+        somebody would go looking."""
+        check = self._history("lab-journey-down")[-1]
+        third = check.steps[2]
+        self.assertEqual(third.status, "skipped")
+        self.assertEqual(third.description, "add to basket")
+
+    def test_the_error_is_the_browsers_own_words(self):
+        """ECS `error.message` prefixes it with "error executing step: ",
+        which is scaffolding rather than information."""
+        check = self._history("lab-journey-down")[-1]
+        self.assertEqual(check.failed_step.error,
+                         "page.waitForSelector: Timeout 5000ms exceeded.")
+
+    def test_each_step_carries_its_own_duration(self):
+        check = self._history("lab-journey-up")[-1]
+        durations = [s.duration_ms for s in check.steps]
+        self.assertTrue(all(d is not None for d in durations))
+        # The lab's basket button waits 400ms on purpose, so the last step is
+        # the slow one — the shape a per-step view exists to show.
+        self.assertEqual(max(durations), durations[-1])
+
+    def test_the_script_source_never_reaches_the_page(self):
+        """`synthetics.payload.source` is the step's CODE.
+
+        The lab's failing journey has a literal password in it, which is
+        exactly what a real one would have. WDash redacts secrets out of its
+        own journeys; carrying Elastic's script bodies onto the same page
+        would hand back the thing redaction exists to prevent.
+        """
+        stored = json.dumps(_browser_runs("lab-journey-down"))
+        self.assertIn("wrong-password", stored,
+                      "the fixture no longer contains the thing being kept "
+                      "off the page, so this test proves nothing")
+
+        rendered = json.dumps([
+            {"description": s.description, "status": s.status,
+             "error": s.error, "kind": s.kind}
+            for check in self._history("lab-journey-down")
+            for s in check.steps])
+        self.assertNotIn("wrong-password", rendered)
+        self.assertNotIn("page.fill", rendered)
+
+    def test_one_runs_steps_do_not_land_on_another(self):
+        """Two journeys ran in the same minute. Joined on anything looser than
+        `monitor.check_group` — the monitor id, the timestamp — the failing
+        one's steps would appear under the passing one."""
+        passing = self._history("lab-journey-up")[-1]
+        self.assertEqual([s.status for s in passing.steps],
+                         ["passed", "passed", "passed"])
+        failing = self._history("lab-journey-down")[-1]
+        self.assertEqual([s.status for s in failing.steps],
+                         ["passed", "failed", "skipped"])
+
+    def test_two_runs_of_one_journey_keep_their_own_steps(self):
+        """The join has to be `monitor.check_group` and nothing looser.
+
+        On `monitor.id` — which is the obvious wrong answer, since that is
+        what the history query already filters by — every run of a monitor
+        collects every step the monitor ever ran. A three-step journey with
+        two runs in the window then shows six steps per run, numbered
+        1,1,2,2,3,3, and the whole point of the view is gone.
+        """
+        checks = self._history("lab-journey-down")
+        self.assertEqual(len(checks), 2, "the fixture needs two runs here")
+        for check in checks:
+            self.assertEqual([s.index for s in check.steps], [1, 2, 3])
+
+    def test_a_journey_end_document_is_not_read_as_a_step(self):
+        """`journey/end` also carries `payload.status`. Counted as a step it
+        adds a fourth row to a three-step journey, with no name."""
+        check = self._history("lab-journey-up")[-1]
+        self.assertEqual(len(check.steps), 3)
+        self.assertTrue(all(s.description for s in check.steps))
+
+    def test_an_http_monitor_costs_no_extra_query(self):
+        """Steps are a browser thing. Asking for them on every history would
+        double the requests behind the busiest page in the product.
+
+        With a real HTTP check in it, rather than an empty client: an empty
+        one returns no hits, so there is nothing to ask a second question
+        about and the test passes whatever the adapter does. It did — a
+        mutation that deleted the browser condition entirely survived this
+        test in that form.
+        """
+        client = FakeElasticsearch([_document(kind="http")])
+        source = ElasticsearchMonitorSource(client)
+        source.history("lab-http-up", self.window, Scope.unrestricted(),
+                       limit=25)
+        self.assertEqual(len(client.requests), 1)
+
+    def test_the_step_query_asks_only_for_the_runs_on_this_page(self):
+        """Scoped to the check groups just read, and nothing wider.
+
+        `monitor.id` is the obvious wrong answer — the history query filters
+        by it already — and it is wrong in a way no fixture shows: on a
+        cluster it matches every run the monitor has ever recorded, so the
+        size cap truncates and some rows on the page silently lose their
+        steps. What reaches the cluster is the behaviour here.
+        """
+        self._history("lab-journey-down")
+        asked = _dig(self.client.requests[-1], "query.bool.filter") or []
+        terms = [clause["terms"] for clause in asked if "terms" in clause]
+        self.assertEqual(len(terms), 1)
+        self.assertIn("monitor.check_group", terms[0])
+        self.assertEqual(
+            sorted(terms[0]["monitor.check_group"]),
+            sorted(run["check_group"]
+                   for run in _browser_runs("lab-journey-down")))
+
+    def test_steps_arrive_when_nobody_asked_for_a_page(self):
+        """The bug that made the whole feature invisible on a real screen.
+
+        The first version fetched steps only when the caller passed a bounded
+        `limit`, on the reasoning that the availability figures read the whole
+        window and never look at a step. But the fan-out pages in Python —
+        deliberately, because a page of a merge is not the merge of two pages
+        — so it asks every source for the WHOLE window. Every journey came
+        back with no steps on any deployment with more than one monitor
+        source, which is the ordinary case, and the page showed a browser
+        monitor with nothing to expand.
+
+        It passed every test above, because they all called the adapter
+        directly.
+        """
+        checks = self.source.history("lab-journey-up", self.window,
+                                     Scope.unrestricted())
+        self.assertTrue(all(check.steps for check in checks))
+
+    def test_the_lookup_never_asks_for_more_than_a_search_can_return(self):
+        """`index.max_result_window` is 10,000, and a plain search asking for
+        more is refused. The refusal arrives as an exception, which this
+        adapter turns into "no steps" — so the cliff would show up as a
+        browser monitor with nothing to expand, on exactly the deployments
+        with enough history to want it."""
+        runs = _many_runs("lab-journey-up", 400)
+        source = ElasticsearchMonitorSource(ReplayElasticsearch(runs))
+        client = source._es
+        source.history("lab-journey-up", self.window, Scope.unrestricted())
+        self.assertLessEqual(client.requests[-1]["size"], 10_000)
+
+    def test_when_the_cap_bites_it_is_the_oldest_runs_that_lose_their_steps(self):
+        """A cap has to fall somewhere. Falling on the newest runs would take
+        the steps off the rows on the first page — the ones somebody opened
+        the monitor to look at.
+
+        Thirty steps a run, because three cannot reach the cap: history stops
+        at 500 checks and 500 × 3 is well under 10,000, so the same test on a
+        short journey passes with the cap never applied — which is how the
+        first version of it passed while the order was wrong.
+        """
+        runs = _many_runs("lab-journey-up", 400, steps_per_run=30)
+        source = ElasticsearchMonitorSource(ReplayElasticsearch(runs))
+        checks = source.history("lab-journey-up", self.window,
+                                Scope.unrestricted())
+        with_steps = [bool(check.steps) for check in checks]
+        self.assertIn(False, with_steps, "the cap did not bite, so this "
+                                         "proves nothing about where it falls")
+        # `history` returns oldest first, so the newest are at the end.
+        self.assertTrue(all(with_steps[-100:]))
+        self.assertFalse(with_steps[0])
+
+    def test_a_status_nobody_has_measured_is_shown_rather_than_translated(self):
+        """Three values have been seen. A fourth from some later agent should
+        appear as what it said — mapping it onto one of ours would be a
+        guess presented as a reading."""
+        run = _browser_runs("lab-journey-up")[-1]
+        for document in run["documents"]:
+            if _dig(document, "synthetics.step.index") == 2:
+                document["synthetics"]["step"]["status"] = "flaky"
+        source = ElasticsearchMonitorSource(ReplayElasticsearch([run]))
+        check = source.history("lab-journey-up", self.window,
+                               Scope.unrestricted(), limit=25)[-1]
+        self.assertEqual(check.steps[1].status, "flaky")
