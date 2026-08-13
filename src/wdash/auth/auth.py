@@ -30,7 +30,22 @@ def init_oauth(app, settings=None):
         client_id=settings['client_id'],
         client_secret=settings['client_secret'],
         server_metadata_url=settings['discovery_url'],
-        client_kwargs={'scope': 'openid email profile'},
+        # `groups` is in the default because this product maps groups to
+        # roles — `rbac.yaml` has a `groups_claim` and the callback below
+        # reads it — and a provider that gates the claim behind a scope sends
+        # nothing without it. Dex does; so do Keycloak and Okta with the
+        # usual configuration.
+        #
+        # Measured in the lab: without this every OIDC identity signed in
+        # perfectly and landed on the DEFAULT role, whatever directory groups
+        # it held. Nothing failed, nothing logged, and the only symptom was
+        # an administrator who could not see the configuration page.
+        #
+        # Configurable because an authorization server MAY refuse a scope it
+        # does not recognise, and a deployment that meets one needs a way out
+        # that is not a fork.
+        client_kwargs={'scope': current_app.config.get(
+            'OIDC_SCOPES', 'openid email profile groups')},
     )
     return oauth, oidc
 

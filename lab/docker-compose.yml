@@ -246,7 +246,63 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------
+  # Identity:  ./lab.sh up identity
+  #
+  # A directory and an OIDC provider in front of it, so both of WDash's
+  # sign-in paths can be exercised against something real. Off by default,
+  # like everything else that costs memory.
+  # ---------------------------------------------------------------------
+  openldap:
+    image: osixia/openldap:${OPENLDAP_VERSION}
+    container_name: wdash-lab-ldap
+    profiles: ["identity"]
+    environment:
+      - LDAP_ORGANISATION=WDash Lab
+      - LDAP_DOMAIN=lab.local
+      - LDAP_ADMIN_PASSWORD=hunter2
+      # The seed is idempotent only on a first start; this keeps a restart
+      # from trying to add entries that are already there.
+      - LDAP_SEED_INTERNAL_LDIF_PATH=/container/service/slapd/assets/config/bootstrap/ldif/custom
+    command: ["--copy-service", "--loglevel", "warning"]
+    volumes:
+      - ./identity/ldap:/container/service/slapd/assets/config/bootstrap/ldif/custom:ro
+      - ldap_data:/var/lib/ldap
+      - ldap_config:/etc/ldap/slapd.d
+    ports:
+      - "${LDAP_PORT}:389"
+      - "${LDAPS_PORT}:636"
+    healthcheck:
+      test: ["CMD-SHELL", "ldapsearch -x -H ldap://localhost:389 -b dc=lab,dc=local -D cn=admin,dc=lab,dc=local -w hunter2 '(uid=alice)' | grep -q numEntries"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  dex:
+    image: ghcr.io/dexidp/dex:${DEX_VERSION}
+    container_name: wdash-lab-dex
+    profiles: ["identity"]
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./identity/dex/config.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "${DEX_PORT}:5556"
+    depends_on:
+      openldap:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:5556/dex/.well-known/openid-configuration | grep -q issuer"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
+  ldap_data:
+  ldap_config:
   tempo_data:
   victorialogs_data:
   loki_data:

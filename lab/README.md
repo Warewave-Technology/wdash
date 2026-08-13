@@ -164,6 +164,78 @@ Two things about running them, both learned the hard way:
   ships `@elastic/synthetics` and its own Chromium, which is most of why it is
   2.58GB.
 
+## Identity
+
+`./lab.sh up identity` starts a directory and an OIDC provider in front of it,
+so both of WDash's sign-in paths can be exercised against something real
+rather than mocked.
+
+| | |
+|---|---|
+| OpenLDAP | `ldap://localhost:1389`, base `dc=lab,dc=local` |
+| Dex | `http://localhost:5556/dex` |
+
+Four people, all with the password `hunter2`:
+
+| Who | Group | Role they land on |
+|---|---|---|
+| `alice` | `admins` | admin |
+| `bob` | `developers` | developer |
+| `carol` | `viewers` | viewer |
+| `dave` | none | the default role |
+
+Dave is there on purpose. What a directory returns for somebody who
+authenticates and is entitled to nothing is a different path through the code
+from a refused password, and it is the one that tends to be wrong.
+
+Point WDash at both:
+
+```bash
+# LDAP — the settings the configuration page asks for
+LDAP_SERVER=ldap://localhost:1389
+LDAP_BASE_DN=dc=lab,dc=local
+LDAP_BIND_DN=cn=admin,dc=lab,dc=local
+LDAP_BIND_PASSWORD=hunter2
+
+# OIDC
+OIDC_CLIENT_ID=wdash
+OIDC_CLIENT_SECRET=wdash-lab-secret
+OIDC_DISCOVERY_URL=http://localhost:5556/dex/.well-known/openid-configuration
+OIDC_REDIRECT_URI=http://127.0.0.1:5001/auth/callback
+```
+
+Dex reads the same directory rather than carrying its own users, which is
+what a real deployment does and is also the only way it can issue a `groups`
+claim at all — its static passwords cannot. So the lab has one source of
+identity truth and two paths to it: alice through LDAP and alice through OIDC
+should reach the same role, and if they do not, one of the two paths is
+wrong.
+
+### Three things this lab found
+
+Worth reading before adding to it, because each cost an hour:
+
+* **The image already installs the memberOf overlay.** A second one added
+  from a bootstrap LDIF fails the whole startup with `status 50`, and the
+  seed never runs — so the directory comes up empty and healthy-looking.
+* **That overlay is configured for `groupOfUniqueNames` / `uniqueMember`.** A
+  `groupOfNames` group adds cleanly, lists its members correctly, and is
+  invisible to the overlay: every user in it has no `memberOf` at all, which
+  reaches WDash as "authenticated, belongs to nothing".
+* **WDash was not asking for the `groups` scope.** Dex gates the claim behind
+  it, so every OIDC identity signed in perfectly and landed on the default
+  role — no error, no log line, and an administrator who could not see the
+  configuration page. Fixed in `auth.py`; `OIDC_SCOPES` overrides it for a
+  provider that refuses the scope.
+
+### A naming inconsistency you will meet
+
+`config/rbac.yaml` maps the groups `admins`, `developers` and `viewers`;
+`src/wdash/store/roles.py` maps `wdash-admins`, `wdash-editors` and
+`wdash-viewers` for the same three roles, and is what a deployment gets when
+there is no rbac.yaml to seed from. The lab uses the first set, because that
+is what a fresh install of this repository produces.
+
 ## Port conflicts
 
 The project-root `docker-compose.yml` also contains Elasticsearch and

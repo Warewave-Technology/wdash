@@ -1,0 +1,76 @@
+# The lab directory.
+#
+# Four people and three groups, named to match the roles WDash creates on
+# first run — `admins`, `developers`, `viewers`. A directory
+# whose group names do not match anything in the product proves the bind
+# works and nothing else.
+#
+# Dave is here on purpose and belongs to no group: what a directory returns
+# for somebody who authenticates and is entitled to nothing is a different
+# path through the code from a refused password, and it is the one that
+# tends to be wrong.
+#
+# Everybody's password is `hunter2`, which is the lab's convention.
+#
+# The groups are `groupOfUniqueNames` with `uniqueMember`, and not because
+# anybody prefers them. The image's memberOf overlay is configured for that
+# pair — `olcMemberOfGroupOC: groupOfUniqueNames`, `olcMemberOfMemberAD:
+# uniqueMember` — so a `groupOfNames` group is one the overlay ignores
+# completely. It adds cleanly, it lists its members correctly, and every user
+# in it has no `memberOf` at all, which reaches WDash as "authenticated, no
+# groups" and lands on the default role. Nothing anywhere says why.
+
+dn: ou=people,dc=lab,dc=local
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=lab,dc=local
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=alice,ou=people,dc=lab,dc=local
+objectClass: inetOrgPerson
+uid: alice
+cn: Alice Adams
+sn: Adams
+mail: alice@lab.local
+userPassword: hunter2
+
+dn: uid=bob,ou=people,dc=lab,dc=local
+objectClass: inetOrgPerson
+uid: bob
+cn: Bob Brown
+sn: Brown
+mail: bob@lab.local
+userPassword: hunter2
+
+dn: uid=carol,ou=people,dc=lab,dc=local
+objectClass: inetOrgPerson
+uid: carol
+cn: Carol Clarke
+sn: Clarke
+mail: carol@lab.local
+userPassword: hunter2
+
+dn: uid=dave,ou=people,dc=lab,dc=local
+objectClass: inetOrgPerson
+uid: dave
+cn: Dave Davies
+sn: Davies
+mail: dave@lab.local
+userPassword: hunter2
+
+dn: cn=admins,ou=groups,dc=lab,dc=local
+objectClass: groupOfUniqueNames
+cn: admins
+uniqueMember: uid=alice,ou=people,dc=lab,dc=local
+
+dn: cn=developers,ou=groups,dc=lab,dc=local
+objectClass: groupOfUniqueNames
+cn: developers
+uniqueMember: uid=bob,ou=people,dc=lab,dc=local
+
+dn: cn=viewers,ou=groups,dc=lab,dc=local
+objectClass: groupOfUniqueNames
+cn: viewers
+uniqueMember: uid=carol,ou=people,dc=lab,dc=local

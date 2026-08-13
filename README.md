@@ -151,6 +151,7 @@ rather than two owners.
 | `OIDC_CLIENT_SECRET` | OIDC client secret | — |
 | `OIDC_DISCOVERY_URL` | Provider discovery document | — |
 | `OIDC_REDIRECT_URI` | Callback URL | `http://127.0.0.1:5001/auth/callback` |
+| `OIDC_SCOPES` | What to ask the provider for. `groups` is included because roles are mapped from groups, and a provider that gates that claim behind a scope sends nothing without it | `openid email profile groups` |
 | `RBAC_CONFIG_FILE` | Roles imported **once** into the database on a fresh installation, then ignored | `config/rbac.yaml` |
 | `LOGS_PER_PAGE` | Records per page in the log list | `50` |
 | `SESSION_COOKIE_SECURE` | Send the session cookie over HTTPS only. Also enables HSTS | `False` |

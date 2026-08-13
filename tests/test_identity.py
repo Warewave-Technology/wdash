@@ -362,3 +362,56 @@ class BreakGlassTest(IdentityTestCase):
         row = next(entry for entry in self.app.store.audit.recent()
                    if entry["action"] == "sign-in")
         self.assertEqual(row["state"]["method"], "local account")
+
+
+class OidcScopeTest(unittest.TestCase):
+    """What WDash asks the identity provider for.
+
+    It asked for `openid email profile`, and this product maps GROUPS to
+    roles — `rbac.yaml` names a `groups_claim` and the callback reads it. A
+    provider that gates that claim behind a scope therefore sent nothing, and
+    every OIDC identity signed in perfectly and landed on the default role.
+    No error, no log line; the symptom was an administrator who could not see
+    the configuration page.
+
+    Found against a real Dex in `lab/identity`, which is the only way it
+    could have been: a stubbed provider returns whatever the stub was written
+    to return, including groups nobody asked for.
+    """
+
+    def _registered_scope(self, config=None):
+        from wdash.auth.auth import init_oauth
+
+        settings = {"client_id": "wdash", "client_secret": "secret",
+                    "discovery_url": "https://idp.invalid/.well-known/"
+                                     "openid-configuration",
+                    "redirect_uri": "http://127.0.0.1:5001/auth/callback"}
+
+        class OidcConfig(Config):
+            TESTING = True
+            SECRET_KEY = "scope"
+            DATABASE_URL = "sqlite:///:memory:"
+            ELASTICSEARCH_URL = ""
+
+        if config:
+            for name, value in config.items():
+                setattr(OidcConfig, name, value)
+
+        app = create_app(OidcConfig)
+        with app.app_context():
+            _, oidc = init_oauth(app, settings)
+            return oidc.client_kwargs["scope"]
+
+    def test_groups_are_asked_for(self):
+        self.assertIn("groups", self._registered_scope().split())
+
+    def test_the_usual_three_are_still_asked_for(self):
+        scope = self._registered_scope().split()
+        for name in ("openid", "email", "profile"):
+            self.assertIn(name, scope)
+
+    def test_a_deployment_can_override_it(self):
+        """An authorization server MAY refuse a scope it does not recognise.
+        A deployment that meets one needs a way out that is not a fork."""
+        scope = self._registered_scope({"OIDC_SCOPES": "openid email"})
+        self.assertEqual(scope, "openid email")

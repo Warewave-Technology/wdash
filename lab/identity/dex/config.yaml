@@ -1,0 +1,75 @@
+# Dex, as the lab's identity provider.
+#
+# A real OIDC provider rather than a mock: discovery document, authorization
+# code flow, signed ID tokens, a rotating JWKS. Apache-2.0, and small enough
+# to start in a second — which is why it is here instead of Keycloak, since
+# the lab already asks for enough memory.
+#
+# It reads the SAME directory next door rather than carrying its own users,
+# and that is not tidiness. Dex's static passwords cannot issue a `groups`
+# claim at all, so every OIDC sign-in would have landed on the default role
+# and the lab would have "worked" while proving nothing about role mapping.
+# Getting groups from a directory is also what a real deployment does.
+#
+# So the lab has one source of identity truth and two paths to it: alice
+# signing in through LDAP and alice signing in through OIDC should reach the
+# same role. If they do not, one of the two paths is wrong — which is the
+# question this lab exists to answer.
+
+issuer: http://localhost:5556/dex
+
+storage:
+  # In memory. A lab identity provider that survives a restart is one whose
+  # state nobody can reason about.
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  # No consent screen. It proves nothing here and costs a click in every
+  # test that drives the flow.
+  skipApprovalScreen: true
+
+staticClients:
+  - id: wdash
+    name: WDash
+    secret: wdash-lab-secret
+    redirectURIs:
+      # `127.0.0.1` first because that is what `OIDC_REDIRECT_URI` defaults
+      # to, and a provider compares redirect URIs as strings — `localhost`
+      # and `127.0.0.1` are different ones.
+      - http://127.0.0.1:5001/auth/callback
+      - http://localhost:5001/auth/callback
+
+connectors:
+  - type: ldap
+    id: ldap
+    name: Lab directory
+    config:
+      host: openldap:389
+      insecureNoSSL: true
+
+      bindDN: cn=admin,dc=lab,dc=local
+      bindPW: hunter2
+
+      usernamePrompt: Username
+
+      userSearch:
+        baseDN: ou=people,dc=lab,dc=local
+        filter: "(objectClass=inetOrgPerson)"
+        username: uid
+        idAttr: uid
+        emailAttr: mail
+        nameAttr: cn
+
+      # Searched rather than read from `memberOf`, because that is what Dex
+      # does. WDash's own LDAP path reads `memberOf`, so the two exercise
+      # different halves of the directory and both have to be right.
+      groupSearch:
+        baseDN: ou=groups,dc=lab,dc=local
+        filter: "(objectClass=groupOfUniqueNames)"
+        userMatchers:
+          - userAttr: DN
+            groupAttr: uniqueMember
+        nameAttr: cn

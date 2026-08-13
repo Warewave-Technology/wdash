@@ -5,6 +5,7 @@
 #   ./lab.sh up [profile...]   start the stack
 #                             profiles: kibana, cluster, otel, loki, victorialogs,
 #                                       synthetics (Heartbeat + probe targets),
+#                                       identity (OpenLDAP + Dex),
 #                                       jaeger, tempo
 #   ./lab.sh seed [args...]    load sample data into every running backend
 #                             (args go to seed.py; Loki and VictoriaLogs are
