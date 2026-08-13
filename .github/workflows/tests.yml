@@ -1,0 +1,186 @@
+# What runs before anything is merged.
+#
+# The suite is 1,868 tests, and a good half of them are guards written after
+# a specific mistake: a colour outside the palette, a template naming a
+# theme, a dependency under a licence this project will not take, a test
+# reaching the developer's own database. Every one of those is worth exactly
+# as much as the thing that runs it, and until this file existed that was
+# somebody remembering.
+#
+# Three jobs rather than one, because the suite means three different things
+# depending on what is installed beside it:
+#
+#   suite         no browser, no cluster — 19 tests skip and say so
+#   browser       + Playwright and Chromium — 13 of those 19
+#   live-schema   + a seeded Elasticsearch — the other 6
+#
+# The last two set WDASH_REQUIRE_LAB / check the skip count, because a job
+# that exists to run a test and goes green by skipping it is worse than no
+# job at all.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is what the image ships. 3.14 is what the project is developed
+        # on. Testing only one of them leaves the other to be discovered by
+        # whoever hits it first.
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      # The front-end suites are run BY the Python suite
+      # (tests/test_frontend_integrity.py shells out to node), and they skip
+      # themselves when node is missing — so without this the JavaScript goes
+      # untested and nothing says so.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: pip install -r requirements.txt
+      - run: npm ci
+
+      - name: The suite
+        # Not verbose: 1,868 lines of test names bury the one that failed.
+        # The specialised jobs below are where a SKIP is a failure; here
+        # nineteen of them are expected and the count is printed at the end.
+        run: python -m unittest discover -s tests -t .
+
+      - name: The front-end suites, on their own as well
+        run: npm test
+
+  browser:
+    name: browser journeys
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Pinned to the version the browser image installs. A journey measured
+      # against a different Chromium than the one that ships is a measurement
+      # of something else.
+      - name: Playwright and Chromium
+        run: |
+          pip install playwright==1.62.0
+          playwright install --with-deps chromium
+
+      - name: The journey suite, against a real browser
+        run: python -m unittest tests.test_journeys -v
+
+      - name: And nothing quietly skipped
+        # `BrowserSuiteIsNotSilentlySkippedTest` holds this from the inside;
+        # this holds it from the outside, where a failure to install
+        # Playwright at all would otherwise look like a green run.
+        run: |
+          python - <<'PY'
+          import io, unittest
+          from unittest import TextTestRunner
+          suite = unittest.defaultTestLoader.loadTestsFromNames(
+              ["tests.test_journeys"])
+          result = TextTestRunner(stream=io.StringIO()).run(suite)
+          print(f"{result.testsRun} run, {len(result.skipped)} skipped")
+          for test, reason in result.skipped:
+              print(f"  skipped: {test.id()} — {reason}")
+          raise SystemExit(1 if result.skipped or not result.wasSuccessful()
+                           else 0)
+          PY
+
+  live-schema:
+    name: live schema equivalence
+    runs-on: ubuntu-latest
+
+    services:
+      elasticsearch:
+        # The same version the lab runs, because the document shapes this
+        # job checks are read off a real cluster rather than a reference.
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.19.9
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: -Xms1g -Xmx1g
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -sf http://localhost:9200 || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Not ELASTICSEARCH_URL. The suite forces that one empty so no test can
+      # reach a cluster nobody declared; these tests get their own name.
+      WDASH_LAB_URL: http://localhost:9200
+      WDASH_REQUIRE_LAB: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Enough of both schemas to compare, and no more: this job asks whether
+      # a trace read as OTel and the same trace read as Elastic APM come out
+      # identical, which needs variety rather than volume.
+      - name: Seed both trace schemas
+        run: python lab/seed/seed.py --logs 3000 --traces 400 --days 2
+
+      - name: The parts that need a cluster
+        run: python -m unittest tests.test_hub -v
+
+  image:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The server target, which is the last stage and therefore what a plain
+      # `docker build .` produces. Nothing in the suite can tell you the
+      # Dockerfile stopped working — it is the one artefact every deployment
+      # uses and the only one no test touches.
+      #
+      # Not the browser target: 1.77GB and several minutes, for a stage that
+      # differs by one `pip install` and a `playwright install`. Worth a
+      # nightly or a release, not a pull request.
+      - name: Build the server image
+        run: docker build -t wdash:ci .
+
+      - name: It starts, and says what it is
+        run: |
+          docker run --rm --entrypoint python wdash:ci -c "
+          import sys; sys.path.insert(0, 'src')
+          from wdash.app import create_app
+          print('imports and builds an app:', bool(create_app))"

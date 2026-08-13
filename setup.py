@@ -25,12 +25,19 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
+        "Topic :: System :: Monitoring",
     ],
-    python_requires=">=3.8",
+    # 3.11 is what the image ships and the lowest version CI runs. The
+    # previous claim was ">=3.8" with classifiers down to 3.8, and it was not
+    # true for either half: `psycopg==3.3.4` needs 3.10, `cryptography` and
+    # `requests` need 3.9, so `pip install wdash` on 3.8 could never have
+    # resolved. Claiming a version nothing tests is a promise made to
+    # somebody else's afternoon.
+    python_requires=">=3.11",
     install_requires=requirements,
     entry_points={
         "console_scripts": [

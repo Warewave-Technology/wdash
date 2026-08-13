@@ -468,13 +468,30 @@ if __name__ == "__main__":
 # Canli lab entegrasyonu - ES yoksa atlanir
 # --------------------------------------------------------------------------
 
+#: Where the integration tests below look for a cluster.
+#:
+#: NOT `ELASTICSEARCH_URL`, which is what this read until it was noticed.
+#: `tests/__init__.py` forces that one empty on purpose — the suite must not
+#: talk to a cluster nobody declared — so `os.environ.get(name, default)`
+#: returned the empty string rather than the default, the client refused to
+#: build, and these tests skipped every single run. Including the runs with
+#: the lab up, while printing a message telling you to start it.
+#:
+#: A variable of their own means the two statements stop fighting: "the
+#: application has no cluster" and "the integration tests have one over
+#: here".
+LAB_URL = os.environ.get("WDASH_LAB_URL") or "http://localhost:9200"
+
+#: Set by CI. A job that exists to run these tests and reports success
+#: because it skipped them is worse than no job.
+LAB_REQUIRED = os.environ.get("WDASH_REQUIRE_LAB") == "1"
+
+
 def _lab_client():
     """Lab ayaktaysa ES istemcisi, degilse None."""
     try:
         from elasticsearch import Elasticsearch
-        client = Elasticsearch(
-            hosts=[os.environ.get("ELASTICSEARCH_URL", "http://localhost:9200")],
-            request_timeout=5)
+        client = Elasticsearch(hosts=[LAB_URL], request_timeout=5)
         return client if client.ping() else None
     except Exception:
         return None
@@ -483,7 +500,23 @@ def _lab_client():
 LAB = _lab_client()
 
 
-@unittest.skipIf(LAB is None, "lab Elasticsearch calismiyor (cd lab && ./lab.sh up)")
+class LabIsReachableTest(unittest.TestCase):
+    """The guard on the skip below.
+
+    A skip is the right answer on a laptop with nothing running and the wrong
+    answer in a job whose whole purpose is these four tests. `WDASH_REQUIRE_LAB=1`
+    turns the one into the other.
+    """
+
+    @unittest.skipUnless(LAB_REQUIRED, "only asserted where a lab is promised")
+    def test_the_lab_is_there_when_it_was_promised(self):
+        self.assertIsNotNone(
+            LAB, f"WDASH_REQUIRE_LAB is set but nothing answered at {LAB_URL}")
+
+
+@unittest.skipIf(LAB is None,
+                 f"no Elasticsearch at {LAB_URL} — `cd lab && ./lab.sh up`, "
+                 f"or set WDASH_LAB_URL")
 class LiveSchemaEquivalenceTest(unittest.TestCase):
     """Verify the hub's central claim against real data.
 

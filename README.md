@@ -501,6 +501,27 @@ Three rules hold this together:
 [`docs/hub.md`](docs/hub.md) explains the reasoning, the migration history and
 what is still outstanding.
 
+## What runs before a merge
+
+`.github/workflows/tests.yml`, in four jobs, because the suite means
+different things depending on what is installed beside it:
+
+| Job | What it adds | What it closes |
+|---|---|---|
+| `suite` | Python 3.11–3.14, node | the 1,885 tests, on every supported version |
+| `browser` | Playwright and Chromium | 13 journey tests that otherwise skip |
+| `live-schema` | a seeded Elasticsearch | 6 tests that read both trace schemas |
+| `image` | Docker | that the Dockerfile still builds |
+
+The last two refuse to pass by skipping — `WDASH_REQUIRE_LAB=1` turns "no
+cluster" from a skip into a failure, and the browser job exits non-zero if
+anything was skipped at all. A job that exists to run a test and goes green
+because it did not is worse than no job.
+
+`tests/test_ci.py` holds the workflow to what it claims: the version matrix
+against the packaging classifiers, the Playwright pin against the image, the
+Elasticsearch service against the lab's version.
+
 ## Local development
 
 ```bash
