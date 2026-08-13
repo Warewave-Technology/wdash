@@ -462,7 +462,7 @@ without interpreting.
 | `GET` | `/api/dashboard/<id>/data` | All dashboard panels plus the previous-period comparison, one round trip |
 | `GET` | `/api/advisor/report` | Advisor findings |
 | `GET` | `/api/advisor/rules` | The rule catalogue |
-| `GET` | `/health` | Liveness and cluster reachability |
+| `GET` | `/health` | Liveness, cluster reachability, and the running version |
 
 Per-panel dashboard endpoints (`/stats`, `/timeline`, `/log-levels`,
 `/services`, `/heatmap`) remain available for API compatibility, but the UI
@@ -608,6 +608,22 @@ tests/                  unit tests, adapter conformance suite, fixtures
 The split that matters: **`hub/` reads observability data, `store/` holds
 WDash's own state.** Coupling them is what made dashboards-in-Elasticsearch look
 correct right up until Elasticsearch became one source among several.
+
+## Versioning
+
+One number, in `src/wdash/__init__.py`. `setup.py` reads it, `package.json`
+and the Kubernetes manifests are held to it by `tests/test_version.py`, and
+`/health` reports it — so a running instance can be asked which build it is
+rather than guessed at.
+
+It had been four numbers that disagreed: the package said `1.0.0` while the
+published images had reached `2.2.4`, and the manifests in this repository
+deployed `wdash-elastic-dashboard:1.0.0` — five minor versions behind
+whatever anybody thought they were running.
+
+Semantic versioning. The Python floor moving from 3.8 to 3.11 is not counted
+as a break, because `>=3.8` was never installable: `psycopg` has required
+3.10 for as long as it has been pinned here.
 
 ## Production notes
 

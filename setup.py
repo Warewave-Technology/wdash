@@ -2,7 +2,19 @@
 WDash setup script
 """
 
+import re
+
 from setuptools import setup, find_packages
+
+
+def _version():
+    """Read from the package rather than repeated here.
+
+    Two copies of a version number are two claims, and they had already
+    parted company.
+    """
+    source = open("src/wdash/__init__.py", encoding="utf-8").read()
+    return re.search(r'__version__ = "([^"]+)"', source).group(1)
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -12,7 +24,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="wdash",
-    version="1.0.0",
+    version=_version(),
     author="Warewave",
     description="A minimal Kibana alternative with RBAC and OIDC support",
     long_description=long_description,

@@ -37,7 +37,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: wdash
-        image: yigitbasalma/wdash-elastic-dashboard:1.0.0
+        image: yigitbasalma/wdash-elastic-dashboard:2.3.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5000
@@ -247,7 +247,7 @@ spec:
       
       initContainers:
       - name: copy-static-files
-        image: yigitbasalma/wdash-elastic-dashboard:1.0.0
+        image: yigitbasalma/wdash-elastic-dashboard:2.3.0
         command: ['sh', '-c', 'cp -r /app/static/* /shared/static/']
         volumeMounts:
         - name: static-files

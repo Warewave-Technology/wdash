@@ -12,6 +12,7 @@ from flask_login import LoginManager, login_required, current_user
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+from wdash import __version__
 from wdash.config import (
     Config, DEFAULT_DASHBOARD_FILE, DEFAULT_TRACE_PATTERNS)
 from wdash.auth import auth_bp, load_user_from_session
@@ -419,7 +420,12 @@ def create_app(config_class=Config):
 
         status = 'healthy' if not degraded else (
             'degraded' if serving else 'unhealthy')
-        payload = dict(checks, status=status)
+        # The version, because "which build is this?" was a question a
+        # running instance could not answer. It was written down in four
+        # places that disagreed — the package said 1.0.0 while the published
+        # images had reached 2.2.4 — and in none of them could an operator
+        # reach it without shelling into the container.
+        payload = dict(checks, status=status, version=__version__)
         if degraded:
             # Named, so an alert can say WHICH backend is down without having
             # to diff two payloads.
