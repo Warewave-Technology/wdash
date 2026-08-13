@@ -210,22 +210,12 @@ NOT_IMPORTED_ON_PURPOSE = {
     "playwright": "imported inside the function in src/wdash/agent/browser.py "
                   "so the server image, which does not ship it, can import "
                   "the module.",
-
-    # Measured, unused, and not yet removed — which is the only honest thing
-    # to write here. `redis` was in this position too: a pinned dependency, a
-    # 165-line Kubernetes manifest, a configmap key, a secret and two compose
-    # containers, for something no line of code read. These two are the same
-    # finding without the manifests.
-    "flask-wtf": "UNUSED. Zero imports anywhere in the repository.",
-    "wtforms": "UNUSED. Zero imports anywhere, and only present because "
-               "flask-wtf pulled it in.",
 }
 
 #: What a distribution is called when you import it.
 IMPORT_NAMES = {
     "python-dotenv": "dotenv",
     "flask-login": "flask_login",
-    "flask-wtf": "flask_wtf",
     "pyyaml": "yaml",
     "argon2-cffi": "argon2",
     "psycopg[binary]": "psycopg",
@@ -287,6 +277,17 @@ class EveryDependencyIsUsedTest(unittest.TestCase):
                  if name not in declared]
         self.assertEqual(stale, [],
                          f"exempted and no longer a dependency: {stale}")
+
+    def test_the_import_names_are_still_about_something_declared(self):
+        """Same rule for the translation table. `flask-wtf` needed an entry
+        here because the distribution and the module are spelled
+        differently; once the dependency went, the entry was a line pointing
+        at nothing."""
+        declared = {n.split("[")[0] for n in self.declared}
+        stale = [name for name in IMPORT_NAMES
+                 if name.split("[")[0] not in declared]
+        self.assertEqual(stale, [],
+                         f"translated and no longer a dependency: {stale}")
 
     def test_redis_is_gone(self):
         """Named rather than left to the general rule, because the general

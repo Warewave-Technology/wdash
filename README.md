@@ -636,7 +636,7 @@ An agent runs the checks. It pulls its configuration and pushes results back,
 so it works behind NAT and restarting WDash misses no check.
 
 ```bash
-docker build -t wdash .                                  # server, 265MB
+docker build -t wdash .                                  # server, 260MB
 docker build -t wdash-browser --target browser .         # + Chromium, 1.77GB
 
 docker run -d wdash-browser \
@@ -725,7 +725,12 @@ Stated plainly, because they affect whether this fits your deployment:
   deployed and never read by a line of code, and it has been removed rather
   than left looking like a plan.
 - **No CSRF protection.** State-changing endpoints rely on `SameSite=Lax`
-  cookies only.
+  cookies only. Flask-WTF was installed and never initialised — no
+  `CSRFProtect(app)` anywhere — while five test configurations set
+  `WTF_CSRF_ENABLED = False`, which reads as "switched off for tests" and
+  therefore as "on in production". It was never on. The library and the flag
+  have been removed so the sentence above is the only thing left saying
+  anything about CSRF.
 - **Query language is a subset.** Fuzzy matching, boosting and regular
   expressions are not supported; unsupported syntax is rejected rather than
   silently misinterpreted.

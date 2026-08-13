@@ -3,7 +3,7 @@
 #   wdash            the server, and an agent that runs http and tcp checks
 #   wdash-browser    the same code plus Chromium, for browser journeys
 #
-# Measured: 265MB and 1.77GB. That ratio is the whole reason for the split.
+# Measured: 260MB and 1.77GB. That ratio is the whole reason for the split.
 # Phase 2 settled on "same image, different entry point" for the agent and
 # that still holds for http and tcp; a journey broke the rule for a concrete
 # reason rather than a tidy one — everybody running a single probe for uptime

@@ -1,6 +1,5 @@
 flask==2.3.3
 flask-login==0.6.3
-flask-wtf==1.1.1
 authlib==1.2.1
 elasticsearch==8.10.0
 python-dotenv==1.0.0
@@ -22,5 +21,4 @@ argon2-cffi==23.1.0
 # as libraries over their published interfaces, which is what the LGPL is for;
 # neither pulls WDash's own licence with it.
 ldap3==2.9.1
-wtforms==3.0.1
 requests==2.32.5

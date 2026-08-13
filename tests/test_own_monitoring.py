@@ -424,7 +424,6 @@ class EndpointTest(unittest.TestCase):
             ENCRYPTION_KEY = SecretBox.generate_key()
             ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
-            WTF_CSRF_ENABLED = False
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
@@ -594,7 +593,6 @@ class ManagementPageTest(unittest.TestCase):
             ENCRYPTION_KEY = SecretBox.generate_key()
             ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
-            WTF_CSRF_ENABLED = False
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
