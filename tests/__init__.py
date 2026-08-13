@@ -85,8 +85,6 @@ INERT = {
     "OIDC_REDIRECT_URI": "echoed into a redirect; nothing connects to it",
     "RBAC_CONFIG_FILE": "config/rbac.yaml is tracked, so it is the same file "
                         "on every machine — not developer state",
-    "REDIS_URL": "no code reads it. README records the same thing: "
-                 "reserved, not used yet",
 }
 
 def points_at_something_real(value):

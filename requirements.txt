@@ -6,7 +6,6 @@ elasticsearch==8.10.0
 python-dotenv==1.0.0
 pyyaml==6.0.1
 gunicorn==21.2.0
-redis==5.0.1
 # Metadata store: WDash's own state (accounts, roles, sources, dashboards).
 # Deliberately not Elasticsearch — that is a data source and may be absent.
 sqlalchemy==2.0.51

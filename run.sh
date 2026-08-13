@@ -54,21 +54,6 @@ else
     echo "⚠️  curl not found, skipping Elasticsearch connectivity check"
 fi
 
-# Check if Redis is accessible (optional)
-if [ ! -z "$REDIS_URL" ]; then
-    echo "🔍 Checking Redis connection..."
-    if command -v redis-cli &> /dev/null; then
-        if redis-cli -u "$REDIS_URL" ping > /dev/null 2>&1; then
-            echo "✅ Redis is accessible"
-        else
-            echo "⚠️  Warning: Cannot connect to Redis at $REDIS_URL"
-            echo "   Redis is optional but recommended for session storage"
-        fi
-    else
-        echo "⚠️  redis-cli not found, skipping Redis connectivity check"
-    fi
-fi
-
 # Create dashboards.json if it doesn't exist
 if [ ! -f data/dashboards.json ]; then
     echo "📊 Creating empty dashboards file..."

@@ -84,8 +84,6 @@ class Config:
     #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     ENCRYPTION_KEY = os.environ.get('WDASH_ENCRYPTION_KEY')
 
-    # Redis Configuration
-    REDIS_URL = os.environ.get('REDIS_URL') or 'redis://localhost:6379/0'
     
     # Which indices hold which signal. Logs and traces live in the same
     # cluster, and a log search that also scans the trace store returns spans

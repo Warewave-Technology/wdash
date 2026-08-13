@@ -67,23 +67,6 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  redis:
-    image: redis:${REDIS_VERSION}
-    container_name: wdash-lab-redis
-    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
-    ports:
-      - "${REDIS_PORT}:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped
-
-  # For comparison and debugging. Off by default — it costs memory.
-  #   ./lab.sh up kibana
   kibana:
     image: docker.elastic.co/kibana/kibana:${KIBANA_VERSION}
     container_name: wdash-lab-kibana
@@ -269,4 +252,3 @@ volumes:
   loki_data:
   es01_data:
   es02_data:
-  redis_data:

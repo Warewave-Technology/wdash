@@ -85,7 +85,6 @@ cmd_up() {
 
     echo
     echo "  Elasticsearch  $ES_URL"
-    echo "  Redis          localhost:${REDIS_PORT:-6379}"
     for p in "$@"; do
         [ "$p" = "kibana" ] && echo "  Kibana         http://localhost:${KIBANA_PORT:-5601}"
         [ "$p" = "otel" ]   && echo "  OTLP           localhost:${OTLP_GRPC_PORT:-4317} (gRPC), ${OTLP_HTTP_PORT:-4318} (HTTP)"

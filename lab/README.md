@@ -13,7 +13,7 @@ A self-contained development and test environment. It serves two purposes:
 
 ```bash
 cd lab
-./lab.sh up          # Elasticsearch + Redis
+./lab.sh up          # Elasticsearch
 ./lab.sh seed        # ~50k logs, 2k traces
 ./lab.sh status      # health check
 ```
@@ -22,7 +22,6 @@ To point the application at the lab, use this in the project root `.env`:
 
 ```
 ELASTICSEARCH_URL=http://localhost:9200
-REDIS_URL=redis://localhost:6379/0
 ```
 
 ## Commands
@@ -167,7 +166,7 @@ Two things about running them, both learned the hard way:
 
 ## Port conflicts
 
-The project-root `docker-compose.yml` also contains Elasticsearch, Redis and
+The project-root `docker-compose.yml` also contains Elasticsearch and
 Kibana on the same ports. **Do not run both at once.** Use this lab for
 development; the root compose file should eventually be reduced to just the
 application.

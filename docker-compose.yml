@@ -8,13 +8,11 @@ services:
   #   environment:
   #     - FLASK_ENV=production
   #     - ELASTICSEARCH_URL=http://elasticsearch:9200
-  #     - REDIS_URL=redis://redis:6379/0
   #   volumes:
   #     - ./config/rbac.yaml:/app/config/rbac.yaml
   #     - ./data:/app/data
   #   depends_on:
   #     - elasticsearch
-  #     - redis
   #   restart: unless-stopped
 
   elasticsearch:
@@ -27,14 +25,6 @@ services:
       - "9200:9200"
     volumes:
       - elasticsearch_data:/usr/share/elasticsearch/data
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
     restart: unless-stopped
 
   # Optional: Kibana for comparison/admin tasks
@@ -50,4 +40,3 @@ services:
 
 volumes:
   elasticsearch_data:
-  redis_data:

@@ -9,7 +9,7 @@ data:
   # Every key here is read by the application. Ones that were not — LOG_LEVEL,
   # LOG_FORMAT, SESSION_TIMEOUT, MAX_SEARCH_SIZE, WORKERS,
   # WORKER_CONNECTIONS, WORKER_TIMEOUT, SECRET_KEY_FILE, REDIS_TIMEOUT,
-  # ELASTICSEARCH_MAX_RETRIES — have been removed. A key that looks like
+  # REDIS_URL, ELASTICSEARCH_MAX_RETRIES — have been removed. A key that looks like
   # configuration and changes nothing is worse than a missing one: somebody
   # turns it and reports that it had no effect.
 
@@ -46,8 +46,6 @@ data:
   # as records with no body and no severity.
   TRACE_INDEX_PATTERNS: "*traces*,*apm*"
 
-  # Redis — not used by the code yet; sessions still live in the cookie.
-  REDIS_URL: "redis://redis:6379/0"
 
   # OIDC
   OIDC_DISCOVERY_URL: ""

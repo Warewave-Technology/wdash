@@ -54,11 +54,6 @@ spec:
             configMapKeyRef:
               name: wdash-config
               key: ELASTICSEARCH_URL
-        - name: REDIS_URL
-          valueFrom:
-            configMapKeyRef:
-              name: wdash-config
-              key: REDIS_URL
         - name: OIDC_DISCOVERY_URL
           valueFrom:
             configMapKeyRef:

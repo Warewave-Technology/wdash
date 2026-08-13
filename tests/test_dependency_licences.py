@@ -193,3 +193,104 @@ class DockerfileIsCoveredTest(unittest.TestCase):
             all(_re.match(r"^[a-z0-9._-]+$", name)
                 for name in _dockerfile_installs()),
             f"not package names: {_dockerfile_installs()}")
+
+
+# ---------------------------------------------------------------------------
+# Whether we depend on it at all
+# ---------------------------------------------------------------------------
+
+#: Declared, not imported, and correct anyway — with the reason each is here.
+#: The list is short on purpose: it is the only place a dependency can hide.
+NOT_IMPORTED_ON_PURPOSE = {
+    "gunicorn": "the process that runs the app. The Dockerfile's CMD, not an "
+                "import.",
+    "psycopg": "loaded by SQLAlchemy from the URL scheme when DATABASE_URL "
+               "points at Postgres. Importing it here would be importing a "
+               "driver for a database this deployment may not have.",
+    "playwright": "imported inside the function in src/wdash/agent/browser.py "
+                  "so the server image, which does not ship it, can import "
+                  "the module.",
+
+    # Measured, unused, and not yet removed — which is the only honest thing
+    # to write here. `redis` was in this position too: a pinned dependency, a
+    # 165-line Kubernetes manifest, a configmap key, a secret and two compose
+    # containers, for something no line of code read. These two are the same
+    # finding without the manifests.
+    "flask-wtf": "UNUSED. Zero imports anywhere in the repository.",
+    "wtforms": "UNUSED. Zero imports anywhere, and only present because "
+               "flask-wtf pulled it in.",
+}
+
+#: What a distribution is called when you import it.
+IMPORT_NAMES = {
+    "python-dotenv": "dotenv",
+    "flask-login": "flask_login",
+    "flask-wtf": "flask_wtf",
+    "pyyaml": "yaml",
+    "argon2-cffi": "argon2",
+    "psycopg[binary]": "psycopg",
+}
+
+
+def _imported_names():
+    """Every top-level module imported by the application or its tests."""
+    import pathlib
+    names = set()
+    for path in list(pathlib.Path(ROOT, "src").rglob("*.py")) + \
+            list(pathlib.Path(ROOT, "tests").glob("*.py")) + \
+            [pathlib.Path(ROOT, "main.py")]:
+        for match in re.finditer(r"^\s*(?:from|import)\s+([\w_]+)",
+                                 path.read_text(), re.M):
+            names.add(match.group(1).lower())
+    return names
+
+
+class EveryDependencyIsUsedTest(unittest.TestCase):
+    """A dependency nothing imports is one nobody can argue with.
+
+    `redis==5.0.1` sat in requirements.txt for the life of the project. It was
+    in every published image, in the Kubernetes manifests as a Deployment, a
+    Service, a PVC, a ConfigMap and a Secret, and in two compose files — and
+    no line of code had ever read it. The README said so plainly, which is
+    better than hiding it and still leaves a reader working out whether the
+    thing they are looking at is a plan or a leftover.
+
+    That is the cost being measured here: not the megabytes, the doubt.
+    """
+
+    def setUp(self):
+        self.declared = _requirements()
+        self.imported = _imported_names()
+
+    def _unused(self):
+        unused = []
+        for name in sorted(self.declared):
+            module = IMPORT_NAMES.get(name, name.replace("-", "_"))
+            if module.lower() not in self.imported:
+                unused.append(name)
+        return unused
+
+    def test_nothing_is_declared_and_unread_without_a_reason(self):
+        stated = {n.split("[")[0] for n in NOT_IMPORTED_ON_PURPOSE}
+        unexplained = [n for n in self._unused()
+                       if n.split("[")[0] not in stated]
+        self.assertEqual(
+            unexplained, [],
+            f"declared in requirements.txt and imported nowhere: "
+            f"{unexplained}. Remove it, or say here why it stays.")
+
+    def test_the_reasons_are_still_about_something_declared(self):
+        """An exemption for a dependency that is already gone is a line that
+        makes the next reader look for something that is not there."""
+        declared = {n.split("[")[0] for n in self.declared}
+        stale = [name for name in NOT_IMPORTED_ON_PURPOSE
+                 if name not in declared]
+        self.assertEqual(stale, [],
+                         f"exempted and no longer a dependency: {stale}")
+
+    def test_redis_is_gone(self):
+        """Named rather than left to the general rule, because the general
+        rule would have been satisfied by adding `redis` to the list above."""
+        self.assertNotIn("redis", self.declared)
+        with open(os.path.join(ROOT, "src", "wdash", "config.py")) as handle:
+            self.assertNotIn("REDIS_URL", handle.read())

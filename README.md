@@ -93,7 +93,7 @@ The repository ships a self-contained lab environment. You do not need an
 existing Elasticsearch cluster to try it.
 
 ```bash
-# 1. Start Elasticsearch + Redis and load sample data
+# 1. Start Elasticsearch and load sample data
 cd lab
 ./lab.sh up
 ./lab.sh seed          # ~50k logs, 2k traces across two schemas
@@ -161,7 +161,6 @@ rather than two owners.
 | `DASHBOARD_STORAGE` | Where dashboards **and saved searches** live: `database` or `file` (default). Run the migration before switching &mdash; flipping it without one presents an empty list as though nothing had ever been saved | `file` |
 | `DASHBOARD_INDEX` | Kept out of log search. The Elasticsearch dashboard store has been removed, but an installation that used it still has the index sitting in the cluster, and without this a search over `*` returns dashboards as bodyless records | `wdash-dashboards` |
 | `MAX_SEARCH_RESULTS` | Upper bound on page size | `1000` |
-| `REDIS_URL` | Reserved; not used yet | `redis://localhost:6379/0` |
 
 ### Identity providers
 
@@ -720,8 +719,11 @@ Stated plainly, because they affect whether this fits your deployment:
   coordination between workers, and it replaces the previous unbounded one.
 - **Thresholds are not alerting.** They colour the dashboard; there is no
   notification, schedule, silencing or history.
-- **Redis is configured but not used.** Sessions are signed cookies carrying
-  identity only; authorization is read from the database per request.
+- **Sessions live in the cookie.** Signed, carrying identity only;
+  authorization is read from the database on every request. There is no
+  session store, and nothing here is waiting for one — a Redis was configured,
+  deployed and never read by a line of code, and it has been removed rather
+  than left looking like a plan.
 - **No CSRF protection.** State-changing endpoints rely on `SameSite=Lax`
   cookies only.
 - **Query language is a subset.** Fuzzy matching, boosting and regular
