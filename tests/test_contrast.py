@@ -85,16 +85,33 @@ def flatten(value, variables):
                   r"([\d.]+)%\s*,\s*transparent\s*\)", unmix, value)
 
 
-def measurable_stylesheet():
-    """The stylesheet with every colour written out.
+def palettes():
+    """Every theme's complete palette, by name.
+
+    `_variables` over the whole file would give one flattened dictionary in
+    which the last definition wins — so the moment a second theme existed,
+    every measurement below would have been of whichever palette happened to
+    be written last, and the other would have gone unchecked while reading as
+    covered.
+    """
+    css = stylesheet()
+    base = _variables(css[:css.index("}")])
+    themes = {"dark": base}
+    for match in re.finditer(r':root\[data-theme="(\w+)"\]\s*\{([^}]*)\}',
+                             css):
+        themes[match.group(1)] = {**base, **_variables(match.group(2))}
+    return themes
+
+
+def measurable_stylesheet(theme="dark"):
+    """The stylesheet with every colour written out, in one theme.
 
     For the tests that MEASURE. The ones that assert the stylesheet says
     `var(--surface-page)` read the real thing instead — flattened, that
     assertion would be checking a colour rather than the token, which is the
     opposite of what it is for.
     """
-    css = stylesheet()
-    return flatten(css, _variables(css))
+    return flatten(stylesheet(), palettes()[theme])
 
 
 def _resolve(value, variables, depth=0):
@@ -163,9 +180,11 @@ class ContrastMathTest(unittest.TestCase):
 
 
 class BadgeContrastTest(unittest.TestCase):
+    THEME = "dark"
+
     def setUp(self):
         self.css = stylesheet()
-        self.variables = _variables(self.css)
+        self.variables = palettes()[self.THEME]
 
     def _colours(self, selector):
         block = _rule(self.css, selector)
@@ -234,7 +253,7 @@ class BadgeContrastTest(unittest.TestCase):
         light. There is no ink that fixes a mid-tone — the fill had to
         change, and the palette already had hues built to carry dark text.
         """
-        css = measurable_stylesheet()
+        css = measurable_stylesheet(self.THEME)
         default_ink = _resolve(_declaration(_rule(css, ".badge"), "color"),
                                self.variables)
 
@@ -353,9 +372,11 @@ class MonitorColourTest(unittest.TestCase):
     two reds has two vocabularies.
     """
 
+    THEME = "dark"
+
     def setUp(self):
-        self.css = measurable_stylesheet()
-        self.variables = _variables(self.css)
+        self.css = measurable_stylesheet(self.THEME)
+        self.variables = palettes()[self.THEME]
         self.card = _resolve("var(--surface-card)", self.variables)
         self.page = _resolve("var(--surface-page)", self.variables)
 
@@ -519,6 +540,8 @@ class MonitorTemplateTest(unittest.TestCase):
 
 
 class JourneyStepColourTest(unittest.TestCase):
+    THEME = "dark"
+
     """The step pills inside a journey run.
 
     Quieter than `.monitor-status` on purpose — they sit in a fold somebody
@@ -528,8 +551,8 @@ class JourneyStepColourTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.css = measurable_stylesheet()
-        self.variables = _variables(self.css)
+        self.css = measurable_stylesheet(self.THEME)
+        self.variables = palettes()[self.THEME]
         # The steps table sits on `.bg-body-tertiary` inside a card. The card
         # is the darker of the two surfaces it can land on, so it is the one
         # to check against.
@@ -569,13 +592,30 @@ class JourneyStepColourTest(unittest.TestCase):
                                   self.variables).lower())
 
     def test_failed_is_the_same_red_the_rest_of_the_product_uses(self):
-        """A product with two reds has two vocabularies."""
+        """A product with two reds has two vocabularies.
+
+        Against `--hue-red` rather than against the DOWN badge, which is what
+        this compared before. The two are the same colour on the dark theme
+        and are not meant to be on a light one: the badge is a bright fill
+        somebody reads dark text on, and this is text on the page. Comparing
+        them was comparing an ink with a surface, and it only looked right
+        while every surface happened to be dark.
+        """
         failed = _resolve(
             _declaration(self._block(".journey-step.failed"), "color"),
             self.variables).lower()
-        down = _gradient_stops(
-            _declaration(self._block(".monitor-status.down"), "background"))
-        self.assertIn(failed, [stop.lower() for stop in down])
+        self.assertEqual(failed, self.variables["--hue-red"].lower())
+
+    def test_the_ink_red_and_the_fill_red_stay_in_the_same_family(self):
+        """Different roles, still one vocabulary. If the ink drifted to
+        orange while the fills stayed red, the page would be telling two
+        stories about the same fact."""
+        ink = _rgb(self.variables["--hue-red"])
+        fill = _rgb(self.variables["--fill-red"])
+        self.assertEqual(max(range(3), key=lambda i: ink[i]),
+                         max(range(3), key=lambda i: fill[i]),
+                         "the ink red and the fill red have different "
+                         "dominant channels")
 
 
 # ---------------------------------------------------------------------------
@@ -619,7 +659,12 @@ class ThePaletteIsTheOnlyPlaceTest(unittest.TestCase):
     def _offenders(self, text, skip_root=False):
         text = _blank_comments(text)
         if skip_root:
-            text = text.split("}", 1)[1]
+            # Every `:root` block, not the first one. Splitting on the first
+            # `}` worked while there was one palette and reported the light
+            # theme's twenty-two colours as violations the day it arrived —
+            # a guard that fails on the correct answer is one people delete.
+            text = re.sub(r":root[^{]*\{[^}]*\}",
+                          lambda m: "\n" * m.group(0).count("\n"), text)
         found = []
         for number, line in enumerate(text.splitlines(), start=1):
             for literal in re.findall(
@@ -778,3 +823,59 @@ class NoTemplateNamesAThemeTest(unittest.TestCase):
             self.assertIsNone(
                 _rule(css, f".{fixed}"),
                 f".{fixed} still carries rules, but nothing asks for it")
+
+
+# ---------------------------------------------------------------------------
+# The same measurements, in every theme
+# ---------------------------------------------------------------------------
+#
+# A colour test that reads one palette is a colour test for one theme, and the
+# other one ships unmeasured. This is what the roadmap called the honest cost
+# of a light theme: not the palette, the fact that everything holding the dark
+# one to a standard now has to hold both.
+#
+# Generated rather than written out, so a theme added to the stylesheet is
+# measured by every test above it without anybody remembering to say so — and
+# `test_every_theme_in_the_stylesheet_is_measured` fails if that stops being
+# true.
+
+_MEASURING = (BadgeContrastTest, MonitorColourTest, JourneyStepColourTest)
+
+
+def _for_theme(case, theme):
+    generated = type(f"{case.__name__}_{theme}", (case,), {"THEME": theme})
+    generated.__module__ = __name__
+    return generated
+
+
+for _theme in palettes():
+    if _theme == "dark":
+        continue                      # the classes above already are dark
+    for _case in _MEASURING:
+        globals()[f"{_case.__name__}_{_theme}"] = _for_theme(_case, _theme)
+
+
+class EveryThemeIsMeasuredTest(unittest.TestCase):
+    def test_every_theme_in_the_stylesheet_is_measured(self):
+        """The generation above is a loop over whatever is in the file. This
+        is the assertion that the loop found something — a regex that stops
+        matching would silently go back to measuring one theme."""
+        for theme in palettes():
+            for case in _MEASURING:
+                name = case.__name__ if theme == "dark" \
+                    else f"{case.__name__}_{theme}"
+                self.assertIn(name, globals(),
+                              f"{theme} is in the stylesheet and nothing "
+                              f"measures it")
+
+    def test_more_than_one_theme_exists(self):
+        self.assertGreater(len(palettes()), 1)
+
+    def test_a_theme_inherits_what_it_does_not_override(self):
+        """A theme is a patch on the palette, not a replacement. `--fill-*`
+        and `--text-on-fill` are deliberately absent from the light theme, so
+        they have to arrive from the base."""
+        light = palettes()["light"]
+        self.assertEqual(light["--fill-red"], palettes()["dark"]["--fill-red"])
+        self.assertEqual(light["--text-on-fill"],
+                         palettes()["dark"]["--text-on-fill"])

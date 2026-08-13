@@ -54,36 +54,114 @@
        Chart.js option string is not CSS. */
     --grid-faint: color-mix(in srgb, var(--wash) 6%, transparent);
 
-    /* The hues that carry meaning: a log level, a monitor state, a step.
-       `-vivid` is the far end of the gradient a badge is filled with. */
+    /* INK. The hues that carry meaning when they are TEXT — an error
+       message, a failed step, a tint behind a row. These are the ones a
+       theme has to change: `#7ee787` is 12:1 on a dark page and 1.5:1 on a
+       white one. */
     --hue-blue: #79c0ff;
-    --hue-blue-vivid: #4dabf7;
     --hue-green: #7ee787;
-    --hue-green-vivid: #51cf66;
     --hue-yellow: #f2cc60;
-    --hue-yellow-vivid: #ffd93d;
     --hue-red: #ff7b72;
-    --hue-red-vivid: #ff6b6b;
+    --hue-purple: #d2a8ff;
+    --hue-cyan: #39c5cf;
+    --hue-orange: #ffa657;
+
+    /* FILL. The same meanings as a chip somebody reads dark text ON — a log
+       level, a monitor state, a badge, a primary button. Split from the ink
+       above because the two want opposite things from a light theme: the ink
+       has to go dark against a white page, and the fill has to stay bright
+       or `--text-on-fill` stops working.
+
+       So these are the same in every theme, and that is the point rather
+       than an oversight. `-vivid` is the far end of the gradient. */
+    --fill-accent: #39c5cf;
+    --fill-accent-vivid: #2dd4bf;
+    --fill-blue: #79c0ff;
+    --fill-blue-vivid: #4dabf7;
+    --fill-green: #7ee787;
+    --fill-green-vivid: #51cf66;
+    --fill-yellow: #f2cc60;
+    --fill-yellow-vivid: #ffd93d;
+    --fill-red: #ff7b72;
+    --fill-red-vivid: #ff6b6b;
     /* FATAL and CRITICAL, which have to be louder than ERROR or the chart
        says the two are the same kind of night. */
-    --hue-red-strong: #ff4444;
-    --hue-purple: #d2a8ff;
-    --hue-purple-vivid: #be4bdb;
-    --hue-cyan: #39c5cf;
-    --hue-cyan-vivid: #2dd4bf;
-    --hue-orange: #ffa657;
+    --fill-red-strong: #ff4444;
+    --fill-purple: #d2a8ff;
+    --fill-purple-vivid: #be4bdb;
+    --fill-cyan: #39c5cf;
+    --fill-cyan-vivid: #2dd4bf;
+    --fill-orange: #ffa657;
 
     /* The categorical ramp a chart walks when its series are services or
        hosts rather than severities — one token instead of ten, because a
        theme replaces the whole ramp or none of it, and ten separate names
        would be ten chances to change nine.
 
-       The first seven ARE the hues above. Written as tokens rather than
-       repeated, so a change to a hue reaches the chart. */
+       Fills, because a chart bar is a shape somebody reads a label against,
+       not a piece of text. */
     --chart-series:
-        var(--accent), var(--hue-green), var(--hue-purple), var(--hue-orange),
-        var(--hue-blue), var(--hue-yellow), var(--hue-red),
-        #a5d6ff, #56d364, #e3b341;
+        var(--fill-accent), var(--fill-green), var(--fill-purple),
+        var(--fill-orange), var(--fill-blue), var(--fill-yellow),
+        var(--fill-red), #a5d6ff, #56d364, #e3b341;
+}
+
+
+/*
+ * The light theme.
+ *
+ * A palette and nothing else — no rule below this block knows which theme it
+ * is in. That is the whole return on the three steps it took to get here:
+ * naming the tokens for their role, moving every colour into the palette, and
+ * taking the fixed Bootstrap classes out of the templates.
+ *
+ * What is NOT here is as deliberate as what is:
+ *
+ *   * the `--fill-*` colours. A chip is a bright shape with dark text on it,
+ *     and that reads on white as well as it reads on black. Darkening them
+ *     for the light theme would break `--text-on-fill`, which is dark in
+ *     every theme precisely so the fills can stay put.
+ *   * `--text-on-fill` itself, for the same reason.
+ *
+ * The ink hues had to move a long way, and that is the part a light theme
+ * cannot borrow from a dark one: `#7ee787` is 12:1 on this product's dark
+ * page and 1.5:1 on a white one. Every value below is measured in
+ * `tests/test_contrast.py` against the surface it lands on.
+ */
+:root[data-theme="light"] {
+    --surface-page: #ffffff;
+    --surface-sunken: #f6f8fa;
+    --surface-raised: #eaeef2;
+    --surface-card: #ffffff;
+    --surface-navbar: #ffffff;
+    --surface-input: #ffffff;
+    --surface-hover: #eaeef2;
+
+    --text-primary: #1f2328;
+    --text-muted: #5a636c;
+    --text-secondary: #636c76;
+
+    --border: #d0d7de;
+    --border-strong: #afb8c1;
+    --accent: #0e7490;
+
+    /* Not black at 40%, which is a bruise on a white page. A mid grey at the
+       same alpha is the shadow somebody expects to see. */
+    --shadow: #8c959f;
+    /* The overlay has to DARKEN here. Same 4% wash at the call site, opposite
+       direction — which is why it is a colour rather than a finished value. */
+    --wash: #0d1117;
+
+    --hue-blue: #0969da;
+    --hue-green: #116329;
+    --hue-yellow: #7d4e00;
+    /* Darker than the obvious `#cf222e`, which measures 4.40:1 against its
+       own 12% tint on a white card — the expiry chip and the row wash are
+       where a red has to survive being watered down. */
+    --hue-red: #b42318;
+    --hue-purple: #8250df;
+    --hue-cyan: #0e7490;
+    --hue-orange: #a04100;
 }
 
 /* Base Dark Theme */
@@ -221,17 +299,17 @@ body {
 
 /* Buttons - Warp Style */
 .btn-primary {
-    background: linear-gradient(135deg, var(--accent) 0%, var(--hue-cyan-vivid) 100%);
+    background: linear-gradient(135deg, var(--fill-accent) 0%, var(--fill-cyan-vivid) 100%);
     border: none;
     border-radius: 8px;
-    color: var(--surface-page);
+    color: var(--text-on-fill);
     font-weight: 600;
     transition: all 0.3s ease;
     box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .btn-primary:hover {
-    background: linear-gradient(135deg, var(--hue-cyan-vivid) 0%, var(--accent) 100%);
+    background: linear-gradient(135deg, var(--fill-cyan-vivid) 0%, var(--fill-accent) 100%);
     transform: translateY(-2px);
     box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 40%, transparent);
 }
@@ -244,9 +322,9 @@ body {
 }
 
 .btn-outline-secondary:hover {
-    background-color: var(--accent);
+    background-color: var(--fill-accent);
     border-color: var(--accent);
-    color: var(--surface-page);
+    color: var(--text-on-fill);
     transform: translateY(-1px);
 }
 
@@ -322,7 +400,7 @@ body {
     left: 0;
     right: 0;
     height: 1px;
-    background: linear-gradient(90deg, transparent 0%, var(--accent) 50%, transparent 100%);
+    background: linear-gradient(90deg, transparent 0%, var(--fill-accent) 50%, transparent 100%);
     opacity: 0;
     transition: opacity 0.3s ease;
 }
@@ -373,24 +451,24 @@ body {
 
 .log-level.ERROR,
 .log-level.FATAL {
-    background: linear-gradient(135deg, var(--hue-red) 0%, var(--hue-red-vivid) 100%);
-    color: var(--surface-page);
+    background: linear-gradient(135deg, var(--fill-red) 0%, var(--fill-red-vivid) 100%);
+    color: var(--text-on-fill);
 }
 
 .log-level.WARN,
 .log-level.WARNING {
-    background: linear-gradient(135deg, var(--hue-yellow) 0%, var(--hue-yellow-vivid) 100%);
-    color: var(--surface-page);
+    background: linear-gradient(135deg, var(--fill-yellow) 0%, var(--fill-yellow-vivid) 100%);
+    color: var(--text-on-fill);
 }
 
 .log-level.INFO {
-    background: linear-gradient(135deg, var(--hue-blue) 0%, var(--hue-blue-vivid) 100%);
-    color: var(--surface-page);
+    background: linear-gradient(135deg, var(--fill-blue) 0%, var(--fill-blue-vivid) 100%);
+    color: var(--text-on-fill);
 }
 
 .log-level.DEBUG {
-    background: linear-gradient(135deg, var(--hue-purple) 0%, var(--hue-purple-vivid) 100%);
-    color: var(--surface-page);
+    background: linear-gradient(135deg, var(--fill-purple) 0%, var(--fill-purple-vivid) 100%);
+    color: var(--text-on-fill);
 }
 
 /* Light text on mid-grey measured 2.83:1 — the only log level below the
@@ -403,13 +481,13 @@ body {
 }
 
 .log-level.SUCCESS {
-    background: linear-gradient(135deg, var(--hue-green) 0%, var(--hue-green-vivid) 100%);
-    color: var(--surface-page);
+    background: linear-gradient(135deg, var(--fill-green) 0%, var(--fill-green-vivid) 100%);
+    color: var(--text-on-fill);
 }
 
 .log-level.NOTICE {
-    background: linear-gradient(135deg, var(--accent) 0%, var(--hue-cyan-vivid) 100%);
-    color: var(--surface-page);
+    background: linear-gradient(135deg, var(--fill-accent) 0%, var(--fill-cyan-vivid) 100%);
+    color: var(--text-on-fill);
 }
 
 /* Timestamps - Terminal Style */
@@ -496,9 +574,9 @@ body {
 }
 
 .pagination .page-item.active .page-link {
-    background: linear-gradient(135deg, var(--accent) 0%, var(--hue-cyan-vivid) 100%);
+    background: linear-gradient(135deg, var(--fill-accent) 0%, var(--fill-cyan-vivid) 100%);
     border-color: var(--accent);
-    color: var(--surface-page);
+    color: var(--text-on-fill);
 }
 
 /* Dropdowns */
@@ -671,11 +749,11 @@ body {
  *
  * The hues are built for dark ink, which is what `.badge` now sets.
  */
-.badge.bg-danger { background: var(--hue-red) !important; }
-.badge.bg-success { background: var(--hue-green) !important; }
-.badge.bg-warning { background: var(--hue-yellow) !important; }
-.badge.bg-info { background: var(--hue-blue) !important; }
-.badge.bg-primary { background: var(--accent) !important; }
+.badge.bg-danger { background: var(--fill-red) !important; }
+.badge.bg-success { background: var(--fill-green) !important; }
+.badge.bg-warning { background: var(--fill-yellow) !important; }
+.badge.bg-info { background: var(--fill-blue) !important; }
+.badge.bg-primary { background: var(--fill-accent) !important; }
 
 .bg-secondary {
     background: linear-gradient(135deg, var(--surface-raised) 0%, var(--surface-hover) 100%) !important;
@@ -721,15 +799,15 @@ body {
     letter-spacing: 1px;
     font-family: 'SF Mono', monospace;
     box-shadow: 0 2px 4px color-mix(in srgb, var(--shadow) 30%, transparent);
-    color: var(--surface-page);
+    color: var(--text-on-fill);
 }
 
 .monitor-status.up {
-    background: linear-gradient(135deg, var(--hue-green) 0%, var(--hue-green-vivid) 100%);
+    background: linear-gradient(135deg, var(--fill-green) 0%, var(--fill-green-vivid) 100%);
 }
 
 .monitor-status.down {
-    background: linear-gradient(135deg, var(--hue-red) 0%, var(--hue-red-vivid) 100%);
+    background: linear-gradient(135deg, var(--fill-red) 0%, var(--fill-red-vivid) 100%);
 }
 
 /* The same grey TRACE uses, for the same reason: an unknown monitor is not a
@@ -955,7 +1033,7 @@ code {
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: linear-gradient(135deg, var(--surface-hover) 0%, var(--accent) 100%);
+    background: linear-gradient(135deg, var(--surface-hover) 0%, var(--fill-accent) 100%);
 }
 
 /* Responsive Design */
@@ -1380,7 +1458,7 @@ code {
     font-size: 3.5rem;
     font-weight: 700;
     margin: 0;
-    background: linear-gradient(135deg, var(--accent), var(--hue-blue));
+    background: linear-gradient(135deg, var(--fill-accent), var(--fill-blue));
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -1448,8 +1526,8 @@ code {
 .t-str { color: var(--hue-green); }
 .t-num { color: var(--hue-yellow); font-weight: 600; }
 .t-ok { color: var(--hue-green); }
-.t-err { color: var(--surface-page); background: var(--hue-red); padding: 1px 6px; border-radius: 3px; font-size: 0.72rem; font-weight: 700; }
-.t-warn { color: var(--surface-page); background: var(--hue-yellow); padding: 1px 6px; border-radius: 3px; font-size: 0.72rem; font-weight: 700; }
+.t-err { color: var(--text-on-fill); background: var(--fill-red); padding: 1px 6px; border-radius: 3px; font-size: 0.72rem; font-weight: 700; }
+.t-warn { color: var(--text-on-fill); background: var(--fill-yellow); padding: 1px 6px; border-radius: 3px; font-size: 0.72rem; font-weight: 700; }
 .t-dim { color: var(--text-secondary); }
 .t-muted { color: var(--text-secondary); opacity: 0.5; }
 
@@ -1508,8 +1586,8 @@ code {
 .landing-cta {
     display: inline-block;
     padding: 14px 36px;
-    background: linear-gradient(135deg, var(--accent), var(--hue-cyan-vivid));
-    color: var(--surface-page);
+    background: linear-gradient(135deg, var(--fill-accent), var(--fill-cyan-vivid));
+    color: var(--text-on-fill);
     font-weight: 700;
     font-size: 1rem;
     border-radius: 10px;
@@ -1521,7 +1599,7 @@ code {
 .landing-cta:hover {
     transform: translateY(-2px);
     box-shadow: 0 8px 30px color-mix(in srgb, var(--accent) 50%, transparent);
-    color: var(--surface-page);
+    color: var(--text-on-fill);
 }
 
 /* Post-login cards */
@@ -1583,3 +1661,109 @@ code {
     border-color: color-mix(in srgb, var(--text-muted) 30%, transparent);
     background: transparent;
 }
+
+
+/* ---------------------------------------------------------------------------
+ * The date picker
+ *
+ * flatpickr's own dark theme arrives from a CDN, which means the calendar was
+ * the one surface in the product that could not follow a theme: on a light
+ * page it stayed a dark panel floating over white. Painted from the palette
+ * here instead, so it goes wherever the rest of the page goes.
+ *
+ * The CDN theme is still loaded and still wins on anything not listed below —
+ * removing that link is a separate change, and one worth making only after
+ * somebody has clicked through every state of this calendar.
+ * ------------------------------------------------------------------------ */
+.flatpickr-calendar {
+    background: var(--surface-card);
+    border: 1px solid var(--border);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--shadow) 40%, transparent);
+    color: var(--text-primary);
+}
+
+.flatpickr-calendar.arrowTop::before,
+.flatpickr-calendar.arrowTop::after { border-bottom-color: var(--surface-card); }
+.flatpickr-calendar.arrowBottom::before,
+.flatpickr-calendar.arrowBottom::after { border-top-color: var(--surface-card); }
+
+.flatpickr-months,
+.flatpickr-months .flatpickr-month,
+.flatpickr-weekdays,
+span.flatpickr-weekday {
+    background: var(--surface-card);
+    color: var(--text-muted);
+    fill: var(--text-muted);
+}
+
+.flatpickr-current-month,
+.flatpickr-current-month input.cur-year,
+.flatpickr-monthDropdown-months {
+    color: var(--text-primary);
+}
+
+/* The month is a native <select>, and both flatpickr's theme and the browser
+   have an opinion about it — which is why it came out dark on the light page
+   and light on the dark one. Named specifically enough to win, including the
+   options, which are drawn by the browser and inherit nothing. */
+.flatpickr-current-month .flatpickr-monthDropdown-months,
+.flatpickr-current-month .flatpickr-monthDropdown-months option,
+.flatpickr-monthDropdown-months .flatpickr-monthDropdown-month {
+    background: var(--surface-card);
+    color: var(--text-primary);
+}
+
+.flatpickr-months .flatpickr-prev-month svg,
+.flatpickr-months .flatpickr-next-month svg { fill: var(--text-muted); }
+.flatpickr-months .flatpickr-prev-month:hover svg,
+.flatpickr-months .flatpickr-next-month:hover svg { fill: var(--accent); }
+
+.flatpickr-day {
+    color: var(--text-primary);
+    border-color: transparent;
+}
+
+.flatpickr-day.flatpickr-disabled,
+.flatpickr-day.prevMonthDay,
+.flatpickr-day.nextMonthDay { color: var(--text-secondary); }
+
+.flatpickr-day:hover,
+.flatpickr-day:focus {
+    background: var(--surface-hover);
+    border-color: var(--surface-hover);
+    color: var(--text-primary);
+}
+
+.flatpickr-day.today {
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+
+.flatpickr-day.selected,
+.flatpickr-day.selected:hover,
+.flatpickr-day.startRange,
+.flatpickr-day.endRange {
+    background: var(--fill-accent);
+    border-color: var(--fill-accent);
+    color: var(--text-on-fill);
+}
+
+.flatpickr-time,
+.flatpickr-time input,
+.flatpickr-time .flatpickr-time-separator,
+.flatpickr-time .flatpickr-am-pm {
+    background: var(--surface-raised);
+    color: var(--text-primary);
+    border-top-color: var(--border);
+}
+
+.flatpickr-time input:hover,
+.flatpickr-time input:focus,
+.flatpickr-time .flatpickr-am-pm:hover {
+    background: var(--surface-hover);
+}
+
+.numInputWrapper span { border-color: var(--border); }
+.numInputWrapper span:hover { background: var(--surface-hover); }
+.numInputWrapper span.arrowUp::after { border-bottom-color: var(--text-muted); }
+.numInputWrapper span.arrowDown::after { border-top-color: var(--text-muted); }

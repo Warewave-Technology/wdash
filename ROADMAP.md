@@ -35,6 +35,18 @@ uptime checks. Elastic's own browser monitors are read down to the step too,
 onto the same screen — measured against a running Heartbeat rather than
 transcribed from the reference.
 
+**Themes.** Dark, light, or follow the system, chosen from the navbar and
+remembered by the browser rather than by the account — the same operator on a
+bright wall display and a dark laptop wants two different answers. Dark stays
+the default, so an upgrade changes nothing for anybody who does not ask.
+
+Underneath it, every colour in the product now comes from one palette, and
+`tests/test_contrast.py` measures every theme rather than whichever one was
+written first. That was the expensive half: 24 Bootstrap classes naming a
+theme in six templates and three scripts, and about a hundred colours written
+outside the palette — including the chart gridlines, which were a shade of a
+dark background and would have been invisible on a light page.
+
 **Alerting.** Rules over monitors, webhook delivery, silences, and a history
 that records what was NOT delivered as well as what was. Evaluation is its own
 process, because an agent going silent produces no requests to piggyback on
@@ -122,20 +134,11 @@ Nothing is committed.
 Grounded in what is there rather than in a redesign. Each of these is a thing
 somebody can point at today.
 
-* **There is one palette, and it is dark.** `static/css/wdash.css` defines it
-  under a bare `:root`: no `prefers-color-scheme`, no toggle, and variables
-  named `--dark-*` for the only theme there is. Anyone on a light desktop, a
-  projector, or a printed page gets the dark one.
+* ~~**There is one palette, and it is dark.**~~ Done — see
+  **Themes** under "Here now". The measurement that started it is in
+  [docs/themes](docs/themes/), including the part that mattered: the palette
+  was a third of the work.
 
-  Three of them are rendered on the real screens in
-  [docs/themes](docs/themes/), with the cost measured rather than guessed: the
-  palette is only a third of it. There are 24 fixed-theme Bootstrap classes
-  nailed into six templates and three scripts — `<body class="bg-dark
-  text-light">` overrides every token underneath it — and about a hundred
-  literal colours in the stylesheet against 250 uses of `var()`. So the order
-  is tokenise, then unpin the templates, and only then is a theme a setting.
-  `test_contrast.py` would have to hold every theme rather than the one
-  `:root` it reads today.
 * **A failed journey does not name its step until you click.** The run row
   prints the raw error and a "3 steps" button; "sign in" is one collapse away.
   `failed_step` already exists on the model and on both journey kinds, so the

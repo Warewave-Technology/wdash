@@ -344,6 +344,110 @@ check('highlighting never changes the text it colours', () => {
         }, 60);
     });
 
+    // -----------------------------------------------------------------
+    // The theme, which lives inline in base.html
+    // -----------------------------------------------------------------
+    //
+    // Extracted from the template and run, rather than asserted about as
+    // text. It has to be inline and in the <head> — a page that renders in
+    // one theme and then swaps is worse than one with no choice at all — and
+    // that puts it outside every bundle, where nothing was watching it.
+    const layout = fs.readFileSync(path.join(ROOT, 'templates/base.html'), 'utf8');
+    const themeScript = layout
+        .split('<script nonce="{{ csp_nonce }}">')[1]
+        .split('</script>')[0];
+
+    function themeWindow({ stored, systemPrefersLight, storageThrows }) {
+        const page = new JSDOM('<!doctype html><html><body></body></html>',
+                               { runScripts: 'outside-only' });
+        const w = page.window;
+        const box = { 'wdash-theme': stored };
+        // defineProperty, not assignment: jsdom exposes `localStorage` as an
+        // accessor on the prototype, so `w.localStorage = {...}` is silently
+        // dropped and the script reads the real one — which is empty, so
+        // every case looked like "nothing stored" and passed for the default.
+        Object.defineProperty(w, 'localStorage', { configurable: true, value: {
+            getItem(key) {
+                if (storageThrows) throw new Error('storage is off');
+                return key in box ? box[key] : null;
+            },
+            setItem(key, value) {
+                if (storageThrows) throw new Error('storage is off');
+                box[key] = value;
+            },
+        } });
+        w.matchMedia = query => ({
+            matches: query.includes('light') && systemPrefersLight,
+            addEventListener() {},
+        });
+        w.eval(themeScript);
+        return w;
+    }
+
+    check('nothing stored means dark, which is what is already deployed', () => {
+        const w = themeWindow({ stored: undefined, systemPrefersLight: true });
+        assertEqual(w.document.documentElement.getAttribute('data-theme'),
+                    'dark', 'an upgrade changed how the product looks');
+    });
+
+    check('a stored choice is what gets applied', () => {
+        const w = themeWindow({ stored: 'light', systemPrefersLight: false });
+        assertEqual(w.document.documentElement.getAttribute('data-theme'),
+                    'light', 'the stored choice was ignored');
+    });
+
+    check('following the system asks the system', () => {
+        const light = themeWindow({ stored: 'system', systemPrefersLight: true });
+        const dark = themeWindow({ stored: 'system', systemPrefersLight: false });
+        assertEqual(light.document.documentElement.getAttribute('data-theme'),
+                    'light', 'system + light desktop should be light');
+        assertEqual(dark.document.documentElement.getAttribute('data-theme'),
+                    'dark', 'system + dark desktop should be dark');
+    });
+
+    check('the choice is remembered, not the resolved theme', () => {
+        const w = themeWindow({ stored: 'system', systemPrefersLight: true });
+        assertEqual(w.document.documentElement.getAttribute('data-theme-choice'),
+                    'system',
+                    'storing "light" instead would stop following the system');
+    });
+
+    check('both theme attributes move together', () => {
+        const w = themeWindow({ stored: 'light', systemPrefersLight: false });
+        const root = w.document.documentElement;
+        assertEqual(root.getAttribute('data-bs-theme'),
+                    root.getAttribute('data-theme'),
+                    'Bootstrap and the palette disagree, which is a page with '
+                    + 'light dropdowns on a dark background');
+    });
+
+    check('choosing "follow the system" stores the CHOICE', () => {
+        // Storing the resolved theme instead would follow the system exactly
+        // once: the next visit reads "light", which is a fixed choice, and
+        // the desktop switching to dark at six o'clock does nothing.
+        const w = themeWindow({ stored: 'dark', systemPrefersLight: true });
+        w.wdashTheme.set('system');
+        assertEqual(w.localStorage.getItem('wdash-theme'), 'system',
+                    'the stored value stopped being the choice');
+        assertEqual(w.document.documentElement.getAttribute('data-theme'),
+                    'light', 'the system preference was not applied');
+    });
+
+    check('storage being unavailable is not a broken page', () => {
+        const w = themeWindow({ stored: 'light', storageThrows: true });
+        assertEqual(w.document.documentElement.getAttribute('data-theme'),
+                    'dark', 'private browsing should fall back, not throw');
+        w.wdashTheme.set('light');
+        assertEqual(w.document.documentElement.getAttribute('data-theme'),
+                    'light', 'the choice should still apply for this page');
+    });
+
+    check('rubbish in storage does not become a theme attribute', () => {
+        const w = themeWindow({ stored: 'purple', systemPrefersLight: false });
+        assertEqual(w.document.documentElement.getAttribute('data-theme'),
+                    'dark', 'an unknown value should fall back to the default');
+    });
+
     console.log(failures.length
         ? `\n${failures.length} failure(s)`
         : '\nall front-end smoke checks passed');

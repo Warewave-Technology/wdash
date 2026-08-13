@@ -268,7 +268,10 @@ async function main() {
     // the stylesheet could be themed down to the last token and the charts
     // would still be drawn for the theme they were written in.
     const palette = makeDashboard(jsonResponse({ panels: [] }));
-    palette.document.documentElement.style.setProperty('--hue-red', '#abcdef');
+    // `--fill-red`, not `--hue-red`: a chart bar is a shape somebody reads a
+    // label against, so it takes the FILL. The ink hue goes dark on a light
+    // theme and would paint a near-black bar.
+    palette.document.documentElement.style.setProperty('--fill-red', '#abcdef');
     palette.document.documentElement.style.setProperty('--border', '#123456');
     palette.document.documentElement.style.setProperty('--text-muted', '#654321');
     palette.document.documentElement.style.setProperty(

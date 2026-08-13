@@ -979,16 +979,16 @@ class LogSearch {
         // fact, which is the thing `test_down_is_the_same_red_the_log_levels
         // _use` exists to prevent in the stylesheet and could not see here.
         const LEVELS = [
-            ['FATAL', '--hue-red-strong'], ['ERROR', '--hue-red'],
-            ['WARN', '--hue-yellow'], ['INFO', '--hue-blue'],
-            ['DEBUG', '--hue-purple'], ['TRACE', '--text-muted'],
+            ['FATAL', '--fill-red-strong'], ['ERROR', '--fill-red'],
+            ['WARN', '--fill-yellow'], ['INFO', '--fill-blue'],
+            ['DEBUG', '--fill-purple'], ['TRACE', '--text-muted'],
             ['UNSPECIFIED', '--border-strong'],
         ];
         const present = LEVELS.filter(([name]) =>
             buckets.some(b => (b.by_severity || {})[name]));
 
         const labels = buckets.map(b => new Date(b.timestamp || b.key));
-        const datasets = (present.length ? present : [['count', '--hue-blue']]).map(([name, token]) => ({
+        const datasets = (present.length ? present : [['count', '--fill-blue']]).map(([name, token]) => ({
             label: name,
             backgroundColor: paletteColour(token),
             data: buckets.map(b => present.length

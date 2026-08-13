@@ -17,6 +17,97 @@
     <link href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" integrity="sha384-RkASv+6KfBMW9eknReJIJ6b3UnjKOKC5bOUaNgIY778NFbQ8MtWq9Lr/khUgqtTt" crossorigin="anonymous" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/themes/dark.css" integrity="sha384-heUUtXw0Djj2DElfLOVPlASSWFKNL3JDY6s3FEqQD03GYyWOeophY5DsfEG40sYX" crossorigin="anonymous" rel="stylesheet">
     <link href="{{ url_for('static', filename='css/wdash.css') }}?v={{ range(1000,9999) | random }}" rel="stylesheet">
+
+    {# The theme, decided before anything is painted.
+     #
+     # In the HEAD and inline, because the alternative is a page that renders
+     # in one theme and then swaps — which is worse than having no choice at
+     # all, and is exactly what a script at the end of <body> produces.
+     # Inline is allowed here by the nonce; `script-src` carries no
+     # 'unsafe-inline'.
+     #
+     # Stored in the browser rather than on the account. A theme is a
+     # property of the screen somebody is sitting at, not of who they are:
+     # the same operator on a bright wall display and a dark laptop wants two
+     # different answers, and an account-wide setting can only give one.
+     #
+     # `dark` when nothing is stored, which is what every existing
+     # installation already shows. Following the system is a choice somebody
+     # makes, not one made for them by an upgrade.
+     #
+     # `data-theme` drives our palette; `data-bs-theme` drives Bootstrap's
+     # own components. They are set together and never separately — the pair
+     # disagreeing is a page with light dropdowns on a dark background.
+     #}
+    <script nonce="{{ csp_nonce }}">
+    (function () {
+        var KEY = 'wdash-theme';
+        var root = document.documentElement;
+
+        function stored() {
+            try {
+                var value = window.localStorage.getItem(KEY);
+                return (value === 'light' || value === 'dark'
+                        || value === 'system') ? value : 'dark';
+            } catch (error) {
+                // Private browsing, or storage turned off entirely. The
+                // theme is a preference, not a feature to fail over.
+                return 'dark';
+            }
+        }
+
+        function resolve(choice) {
+            if (choice !== 'system') return choice;
+            return window.matchMedia
+                && window.matchMedia('(prefers-color-scheme: light)').matches
+                ? 'light' : 'dark';
+        }
+
+        function apply(choice) {
+            var theme = resolve(choice);
+            root.setAttribute('data-theme', theme);
+            root.setAttribute('data-bs-theme', theme);
+            root.setAttribute('data-theme-choice', choice);
+        }
+
+        window.wdashTheme = {
+            current: stored,
+            set: function (choice) {
+                try { window.localStorage.setItem(KEY, choice); } catch (e) {}
+                apply(choice);
+                document.querySelectorAll('[data-theme-option]').forEach(
+                    function (item) {
+                        item.classList.toggle(
+                            'active', item.dataset.themeOption === choice);
+                    });
+            },
+        };
+
+        apply(stored());
+
+        // The system flipping while the page is open. Only meaningful in
+        // `system`, and the listener is registered once rather than being
+        // added and removed as the choice changes.
+        if (window.matchMedia) {
+            window.matchMedia('(prefers-color-scheme: light)')
+                .addEventListener('change', function () {
+                    if (stored() === 'system') apply('system');
+                });
+        }
+
+        document.addEventListener('DOMContentLoaded', function () {
+            document.querySelectorAll('[data-theme-option]').forEach(
+                function (item) {
+                    item.classList.toggle(
+                        'active', item.dataset.themeOption === stored());
+                    item.addEventListener('click', function (event) {
+                        event.preventDefault();
+                        window.wdashTheme.set(item.dataset.themeOption);
+                    });
+                });
+        });
+    })();
+    </script>
 </head>
 <body>
     <nav class="navbar navbar-expand-lg border-bottom">
@@ -85,6 +176,34 @@
                             <i class="fas fa-sign-in-alt"></i> Login
                         </a>
                     {% endif %}
+
+                    {# Outside the signed-in branch on purpose: the sign-in
+                       screen is a screen too, and somebody who finds it
+                       painful to read there cannot wait until after they
+                       have signed in to fix it. #}
+                    <div class="nav-item dropdown">
+                        <a class="nav-link" href="#" role="button" id="themeMenu"
+                           data-bs-toggle="dropdown" aria-label="Theme"
+                           title="Theme">
+                            <i class="fas fa-circle-half-stroke"></i>
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-end"
+                            aria-labelledby="themeMenu">
+                            <li><h6 class="dropdown-header">Theme</h6></li>
+                            <li><a class="dropdown-item" href="#"
+                                   data-theme-option="dark">
+                                <i class="fas fa-moon fa-fw"></i> Dark
+                            </a></li>
+                            <li><a class="dropdown-item" href="#"
+                                   data-theme-option="light">
+                                <i class="fas fa-sun fa-fw"></i> Light
+                            </a></li>
+                            <li><a class="dropdown-item" href="#"
+                                   data-theme-option="system">
+                                <i class="fas fa-desktop fa-fw"></i> Follow system
+                            </a></li>
+                        </ul>
+                    </div>
                 </div>
             </div>
         </div>

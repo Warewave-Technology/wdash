@@ -686,11 +686,11 @@ class AsyncDashboard {
      */
     static seriesColour(label, index) {
         const bySeverity = {
-            ERROR: '--hue-red', FATAL: '--hue-red-strong',
-            CRITICAL: '--hue-red-strong',
-            WARN: '--hue-yellow', WARNING: '--hue-yellow',
-            INFO: '--hue-blue', DEBUG: '--hue-purple', TRACE: '--text-muted',
-            SUCCESS: '--hue-green', NOTICE: '--accent',
+            ERROR: '--fill-red', FATAL: '--fill-red-strong',
+            CRITICAL: '--fill-red-strong',
+            WARN: '--fill-yellow', WARNING: '--fill-yellow',
+            INFO: '--fill-blue', DEBUG: '--fill-purple', TRACE: '--text-muted',
+            SUCCESS: '--fill-green', NOTICE: '--fill-accent',
         };
         const known = bySeverity[String(label).toUpperCase()];
         if (known) return paletteColour(known);
@@ -740,7 +740,7 @@ class AsyncDashboard {
             datasets = [{
                 label: 'Count',
                 data: buckets.map(b => b.count),
-                backgroundColor: paletteColour('--accent'),
+                backgroundColor: paletteColour('--fill-accent'),
                 borderWidth: 0,
             }];
         }
