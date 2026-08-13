@@ -319,10 +319,10 @@
 
     const data = JSON.parse(holder.textContent);
     const style = getComputedStyle(document.documentElement);
-    const teal = style.getPropertyValue('--dark-accent-teal').trim() || '#39c5cf';
-    const red = style.getPropertyValue('--syntax-red').trim() || '#ff7b72';
-    const muted = style.getPropertyValue('--dark-text-secondary').trim() || '#7d8590';
-    const grid = style.getPropertyValue('--dark-border').trim() || '#30363d';
+    const teal = style.getPropertyValue('--accent').trim() || '#39c5cf';
+    const red = style.getPropertyValue('--hue-red').trim() || '#ff7b72';
+    const muted = style.getPropertyValue('--text-secondary').trim() || '#7d8590';
+    const grid = style.getPropertyValue('--border').trim() || '#30363d';
 
     const times = data.labels.map(v => v ? new Date(v) : null);
     const label = i => times[i] ? times[i].toLocaleTimeString() : '';

@@ -1,7 +1,7 @@
 """
 Text that can actually be read.
 
-`.badge` sets `color: var(--dark-bg)` — the PAGE BACKGROUND colour. On the
+`.badge` sets `color: var(--surface-page)` — the PAGE BACKGROUND colour. On the
 bright fills (warning, info, success) that is right: dark text on a light
 chip. On a dark fill it is the same colour as what is behind it, and the
 Advisor's "Affected" chips were `#0d1117` on `#212529`: a contrast ratio of
@@ -26,9 +26,32 @@ CSS = os.path.join(ROOT, "static", "css", "wdash.css")
 AA_NORMAL = 4.5
 
 
+def stylesheet():
+    """`wdash.css`, with its comments removed.
+
+    Everything in this file reads CSS with a regex, and a regex cannot tell a
+    declaration from prose about one. Renaming the palette, the new header
+    explained the old name by writing `--dark-bg: #ffffff` inside a comment —
+    and that matched as a declaration whose greedy value ran on to the next
+    semicolon, swallowing the real token four lines below it. The palette
+    then had no page background at all, and three tests failed a long way
+    from the comment that caused it.
+
+    Stripping first is the fix, rather than a rule against explaining
+    yourself in a comment.
+    """
+    with open(CSS) as handle:
+        return _without_comments(handle.read())
+
+
+def _without_comments(css):
+    return re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+
+
 def _variables(css):
     return {name: value.strip()
-            for name, value in re.findall(r"(--[\w-]+):\s*([^;]+);", css)}
+            for name, value in re.findall(r"(--[\w-]+):\s*([^;]+);",
+                                          _without_comments(css))}
 
 
 def _resolve(value, variables, depth=0):
@@ -98,8 +121,7 @@ class ContrastMathTest(unittest.TestCase):
 
 class BadgeContrastTest(unittest.TestCase):
     def setUp(self):
-        with open(CSS) as handle:
-            self.css = handle.read()
+        self.css = stylesheet()
         self.variables = _variables(self.css)
 
     def _colours(self, selector):
@@ -144,7 +166,7 @@ class BadgeContrastTest(unittest.TestCase):
         bright warning and info fills. This records that the fix above is a
         deliberate exception rather than a rule nobody looked at."""
         block = _rule(self.css, ".badge")
-        self.assertEqual(_declaration(block, "color"), "var(--dark-bg)")
+        self.assertEqual(_declaration(block, "color"), "var(--surface-page)")
 
 
 class TemplateUsesTheStyleTest(unittest.TestCase):
@@ -217,11 +239,10 @@ class MonitorColourTest(unittest.TestCase):
     """
 
     def setUp(self):
-        with open(CSS) as handle:
-            self.css = handle.read()
+        self.css = stylesheet()
         self.variables = _variables(self.css)
-        self.card = _resolve("var(--dark-card)", self.variables)
-        self.page = _resolve("var(--dark-bg)", self.variables)
+        self.card = _resolve("var(--surface-card)", self.variables)
+        self.page = _resolve("var(--surface-page)", self.variables)
 
     def _block(self, selector):
         block = _rule(self.css, selector)
@@ -305,7 +326,7 @@ class MonitorColourTest(unittest.TestCase):
     def test_a_tinted_row_keeps_its_text_readable(self):
         """The tint is translucent, so what matters is the blend — and the
         body text still has to be readable on it."""
-        body = _resolve("var(--dark-text)", self.variables)
+        body = _resolve("var(--text-primary)", self.variables)
         for selector in ("tr.monitor-row-down,\ntr.monitor-row-critical",
                          "tr.monitor-row-warning"):
             block = _rule(self.css, selector)
@@ -392,13 +413,12 @@ class JourneyStepColourTest(unittest.TestCase):
     """
 
     def setUp(self):
-        with open(CSS) as handle:
-            self.css = handle.read()
+        self.css = stylesheet()
         self.variables = _variables(self.css)
         # The steps table sits on `.bg-body-tertiary` inside a card. The card
         # is the darker of the two surfaces it can land on, so it is the one
         # to check against.
-        self.card = _resolve("var(--dark-card)", self.variables)
+        self.card = _resolve("var(--surface-card)", self.variables)
 
     def _block(self, selector):
         block = _rule(self.css, selector)
@@ -427,10 +447,10 @@ class JourneyStepColourTest(unittest.TestCase):
             self.variables)
         self.assertNotEqual(skipped, failed)
         # And it is the palette's muted grey rather than a fourth colour
-        # invented for this table. `--dark-text-muted` is what the product
+        # invented for this table. `--text-muted` is what the product
         # already uses for "nothing to report here".
         self.assertEqual(skipped.lower(),
-                         _resolve("var(--dark-text-muted)",
+                         _resolve("var(--text-muted)",
                                   self.variables).lower())
 
     def test_failed_is_the_same_red_the_rest_of_the_product_uses(self):
