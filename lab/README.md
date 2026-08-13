@@ -150,7 +150,9 @@ measured against, and they write somewhere the HTTP monitors do not:
 ```
 synthetics-browser-default              journey and step documents
 synthetics-browser.network-default      one per request the page made
-synthetics-browser.screenshot-default   the screenshots, split into blocks
+synthetics-browser.screenshot-default   screenshots — several documents per
+                                        run, and how they assemble into an
+                                        image has not been measured
 ```
 
 Two things about running them, both learned the hard way:
