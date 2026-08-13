@@ -319,10 +319,13 @@
 
     const data = JSON.parse(holder.textContent);
     const style = getComputedStyle(document.documentElement);
-    const teal = style.getPropertyValue('--accent').trim() || '#39c5cf';
-    const red = style.getPropertyValue('--hue-red').trim() || '#ff7b72';
-    const muted = style.getPropertyValue('--text-secondary').trim() || '#7d8590';
-    const grid = style.getPropertyValue('--border').trim() || '#30363d';
+    // No fallbacks. A fallback colour is a literal of the theme it was
+    // written for, so the one case it covers — the token missing — is the
+    // one case where it paints the wrong theme.
+    const teal = style.getPropertyValue('--accent').trim();
+    const red = style.getPropertyValue('--hue-red').trim();
+    const muted = style.getPropertyValue('--text-secondary').trim();
+    const grid = style.getPropertyValue('--border').trim();
 
     const times = data.labels.map(v => v ? new Date(v) : null);
     const label = i => times[i] ? times[i].toLocaleTimeString() : '';

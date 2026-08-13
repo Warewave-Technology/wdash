@@ -258,6 +258,43 @@ async function main() {
     check('an explained empty response stops spinning', () =>
         assert(spinning(explained) === 0, `${spinning(explained)} spinner(s) left`));
 
+    // ---------------------------------------------------------------------
+    // Chart colours come from the palette
+    // ---------------------------------------------------------------------
+    //
+    // The chart used to paint with colours written into this file: gridlines
+    // at `#30363d`, which is a shade of a dark page background and vanishes
+    // on a light one. Nothing about colour had ever looked at a script, so
+    // the stylesheet could be themed down to the last token and the charts
+    // would still be drawn for the theme they were written in.
+    const palette = makeDashboard(jsonResponse({ panels: [] }));
+    palette.document.documentElement.style.setProperty('--hue-red', '#abcdef');
+    palette.document.documentElement.style.setProperty('--border', '#123456');
+    palette.document.documentElement.style.setProperty('--text-muted', '#654321');
+    palette.document.documentElement.style.setProperty(
+        '--chart-series', '#111111, #222222, #333333');
+
+    check('a severity takes its colour from the palette', () =>
+        assert(palette.AsyncDashboard.seriesColour('ERROR', 0) === '#abcdef',
+               `got ${palette.AsyncDashboard.seriesColour('ERROR', 0)}`));
+
+    check('an unknown series walks the palette ramp', () => {
+        const first = palette.AsyncDashboard.seriesColour('checkout', 0);
+        const third = palette.AsyncDashboard.seriesColour('billing', 2);
+        assert(first === '#111111' && third === '#333333',
+               `ramp gave ${first} and ${third}`);
+    });
+
+    check('the ramp wraps rather than running out', () =>
+        assert(palette.AsyncDashboard.seriesColour('n', 4) === '#222222',
+               'index 4 of a three-colour ramp should be the second'));
+
+    check('the axis takes its gridlines from the palette', () => {
+        const axis = palette.AsyncDashboard.axisStyle();
+        assert(axis.grid.color === '#123456' && axis.ticks.color === '#654321',
+               `axis used ${axis.grid.color} / ${axis.ticks.color}`);
+    });
+
     console.log('');
     if (failures.length) {
         console.log(`${failures.length} dashboard check(s) failed\n`);

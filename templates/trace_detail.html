@@ -169,7 +169,7 @@
         const rootStart = Math.min(...data.spans.map(s => Date.parse(s.start)));
 
         const ticks = 5;
-        let axis = '<div class="position-relative" style="height:16px;border-bottom:1px solid #444">';
+        let axis = '<div class="position-relative" style="height:16px;border-bottom:1px solid var(--border-strong)">';
         for (let i = 0; i <= ticks; i++) {
             const pct = i / ticks * 100;
             const align = i === 0 ? 'left:0'
@@ -192,7 +192,7 @@
 
             let guides = '';
             for (let d = 0; d < row.depth; d++) {
-                guides += '<span style="display:inline-block;width:14px;border-left:1px solid #3a3a3a;' +
+                guides += '<span style="display:inline-block;width:14px;border-left:1px solid var(--border);' +
                           'height:1.1rem;vertical-align:middle"></span>';
             }
 
@@ -210,9 +210,10 @@
                     '<div class="position-absolute" title="total ' + duration(s.duration_us) +
                         ', self ' + duration(row.self_time_us) + '" style="left:' + left +
                         '%;width:' + width + '%;height:10px;top:3px;border-radius:2px;background:' +
-                        (failed ? 'rgba(220,53,69,.3)' : serviceColour(s.service, 0.28)) + '">' +
+                        (failed ? 'color-mix(in srgb, var(--hue-red) 30%, transparent)'
+                               : serviceColour(s.service, 0.28)) + '">' +
                         '<div style="width:' + selfPct + '%;height:100%;border-radius:2px;background:' +
-                            (failed ? '#dc3545' : colour) + '"></div>' +
+                            (failed ? 'var(--hue-red)' : colour) + '"></div>' +
                     '</div>' +
                 '</div></td>' +
                 '<td class="text-end text-nowrap" style="width:13%"><small>' +

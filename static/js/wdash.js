@@ -2,6 +2,28 @@
  * WDash JavaScript Utilities
  */
 
+/**
+ * A colour from the palette, by token name.
+ *
+ * Read at call time rather than cached at load: the palette is what a theme
+ * overrides, and a value captured once would be whichever theme happened to
+ * be active when the page opened.
+ *
+ * The same five lines are in `async-dashboard.js`. There is no module system
+ * here and the load order between the two is decided by template blocks, so a
+ * helper that arrives second is undefined the first time it is wanted.
+ *
+ * No fallback colour on purpose: a fallback is a literal, and a literal is
+ * what this removes. A missing token comes back empty and the chart draws in
+ * its own default — visible, and `tests/test_contrast.py` fails, because
+ * every token named from a script has to exist in `:root`.
+ */
+function paletteColour(name) {
+    return getComputedStyle(document.documentElement)
+        .getPropertyValue(name).trim();
+}
+
+
 class WDash {
     constructor() {
         this.init();
@@ -949,18 +971,26 @@ class LogSearch {
 
         // Fixed order and colour so a severity always looks the same, and the
         // eye can compare two searches without re-reading the legend.
+        //
+        // From the palette, and the palette the REST of the product uses.
+        // These were Bootstrap's own — `#dc3545` for ERROR against the
+        // `#ff7b72` an ERROR badge is painted with two inches above it, and
+        // `#ffc107` for WARN against `#f2cc60`. Two vocabularies for one
+        // fact, which is the thing `test_down_is_the_same_red_the_log_levels
+        // _use` exists to prevent in the stylesheet and could not see here.
         const LEVELS = [
-            ['FATAL', '#8b0000'], ['ERROR', '#dc3545'], ['WARN', '#ffc107'],
-            ['INFO', '#0dcaf0'], ['DEBUG', '#6c757d'], ['TRACE', '#495057'],
-            ['UNSPECIFIED', '#343a40'],
+            ['FATAL', '--hue-red-strong'], ['ERROR', '--hue-red'],
+            ['WARN', '--hue-yellow'], ['INFO', '--hue-blue'],
+            ['DEBUG', '--hue-purple'], ['TRACE', '--text-muted'],
+            ['UNSPECIFIED', '--border-strong'],
         ];
         const present = LEVELS.filter(([name]) =>
             buckets.some(b => (b.by_severity || {})[name]));
 
         const labels = buckets.map(b => new Date(b.timestamp || b.key));
-        const datasets = (present.length ? present : [['count', '#0dcaf0']]).map(([name, colour]) => ({
+        const datasets = (present.length ? present : [['count', '--hue-blue']]).map(([name, token]) => ({
             label: name,
-            backgroundColor: colour,
+            backgroundColor: paletteColour(token),
             data: buckets.map(b => present.length
                 ? ((b.by_severity || {})[name] || 0)
                 : b.count),
@@ -979,7 +1009,7 @@ class LogSearch {
                     x: { stacked: true, ticks: { maxTicksLimit: 8, font: { size: 9 } },
                          grid: { display: false } },
                     y: { stacked: true, ticks: { maxTicksLimit: 4, font: { size: 9 } },
-                         grid: { color: 'rgba(255,255,255,.06)' } },
+                         grid: { color: paletteColour('--grid-faint') } },
                 },
                 plugins: {
                     legend: { labels: { boxWidth: 10, font: { size: 10 } } },

@@ -54,6 +54,49 @@ def _variables(css):
                                           _without_comments(css))}
 
 
+def flatten(value, variables):
+    """A declaration with every token and every `color-mix` written out.
+
+    The parsers below look for literal colours — the stops of a gradient, the
+    alpha of a tint. Once the stylesheet says `var(--hue-red)` and
+    `color-mix(in srgb, var(--hue-red) 12%, transparent)` instead of the hex
+    and the `rgba()`, none of them find anything, and a test that finds
+    nothing to measure passes.
+
+    So the tokens are substituted first, and a mix with `transparent` is
+    written back as the `rgba()` it renders as: mixing a colour with
+    transparent in sRGB is the same colour at that alpha, which is why the
+    stylesheet could be converted with no pixel changing at all.
+    """
+    for _ in range(6):
+        substituted = re.sub(
+            r"var\((--[\w-]+)\)",
+            lambda m: variables.get(m.group(1), m.group(0)), value)
+        if substituted == value:
+            break
+        value = substituted
+
+    def unmix(match):
+        colour, share = match.group(1).strip(), float(match.group(2))
+        red, green, blue = _rgb(colour)
+        return f"rgba({red}, {green}, {blue}, {share / 100})"
+
+    return re.sub(r"color-mix\(\s*in\s+srgb\s*,\s*(#[0-9a-fA-F]{3,8})\s+"
+                  r"([\d.]+)%\s*,\s*transparent\s*\)", unmix, value)
+
+
+def measurable_stylesheet():
+    """The stylesheet with every colour written out.
+
+    For the tests that MEASURE. The ones that assert the stylesheet says
+    `var(--surface-page)` read the real thing instead — flattened, that
+    assertion would be checking a colour rather than the token, which is the
+    opposite of what it is for.
+    """
+    css = stylesheet()
+    return flatten(css, _variables(css))
+
+
 def _resolve(value, variables, depth=0):
     """Follow `var(--x)` chains to a literal colour."""
     value = value.strip()
@@ -239,7 +282,7 @@ class MonitorColourTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.css = stylesheet()
+        self.css = measurable_stylesheet()
         self.variables = _variables(self.css)
         self.card = _resolve("var(--surface-card)", self.variables)
         self.page = _resolve("var(--surface-page)", self.variables)
@@ -413,7 +456,7 @@ class JourneyStepColourTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.css = stylesheet()
+        self.css = measurable_stylesheet()
         self.variables = _variables(self.css)
         # The steps table sits on `.bg-body-tertiary` inside a card. The card
         # is the darker of the two surfaces it can land on, so it is the one
@@ -461,3 +504,130 @@ class JourneyStepColourTest(unittest.TestCase):
         down = _gradient_stops(
             _declaration(self._block(".monitor-status.down"), "background"))
         self.assertIn(failed, [stop.lower() for stop in down])
+
+
+# ---------------------------------------------------------------------------
+# One place a colour is written down
+# ---------------------------------------------------------------------------
+
+#: Colours that do not belong to the theme, with the reason each is exempt.
+#: A list like this is where a tokenisation quietly stops being true, so it is
+#: kept to things that would be WRONG to theme rather than things that were
+#: awkward to convert.
+NOT_THEME_COLOURS = {
+    "#ff5f57": "the macOS window close button, on the landing page's mock "
+               "terminal. A picture of somebody else's chrome.",
+    "#febc2e": "the macOS minimise button, same picture.",
+    "#28c840": "the macOS zoom button, same picture.",
+}
+
+
+def _blank_comments(text):
+    """Comments removed, line numbers kept, so a failure can be found."""
+    return re.sub(r"/\*.*?\*/|<!--.*?-->",
+                  lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)
+
+
+class ThePaletteIsTheOnlyPlaceTest(unittest.TestCase):
+    """A colour written anywhere else cannot be themed.
+
+    This is the test the light theme is built on, and it is the one that
+    keeps it true afterwards. Rendering three palettes onto the real screens
+    measured what a theme actually costs, and the palette was the smaller
+    half: about a hundred colours were written out across the stylesheet, the
+    templates and the scripts, so overriding `:root` moved two thirds of the
+    page and left the rest painted for the dark theme.
+
+    The stylesheet is one file and can be read. The scripts are the ones that
+    got away with it longest — a chart's gridlines were `#30363d`, which is a
+    shade of a dark background and is invisible on a light one, and no test
+    about colour had ever looked at a `.js` file.
+    """
+
+    def _offenders(self, text, skip_root=False):
+        text = _blank_comments(text)
+        if skip_root:
+            text = text.split("}", 1)[1]
+        found = []
+        for number, line in enumerate(text.splitlines(), start=1):
+            for literal in re.findall(
+                    # Not preceded by `&`: `&#128269;` is a magnifying
+                    # glass, and its digits are all valid hex.
+                    r"(?<!&)#[0-9a-fA-F]{6}\b|(?<!&)#[0-9a-fA-F]{3}\b"
+                    r"(?![0-9a-fA-F;])"
+                    r"|rgba?\(\s*\d+[^)]*\)|hsla?\(\s*\d+[^)]*\)", line):
+                if literal.lower() in NOT_THEME_COLOURS:
+                    continue
+                found.append(f"line {number}: {literal}")
+        return found
+
+    def test_the_stylesheet_writes_no_colour_outside_the_palette(self):
+        offenders = self._offenders(stylesheet(), skip_root=True)
+        self.assertEqual(offenders, [], "\n".join(
+            ["wdash.css paints with colours a theme cannot reach:"] + offenders))
+
+    def test_no_template_writes_a_colour(self):
+        templates = os.path.join(ROOT, "templates")
+        offenders = []
+        for name in sorted(os.listdir(templates)):
+            if not name.endswith(".html"):
+                continue
+            with open(os.path.join(templates, name)) as handle:
+                for line in self._offenders(handle.read()):
+                    offenders.append(f"{name} {line}")
+        self.assertEqual(offenders, [], "\n".join(
+            ["templates paint with colours a theme cannot reach:"] + offenders))
+
+    def test_no_script_writes_a_colour(self):
+        scripts = os.path.join(ROOT, "static", "js")
+        offenders = []
+        for name in sorted(os.listdir(scripts)):
+            # The minified bundle is built from wdash.js; checking it as well
+            # would report every finding twice and blame a generated file.
+            if not name.endswith(".js") or name.endswith(".min.js"):
+                continue
+            with open(os.path.join(scripts, name)) as handle:
+                text = re.sub(r"^\s*//.*$", "", handle.read(), flags=re.M)
+            for line in self._offenders(text):
+                offenders.append(f"{name} {line}")
+        self.assertEqual(offenders, [], "\n".join(
+            ["scripts paint with colours a theme cannot reach:"] + offenders))
+
+    def test_every_token_a_script_names_exists(self):
+        """`paletteColour` has no fallback, on purpose: a fallback is a
+        literal of the theme it was written for. What replaces it is this —
+        a token named from a script and missing from the palette is a chart
+        drawn in Chart.js's own colours, which nobody would notice.
+
+        Every quoted token name, not only the ones inside a
+        `paletteColour(...)` call. The severity table in `wdash.js` carries
+        its tokens in an array and hands them over later, so a version of
+        this that matched call sites watched the wrong thing: deleting
+        `--hue-red-strong` from the palette went straight through it.
+        """
+        variables = _variables(stylesheet())
+        missing = []
+        for folder in (os.path.join(ROOT, "static", "js"),
+                       os.path.join(ROOT, "templates")):
+            for name in sorted(os.listdir(folder)):
+                if name.endswith(".min.js"):
+                    continue
+                if not (name.endswith(".js") or name.endswith(".html")):
+                    continue
+                with open(os.path.join(folder, name)) as handle:
+                    text = _blank_comments(handle.read())
+                text = re.sub(r"^\s*//.*$", "", text, flags=re.M)
+                for token in re.findall(r"['\"](--[\w-]+)['\"]", text):
+                    if token not in variables:
+                        missing.append(f"{name}: {token}")
+        self.assertEqual(sorted(set(missing)), [],
+                         f"named in a script, absent from the palette: "
+                         f"{sorted(set(missing))}")
+
+    def test_the_exemptions_are_all_still_used(self):
+        """An exemption for a colour nobody writes any more is a hole kept
+        open for the next person to fall into."""
+        css = stylesheet()
+        for colour in NOT_THEME_COLOURS:
+            self.assertIn(colour, css.lower(),
+                          f"{colour} is exempt and no longer used")

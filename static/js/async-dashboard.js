@@ -13,6 +13,30 @@
  * still exist on the server; this UI no longer calls them.
  */
 
+/**
+ * A colour from the palette, by token name.
+ *
+ * Read at call time rather than cached at load: the palette is what a theme
+ * overrides, and a value captured once would be whichever theme happened to
+ * be active when the page opened.
+ *
+ * Written out in both scripts rather than shared. There is no module system
+ * here and the load order between them is decided by template blocks, so a
+ * helper that arrives second is a helper that is undefined the first time it
+ * is wanted. Five lines twice beats a race.
+ *
+ * No fallback colour on purpose: a fallback is a literal, and a literal is
+ * the thing being removed. If a token is missing the value comes back empty
+ * and the chart draws in its own default, which is visible — and
+ * `tests/test_contrast.py` fails, because every token named here has to
+ * exist in `:root`.
+ */
+function paletteColour(name) {
+    return getComputedStyle(document.documentElement)
+        .getPropertyValue(name).trim();
+}
+
+
 class AsyncDashboard {
     constructor(dashboardId, dashboardQuery) {
         this.dashboardId = dashboardId;
@@ -662,21 +686,28 @@ class AsyncDashboard {
      */
     static seriesColour(label, index) {
         const bySeverity = {
-            ERROR: '#ff7b72', FATAL: '#ff4444', CRITICAL: '#ff4444',
-            WARN: '#f2cc60', WARNING: '#f2cc60',
-            INFO: '#79c0ff', DEBUG: '#d2a8ff', TRACE: '#8b949e',
-            SUCCESS: '#7ee787', NOTICE: '#39c5cf',
+            ERROR: '--hue-red', FATAL: '--hue-red-strong',
+            CRITICAL: '--hue-red-strong',
+            WARN: '--hue-yellow', WARNING: '--hue-yellow',
+            INFO: '--hue-blue', DEBUG: '--hue-purple', TRACE: '--text-muted',
+            SUCCESS: '--hue-green', NOTICE: '--accent',
         };
         const known = bySeverity[String(label).toUpperCase()];
-        if (known) return known;
-        const palette = ['#39c5cf', '#7ee787', '#d2a8ff', '#ffa657', '#79c0ff',
-                         '#f2cc60', '#ff7b72', '#a5d6ff', '#56d364', '#e3b341'];
-        return palette[index % palette.length];
+        if (known) return paletteColour(known);
+        const palette = paletteColour('--chart-series').split(',');
+        return palette[index % palette.length].trim();
     }
 
     static axisStyle() {
         const font = { family: 'SF Mono, Monaco, monospace' };
-        return { ticks: { color: '#8b949e', font }, grid: { color: '#30363d' } };
+        // The two colours a chart needs from the page rather than from its
+        // data. Written out, an axis tuned for a dark page is invisible on a
+        // light one — the gridlines especially, which are a shade of the
+        // background by design.
+        return {
+            ticks: { color: paletteColour('--text-muted'), font },
+            grid: { color: paletteColour('--border') },
+        };
     }
 
     /**
@@ -709,7 +740,7 @@ class AsyncDashboard {
             datasets = [{
                 label: 'Count',
                 data: buckets.map(b => b.count),
-                backgroundColor: '#39c5cf',
+                backgroundColor: paletteColour('--accent'),
                 borderWidth: 0,
             }];
         }
@@ -721,7 +752,8 @@ class AsyncDashboard {
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: { legend: { position: 'bottom',
-                                     labels: { color: '#f0f6fc', boxWidth: 12 } } },
+                                     labels: { color: paletteColour('--text-primary'),
+                                               boxWidth: 12 } } },
                 onHover: (e, els) => {
                     e.native.target.style.cursor = els.length ? 'pointer' : 'default';
                 },
@@ -762,11 +794,13 @@ class AsyncDashboard {
         this.upsertChart(panel.id, canvas, donut ? {
             type: 'doughnut',
             data: { labels, datasets: [{ data: values, backgroundColor: colours,
-                                         borderColor: '#0d1117', borderWidth: 3 }] },
+                                         borderColor: paletteColour('--surface-page'),
+                                         borderWidth: 3 }] },
             options: {
                 responsive: true, maintainAspectRatio: false,
                 plugins: { legend: { position: 'bottom',
-                                     labels: { color: '#f0f6fc', boxWidth: 12 } } },
+                                     labels: { color: paletteColour('--text-primary'),
+                                               boxWidth: 12 } } },
                 onHover: hover, onClick: click,
             },
         } : {
@@ -871,8 +905,8 @@ class AsyncDashboard {
             return;
         }
 
-        Chart.defaults.color = '#f0f6fc';
-        Chart.defaults.borderColor = '#30363d';
+        Chart.defaults.color = paletteColour('--text-primary');
+        Chart.defaults.borderColor = paletteColour('--border');
     }
 
     toggleAutoRefresh() {
@@ -922,7 +956,7 @@ asyncStyles.textContent = `
         left: 0;
         right: 0;
         bottom: 0;
-        background: rgba(13, 17, 23, 0.9);
+        background: color-mix(in srgb, var(--surface-page) 90%, transparent);
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -942,7 +976,7 @@ asyncStyles.textContent = `
         transition: border-color .12s ease, transform .12s ease;
     }
     .stat-card:hover, .stat-card:focus-visible {
-        border-color: #39c5cf;
+        border-color: var(--accent);
         transform: translateY(-2px);
         outline: none;
     }

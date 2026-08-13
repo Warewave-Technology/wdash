@@ -35,6 +35,19 @@
     --border-strong: #3d444d;
     --accent: #39c5cf;
 
+    /* What a shadow is made of, and what a hover overlay is made of. Both
+       have to flip: a shadow on a light page is far weaker than black at
+       40%, and an overlay that lightens a dark row has to darken a light
+       one. They are colours rather than finished values so the strength
+       stays where it is used — `color-mix(... 4%, transparent)` reads as
+       "a 4% wash" wherever it appears. */
+    --shadow: #000000;
+    --wash: #ffffff;
+    /* The faintest line on a chart — barely there on purpose, and the one
+       value a script cannot compute for itself because `color-mix` inside a
+       Chart.js option string is not CSS. */
+    --grid-faint: color-mix(in srgb, var(--wash) 6%, transparent);
+
     /* The hues that carry meaning: a log level, a monitor state, a step.
        `-vivid` is the far end of the gradient a badge is filled with. */
     --hue-blue: #79c0ff;
@@ -45,10 +58,26 @@
     --hue-yellow-vivid: #ffd93d;
     --hue-red: #ff7b72;
     --hue-red-vivid: #ff6b6b;
+    /* FATAL and CRITICAL, which have to be louder than ERROR or the chart
+       says the two are the same kind of night. */
+    --hue-red-strong: #ff4444;
     --hue-purple: #d2a8ff;
     --hue-purple-vivid: #be4bdb;
     --hue-cyan: #39c5cf;
     --hue-cyan-vivid: #2dd4bf;
+    --hue-orange: #ffa657;
+
+    /* The categorical ramp a chart walks when its series are services or
+       hosts rather than severities — one token instead of ten, because a
+       theme replaces the whole ramp or none of it, and ten separate names
+       would be ten chances to change nine.
+
+       The first seven ARE the hues above. Written as tokens rather than
+       repeated, so a change to a hue reaches the chart. */
+    --chart-series:
+        var(--accent), var(--hue-green), var(--hue-purple), var(--hue-orange),
+        var(--hue-blue), var(--hue-yellow), var(--hue-red),
+        #a5d6ff, #56d364, #e3b341;
 }
 
 /* Base Dark Theme */
@@ -81,7 +110,7 @@ body {
 }
 
 .navbar-dark {
-    background: linear-gradient(135deg, var(--surface-navbar) 0%, #161b22 100%) !important;
+    background: linear-gradient(135deg, var(--surface-navbar) 0%, var(--surface-sunken) 100%) !important;
     border-bottom: 1px solid var(--border);
     backdrop-filter: blur(10px);
 }
@@ -90,7 +119,7 @@ body {
     font-weight: bold;
     font-size: 1.5rem;
     color: var(--accent) !important;
-    text-shadow: 0 0 10px rgba(57, 197, 207, 0.3);
+    text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .navbar-nav .nav-link {
@@ -103,7 +132,7 @@ body {
 
 .navbar-nav .nav-link:hover {
     color: var(--accent) !important;
-    background-color: rgba(57, 197, 207, 0.1);
+    background-color: color-mix(in srgb, var(--accent) 10%, transparent);
     transform: translateY(-1px);
 }
 
@@ -113,7 +142,7 @@ body {
     border: 1px solid var(--border);
     border-radius: 12px;
     color: var(--text-primary);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--shadow) 40%, transparent);
     backdrop-filter: blur(10px);
 }
 
@@ -146,7 +175,7 @@ body {
     background-color: var(--surface-input);
     border-color: var(--accent);
     color: var(--text-primary);
-    box-shadow: 0 0 0 3px rgba(57, 197, 207, 0.1);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
     transform: translateY(-1px);
 }
 
@@ -167,7 +196,7 @@ body {
     background-color: var(--surface-input);
     border-color: var(--accent);
     color: var(--text-primary);
-    box-shadow: 0 0 0 3px rgba(57, 197, 207, 0.1);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .form-label {
@@ -186,19 +215,19 @@ body {
 
 /* Buttons - Warp Style */
 .btn-primary {
-    background: linear-gradient(135deg, var(--accent) 0%, #2dd4bf 100%);
+    background: linear-gradient(135deg, var(--accent) 0%, var(--hue-cyan-vivid) 100%);
     border: none;
     border-radius: 8px;
     color: var(--surface-page);
     font-weight: 600;
     transition: all 0.3s ease;
-    box-shadow: 0 2px 8px rgba(57, 197, 207, 0.3);
+    box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .btn-primary:hover {
-    background: linear-gradient(135deg, #2dd4bf 0%, var(--accent) 100%);
+    background: linear-gradient(135deg, var(--hue-cyan-vivid) 0%, var(--accent) 100%);
     transform: translateY(-2px);
-    box-shadow: 0 4px 16px rgba(57, 197, 207, 0.4);
+    box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .btn-outline-secondary {
@@ -236,25 +265,25 @@ body {
 }
 
 .alert-success {
-    background: linear-gradient(135deg, rgba(126, 231, 135, 0.1) 0%, rgba(126, 231, 135, 0.05) 100%);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--hue-green) 10%, transparent) 0%, color-mix(in srgb, var(--hue-green) 5%, transparent) 100%);
     border-color: var(--hue-green);
     color: var(--hue-green);
 }
 
 .alert-warning {
-    background: linear-gradient(135deg, rgba(242, 204, 96, 0.1) 0%, rgba(242, 204, 96, 0.05) 100%);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--hue-yellow) 10%, transparent) 0%, color-mix(in srgb, var(--hue-yellow) 5%, transparent) 100%);
     border-color: var(--hue-yellow);
     color: var(--hue-yellow);
 }
 
 .alert-danger {
-    background: linear-gradient(135deg, rgba(255, 123, 114, 0.1) 0%, rgba(255, 123, 114, 0.05) 100%);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--hue-red) 10%, transparent) 0%, color-mix(in srgb, var(--hue-red) 5%, transparent) 100%);
     border-color: var(--hue-red);
     color: var(--hue-red);
 }
 
 .alert-info {
-    background: linear-gradient(135deg, rgba(121, 192, 255, 0.1) 0%, rgba(121, 192, 255, 0.05) 100%);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--hue-blue) 10%, transparent) 0%, color-mix(in srgb, var(--hue-blue) 5%, transparent) 100%);
     border-color: var(--hue-blue);
     color: var(--hue-blue);
 }
@@ -293,7 +322,7 @@ body {
 }
 
 .log-entry:hover {
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 4px 20px color-mix(in srgb, var(--shadow) 40%, transparent);
     background: linear-gradient(135deg, var(--surface-raised) 0%, var(--surface-card) 100%);
     transform: translateX(4px);
     border-left-color: var(--accent);
@@ -305,23 +334,23 @@ body {
 
 .log-entry.error {
     border-left-color: var(--hue-red);
-    background: linear-gradient(135deg, rgba(255, 123, 114, 0.05) 0%, var(--surface-card) 100%);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--hue-red) 5%, transparent) 0%, var(--surface-card) 100%);
 }
 
 .log-entry.warn,
 .log-entry.warning {
     border-left-color: var(--hue-yellow);
-    background: linear-gradient(135deg, rgba(242, 204, 96, 0.05) 0%, var(--surface-card) 100%);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--hue-yellow) 5%, transparent) 0%, var(--surface-card) 100%);
 }
 
 .log-entry.info {
     border-left-color: var(--hue-blue);
-    background: linear-gradient(135deg, rgba(121, 192, 255, 0.05) 0%, var(--surface-card) 100%);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--hue-blue) 5%, transparent) 0%, var(--surface-card) 100%);
 }
 
 .log-entry.debug {
     border-left-color: var(--hue-purple);
-    background: linear-gradient(135deg, rgba(210, 168, 255, 0.05) 0%, var(--surface-card) 100%);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--hue-purple) 5%, transparent) 0%, var(--surface-card) 100%);
 }
 
 /* Log Level Badges - Terminal Style - Updated to match chart colors */
@@ -333,28 +362,28 @@ body {
     text-transform: uppercase;
     letter-spacing: 1px;
     font-family: 'SF Mono', monospace;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 2px 4px color-mix(in srgb, var(--shadow) 30%, transparent);
 }
 
 .log-level.ERROR,
 .log-level.FATAL {
-    background: linear-gradient(135deg, #ff7b72 0%, #ff6b6b 100%);
+    background: linear-gradient(135deg, var(--hue-red) 0%, var(--hue-red-vivid) 100%);
     color: var(--surface-page);
 }
 
 .log-level.WARN,
 .log-level.WARNING {
-    background: linear-gradient(135deg, #f2cc60 0%, #ffd93d 100%);
+    background: linear-gradient(135deg, var(--hue-yellow) 0%, var(--hue-yellow-vivid) 100%);
     color: var(--surface-page);
 }
 
 .log-level.INFO {
-    background: linear-gradient(135deg, #79c0ff 0%, #4dabf7 100%);
+    background: linear-gradient(135deg, var(--hue-blue) 0%, var(--hue-blue-vivid) 100%);
     color: var(--surface-page);
 }
 
 .log-level.DEBUG {
-    background: linear-gradient(135deg, #d2a8ff 0%, #be4bdb 100%);
+    background: linear-gradient(135deg, var(--hue-purple) 0%, var(--hue-purple-vivid) 100%);
     color: var(--surface-page);
 }
 
@@ -363,17 +392,17 @@ body {
    so the light text works, rather than lightened so dark text does: TRACE
    should stay the quietest badge, and a pale grey chip would shout. */
 .log-level.TRACE {
-    background: linear-gradient(135deg, #3d444d 0%, #30363d 100%);
+    background: linear-gradient(135deg, var(--border-strong) 0%, var(--border) 100%);
     color: var(--text-primary);
 }
 
 .log-level.SUCCESS {
-    background: linear-gradient(135deg, #7ee787 0%, #51cf66 100%);
+    background: linear-gradient(135deg, var(--hue-green) 0%, var(--hue-green-vivid) 100%);
     color: var(--surface-page);
 }
 
 .log-level.NOTICE {
-    background: linear-gradient(135deg, #39c5cf 0%, #2dd4bf 100%);
+    background: linear-gradient(135deg, var(--accent) 0%, var(--hue-cyan-vivid) 100%);
     color: var(--surface-page);
 }
 
@@ -392,7 +421,7 @@ body {
     border-radius: 12px;
     margin-bottom: 24px;
     border: 1px solid var(--border);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--shadow) 40%, transparent);
 }
 
 .search-controls .form-label {
@@ -413,19 +442,19 @@ body {
 
 .dashboard-card:hover {
     transform: translateY(-4px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--shadow) 50%, transparent);
     border-color: var(--accent);
 }
 
 .dashboard-stats .card {
     border: 1px solid var(--border);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--shadow) 40%, transparent);
     transition: all 0.3s ease;
 }
 
 .dashboard-stats .card:hover {
     transform: translateY(-2px);
-    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 6px 16px color-mix(in srgb, var(--shadow) 50%, transparent);
 }
 
 .dashboard-stats .card-body h3 {
@@ -461,7 +490,7 @@ body {
 }
 
 .pagination .page-item.active .page-link {
-    background: linear-gradient(135deg, var(--accent) 0%, #2dd4bf 100%);
+    background: linear-gradient(135deg, var(--accent) 0%, var(--hue-cyan-vivid) 100%);
     border-color: var(--accent);
     color: var(--surface-page);
 }
@@ -471,7 +500,7 @@ body {
     background-color: var(--surface-card);
     border: 1px solid var(--border);
     border-radius: 10px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--shadow) 50%, transparent);
     backdrop-filter: blur(10px);
 }
 
@@ -500,7 +529,7 @@ body {
     background-color: var(--surface-card);
     border: 1px solid var(--border);
     border-radius: 12px;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+    box-shadow: 0 16px 48px color-mix(in srgb, var(--shadow) 60%, transparent);
 }
 
 .modal-header {
@@ -571,12 +600,12 @@ body {
 }
 
 .alert code {
-    background: rgba(57, 197, 207, 0.1);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
     padding: 3px 6px;
     border-radius: 4px;
     color: var(--accent);
     font-family: 'SF Mono', monospace;
-    border: 1px solid rgba(57, 197, 207, 0.2);
+    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 /* Empty State */
@@ -627,7 +656,7 @@ body {
 
 /* `.badge` above sets the text to the PAGE BACKGROUND colour, which is right
    on the bright fills (warning, info, success) and invisible on a dark one:
-   #0d1117 on Bootstrap's #212529 measures 1.23:1, against the 4.5:1 that
+   var(--surface-page) on Bootstrap's #212529 measures 1.23:1, against the 4.5:1 that
    normal text needs. .bg-secondary escapes it by overriding colour; .bg-dark
    did not, so the Advisor's "Affected" chips were black on near-black. */
 .badge.bg-dark {
@@ -663,23 +692,23 @@ body {
     text-transform: uppercase;
     letter-spacing: 1px;
     font-family: 'SF Mono', monospace;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, .3);
+    box-shadow: 0 2px 4px color-mix(in srgb, var(--shadow) 30%, transparent);
     color: var(--surface-page);
 }
 
 .monitor-status.up {
-    background: linear-gradient(135deg, #7ee787 0%, #51cf66 100%);
+    background: linear-gradient(135deg, var(--hue-green) 0%, var(--hue-green-vivid) 100%);
 }
 
 .monitor-status.down {
-    background: linear-gradient(135deg, #ff7b72 0%, #ff6b6b 100%);
+    background: linear-gradient(135deg, var(--hue-red) 0%, var(--hue-red-vivid) 100%);
 }
 
 /* The same grey TRACE uses, for the same reason: an unknown monitor is not a
    warning. Nothing has said it is broken, only that nothing has said
    anything, and a colour would claim more than that. */
 .monitor-status.unknown {
-    background: linear-gradient(135deg, #3d444d 0%, #30363d 100%);
+    background: linear-gradient(135deg, var(--border-strong) 0%, var(--border) 100%);
     color: var(--text-primary);
 }
 
@@ -687,12 +716,12 @@ body {
    on `<tr>` with higher specificity than a plain class. */
 tr.monitor-row-down,
 tr.monitor-row-critical {
-    background: rgba(255, 123, 114, .09) !important;
+    background: color-mix(in srgb, var(--hue-red) 9%, transparent) !important;
     box-shadow: inset 3px 0 0 var(--hue-red);
 }
 
 tr.monitor-row-warning {
-    background: rgba(242, 204, 96, .08) !important;
+    background: color-mix(in srgb, var(--hue-yellow) 8%, transparent) !important;
     box-shadow: inset 3px 0 0 var(--hue-yellow);
 }
 
@@ -701,7 +730,7 @@ tr.monitor-row-warning {
 .table-hover > tbody > tr.monitor-row-down:hover,
 .table-hover > tbody > tr.monitor-row-critical:hover,
 .table-hover > tbody > tr.monitor-row-warning:hover {
-    background: rgba(255, 255, 255, .04) !important;
+    background: color-mix(in srgb, var(--wash) 4%, transparent) !important;
 }
 
 .table-hover > tbody > tr.monitor-row-down:hover,
@@ -722,20 +751,20 @@ tr.monitor-row-warning {
 
 .expiry-chip.ok {
     color: var(--hue-green);
-    background: rgba(126, 231, 135, .10);
-    border-color: rgba(126, 231, 135, .30);
+    background: color-mix(in srgb, var(--hue-green) 10%, transparent);
+    border-color: color-mix(in srgb, var(--hue-green) 30%, transparent);
 }
 
 .expiry-chip.warning {
     color: var(--hue-yellow);
-    background: rgba(242, 204, 96, .10);
-    border-color: rgba(242, 204, 96, .35);
+    background: color-mix(in srgb, var(--hue-yellow) 10%, transparent);
+    border-color: color-mix(in srgb, var(--hue-yellow) 35%, transparent);
 }
 
 .expiry-chip.critical {
     color: var(--hue-red);
-    background: rgba(255, 123, 114, .12);
-    border-color: rgba(255, 123, 114, .40);
+    background: color-mix(in srgb, var(--hue-red) 12%, transparent);
+    border-color: color-mix(in srgb, var(--hue-red) 40%, transparent);
 }
 
 /* Expired is not "very soon" — it has already happened, and it should not be
@@ -745,8 +774,8 @@ tr.monitor-row-warning {
    second selector to know. */
 .expiry-chip.expired {
     color: var(--hue-red);
-    background: rgba(255, 123, 114, .12);
-    border-color: rgba(255, 123, 114, .40);
+    background: color-mix(in srgb, var(--hue-red) 12%, transparent);
+    border-color: color-mix(in srgb, var(--hue-red) 40%, transparent);
     text-transform: uppercase;
     letter-spacing: 1px;
     font-weight: 700;
@@ -828,16 +857,16 @@ pre {
     padding: 16px;
     border-radius: 8px;
     font-family: 'SF Mono', monospace;
-    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+    box-shadow: inset 0 2px 4px color-mix(in srgb, var(--shadow) 30%, transparent);
 }
 
 code {
-    background-color: rgba(57, 197, 207, 0.1);
+    background-color: color-mix(in srgb, var(--accent) 10%, transparent);
     color: var(--accent);
     padding: 2px 6px;
     border-radius: 4px;
     font-family: 'SF Mono', monospace;
-    border: 1px solid rgba(57, 197, 207, 0.2);
+    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 /* Utility Classes */
@@ -872,8 +901,8 @@ code {
 }
 
 @keyframes glow {
-    0%, 100% { box-shadow: 0 0 5px rgba(57, 197, 207, 0.3); }
-    50% { box-shadow: 0 0 20px rgba(57, 197, 207, 0.6); }
+    0%, 100% { box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 30%, transparent); }
+    50% { box-shadow: 0 0 20px color-mix(in srgb, var(--accent) 60%, transparent); }
 }
 
 .glow {
@@ -924,7 +953,7 @@ code {
 .form-control:focus,
 .form-select:focus,
 .btn:focus {
-    box-shadow: 0 0 0 3px rgba(57, 197, 207, 0.2);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 /* Custom scrollbar for Firefox */
@@ -994,7 +1023,7 @@ code {
     background-color: var(--surface-card);
     border: 1px solid var(--border);
     border-radius: 12px;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+    box-shadow: 0 16px 48px color-mix(in srgb, var(--shadow) 60%, transparent);
 }
 
 .modal-header {
@@ -1062,16 +1091,16 @@ code {
     font-size: 0.75rem;
     padding: 2px 8px;
     border-radius: 4px;
-    background: rgba(57, 197, 207, 0.15);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
     color: var(--accent);
-    border: 1px solid rgba(57, 197, 207, 0.3);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
     margin-top: 4px;
     transition: all 0.2s ease;
     user-select: none;
 }
 
 .log-multiline-badge:hover {
-    background: rgba(57, 197, 207, 0.25);
+    background: color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
 /* Stack trace styling */
@@ -1133,7 +1162,7 @@ code {
 }
 
 .field-table tr:hover {
-    background: rgba(57, 197, 207, 0.05);
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
 
 .field-table-container {
@@ -1175,13 +1204,13 @@ code {
 }
 
 .context-log:hover {
-    background: rgba(57, 197, 207, 0.05);
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
 
 .context-current-marker {
     padding: 6px 10px;
     margin: 4px 0;
-    background: rgba(242, 204, 96, 0.1);
+    background: color-mix(in srgb, var(--hue-yellow) 10%, transparent);
     border-left: 3px solid var(--hue-yellow);
     border-radius: 0 4px 4px 0;
     font-size: 0.8rem;
@@ -1246,7 +1275,7 @@ code {
 }
 
 .field-stat-item:hover {
-    background: rgba(57, 197, 207, 0.05);
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
 
 .field-stat-value {
@@ -1292,8 +1321,8 @@ code {
     position: absolute;
     inset: 0;
     background-image:
-        linear-gradient(rgba(57,197,207,0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(57,197,207,0.03) 1px, transparent 1px);
+        linear-gradient(color-mix(in srgb, var(--accent) 3%, transparent) 1px, transparent 1px),
+        linear-gradient(90deg, color-mix(in srgb, var(--accent) 3%, transparent) 1px, transparent 1px);
     background-size: 60px 60px;
     animation: gridPulse 8s ease-in-out infinite;
 }
@@ -1323,7 +1352,7 @@ code {
     font-size: 3.5rem;
     font-weight: 700;
     margin: 0;
-    background: linear-gradient(135deg, var(--accent), #79c0ff);
+    background: linear-gradient(135deg, var(--accent), var(--hue-blue));
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -1332,7 +1361,7 @@ code {
 .landing-icon {
     font-size: 2.8rem;
     color: var(--accent);
-    text-shadow: 0 0 30px rgba(57,197,207,0.4);
+    text-shadow: 0 0 30px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .landing-tagline {
@@ -1349,7 +1378,7 @@ code {
     overflow: hidden;
     text-align: left;
     margin-bottom: 40px;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    box-shadow: 0 20px 60px color-mix(in srgb, var(--shadow) 50%, transparent);
 }
 
 .terminal-bar {
@@ -1418,7 +1447,7 @@ code {
     display: flex;
     gap: 12px;
     padding: 16px;
-    background: rgba(22,27,34,0.8);
+    background: color-mix(in srgb, var(--surface-sunken) 80%, transparent);
     border: 1px solid var(--border);
     border-radius: 10px;
     transition: border-color 0.3s;
@@ -1451,19 +1480,19 @@ code {
 .landing-cta {
     display: inline-block;
     padding: 14px 36px;
-    background: linear-gradient(135deg, var(--accent), #2dd4bf);
+    background: linear-gradient(135deg, var(--accent), var(--hue-cyan-vivid));
     color: var(--surface-page);
     font-weight: 700;
     font-size: 1rem;
     border-radius: 10px;
     text-decoration: none;
     transition: all 0.3s;
-    box-shadow: 0 4px 20px rgba(57,197,207,0.3);
+    box-shadow: 0 4px 20px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .landing-cta:hover {
     transform: translateY(-2px);
-    box-shadow: 0 8px 30px rgba(57,197,207,0.5);
+    box-shadow: 0 8px 30px color-mix(in srgb, var(--accent) 50%, transparent);
     color: var(--surface-page);
 }
 
@@ -1475,7 +1504,7 @@ code {
 .landing-card:hover {
     transform: translateY(-4px);
     border-color: var(--accent);
-    box-shadow: 0 12px 32px rgba(0,0,0,0.4);
+    box-shadow: 0 12px 32px color-mix(in srgb, var(--shadow) 40%, transparent);
 }
 
 @media (max-width: 768px) {
@@ -1509,20 +1538,20 @@ code {
 }
 
 .journey-step.passed {
-    color: #7ee787;
-    border-color: rgba(126, 231, 135, .35);
-    background: rgba(126, 231, 135, .08);
+    color: var(--hue-green);
+    border-color: color-mix(in srgb, var(--hue-green) 35%, transparent);
+    background: color-mix(in srgb, var(--hue-green) 8%, transparent);
 }
 
 .journey-step.failed {
-    color: #ff7b72;
-    border-color: rgba(255, 123, 114, .45);
-    background: rgba(255, 123, 114, .12);
+    color: var(--hue-red);
+    border-color: color-mix(in srgb, var(--hue-red) 45%, transparent);
+    background: color-mix(in srgb, var(--hue-red) 12%, transparent);
     font-weight: bold;
 }
 
 .journey-step.skipped {
     color: var(--text-muted);
-    border-color: rgba(139, 148, 158, .3);
+    border-color: color-mix(in srgb, var(--text-muted) 30%, transparent);
     background: transparent;
 }
