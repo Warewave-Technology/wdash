@@ -103,7 +103,9 @@ The lab's failing journey has a password in it, and so would a real one.
 
 ## Phase 4 — candidates
 
-Nothing is committed. The strongest three, in the order they would help:
+Nothing is committed.
+
+### Capability
 
 * **Journeys from more than one place.** A journey already runs on every agent
   assigned to it, but the page shows one status. "Slow from Frankfurt, fine
@@ -112,8 +114,31 @@ Nothing is committed. The strongest three, in the order they would help:
   Opsgenie and Alertmanager, which is most of it. Email is the obvious gap and
   brings an SMTP configuration screen with it.
 * **Per-step history.** "Which step got slower this week" is answerable from
-  what is already stored, and would need a chart per step rather than per
-  journey.
+  what is already stored — for WDash's own journeys and now for Elastic's too
+  — and would need a chart per step rather than per journey.
+
+### The screen itself
+
+Grounded in what is there rather than in a redesign. Each of these is a thing
+somebody can point at today.
+
+* **There is one palette, and it is dark.** `static/css/wdash.css` defines it
+  under a bare `:root`: no `prefers-color-scheme`, no toggle, and variables
+  named `--dark-*` for the only theme there is. Anyone on a light desktop, a
+  projector, or a printed page gets the dark one. The work is tokenising the
+  palette first, and the honest cost is `test_contrast.py`, which would have
+  to hold both themes rather than one — which is the reason to do it properly
+  or not at all.
+* **A failed journey does not name its step until you click.** The run row
+  prints the raw error and a "3 steps" button; "sign in" is one collapse away.
+  `failed_step` already exists on the model and on both journey kinds, so the
+  row could say which step broke without asking for anything new.
+* **Elastic's journey screenshots are not shown.** WDash's own journeys keep
+  the picture of the page as it failed, and the two kinds now share a screen —
+  so a run with no screenshot reads as "none was taken" rather than "this one
+  comes from somewhere else". They are in
+  `synthetics-browser.screenshot-*`, several documents per run, and how they
+  assemble has not been measured.
 
 ## Deliberately absent
 
