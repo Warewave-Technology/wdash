@@ -771,6 +771,19 @@ Stated plainly, because they affect whether this fits your deployment:
 What is planned, and what is missing on purpose, is in
 [ROADMAP.md](ROADMAP.md).
 
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) — how to run the suite, what a change is
+expected to come with, and the two rules that will fail an otherwise fine
+pull request: a dependency has to pass a licence check, and it has to be
+imported by something.
+
+## Reporting a vulnerability
+
+[SECURITY.md](SECURITY.md), not a public issue. It also says which
+weaknesses are documented trades rather than bugs, so a report can be about
+something new.
+
 ## Licence
 
 MIT. See `LICENSE`.

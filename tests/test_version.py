@@ -135,3 +135,45 @@ class TheReleaseIsConsistentTest(unittest.TestCase):
         self.assertNotIn("wdash-elastic-dashboard:latest", manifest,
                          "`latest` is not a version, it is whatever happened "
                          "to be pushed most recently")
+
+
+class TheProjectFilesSayWhatIsTrueTest(unittest.TestCase):
+    """SECURITY.md and CONTRIBUTING.md make checkable claims.
+
+    A security document that overstates the defences is worse than none: it
+    tells a reporter not to bother looking at something that is not there.
+    One draft of SECURITY.md here claimed the Content-Security-Policy carried
+    no `unsafe-inline`, which is true of `script-src` and false of
+    `style-src` — where it is deliberate, because a style attribute cannot
+    carry a nonce.
+    """
+
+    def test_the_supported_version_is_this_one(self):
+        line = re.search(r"\| (\d+\.\d+)\.x \| yes \|", _read("SECURITY.md"))
+        self.assertIsNotNone(line, "SECURITY.md names no supported line")
+        major_minor = ".".join(declared().split(".")[:2])
+        self.assertEqual(line.group(1), major_minor)
+
+    def test_the_csp_claim_matches_the_policy(self):
+        """Both halves: scripts carry a nonce and no `unsafe-inline`, styles
+        allow it and the document says so."""
+        policy = _read("src", "wdash", "security.py")
+        script = re.search(r'"script-src[^\n]*', policy).group(0)
+        style = re.search(r'"style-src[^\n]*', policy).group(0)
+        self.assertNotIn("unsafe-inline", script)
+        self.assertIn("unsafe-inline", style)
+
+        document = _read("SECURITY.md")
+        self.assertIn("`style-src` DOES allow `'unsafe-inline'`", document)
+
+    def test_the_contributing_guide_points_at_tests_that_exist(self):
+        """A table of guards is a promise that each one is there."""
+        import os
+        guide = _read("CONTRIBUTING.md")
+        for name in re.findall(r"`(test_\w+\.py)`", guide):
+            self.assertTrue(
+                os.path.exists(os.path.join(ROOT, "tests", name)),
+                f"CONTRIBUTING.md names {name}, which does not exist")
+
+    def test_the_security_document_is_reachable_from_the_guide(self):
+        self.assertIn("SECURITY.md", _read("CONTRIBUTING.md"))
