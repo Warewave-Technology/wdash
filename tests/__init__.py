@@ -37,14 +37,7 @@ NEUTRALISED = (
                                 # a list of index names, inert without a
                                 # cluster to look them up in.
     "DASHBOARD_STORAGE",        # database vs file: a different store entirely
-    "DASHBOARD_STORAGE_FILE",   # writes into somebody's real data directory
-    # DATABASE_URL has the same flaw as ELASTICSEARCH_URL and is NOT fixed
-    # here: its default is `sqlite:///data/wdash.db`, the developer's own
-    # database. Forcing it at a path that does not exist breaks 414 tests,
-    # because a great many of them reach Config before they build their own
-    # app. That is a real hazard and a separate piece of work; it is written
-    # down rather than left to be rediscovered.
-    "DATABASE_URL",
+    "DASHBOARD_STORAGE_FILE",   # see PROTECTED_BY_THE_APP
 )
 
 #: Forced to a value, because removing them lands on a default that points at
@@ -54,7 +47,73 @@ FORCED = {
     # app, where the dependency is visible and does not vary by what happens
     # to be listening on 9200.
     "ELASTICSEARCH_URL": "",
+
+    # No developer database. The default is `sqlite:///data/wdash.db` — local
+    # accounts, their password hashes, and every source credential the
+    # encryption key protects.
+    #
+    # `create_app` used to swap that for `:memory:` itself whenever TESTING
+    # was set. It worked, and it was in the wrong place twice over: it only
+    # covered apps, so anything reading `Config.DATABASE_URL` directly — the
+    # alert process, the agent, the two CLIs — still landed on the real file;
+    # and it only covered apps whose config REMEMBERED to set TESTING, which
+    # is a thing a new test forgets silently and destructively. Forced here,
+    # the guarantee holds for the whole process and needs nothing remembered.
+    #
+    # In-memory rather than a temporary file, because each connection pool
+    # gets its own database: apps stay isolated from each other for free,
+    # which a single shared path would have undone.
+    "DATABASE_URL": "sqlite:///:memory:",
 }
+
+#: Points at something real, and is NOT handled here — the application itself
+#: refuses it under TESTING. Each entry names the test that proves it, so that
+#: deleting the protection fails a test rather than quietly widening this list.
+#:
+#: This is the only honest alternative to forcing a value, and it is better
+#: where isolation has to be per-app rather than per-run: the dashboard file
+#: store gets a fresh temporary directory per app, which one forced path would
+#: have collapsed back into a single file every app shares.
+PROTECTED_BY_THE_APP = {
+    "DASHBOARD_STORAGE_FILE":
+        "tests.test_dashboard_persistence.IsolationTest",
+}
+
+#: Points at something real and is reached by nothing, checked rather than
+#: assumed. Listed so the next person does not have to re-derive it.
+INERT = {
+    "OIDC_REDIRECT_URI": "echoed into a redirect; nothing connects to it",
+    "RBAC_CONFIG_FILE": "config/rbac.yaml is tracked, so it is the same file "
+                        "on every machine — not developer state",
+    "REDIS_URL": "no code reads it. README records the same thing: "
+                 "reserved, not used yet",
+}
+
+def points_at_something_real(value):
+    """Would a test reaching this value talk to, or write into, something?
+
+    The judgement the guard in `test_no_elasticsearch` is made of, named so it
+    can be tested on its own. The version before it was a regex over the text
+    of `config.py`, and it was wrong in two ways that each hid a live value
+    for months:
+
+      * it needed a literal default on the line, so
+        `os.environ.get(...) or CONSTANT` was invisible;
+      * it treated a path as real only if it began with `/`, and
+        `data/dashboards.json` — somebody's actual dashboards — does not.
+
+    Relative is not the same as harmless. A relative path is resolved against
+    the working directory, and the suite's working directory is the
+    repository.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    if value.startswith("sqlite:"):
+        # Both an address and a path, and it is the path that matters:
+        # `://` alone would call `sqlite:///:memory:` real.
+        return os.path.exists(value.split("///", 1)[-1])
+    return "://" in value or os.path.exists(value)
+
 
 for _variable in NEUTRALISED:
     os.environ.pop(_variable, None)

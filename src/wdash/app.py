@@ -13,8 +13,7 @@ from flask_login import LoginManager, login_required, current_user
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from wdash.config import (
-    Config, DEFAULT_DASHBOARD_FILE, DEFAULT_DATABASE_URL,
-    DEFAULT_TRACE_PATTERNS)
+    Config, DEFAULT_DASHBOARD_FILE, DEFAULT_TRACE_PATTERNS)
 from wdash.auth import auth_bp, load_user_from_session
 from wdash.auth.setup import register_setup_gate, setup_bp
 from wdash.logs import ElasticsearchClient
@@ -86,19 +85,18 @@ def create_app(config_class=Config):
     # WDash's own state, separate from every data source. Always present: roles
     # and local accounts live here regardless of which backends are configured,
     # and a Loki-only deployment has no Elasticsearch to fall back on.
-    # A test run must not write into the repository's data directory: a
-    # database that survives between runs makes tests order-dependent and
-    # eventually makes one of them fail for reasons nobody can reproduce.
     #
-    # Compared against the literal default, not against Config.DATABASE_URL —
-    # that attribute already reflects DATABASE_URL from the environment, so
-    # comparing to it discarded an explicitly configured database as well.
-    database_url = app.config.get('DATABASE_URL')
-    if app.config.get('TESTING') and database_url == DEFAULT_DATABASE_URL:
-        database_url = 'sqlite:///:memory:'
-
+    # Whatever the configuration says, with no TESTING branch. There was one:
+    # under TESTING the default URL was swapped for `:memory:`, so a test run
+    # could not write into the repository's data directory. It held for apps
+    # and only for apps — the alert process, the agent and the two CLIs read
+    # `Config.DATABASE_URL` and got the developer's real database — and it
+    # held only for a config that remembered to set TESTING. That guarantee
+    # belongs to the harness, which can make it for the whole process:
+    # `tests/__init__.py` forces DATABASE_URL, and a test there fails if it
+    # ever stops.
     store = Store.open(
-        database_url,
+        app.config.get('DATABASE_URL'),
         rbac_file=app.config.get('RBAC_CONFIG_FILE'),
         secret_box=SecretBox(app.config.get('ENCRYPTION_KEY')))
     app.store = store

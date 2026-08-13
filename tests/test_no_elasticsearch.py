@@ -274,35 +274,119 @@ class EnvironmentIsolationTest(unittest.TestCase):
             "the suite computes an Elasticsearch URL, so any test that does "
             "not declare its own source may be talking to a real cluster")
 
-    def test_every_name_with_a_live_default_is_forced_rather_than_removed(self):
-        """A default that is an address or a path points at something real.
-        Removing the variable hands the test whatever is there."""
-        import inspect
-        import re
+    def test_the_developers_own_database_is_not_what_a_test_gets(self):
+        """`DATABASE_URL` was the second instance of the same mistake.
 
-        from tests import FORCED, NEUTRALISED
-        from wdash import config as config_module
+        It sat on the removal list with a comment saying it had the flaw and
+        was not fixed. Removed faithfully, `Config` fell back to
+        `sqlite:///data/wdash.db` — the developer's own store, holding local
+        accounts, password hashes and every credential the encryption key
+        protects.
 
-        source = inspect.getsource(config_module)
-        live = []
-        for line in source.splitlines():
-            found = re.search(r"os\.environ\.get\(\s*['\"](\w+)['\"]\s*,\s*"
-                              r"['\"]([^'\"]+)['\"]", line)
-            if not found:
-                continue
-            name, default = found.groups()
-            if name not in NEUTRALISED and name not in FORCED:
-                continue
-            # An address or a filesystem path. A default like `file` or a
-            # list of index names is inert on its own.
-            if "://" in default or default.startswith("/"):
-                live.append((name, default))
+        `create_app` did swap it for `:memory:` under TESTING, which is why
+        nothing had corrupted it. That covered apps built by a config that
+        remembered TESTING, and nothing else: the alert process, the agent and
+        both CLIs read this value directly.
+        """
+        from wdash.config import Config, DEFAULT_DATABASE_URL
 
-        wrong = [name for name, _ in live if name not in FORCED]
+        class Fresh(Config):
+            pass
+
+        self.assertNotEqual(Fresh.DATABASE_URL, DEFAULT_DATABASE_URL)
+        self.assertEqual(Fresh.DATABASE_URL, "sqlite:///:memory:")
+
+    def test_no_configured_value_a_test_can_reach_points_at_something_real(self):
+        """The guard that missed the second instance, rewritten.
+
+        The old one read `config.py` as TEXT, looking for
+        `os.environ.get('X', 'default')` where the default contained `://` or
+        began with `/`. It found `ELASTICSEARCH_URL` and could not have found
+        either of the two that were left:
+
+          * `DATABASE_URL` is written `os.environ.get(...) or CONSTANT`, so
+            there was no literal on the line to match;
+          * `DASHBOARD_STORAGE_FILE` resolves to `data/dashboards.json` — a
+            RELATIVE path, so `startswith('/')` said inert about a file
+            holding somebody's real dashboards.
+
+        So this one asks the question of the VALUE instead: with the suite's
+        environment in place, does any attribute of `Config` name an address
+        or resolve to a file that exists? Every answer has to be accounted
+        for — forced, refused by the application, or checked and inert.
+        """
+        from tests import (FORCED, INERT, PROTECTED_BY_THE_APP,
+                           points_at_something_real)
+        from wdash.config import Config
+
+        class Fresh(Config):
+            pass
+
+        accounted = set(FORCED) | set(PROTECTED_BY_THE_APP) | set(INERT)
+        unaccounted = {
+            name: getattr(Fresh, name)
+            for name in dir(Fresh)
+            if not name.startswith("_") and name not in accounted
+            and points_at_something_real(getattr(Fresh, name))}
         self.assertEqual(
-            wrong, [],
-            f"these have a default pointing at something real and are only "
-            f"REMOVED, which lands the suite on it: {live}")
+            unaccounted, {},
+            "these resolve to something real and are on none of the three "
+            "lists in tests/__init__.py, so a test reaching one gets whatever "
+            "is on this machine")
+
+    def test_a_relative_path_counts_as_real(self):
+        """The case the first guard was blind to, on its own.
+
+        It asked whether a default began with `/`. `data/dashboards.json` does
+        not, and it is somebody's dashboards — relative means resolved against
+        the working directory, and the suite's working directory is this
+        repository. Without this the scan above passes on a weakened
+        classifier, because everything real is on a list already.
+        """
+        from tests import points_at_something_real
+
+        self.assertTrue(points_at_something_real("data/dashboards.json"))
+        self.assertTrue(points_at_something_real("config/rbac.yaml"))
+        self.assertFalse(points_at_something_real("data/not-a-file.json"))
+
+    def test_an_address_counts_even_though_nothing_is_listening(self):
+        """`http://localhost:9200` was real on the day somebody started the
+        lab, not on the day it was written. Reachability is not the test."""
+        from tests import points_at_something_real
+
+        self.assertTrue(points_at_something_real("http://localhost:9200"))
+        self.assertTrue(points_at_something_real("redis://localhost:6379/0"))
+        self.assertFalse(points_at_something_real(""))
+        self.assertFalse(points_at_something_real("file"))
+
+    def test_a_sqlite_url_is_judged_on_its_file(self):
+        """It is an address AND a path. Judged as an address, every in-memory
+        database in the suite reads as real and the guard cries wolf until
+        somebody deletes it."""
+        from tests import points_at_something_real
+
+        self.assertTrue(points_at_something_real("sqlite:///data/wdash.db"))
+        self.assertFalse(points_at_something_real("sqlite:///:memory:"))
+        self.assertFalse(points_at_something_real("sqlite:///data/gone.db"))
+
+    def test_what_the_application_refuses_is_covered_by_a_named_test(self):
+        """`PROTECTED_BY_THE_APP` is the one list that can hide something.
+
+        A name on it points at real data and is NOT neutralised — the promise
+        is that the application declines to use it under TESTING. A promise
+        like that is worth exactly as much as the test holding it, so each
+        entry names one and this checks the name resolves.
+        """
+        import importlib
+
+        from tests import PROTECTED_BY_THE_APP
+
+        for name, dotted in PROTECTED_BY_THE_APP.items():
+            module, _, case = dotted.rpartition(".")
+            imported = importlib.import_module(module)
+            self.assertTrue(
+                hasattr(imported, case),
+                f"{name} is protected by {dotted}, which no longer exists")
 
     def test_every_config_value_that_means_off_when_empty_is_listed(self):
         """The two that read with a default rather than `or` are exactly the

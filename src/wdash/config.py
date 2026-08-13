@@ -13,9 +13,9 @@ from dotenv import load_dotenv
 if os.environ.get("WDASH_NO_DOTENV") != "1":
     load_dotenv()
 
-#: Where the metadata store lives when nothing is configured. Named so that
-#: code can tell "the default" from "whatever the environment happens to say",
-#: which are not the same test.
+#: Where the metadata store lives when nothing is configured: local accounts,
+#: their password hashes, and every credential the encryption key protects.
+#: Named because a test has to be able to say "not THAT one" about it.
 DEFAULT_DATABASE_URL = 'sqlite:///data/wdash.db'
 
 #: The packaged dashboard file. Named so the app factory can tell
