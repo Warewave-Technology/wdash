@@ -125,10 +125,17 @@ somebody can point at today.
 * **There is one palette, and it is dark.** `static/css/wdash.css` defines it
   under a bare `:root`: no `prefers-color-scheme`, no toggle, and variables
   named `--dark-*` for the only theme there is. Anyone on a light desktop, a
-  projector, or a printed page gets the dark one. The work is tokenising the
-  palette first, and the honest cost is `test_contrast.py`, which would have
-  to hold both themes rather than one — which is the reason to do it properly
-  or not at all.
+  projector, or a printed page gets the dark one.
+
+  Three of them are rendered on the real screens in
+  [docs/themes](docs/themes/), with the cost measured rather than guessed: the
+  palette is only a third of it. There are 24 fixed-theme Bootstrap classes
+  nailed into six templates and three scripts — `<body class="bg-dark
+  text-light">` overrides every token underneath it — and about a hundred
+  literal colours in the stylesheet against 250 uses of `var()`. So the order
+  is tokenise, then unpin the templates, and only then is a theme a setting.
+  `test_contrast.py` would have to hold every theme rather than the one
+  `:root` it reads today.
 * **A failed journey does not name its step until you click.** The run row
   prints the raw error and a "3 steps" button; "sign in" is one collapse away.
   `failed_step` already exists on the model and on both journey kinds, so the
