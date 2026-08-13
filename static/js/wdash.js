@@ -1141,7 +1141,7 @@ class LogSearch {
                     <span class="log-level ${esc(severity.toUpperCase())}">${esc(severity)}</span>
                     <span class="ms-2 fw-bold">${esc(service)}</span>
                     ${host ? `<span class="ms-2 text-muted">${esc(host)}</span>` : ''}
-                    ${record.trace_id ? `<span class="badge bg-info text-dark ms-2" title="Correlated with a trace"><i class="fas fa-project-diagram"></i></span>` : ''}
+                    ${record.trace_id ? `<span class="badge bg-info ms-2" title="Correlated with a trace"><i class="fas fa-project-diagram"></i></span>` : ''}
                 </div>
                 <span class="timestamp">${esc(WDash.formatTimestamp(record.timestamp))}</span>
             </div>
@@ -1270,7 +1270,7 @@ class LogSearch {
         WDash.recordFields(record).forEach(([key, value]) => {
             rows.push(this._fieldRow(key, value, false));
         });
-        return '<table class="table table-sm table-dark field-table mb-0">' +
+        return '<table class="table table-sm field-table mb-0">' +
             '<thead><tr><th style="width:180px">Field</th><th>Value</th><th style="width:70px">Actions</th></tr></thead>' +
             '<tbody>' + rows.join('') + '</tbody></table>';
     }

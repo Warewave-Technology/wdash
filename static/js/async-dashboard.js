@@ -842,7 +842,7 @@ class AsyncDashboard {
             c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
         container.innerHTML =
-            '<table class="table table-sm table-dark mb-0" style="font-size:.8rem">' +
+            '<table class="table table-sm mb-0" style="font-size:.8rem">' +
             '<thead><tr><th>Service</th><th class="text-end">Spans</th>' +
             '<th class="text-end">Errors</th><th class="text-end">Error rate</th>' +
             '</tr></thead><tbody>' +

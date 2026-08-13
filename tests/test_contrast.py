@@ -204,12 +204,84 @@ class BadgeContrastTest(unittest.TestCase):
         self.assertGreaterEqual(
             ratio, AA_NORMAL, f"{foreground} on {background} is {ratio:.2f}:1")
 
-    def test_the_default_badge_colour_is_still_the_page_background(self):
-        """Not a mistake in itself — it is what makes dark text sit on the
-        bright warning and info fills. This records that the fix above is a
-        deliberate exception rather than a rule nobody looked at."""
+    def test_the_default_badge_colour_is_ink_rather_than_the_background(self):
+        """It WAS the page background, and that was right by coincidence.
+
+        Dark text on a bright warning fill is what it produced, and that is
+        what a badge needs. But it produced it by borrowing a colour that
+        means something else, and the coincidence only holds while the page
+        is dark: a light theme sets the page background to white and the
+        warning badge becomes white lettering on yellow.
+
+        So the ink is its own token, dark in every theme, because the fill it
+        sits on is bright in every theme. The templates used to patch around
+        this by adding Bootstrap's `text-dark` to seven badges — a fixed
+        colour, remembered by hand, on the ones somebody noticed.
+        """
         block = _rule(self.css, ".badge")
-        self.assertEqual(_declaration(block, "color"), "var(--surface-page)")
+        self.assertEqual(_declaration(block, "color"), "var(--text-on-fill)")
+
+    def test_every_badge_fill_a_page_uses_is_legible(self):
+        """Every `badge bg-x` the templates and scripts actually write.
+
+        Discovered rather than listed, so a new one is measured the day it
+        appears instead of the day somebody squints at it. Written as a list,
+        this test would have been passing about the five fills I happened to
+        think of.
+
+        It found a real one: `badge bg-success` is used in three places, and
+        Bootstrap's `#198754` is 4.18:1 under dark ink and 4.16:1 under
+        light. There is no ink that fixes a mid-tone — the fill had to
+        change, and the palette already had hues built to carry dark text.
+        """
+        css = measurable_stylesheet()
+        default_ink = _resolve(_declaration(_rule(css, ".badge"), "color"),
+                               self.variables)
+
+        for fill in sorted(self._fills_in_use()):
+            block = _rule(css, f".badge.bg-{fill}") or _rule(css, f".bg-{fill}")
+            # No rule at all means Bootstrap paints it, and Bootstrap's
+            # mid-tones are the thing this test exists to keep out. Asserted
+            # rather than skipped: an earlier version of this passed over any
+            # fill it could not resolve, so DELETING the rule for
+            # `bg-success` — the very failure that prompted the fix — went
+            # straight through it.
+            self.assertIsNotNone(
+                block,
+                f"badge bg-{fill} is left to Bootstrap, whose primary, "
+                f"success and danger measure about 4.2:1 against any ink")
+
+            ink = _resolve(_declaration(block, "color") or "",
+                           self.variables) or default_ink
+            painted = (_declaration(block, "background")
+                       or _declaration(block, "background-color") or "")
+            stops = _gradient_stops(painted) or \
+                [_resolve(painted, self.variables)]
+            self.assertTrue(stops and stops[0],
+                            f"badge bg-{fill} has no colour to measure")
+            for stop in stops:
+                ratio = contrast(ink, stop)
+                self.assertGreaterEqual(
+                    ratio, AA_NORMAL,
+                    f"badge bg-{fill}: {ink} on {stop} is {ratio:.2f}:1")
+
+    @staticmethod
+    def _fills_in_use():
+        found = set()
+        for folder, suffix in ((os.path.join(ROOT, "templates"), ".html"),
+                               (os.path.join(ROOT, "static", "js"), ".js")):
+            for name in os.listdir(folder):
+                if not name.endswith(suffix) or name.endswith(".min.js"):
+                    continue
+                with open(os.path.join(folder, name)) as handle:
+                    found.update(re.findall(r"badge bg-([a-z]+)",
+                                            handle.read()))
+        return found
+
+    def test_the_fills_were_actually_found(self):
+        """A discovery that discovers nothing passes every assertion above
+        it."""
+        self.assertGreaterEqual(len(self._fills_in_use()), 5)
 
 
 class TemplateUsesTheStyleTest(unittest.TestCase):
@@ -631,3 +703,78 @@ class ThePaletteIsTheOnlyPlaceTest(unittest.TestCase):
         for colour in NOT_THEME_COLOURS:
             self.assertIn(colour, css.lower(),
                           f"{colour} is exempt and no longer used")
+
+
+#: Bootstrap utilities that name a theme instead of a role. Each is a fixed
+#: colour carrying `!important`, so it wins against every token underneath it
+#: — which is the whole problem: a palette can be swapped perfectly and the
+#: page still comes out in the theme its classes were written for.
+FIXED_THEME_CLASSES = {
+    "bg-dark": "`.bg-dark` on <body> painted the page a fixed near-black. "
+               "The first light theme rendered white cards floating on a "
+               "dark page, and the palette was not the reason.",
+    "text-light": "the other half of the same line.",
+    "navbar-dark": "the bar looks like the bar; it is not a variant somebody "
+                   "selects. The rule moved to `.navbar`.",
+    "table-dark": "worse than the others, because it pins the TEXT colour "
+                  "too: on a light background the sources table rendered "
+                  "white on white. The tokens moved to `.table`, so every "
+                  "table follows the theme.",
+    "text-dark": "seven badges patched by hand because the default ink was "
+                 "the page background. The ink is `--text-on-fill` now.",
+    "bg-light": "the same mistake with the colours swapped.",
+    "text-white": "a fixed colour where `--text-primary` is meant.",
+    "border-dark": "a fixed line colour where `--border` is meant.",
+}
+
+
+class NoTemplateNamesAThemeTest(unittest.TestCase):
+    """The half of a theme that does not live in the stylesheet.
+
+    Measured before it was fixed: 24 of these across six templates and three
+    scripts. They are why the roadmap said tokenising was only a third of the
+    work — with them in place, a light theme is not a palette away, it is a
+    palette plus twenty-four edits somebody has to find.
+    """
+
+    #: `badge bg-dark` is a Bootstrap class the stylesheet deliberately
+    #: restyles — `.badge.bg-dark` exists so that a dark-filled badge is
+    #: legible wherever one turns up. Its own test measures it.
+    ALLOWED_LINES = ("badge bg-dark",)
+
+    def _scan(self, folder, suffixes):
+        offenders = []
+        for name in sorted(os.listdir(folder)):
+            if not name.endswith(suffixes) or name.endswith(".min.js"):
+                continue
+            with open(os.path.join(folder, name)) as handle:
+                text = _blank_comments(handle.read())
+            for number, line in enumerate(text.splitlines(), start=1):
+                if any(allowed in line for allowed in self.ALLOWED_LINES):
+                    continue
+                for fixed in FIXED_THEME_CLASSES:
+                    if re.search(rf"(?<![\w-]){fixed}(?![\w-])", line):
+                        offenders.append(f"{name}:{number}: {fixed}")
+        return offenders
+
+    def test_no_template_names_a_theme(self):
+        offenders = self._scan(os.path.join(ROOT, "templates"), (".html",))
+        self.assertEqual(offenders, [], "\n".join(
+            ["a theme cannot reach these:"] + offenders
+            + [f"  {name}: {why}" for name, why in FIXED_THEME_CLASSES.items()
+               if any(name in o for o in offenders)]))
+
+    def test_no_script_names_a_theme(self):
+        offenders = self._scan(os.path.join(ROOT, "static", "js"), (".js",))
+        self.assertEqual(offenders, [], "\n".join(
+            ["a theme cannot reach these:"] + offenders))
+
+    def test_the_stylesheet_does_not_hang_a_rule_on_one(self):
+        """A rule keyed on `.table-dark` is dead the moment the templates stop
+        asking for it — and dead in the quietest way, because the table still
+        renders, in Bootstrap's colours."""
+        css = stylesheet()
+        for fixed in ("navbar-dark", "table-dark", "bg-light", "text-light"):
+            self.assertIsNone(
+                _rule(css, f".{fixed}"),
+                f".{fixed} still carries rules, but nothing asks for it")

@@ -33,7 +33,7 @@
       data-bs-target="#tab-forwarding" type="button">
       <i class="fas fa-paper-plane"></i> Forwarding
       {% if forwarding_pending %}
-      <span class="badge bg-warning text-dark ms-1">{{ forwarding_pending }}</span>
+      <span class="badge bg-warning ms-1">{{ forwarding_pending }}</span>
       {% endif %}
     </button></li>
 </ul>
@@ -106,7 +106,7 @@
   {% else %}
   <div class="card">
     <div class="table-responsive">
-      <table class="table table-sm table-dark mb-0" style="font-size:.82rem">
+      <table class="table table-sm mb-0" style="font-size:.82rem">
         <thead>
           <tr>
             <th style="width:11rem">When</th>
@@ -129,7 +129,7 @@
             </td>
             <td>
               {% if 'refused' in entry.action or 'blocked' in entry.action %}
-              <span class="badge bg-warning text-dark">{{ entry.action }}</span>
+              <span class="badge bg-warning">{{ entry.action }}</span>
               {% elif 'deleted' in entry.action %}
               <span class="badge bg-danger">{{ entry.action }}</span>
               {% else %}
@@ -200,7 +200,7 @@
   {% else %}
   <div class="card">
     <div class="table-responsive">
-      <table class="table table-sm table-dark mb-0" style="font-size:.82rem">
+      <table class="table table-sm mb-0" style="font-size:.82rem">
         <thead>
           <tr>
             <th style="width:11rem">When</th>
@@ -223,7 +223,7 @@
               {% elif attempt.outcome == 'locked' %}
               <span class="badge bg-danger">locked</span>
               {% else %}
-              <span class="badge bg-warning text-dark">failure</span>
+              <span class="badge bg-warning">failure</span>
               {% endif %}
             </td>
           </tr>

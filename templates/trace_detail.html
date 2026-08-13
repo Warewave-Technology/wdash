@@ -139,7 +139,7 @@
             return;
         }
         el('breakdown').innerHTML =
-            '<table class="table table-sm table-dark mb-0"><tbody>' +
+            '<table class="table table-sm mb-0"><tbody>' +
             rows.map(r =>
                 '<tr>' +
                     '<td style="width:42%">' +
@@ -224,7 +224,7 @@
         }).join('');
 
         el('waterfall').innerHTML =
-            '<div class="table-responsive"><table class="table table-sm table-dark table-hover mb-0">' +
+            '<div class="table-responsive"><table class="table table-sm table-hover mb-0">' +
             '<thead><tr class="text-muted" style="font-size:0.68rem">' +
                 '<th style="width:28%">Service</th><th style="width:13%">Span ID</th>' +
                 '<th>Operation</th><th style="width:32%">' + axis + '</th>' +
@@ -265,7 +265,7 @@
                     serviceColour(span.service) + ';margin-right:6px"></span>' +
                 esc(span.service) + '</strong></div>' +
             '<div style="max-height:320px;overflow-y:auto">' +
-            '<table class="table table-sm table-dark mb-0">' + rows.join('') + '</table></div>';
+            '<table class="table table-sm mb-0">' + rows.join('') + '</table></div>';
     }
 
     async function loadLogs() {
@@ -282,7 +282,7 @@
                 return;
             }
             el('logCount').textContent = data.records.length + ' of ' + data.total;
-            box.innerHTML = '<table class="table table-sm table-dark mb-0"><tbody>' +
+            box.innerHTML = '<table class="table table-sm mb-0"><tbody>' +
                 data.records.map(r =>
                     '<tr>' +
                         '<td class="text-nowrap" style="width:16%"><small class="text-muted">' +

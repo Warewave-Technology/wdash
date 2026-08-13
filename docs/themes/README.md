@@ -19,26 +19,29 @@ Nothing in `src/`, `static/` or `templates/` was changed to produce them.
 `render.py` beside this file rewrites the stylesheet on its way to the browser
 and puts the classes back the way a real theme would have to.
 
-## What it costs, measured
+## What it cost, measured — and since done
 
-A theme is not a palette. Two thirds of the work is that the current one is
-not only in the stylesheet:
+These images were made before any of it, by rewriting the stylesheet on its
+way to the browser. Rendering them is what measured the work, and the palette
+turned out to be the smaller half:
 
-* **24 fixed-theme Bootstrap classes**, in six templates and three scripts —
-  counting `static/js/wdash.js` once rather than also counting the minified
-  copy built from it. `<body class="bg-dark text-light">` is the important
-  one: `.bg-dark` is a FIXED colour with `!important`, so it overrides every
-  token underneath it — the first attempt at the light theme produced white
-  cards floating on a dark page, and the palette was not the reason.
-  `table table-dark` appears thirteen times and is worse: it pins the text
-  colour too, so on a light background the source table rendered white on
-  white.
-* **About a hundred literal colours in `wdash.css`** — 33 hex and 68
-  `rgb()`/`rgba()` outside `:root`, against 250 uses of `var()`. Status chips,
-  log levels, row states and every gradient are written out rather than named.
+* **24 fixed-theme Bootstrap classes**, in six templates and three scripts.
+  `<body class="bg-dark text-light">` was the important one: `.bg-dark` is a
+  FIXED colour with `!important`, so it overrode every token underneath it —
+  the first attempt at the light theme produced white cards floating on a
+  dark page, and the palette was not the reason. `table table-dark` appeared
+  thirteen times and was worse: it pins the text colour too, so on a light
+  background the sources table rendered white on white.
+* **About a hundred literal colours** — 33 hex and 68 `rgb()`/`rgba()`
+  outside `:root` in the stylesheet, against 250 uses of `var()`, plus the
+  chart colours in the scripts, which no test about colour had ever read.
 
-So the order of work is: tokenise, then remove the fixed classes, then a
-theme is a setting rather than a rewrite.
+Both are done: every colour now comes from the palette, and no template or
+script names a theme. `tests/test_contrast.py` fails on either coming back.
+One thing the removal exposed is worth knowing — `.bg-dark` on `<body>` had
+been painting the page Bootstrap's `#212529` all along, while
+`--surface-page` said `#0d1117`. The token and the page disagreed, and the
+token lost.
 
 ## Contrast, measured
 

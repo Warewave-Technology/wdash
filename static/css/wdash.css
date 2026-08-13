@@ -43,6 +43,12 @@
        "a 4% wash" wherever it appears. */
     --shadow: #000000;
     --wash: #ffffff;
+    /* Ink for text sitting ON a bright fill — a warning badge, an info chip.
+       It was `--surface-page`, which is right by coincidence on a dark theme
+       and wrong on a light one: white lettering on a yellow badge. What it
+       has to be is dark in EVERY theme, because the fill it sits on is
+       bright in every theme. */
+    --text-on-fill: #0d1117;
     /* The faintest line on a chart — barely there on purpose, and the one
        value a script cannot compute for itself because `color-mix` inside a
        Chart.js option string is not CSS. */
@@ -107,9 +113,9 @@ body {
 .navbar {
     position: relative;
     z-index: 1030;
-}
-
-.navbar-dark {
+    /* Was `.navbar-dark`, which is a class the template had to remember to
+       ask for — and a class that names a theme. The bar looks like this
+       because it is the bar, not because somebody selected a variant. */
     background: linear-gradient(135deg, var(--surface-navbar) 0%, var(--surface-sunken) 100%) !important;
     border-bottom: 1px solid var(--border);
     backdrop-filter: blur(10px);
@@ -465,7 +471,7 @@ body {
 }
 
 /* Tables */
-.table-dark {
+.table {
     --bs-table-bg: var(--surface-card);
     --bs-table-striped-bg: var(--surface-sunken);
     --bs-table-hover-bg: var(--surface-hover);
@@ -644,10 +650,32 @@ body {
 
 /* Badges */
 .badge {
-    color: var(--surface-page);
+    color: var(--text-on-fill);
     font-family: 'SF Mono', monospace;
     font-weight: 600;
 }
+
+/*
+ * Badge fills, from the palette rather than from Bootstrap.
+ *
+ * Two reasons, and the second was found by measuring rather than by looking:
+ *
+ *   * one vocabulary. A `bg-danger` badge was `#dc3545` while the ERROR it
+ *     describes is `--hue-red` two inches away. The product had two reds and
+ *     taught the reader that they meant different things.
+ *   * Bootstrap's mid-tones cannot carry small text either way. `#0d6efd`,
+ *     `#198754` and `#dc3545` all measure about 4.2:1 against dark ink AND
+ *     about 4.2:1 against light — there is no ink that fixes them, which is
+ *     why the fill had to change. `badge bg-success` is used in three places
+ *     and has been below AA in all of them.
+ *
+ * The hues are built for dark ink, which is what `.badge` now sets.
+ */
+.badge.bg-danger { background: var(--hue-red) !important; }
+.badge.bg-success { background: var(--hue-green) !important; }
+.badge.bg-warning { background: var(--hue-yellow) !important; }
+.badge.bg-info { background: var(--hue-blue) !important; }
+.badge.bg-primary { background: var(--accent) !important; }
 
 .bg-secondary {
     background: linear-gradient(135deg, var(--surface-raised) 0%, var(--surface-hover) 100%) !important;

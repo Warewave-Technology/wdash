@@ -534,7 +534,7 @@ document.querySelectorAll('.pick-target').forEach(button => {
                       </td></tr>`;
                 }).join('');
                 return `<div class="mb-3"><strong>${escapeHtml(entry.source)}</strong>
-                        <table class="table table-sm table-dark mb-0">${rows}</table></div>`;
+                        <table class="table table-sm mb-0">${rows}</table></div>`;
             }).join('') || '<div class="text-muted">No sources configured.</div>';
         }
 

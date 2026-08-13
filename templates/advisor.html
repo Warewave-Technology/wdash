@@ -93,8 +93,8 @@
                     </div>
                     <div class="col-md-6 text-md-end mt-3 mt-md-0">
                         <span class="badge bg-danger">{{ report.counts.critical }} critical</span>
-                        <span class="badge bg-warning text-dark">{{ report.counts.warning }} warning</span>
-                        <span class="badge bg-info text-dark">{{ report.counts.info }} info</span>
+                        <span class="badge bg-warning">{{ report.counts.warning }} warning</span>
+                        <span class="badge bg-info">{{ report.counts.info }} info</span>
                         <span class="badge bg-success">{{ report.passed|length }} passed</span>
                         {% if report.skipped %}
                         <span class="badge bg-secondary">{{ report.skipped|length }} skipped</span>
@@ -125,7 +125,7 @@
     <div class="card mb-3 border-{{ meta[0] }}">
         <div class="card-header d-flex justify-content-between align-items-center py-2">
             <div>
-                <span class="badge bg-{{ meta[0] }}{% if meta[0] != 'danger' %} text-dark{% endif %}">
+                <span class="badge bg-{{ meta[0] }}{% if meta[0] != 'danger' %}{% endif %}">
                     <i class="fas fa-{{ meta[1] }}"></i> {{ meta[2] }}
                 </span>
                 <code class="ms-2 text-muted">{{ finding.rule_id }}</code>

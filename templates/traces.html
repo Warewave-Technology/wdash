@@ -135,7 +135,7 @@
             el('spanTotal').textContent = data.total_spans.toLocaleString() + ' spans';
             const max = Math.max(...data.services.map(s => s.span_count));
 
-            box.innerHTML = '<table class="table table-sm table-dark table-hover mb-0">' +
+            box.innerHTML = '<table class="table table-sm table-hover mb-0">' +
                 '<tbody>' + data.services.map(s => {
                     const pct = (s.span_count / max * 100).toFixed(0);
                     const err = s.error_rate > 0
@@ -199,7 +199,7 @@
                 return;
             }
 
-            box.innerHTML = '<table class="table table-sm table-dark table-hover mb-0">' +
+            box.innerHTML = '<table class="table table-sm table-hover mb-0">' +
                 '<tbody>' + data.traces.map(t =>
                     '<tr class="trace-row" style="cursor:pointer" data-trace="' + esc(t.trace_id) + '"' +
                         (t.source ? ' data-source="' + esc(t.source) + '"' : '') + '>' +
