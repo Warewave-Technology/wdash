@@ -610,6 +610,22 @@ The split that matters: **`hub/` reads observability data, `store/` holds
 WDash's own state.** Coupling them is what made dashboards-in-Elasticsearch look
 correct right up until Elasticsearch became one source among several.
 
+## Roles and directory groups
+
+A fresh installation has three roles — `admin`, `developer`, `viewer` — mapped
+from the directory or OIDC groups `wdash-admins`, `wdash-developers` and
+`wdash-viewers`.
+
+The prefix is deliberate. A directory almost certainly has a group called
+`admins` already, it usually means domain administrators, and a default that
+mapped it to `system:admin` would hand WDash's highest privilege to everyone
+in it.
+
+The seeding runs **once**, on an empty installation, importing
+`config/rbac.yaml` if it is there. After that the file is ignored and roles
+are edited in the UI — an edit made there is never overwritten on the next
+restart.
+
 ## Versioning
 
 One number, in `src/wdash/__init__.py`. `setup.py` reads it, `package.json`

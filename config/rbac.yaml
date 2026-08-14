@@ -68,13 +68,21 @@ roles:
       - "api-gateway"
 
 user_roles:
-  # Maps users to roles from OIDC claims.
+  # Maps a named person to a role, ahead of any group they are in. For the
+  # cases a group cannot express: one contractor, one stand-in during an
+  # outage, one person whose directory entry is wrong today.
+  #
   # Format: email or username -> role
-  yigit.basalma: admin
-  dev@company.com: developer
-
-  # Local users
-  admin: admin
+  #
+  # Deliberately empty. This file ships with the repository and is imported
+  # into a fresh installation, so anything left here is a mapping every new
+  # deployment inherits from somebody else — it used to carry a maintainer's
+  # own username, which granted admin to anyone who happened to sign in with
+  # that name.
+  #
+  #   alice@example.com: admin
+  #   contractor@example.com: viewer
+  {}
 
 # Applied to authenticated users with no explicit mapping
 default_role: viewer
@@ -86,7 +94,11 @@ claim_mappings:
   groups_claim: groups
 
 # Group to role mapping
+#
+# Namespaced on purpose. A directory almost certainly already has a group
+# called `admins`, it usually means domain administrators, and mapping it
+# here would hand `system:admin` to everybody in it.
 group_roles:
-  admins: admin
-  developers: developer
-  viewers: viewer
+  wdash-admins: admin
+  wdash-developers: developer
+  wdash-viewers: viewer

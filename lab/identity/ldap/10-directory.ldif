@@ -60,17 +60,17 @@ sn: Davies
 mail: dave@lab.local
 userPassword: hunter2
 
-dn: cn=admins,ou=groups,dc=lab,dc=local
+dn: cn=wdash-admins,ou=groups,dc=lab,dc=local
 objectClass: groupOfUniqueNames
-cn: admins
+cn: wdash-admins
 uniqueMember: uid=alice,ou=people,dc=lab,dc=local
 
-dn: cn=developers,ou=groups,dc=lab,dc=local
+dn: cn=wdash-developers,ou=groups,dc=lab,dc=local
 objectClass: groupOfUniqueNames
-cn: developers
+cn: wdash-developers
 uniqueMember: uid=bob,ou=people,dc=lab,dc=local
 
-dn: cn=viewers,ou=groups,dc=lab,dc=local
+dn: cn=wdash-viewers,ou=groups,dc=lab,dc=local
 objectClass: groupOfUniqueNames
-cn: viewers
+cn: wdash-viewers
 uniqueMember: uid=carol,ou=people,dc=lab,dc=local

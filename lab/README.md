@@ -179,9 +179,9 @@ Four people, all with the password `hunter2`:
 
 | Who | Group | Role they land on |
 |---|---|---|
-| `alice` | `admins` | admin |
-| `bob` | `developers` | developer |
-| `carol` | `viewers` | viewer |
+| `alice` | `wdash-admins` | admin |
+| `bob` | `wdash-developers` | developer |
+| `carol` | `wdash-viewers` | viewer |
 | `dave` | none | the default role |
 
 Dave is there on purpose. What a directory returns for somebody who
@@ -228,13 +228,16 @@ Worth reading before adding to it, because each cost an hour:
   configuration page. Fixed in `auth.py`; `OIDC_SCOPES` overrides it for a
   provider that refuses the scope.
 
-### A naming inconsistency you will meet
+### The group names are namespaced on purpose
 
-`config/rbac.yaml` maps the groups `admins`, `developers` and `viewers`;
-`src/wdash/store/roles.py` maps `wdash-admins`, `wdash-editors` and
-`wdash-viewers` for the same three roles, and is what a deployment gets when
-there is no rbac.yaml to seed from. The lab uses the first set, because that
-is what a fresh install of this repository produces.
+`wdash-admins` rather than `admins`, in the lab and in the product's
+defaults. A real directory almost certainly has a group called `admins`, it
+usually means domain administrators, and a default that maps it to
+`system:admin` hands WDash's highest privilege to everyone in it.
+
+The two sets of defaults — `config/rbac.yaml` and `store/roles.py` — used to
+disagree about this, and about whether the middle role was called `developer`
+or `editor`. `tests/test_store.py` fails if they drift again.
 
 ## Port conflicts
 

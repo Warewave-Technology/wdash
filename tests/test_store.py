@@ -434,3 +434,59 @@ class MigrationCliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TheTwoSetsOfDefaultsAgreeTest(unittest.TestCase):
+    """There are two answers to "what roles does a fresh install have".
+
+    `DEFAULT_ROLES` in `store/roles.py`, and `config/rbac.yaml`, which ships
+    with the repository and is imported when it is there. Seeding runs ONCE,
+    on an empty table, so whichever of the two a deployment landed on is the
+    one it keeps — and they had drifted apart:
+
+        roles.py     admin / editor    / viewer   groups wdash-*
+        rbac.yaml    admin / developer / viewer   groups admins, developers,
+                                                         viewers
+
+    So a directory group named `wdash-admins` granted nothing on an install
+    that had the file, and `admins` granted nothing on one that did not.
+    Neither failed; both signed people in and gave them the default role.
+    """
+
+    def setUp(self):
+        import yaml
+        from wdash.store.roles import DEFAULT_ROLES
+        self.code = DEFAULT_ROLES
+        with open(os.path.join(os.path.dirname(__file__), "..",
+                               "config", "rbac.yaml")) as handle:
+            self.file = yaml.safe_load(handle)
+
+    def test_the_role_names_match(self):
+        self.assertEqual(sorted(self.code), sorted(self.file["roles"]))
+
+    def test_the_group_names_match(self):
+        """The file maps group -> role; the code stores groups per role, so
+        one of them is inverted before they can be compared at all."""
+        from_file = {}
+        for group, role in self.file["group_roles"].items():
+            from_file.setdefault(role, []).append(group)
+        from_code = {name: list(definition["groups"])
+                     for name, definition in self.code.items()
+                     if definition.get("groups")}
+        self.assertEqual({k: sorted(v) for k, v in from_code.items()},
+                         {k: sorted(v) for k, v in from_file.items()})
+
+    def test_the_groups_are_namespaced(self):
+        """A directory almost certainly has a group called `admins` already,
+        it usually means domain administrators, and a default that maps it to
+        `system:admin` hands WDash's highest privilege to everyone in it."""
+        for group in self.file["group_roles"]:
+            self.assertTrue(group.startswith("wdash-"),
+                            f"{group!r} is a name somebody else's directory "
+                            f"probably already uses")
+
+    def test_the_shipped_file_maps_no_named_person(self):
+        """It is imported into every fresh installation, so anything here is
+        a mapping a stranger inherits. It used to carry a maintainer's own
+        username, which granted admin to anyone signing in with that name."""
+        self.assertEqual(self.file.get("user_roles") or {}, {})

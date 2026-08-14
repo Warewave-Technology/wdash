@@ -46,9 +46,9 @@ REQUIRED = os.environ.get("WDASH_REQUIRE_IDENTITY") == "1"
 #: so that a change to one and not the other is a failure rather than a pair
 #: of files agreeing with each other about nothing.
 PEOPLE = {
-    "alice": ("alice@lab.local", ["admins"]),
-    "bob": ("bob@lab.local", ["developers"]),
-    "carol": ("carol@lab.local", ["viewers"]),
+    "alice": ("alice@lab.local", ["wdash-admins"]),
+    "bob": ("bob@lab.local", ["wdash-developers"]),
+    "carol": ("carol@lab.local", ["wdash-viewers"]),
     "dave": ("dave@lab.local", []),
 }
 PASSWORD = "hunter2"

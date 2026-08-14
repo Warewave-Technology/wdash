@@ -26,6 +26,23 @@ logger = logging.getLogger(__name__)
 
 #: Shipped so a fresh installation is usable before anyone opens the config
 #: page. Mirrors the roles config/rbac.yaml has always contained.
+#: What a fresh installation gets when there is no `config/rbac.yaml` to
+#: import from.
+#:
+#: These used to disagree with that file, and which world you landed in
+#: depended on whether it happened to be present: this named the roles admin,
+#: EDITOR and viewer with the groups `wdash-*`, while the file named them
+#: admin, DEVELOPER and viewer with the groups `admins`, `developers` and
+#: `viewers`. Two answers to "what roles does a fresh install have", and the
+#: seeding runs once, so whichever you got was the one you kept.
+#:
+#: One vocabulary now, taking the better half of each. The role names come
+#: from the file, because that is what a fresh clone of this repository has
+#: always produced. The group names come from here, and that is a security
+#: choice rather than a preference: a directory almost certainly already has
+#: a group called `admins`, it usually means domain administrators, and
+#: mapping it to `system:admin` by default hands WDash's highest privilege to
+#: whoever is in it.
 DEFAULT_ROLES = {
     "admin": {
         "description": "Full access, including cluster tools and others' dashboards.",
@@ -37,14 +54,14 @@ DEFAULT_ROLES = {
         "services": None,
         "groups": ["wdash-admins"],
     },
-    "editor": {
+    "developer": {
         "description": "Can build dashboards, cannot administer the system.",
         "permissions": ["logs:read", "traces:read", "monitors:read",
                         "dashboard:view", "dashboard:create", "dashboard:edit"],
         "containers": ["*"],
         "trace_containers": ["*"],
         "services": None,
-        "groups": ["wdash-editors"],
+        "groups": ["wdash-developers"],
     },
     "viewer": {
         "description": "Read-only.",
