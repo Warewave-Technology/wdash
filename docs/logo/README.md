@@ -5,11 +5,13 @@ not a logo — it is an icon the product borrowed, it means "search" on every
 other site that uses it, and it says nothing about the two signals WDash has
 that a search box does not.
 
-Nothing here is wired into the application. Pick one first.
+**1 is the one in use** — the navbar and the favicon carry it. The other two
+stay here because a choice with nothing beside it is not a choice, and the
+next person to argue for changing it should be arguing against something.
 
 | | Idea | What it says |
 |---|---|---|
-| [1](1-pulse-in-brackets.svg) | **Pulse in brackets** | a terminal that watches |
+| [1](1-pulse-in-brackets.svg) ← | **Pulse in brackets** | a terminal that watches |
 | [2](2-waveform-w.svg) | **Waveform W** | the monogram *is* the chart |
 | [3](3-panes.svg) | **Panes** | the dashboard itself |
 
@@ -41,3 +43,23 @@ The first version of the pulse had four peaks of similar height, which at 16
 pixels is texture rather than a shape; it is one heartbeat now.
 
 A mark that only works large is a mark somebody sees once, in the README.
+
+## Where it is used
+
+| | |
+|---|---|
+| `templates/base.html` | the navbar, inline, so the brackets take the bar's ink and the pulse takes `--accent` |
+| `static/img/wdash-mark.svg` | the favicon, with its own `prefers-color-scheme` rule — a browser fetches it on its own and it inherits nothing |
+| `static/img/wdash-mark-32.png` | the fallback for browsers that will not take an SVG here |
+
+Three copies of one drawing drift, and the only symptom is a tab icon that
+has quietly stopped being the logo. `tests/test_frontend_integrity.py`
+compares the path data in all three.
+
+The PNG is one colour, `#0f8b96`, and that number was measured rather than
+picked: 4.07:1 against a white tab strip and 3.95:1 against a dark one. The
+palette's own cyan is 2.09:1 on white — invisible where half the world reads.
+
+`.navbar-brand` is accent-coloured, so `currentColor` inside it *is* the
+accent: without `.navbar-brand .wdash-mark { color: var(--text-primary) }`
+the whole drawing comes out cyan and the pulse disappears into it.

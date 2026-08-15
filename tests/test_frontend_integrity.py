@@ -294,3 +294,90 @@ class LabSeedTest(unittest.TestCase):
     def test_the_seeders_are_actually_found(self):
         """A path that matches nothing makes the check above pass forever."""
         self.assertGreaterEqual(len(self._seeds()), 3)
+
+
+class TheMarkIsOursTest(unittest.TestCase):
+    """The navbar carries WDash's own mark, in three places that must agree.
+
+    It replaced a Font Awesome magnifying glass — an icon the product
+    borrowed, which means "search" on every other site that uses it. The
+    drawing now exists as the navbar's inline SVG, as the favicon, and as the
+    candidate it was chosen from; three copies of one shape drift, and the
+    only symptom is a tab icon that stops being the logo.
+    """
+
+    NAVBAR = os.path.join(ROOT, "templates", "base.html")
+    FAVICON = os.path.join(ROOT, "static", "img", "wdash-mark.svg")
+    PNG = os.path.join(ROOT, "static", "img", "wdash-mark-32.png")
+    CANDIDATE = os.path.join(ROOT, "docs", "logo", "1-pulse-in-brackets.svg")
+
+    def _paths(self, path):
+        """Every `d` attribute in a file, in order."""
+        return re.findall(r'\bd="([^"]+)"', _read(path))
+
+    def test_the_navbar_no_longer_borrows_an_icon(self):
+        brand = _read(self.NAVBAR).split('class="navbar-brand"')[1]
+        brand = brand.split("</a>")[0]
+        self.assertNotIn("fa-search", brand)
+        self.assertIn('class="wdash-mark"', brand)
+
+    def test_all_three_copies_are_the_same_drawing(self):
+        navbar = self._paths(self.NAVBAR)[:3]
+        self.assertEqual(len(navbar), 3, "the navbar mark lost a stroke")
+        self.assertEqual(navbar, self._paths(self.FAVICON))
+        self.assertEqual(navbar, self._paths(self.CANDIDATE))
+
+    def test_the_navbar_mark_takes_its_ink_from_the_page(self):
+        """`currentColor` for the brackets is what makes one file serve both
+        themes. The accent is the only colour written, and it is written as
+        the palette's own name."""
+        brand = _read(self.NAVBAR).split('class="navbar-brand"')[1]
+        brand = brand.split("</a>")[0]
+        self.assertIn('stroke="currentColor"', brand)
+        self.assertIn('stroke="var(--accent)"', brand)
+
+    def test_the_brand_gives_the_mark_ink_rather_than_the_brand_colour(self):
+        """`.navbar-brand` is accent-coloured, so `currentColor` there IS the
+        accent — the whole drawing came out cyan and the pulse, the one
+        element meant to stand out, vanished into it."""
+        css = _read(os.path.join(ROOT, "static", "css", "wdash.css"))
+        rule = re.search(r"\.navbar-brand \.wdash-mark\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(rule, "nothing gives the mark its own colour")
+        self.assertIn("var(--text-primary)", rule.group(1))
+
+    def test_the_favicon_is_declared_and_present(self):
+        head = _read(self.NAVBAR)
+        for rel, filename in (('rel="icon" type="image/svg+xml"',
+                               "img/wdash-mark.svg"),
+                              ('rel="alternate icon" type="image/png"',
+                               "img/wdash-mark-32.png")):
+            with self.subTest(rel=rel):
+                self.assertIn(rel, head)
+                self.assertIn(filename, head)
+        self.assertTrue(os.path.exists(self.FAVICON))
+        self.assertTrue(os.path.exists(self.PNG))
+
+    def test_the_svg_favicon_carries_its_own_ink(self):
+        """A browser fetches it on its own, so it inherits nothing. Without a
+        `prefers-color-scheme` rule the mark is near-black on a dark tab
+        strip, which is where half the readers are."""
+        # Comments stripped first. The file explains its own scoping rule in
+        # prose, and the prose quotes the selector it is warning against —
+        # so the check below read the warning as the fault.
+        source = re.sub(r"<!--.*?-->", "", _read(self.FAVICON), flags=re.S)
+        self.assertIn("prefers-color-scheme: dark", source)
+        # Scoped to its own id: an unscoped rule for `svg` would reach every
+        # sparkline on any page this was inlined into.
+        self.assertRegex(source, r"#wdash-mark\s*\{[^}]*color:")
+        self.assertNotRegex(source, r"(?<![\w#.-])svg\s*\{")
+
+    def test_the_png_fallback_is_a_32_pixel_png(self):
+        """Read out of the file rather than trusted: this one is generated,
+        and a generator that writes an HTML error page under a .png name
+        produces a tab icon nobody notices is missing."""
+        with open(self.PNG, "rb") as handle:
+            data = handle.read()
+        self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(data[12:16], b"IHDR")
+        self.assertEqual(int.from_bytes(data[16:20], "big"), 32)
+        self.assertEqual(int.from_bytes(data[20:24], "big"), 32)

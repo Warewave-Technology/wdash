@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32"
+     height="32" fill="none" id="wdash-mark" role="img" aria-label="WDash">
+  <!--
+    The favicon, and the same drawing as the navbar's — kept in step by
+    tests/test_frontend_integrity.py.
+
+    A browser fetches this on its own, so nothing here can inherit anything:
+    the ink is written out under `prefers-color-scheme`, which is what makes
+    the mark legible against both a light and a dark tab strip. The style is
+    scoped to this file's own id, because an unscoped `svg { color: … }`
+    would reach every sparkline on any page this was ever inlined into.
+
+    Browsers that ignore SVG favicons get wdash-mark-32.png, which is the
+    same drawing in one colour — a mark that needs two to work is a mark that
+    breaks here.
+  -->
+  <style>
+    #wdash-mark { color: #1f2328; }
+    @media (prefers-color-scheme: dark) {
+      #wdash-mark { color: #f0f6fc; }
+    }
+  </style>
+  <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
+     stroke-linejoin="round">
+    <path d="M11.5 5.5H7v21h4.5"/>
+    <path d="M20.5 5.5H25v21h-4.5"/>
+  </g>
+  <path d="M3.5 16h6.6l2.6-7.4 3.1 15 2.3-7.6h6.4" stroke="#39c5cf"
+        stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

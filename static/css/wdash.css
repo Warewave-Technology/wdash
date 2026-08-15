@@ -204,6 +204,21 @@ body {
     font-size: 1.5rem;
     color: var(--accent) !important;
     text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* The mark takes the page's INK, not the brand's colour.
+ *
+ * `.navbar-brand` is accent-coloured, and the mark's brackets are
+ * `currentColor` — so without this the whole drawing came out cyan and the
+ * pulse, the one element that is meant to be the accent, disappeared into
+ * it. The two-tone mark is the design; a monochrome one is the fallback that
+ * lives in the favicon. */
+.navbar-brand .wdash-mark {
+    color: var(--text-primary);
+    flex: none;
 }
 
 .navbar-nav .nav-link {
