@@ -1030,3 +1030,44 @@ class EveryBootstrapVariantIsRestyledTest(unittest.TestCase):
         missing = [name for name in self._used() if name not in restyled]
         self.assertEqual(missing, [], "\n".join(
             ["these are Bootstrap's colours, not the palette's:"] + missing))
+
+
+class MutedInkIsReadableOnEverySurfaceTest(unittest.TestCase):
+    """The gap every other test in this file had in common.
+
+    They measure ink against `--surface-page`. Almost nothing in this product
+    sits on the page: it sits in a card, on a card's header, in a table, in a
+    footer — each of which is a step lighter on the dark theme and a step
+    darker on the light one.
+
+    `.text-muted` was `--text-secondary`, which measures 5.07:1 on the page
+    and 4.08:1 on `--surface-raised`. Every timestamp in every table, every
+    "1–25 of 388 checks", every card footer in the product was under the
+    4.5:1 that normal text needs, and the whole suite passed.
+    """
+
+    #: Ink that carries prose, against every ground the product paints under
+    #: it. `--text-secondary` is here too: it is one step darker, and the
+    #: point of the test is that a token which passes on the page can fail
+    #: two rules up.
+    INKS = ("--text-primary", "--text-secondary", "--text-muted")
+    SURFACES = ("--surface-page", "--surface-card", "--surface-raised",
+                "--surface-sunken")
+
+    def test_every_ink_reads_on_every_surface(self):
+        for theme, palette in palettes().items():
+            for ink in self.INKS:
+                for surface in self.SURFACES:
+                    with self.subTest(theme=theme, ink=ink, surface=surface):
+                        ratio = contrast(palette[ink], palette[surface])
+                        self.assertGreaterEqual(
+                            round(ratio, 2), AA_NORMAL,
+                            f"{theme}: {ink} ({palette[ink]}) on {surface} "
+                            f"({palette[surface]}) is {ratio:.2f}:1")
+
+    def test_the_muted_utility_uses_muted_ink(self):
+        """`.text-muted` is the class the templates actually write, and it
+        pointed at the darker of the two tokens."""
+        block = _rule(stylesheet(), ".text-muted")
+        self.assertIsNotNone(block, ".text-muted is not restyled at all")
+        self.assertIn("var(--text-muted)", block)

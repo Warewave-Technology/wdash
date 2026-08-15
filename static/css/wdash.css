@@ -25,10 +25,18 @@
     --surface-input: #21262d;
     --surface-hover: #30363d;
 
-    /* Text. */
+    /* Text.
+     *
+     * `--text-secondary` was #7d8590, which reads at 5.07:1 on the page and
+     * 4.08:1 two rules up on `--surface-raised` — under the 4.5:1 normal text
+     * needs, on every card footer and table cell in the product. Every test
+     * here measured it against the page, where it passed.
+     *
+     * #868f99 is the dimmest value that clears 4.5:1 on all four surfaces
+     * (4.64 at worst) while staying a visible step below `--text-muted`. */
     --text-primary: #f0f6fc;
     --text-muted: #8b949e;
-    --text-secondary: #7d8590;
+    --text-secondary: #868f99;
 
     /* Lines, and the one accent the product is built around. */
     --border: #30363d;
@@ -238,6 +246,94 @@ body {
     transform: translateY(-1px);
 }
 
+/* ---------------------------------------------------------------------------
+ * What Bootstrap decides when we have not.
+ *
+ * Every component this file has not restyled reads these variables, and
+ * Bootstrap's own values are its palette rather than ours — measured across
+ * every screen, that was 44 elements painting themselves #212529 on the light
+ * theme and blue links on four pages. Nothing looked broken, which is the
+ * problem: it is the same near-black and a near-enough blue, so the drift
+ * only shows the day a palette changes and half the product does not follow.
+ *
+ * Set here rather than per component, because the list of components we have
+ * not touched is the one that keeps growing.
+ * ------------------------------------------------------------------------ */
+:root,
+[data-bs-theme="dark"],
+[data-bs-theme="light"] {
+    --bs-body-color: var(--text-primary);
+    --bs-body-bg: var(--surface-page);
+    --bs-emphasis-color: var(--text-primary);
+    --bs-secondary-color: var(--text-muted);
+    --bs-tertiary-color: var(--text-muted);
+    --bs-border-color: var(--border);
+    --bs-link-color: var(--accent);
+    --bs-link-hover-color: var(--accent);
+    --bs-heading-color: var(--text-primary);
+    --bs-code-color: var(--hue-red);
+    --bs-highlight-bg: color-mix(in srgb, var(--hue-yellow) 25%, transparent);
+}
+
+/* Plain links: a sentence with a link in it, like the Alerts page's "nothing
+   has fired — the configuration page says which".
+   `--bs-link-color` above does nothing for these. Bootstrap writes
+   `color: rgba(var(--bs-link-color-rgb), var(--bs-link-opacity, 1))`, so the
+   variable it reads is an RGB TRIPLE and ours is a hex — measured, these
+   stayed #0d6efd, which is 4.23:1 on the light theme.
+   `:not([class])` so every link that carries its own class — nav links,
+   buttons, dropdown items, pagination — keeps what it already had. */
+a:not([class]) {
+    color: var(--accent);
+}
+
+a:not([class]):hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+/* The tabs on the configuration and audit screens: the main navigation of
+   both, and Bootstrap blue on a page with no other blue in it. */
+.nav-tabs {
+    border-bottom-color: var(--border);
+}
+
+.nav-tabs .nav-link {
+    color: var(--text-muted);
+    border-color: transparent;
+}
+
+.nav-tabs .nav-link:hover {
+    border-color: var(--border);
+    color: var(--text-primary);
+}
+
+.nav-tabs .nav-link.active {
+    background-color: var(--surface-card);
+    border-color: var(--border) var(--border) var(--surface-card);
+    color: var(--accent);
+}
+
+/* Checkboxes and radios. A ticked box was Bootstrap blue on every form in
+   the product, including the role editor's permission list. */
+.form-check-input:checked {
+    background-color: var(--fill-accent);
+    border-color: var(--accent);
+}
+
+.form-check-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 .25rem color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* Severity borders, on the Advisor's finding cards. Bootstrap's red, amber
+   and blue rather than the three the rest of the product reads findings in. */
+.border-danger { border-color: var(--hue-red) !important; }
+.border-warning { border-color: var(--hue-yellow) !important; }
+.border-info { border-color: var(--hue-blue) !important; }
+.border-success { border-color: var(--hue-green) !important; }
+.border-primary { border-color: var(--accent) !important; }
+
 /* Cards - Terminal Window Style */
 .card {
     background: linear-gradient(145deg, var(--surface-card) 0%, var(--surface-sunken) 100%);
@@ -408,6 +504,32 @@ body {
 .btn-danger:hover {
     background-color: var(--fill-red-strong);
     border-color: var(--fill-red-strong);
+    color: var(--text-on-fill);
+}
+
+/* A link-shaped button — "3 steps", "show", the save controls — was
+   Bootstrap's blue on every screen that has one. */
+.btn-link {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.btn-link:hover,
+.btn-link:focus {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+/* The pressed state of a toggle group. `.btn-outline-secondary` was painted
+   from the palette and its `.active` was not, so the selected filter on the
+   Alerts page — the one control telling you what you are looking at — came
+   out Bootstrap grey. */
+.btn-outline-secondary.active,
+.btn-check:checked + .btn-outline-secondary,
+.btn-outline-primary.active,
+.btn-check:checked + .btn-outline-primary {
+    background-color: var(--fill-accent);
+    border-color: var(--accent);
     color: var(--text-on-fill);
 }
 
@@ -836,6 +958,18 @@ body {
 .badge.bg-success { background: var(--fill-green) !important; }
 .badge.bg-warning { background: var(--fill-yellow) !important; }
 .badge.bg-info { background: var(--fill-blue) !important; }
+
+/* The same fills where they are not badges — the trace list's duration bars
+   were the last of Bootstrap's own colours left on any screen. Scoped to
+   `.progress-bar` rather than declared for `.bg-*` generally, so a chip that
+   already has a rule keeps it.
+   `!important` because Bootstrap's `.bg-*` utilities carry it: without it
+   these rules lost silently and the bars stayed #0dcaf0. */
+.progress { background-color: var(--surface-sunken); }
+.progress-bar.bg-info { background-color: var(--fill-blue) !important; }
+.progress-bar.bg-success { background-color: var(--fill-green) !important; }
+.progress-bar.bg-warning { background-color: var(--fill-yellow) !important; }
+.progress-bar.bg-danger { background-color: var(--fill-red) !important; }
 .badge.bg-primary { background: var(--fill-accent) !important; }
 
 .bg-secondary {
@@ -1026,8 +1160,22 @@ tr.monitor-row-warning {
 }
 
 /* Text Colors */
+
+/* `--text-muted`, which is the token named for exactly this, rather than
+ * `--text-secondary`, which is a step darker and was failing on anything
+ * raised off the page. Measured on the dark theme:
+ *
+ *                        page     card     raised
+ *   --text-secondary     5.07     4.34     4.08
+ *   --text-muted         6.15     5.26     4.95
+ *
+ * Normal text needs 4.5, so every `.text-muted` inside a card — table
+ * timestamps, "1–25 of 388 checks", every card footer in the product — was
+ * under it. On the page background it passes, which is why the tests here
+ * never saw it: they measure ink against `--surface-page`, and almost
+ * nothing in this product sits directly on the page. */
 .text-muted {
-    color: var(--text-secondary) !important;
+    color: var(--text-muted) !important;
 }
 
 .text-white {
@@ -1624,7 +1772,9 @@ code {
 .terminal-title {
     margin-left: auto;
     font-size: 0.75rem;
-    color: var(--text-secondary);
+    /* Not `--text-secondary`: this sits on the terminal's title bar, which is
+       `--surface-raised`, and there that ink measures 4.08:1. */
+    color: var(--text-muted);
 }
 
 .terminal-body {

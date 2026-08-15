@@ -187,3 +187,44 @@ class JobsStillDoWhatTheyAreForTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheBrowserJobRunsEveryBrowserSuiteTest(unittest.TestCase):
+    """A suite that needs a browser and is not in that job never runs.
+
+    `tests/test_rendered_pages.py` skips without playwright, so leaving it
+    out of the one job that installs playwright would have made it a test
+    that only ever ran on the machine it was written on — green everywhere
+    else, by skipping.
+    """
+
+    #: Every module that needs a real browser. Adding one here and forgetting
+    #: the workflow is the mistake this catches.
+    BROWSER_SUITES = ("tests.test_journeys", "tests.test_rendered_pages")
+
+    def setUp(self):
+        self.jobs = _workflow()["jobs"]
+
+    def test_the_browser_job_runs_all_of_them(self):
+        """Looking for `-m unittest <module>`, not for the module's name.
+
+        The step below that fails the job on a skip also names every module,
+        so a check for the bare name passes with the step that RUNS it
+        deleted — the suite would then only be loaded by the guard, which
+        reports it as run and skipped nothing because it never got there.
+        """
+        commands = " ".join(step.get("run", "")
+                            for step in self.jobs["browser"]["steps"])
+        for module in self.BROWSER_SUITES:
+            with self.subTest(module=module):
+                self.assertIn(f"-m unittest {module}", commands)
+
+    def test_the_skip_check_covers_all_of_them(self):
+        """The step that fails the job when anything skipped. It names the
+        modules it loads, and a suite missing from that list can skip in
+        silence."""
+        steps = " ".join(str(step) for step in self.jobs["browser"]["steps"])
+        guard = steps.split("loadTestsFromNames")[1]
+        for module in self.BROWSER_SUITES:
+            with self.subTest(module=module):
+                self.assertIn(module, guard)

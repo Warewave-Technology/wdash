@@ -97,6 +97,12 @@ jobs:
       - name: The journey suite, against a real browser
         run: python -m unittest tests.test_journeys -v
 
+      # The other suite that needs a browser: it walks every screen in both
+      # themes and measures what is on it. A colour nobody wrote is invisible
+      # to a stylesheet reader, so this is the only job that can see one.
+      - name: Every screen, rendered
+        run: python -m unittest tests.test_rendered_pages -v
+
       - name: And nothing quietly skipped
         # `BrowserSuiteIsNotSilentlySkippedTest` holds this from the inside;
         # this holds it from the outside, where a failure to install
@@ -106,7 +112,7 @@ jobs:
           import io, unittest
           from unittest import TextTestRunner
           suite = unittest.defaultTestLoader.loadTestsFromNames(
-              ["tests.test_journeys"])
+              ["tests.test_journeys", "tests.test_rendered_pages"])
           result = TextTestRunner(stream=io.StringIO()).run(suite)
           print(f"{result.testsRun} run, {len(result.skipped)} skipped")
           for test, reason in result.skipped:
