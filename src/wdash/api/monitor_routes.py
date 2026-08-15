@@ -267,6 +267,60 @@ def _step_history(checks, window):
     return rows
 
 
+def _locations(checks):
+    """One row per place the check ran from, or nothing.
+
+    "Is it up" and "is it up from Dublin" are different questions, and until
+    this existed the page answered a third one that nobody asked: it averaged
+    every probe together. Measured on two agents watching one endpoint — one
+    slow and failing a quarter of its runs, one healthy — the page reported
+    87.5% available and a response time that was true of neither of them.
+
+    Empty when the checks say nothing about where they ran, and empty when
+    they all say the same thing: one row headed "everywhere" is a column of
+    numbers the summary above it already has.
+    """
+    named = [c for c in checks if c.location]
+    if not named:
+        return []
+    places = {}
+    for check in named:
+        row = places.setdefault(check.location, {
+            "location": check.location, "checks": 0, "failed": 0,
+            "durations": [], "last": None, "status": UNKNOWN, "error": ""})
+        row["checks"] += 1
+        if check.status == DOWN:
+            row["failed"] += 1
+        if check.duration_ms is not None:
+            row["durations"].append(check.duration_ms)
+        # `checks` arrives oldest first, so the last one wins.
+        row["last"] = check.timestamp
+        row["status"] = check.status
+        row["error"] = check.error
+    if len(places) < 2:
+        return []
+
+    rows = []
+    for row in places.values():
+        durations = sorted(row["durations"])
+        rows.append({
+            **row,
+            "durations": None,
+            "availability": (round(100.0 * (row["checks"] - row["failed"])
+                                   / row["checks"], 2) if row["checks"]
+                             else None),
+            "median_ms": _percentile(durations, 0.5),
+            "p95_ms": _percentile(durations, 0.95),
+            "worst_ms": round(durations[-1], 1) if durations else None,
+        })
+    # Worst first: the reason to open this card is that one place disagrees
+    # with the others, and that place should not be somewhere in the middle
+    # of an alphabetical list.
+    rows.sort(key=lambda r: (r["status"] != DOWN, -(r["failed"]),
+                             -(r["median_ms"] or 0)))
+    return rows
+
+
 def _percentile(ordered, fraction):
     """Nearest-rank, so the number shown is one that actually happened."""
     if not ordered:
@@ -510,6 +564,9 @@ def monitor_detail(monitor_id):
         # Empty for everything that is not a journey, which is what keeps the
         # card off every HTTP monitor's page.
         steps=_step_history(everything, window),
+        # One row per place, when there is more than one. The summary above
+        # is the whole check; this is what it hides.
+        locations=_locations(everything),
         checks=[_check(c) for c in checks],
         pager=_pager(page_number, total),
         summary=_availability(points, everything),
@@ -608,6 +665,7 @@ def _check(check):
         "duration_ms": (round(check.duration_ms, 1)
                         if check.duration_ms is not None else None),
         "error": check.error,
+        "location": getattr(check, "location", ""),
         "steps": [_step(s) for s in getattr(check, "steps", ())],
         # Sent separately rather than left for the template to find. The model
         # already decides which step is to blame — a journey stops at the first

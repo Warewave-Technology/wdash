@@ -139,6 +139,65 @@
 </div>
 {% endif %}
 
+{# ---------------- where it ran from ----------------
+   Only when there is more than one place. The summary above is the whole
+   check averaged together, which is the number that describes neither of
+   two probes when one of them is the problem. #}
+{% if locations %}
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="fas fa-location-dot"></i> By location</span>
+        <small class="text-muted">worst first</small>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-hover mb-0" style="font-size:.85rem">
+            <thead><tr>
+                <th style="width:6rem">Status</th>
+                <th>From</th>
+                <th style="width:8rem" class="text-end">Availability</th>
+                <th style="width:7rem" class="text-end">Median</th>
+                <th style="width:6rem" class="text-end">p95</th>
+                <th style="width:7rem" class="text-end">Checks</th>
+                <th style="width:13rem">Last</th>
+            </tr></thead>
+            <tbody>
+            {% for place in locations %}
+            <tr{% if place.status == 'down' %} class="monitor-row-down"{% endif %}>
+                <td><span class="monitor-status {{ place.status }}"
+                    >{{ place.status }}</span></td>
+                <td><span class="badge target-chip">{{ place.location }}</span>
+                    {% if place.error %}
+                    <div class="text-danger" style="font-size:.75rem"
+                    >{{ place.error }}</div>
+                    {% endif %}
+                </td>
+                <td class="text-end">
+                    {% if place.availability is not none
+                    %}{{ place.availability }}<small class="text-muted">%</small
+                    >{% else %}<span class="text-muted">—</span>{% endif %}
+                </td>
+                <td class="text-end">
+                    {% if place.median_ms is not none
+                    %}{{ place.median_ms }} ms{% endif %}
+                </td>
+                <td class="text-end text-muted">
+                    {% if place.p95_ms is not none %}{{ place.p95_ms }} ms{% endif %}
+                </td>
+                <td class="text-end text-muted">
+                    {{ place.checks }}{% if place.failed %},
+                    <span class="text-danger">{{ place.failed }} failed</span>
+                    {% endif %}
+                </td>
+                <td><small class="text-muted"
+                           data-timestamp="{{ place.last }}"></small></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
 {# ---------------- the steps, over the whole window ----------------
    A journey's runs answer "did it work". This answers the question they
    cannot: which step is the nine seconds, and which step is slower than it
@@ -263,6 +322,7 @@
             <thead><tr>
                 <th style="width:6rem">Status</th>
                 <th style="width:13rem">When</th>
+                {% if locations %}<th style="width:9rem">From</th>{% endif %}
                 <th style="width:7rem" class="text-end">Response</th>
                 <th>Detail</th>
             </tr></thead>
@@ -273,6 +333,13 @@
                     >{{ check.status }}</span></td>
                 <td><small class="text-muted"
                            data-timestamp="{{ check.timestamp }}"></small></td>
+                {% if locations %}
+                {# Only when there is more than one place to be. A column
+                   repeating the same word down every row is a column. #}
+                <td>{% if check.location %}<span class="badge target-chip"
+                    >{{ check.location }}</span>{% else
+                    %}<span class="text-muted">—</span>{% endif %}</td>
+                {% endif %}
                 <td class="text-end">
                     {% if check.duration_ms is not none %}{{ check.duration_ms }} ms
                     {% else %}<span class="text-muted">—</span>{% endif %}
@@ -310,7 +377,8 @@
             </tr>
             {% if check.steps %}
             <tr class="collapse" id="steps-{{ loop.index }}">
-                <td colspan="4" class="bg-body-tertiary">
+                <td colspan="{{ 5 if locations else 4 }}"
+                    class="bg-body-tertiary">
                     <div class="d-flex gap-3 flex-wrap align-items-start">
                         <table class="table table-sm mb-0 flex-grow-1"
                                style="max-width:44rem">

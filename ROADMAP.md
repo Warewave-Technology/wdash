@@ -27,6 +27,12 @@ pulls configuration and pushes results back. Both appear on one page, with
 response-time history, per-monitor detail and the TLS certificates the checks
 saw.
 
+**And from more than one place.** A check watched by two probes gets a row per
+location — availability, median, p95 and failures each — and every run says
+where it ran. The summary above them is still the whole check, which is the
+number to page on; the rows are what it hides. Where a check ran from is the
+agent that reported it, or `observer.geo.name` on an Elastic document.
+
 **Browser journeys.** Multi-step checks through real Chromium: sign in, add to
 basket, check out. A journey is a step list rather than a script, every step is
 timed on its own, and a failure names the step and keeps a screenshot of the
@@ -113,15 +119,27 @@ One thing is deliberately not read: `synthetics.payload.source`, which is the
 step's own code and arrives with whatever literal the author typed into it.
 The lab's failing journey has a password in it, and so would a real one.
 
-## Phase 4 — candidates
+## Phase 4 — done
 
-Nothing is committed.
+Five candidates, all of them shipped. Every one changed on contact with a
+running lab, and the changes are the interesting part of the list below: what
+the page turned out to be doing was in three cases worse than the sentence
+that proposed fixing it.
+
+Email as an alert destination was on this list and is not in it — see
+**Deliberately absent**.
 
 ### Capability
 
-* **Journeys from more than one place.** A journey already runs on every agent
-  assigned to it, but the page shows one status. "Slow from Frankfurt, fine
-  from Dublin" is a different question from "is it up".
+* ~~**Journeys from more than one place.**~~ Done, and the gap was worse than
+  this said. The detail page did not show one probe's status; it averaged
+  them. Measured on two agents watching one endpoint — one slow and failing a
+  quarter of its runs, one healthy — the page reported 87.5% available and a
+  response time true of neither. There is a row per location now, worst
+  first, and each run says where it ran. A check carries `location`: the
+  agent that reported it, or the `observer.geo.name` Elastic stamps on it —
+  which a self-managed Heartbeat writes only once somebody configures it, so
+  the lab now does.
 * ~~**Per-step history.**~~ Done. A journey's detail page carries a row per
   step over the window — its share of a typical run, median, p95, failures,
   and the second half of the window against the first, so "which step got

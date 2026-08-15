@@ -255,14 +255,31 @@ class StoreMonitorSource(MonitorSource):
             logger.warning(f"{self.name}: could not read history: {exc}")
             return []
 
+    def _agent_names(self):
+        """Agent id -> the name somebody typed when they registered it.
+
+        Never raises: a history that renders without saying where each check
+        ran is worse than one that says it, and far better than none.
+        """
+        try:
+            return {a["id"]: a["name"] for a in self._store.agents.all()}
+        except Exception as exc:
+            logger.warning(f"{self.name}: could not read agents: {exc}")
+            return {}
+
     def history(self, monitor_id, window, scope, offset=0, limit=None):
         rows = self._results(monitor_id, window)
+        # One lookup for the page rather than one per row, and by NAME: an
+        # agent id is a uuid, and a page that prints uuids where it means
+        # "Dublin" has not answered the question.
+        names = self._agent_names()
         checks = [MonitorCheck(
             timestamp=_aware(r["started_at"]),
             status=DOWN if r["status"] == DOWN else UP,
             duration_ms=(r["duration_us"] or 0) / 1000.0,
             error=r["error"] or "",
             steps=_steps(r.get("steps")),
+            location=names.get(r.get("agent_id"), ""),
             screenshot_id=r.get("screenshot_id")) for r in rows]
 
         # Paged here rather than in SQL. The metadata store holds one

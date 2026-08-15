@@ -144,6 +144,22 @@ def _dig(document, path, default=None):
 _MISSING = object()
 
 
+def _location(source):
+    """Where the agent that wrote this document was standing, or "".
+
+    `observer.geo.name` is what Fleet-managed synthetics stamp on every
+    document and what the lab's Heartbeat was configured to write once this
+    was measured — before that, the whole `observer` object was absent, which
+    is why "" is a real answer here rather than a bug.
+
+    `observer.name` second: it is the same string in the lab, and a
+    deployment that names its probes without giving them a geography should
+    not have the column go blank.
+    """
+    return (_dig(source, "observer.geo.name")
+            or _dig(source, "observer.name") or "")
+
+
 def _status(source):
     """Up, down, or an honest unknown.
 
@@ -452,7 +468,12 @@ class ElasticsearchMonitorSource(MonitorSource):
                         "monitor.duration.us", "error.message",
                         # A browser check's steps are separate documents,
                         # joined to this one by check_group.
-                        "monitor.type", "monitor.check_group"],
+                        "monitor.type", "monitor.check_group",
+                        # Where the agent was standing. Measured: a
+                        # self-managed Heartbeat writes no `observer` at all
+                        # until somebody configures one, and Fleet-managed
+                        # synthetics stamp `observer.geo.name` on everything.
+                        "observer"],
             # Exact rather than the 10,000 cap: this number is shown to
             # somebody as "of N", and "of 10,000+" on a page of 12,000 checks
             # is a number that is simply wrong.
@@ -474,6 +495,7 @@ class ElasticsearchMonitorSource(MonitorSource):
                 status=_status(source),
                 duration_ms=(duration / 1000.0) if duration is not None else None,
                 error=_dig(source, "error.message") or "",
+                location=_location(source),
                 steps=steps.get(_dig(source, "monitor.check_group"), ())))
         # Oldest first: a chart reads left to right.
         checks.reverse()

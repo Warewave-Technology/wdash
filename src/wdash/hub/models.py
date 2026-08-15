@@ -605,6 +605,15 @@ class MonitorCheck:
     steps: tuple = field(default_factory=tuple)
     #: The failure screenshot, when there is one.
     screenshot_id: str = None
+    #: Where this check ran from — the agent that reported it, or the
+    #: `observer.geo.name` Elastic stamps on it. Empty when the source does
+    #: not say, which is a real state and not a default: a self-managed
+    #: Heartbeat writes no observer at all until somebody configures one.
+    #:
+    #: Here rather than on Monitor because a check has ONE location and a
+    #: monitor has as many as it has probes. Averaging the two together is
+    #: how "87.5% available" ends up describing neither Frankfurt nor Dublin.
+    location: str = ""
 
     @property
     def failed_step(self):

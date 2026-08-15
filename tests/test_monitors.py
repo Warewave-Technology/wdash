@@ -1964,3 +1964,236 @@ class StepScreenshotRouteTest(unittest.TestCase):
         self._register(self.Answering(self.SHOT))
         self.assertIn("immutable",
                       self._get().headers.get("Cache-Control", ""))
+
+
+class WhereItRanFromTest(unittest.TestCase):
+    """Elastic's answer to "where was the agent standing".
+
+    Measured on the lab before the field existed: a self-managed Heartbeat
+    writes NO `observer` object at all, and Fleet-managed synthetics stamp
+    `observer.geo.name` on every document. So an empty location is a state
+    the product has to carry rather than a gap to paper over — which is why
+    the whole card disappears rather than showing a row called "unknown".
+    """
+
+    def setUp(self):
+        self.window = TimeWindow.of("1h")
+        self.scope = Scope.unrestricted()
+
+    def _check(self, source):
+        document = _document()
+        document["_source"].update(source)
+        adapter = ElasticsearchMonitorSource(
+            FakeElasticsearch([document]), name="lab")
+        return adapter.history("lab-http-up", self.window, self.scope,
+                               limit=5)[-1]
+
+    def test_the_geography_is_read(self):
+        check = self._check({"observer": {"geo": {"name": "lab-frankfurt"},
+                                          "name": "probe-1"}})
+        self.assertEqual(check.location, "lab-frankfurt")
+
+    def test_a_named_probe_with_no_geography_still_says_something(self):
+        check = self._check({"observer": {"name": "probe-1"}})
+        self.assertEqual(check.location, "probe-1")
+
+    def test_a_heartbeat_that_says_nothing_is_empty_not_unknown(self):
+        """It writes no observer at all until somebody configures one, and
+        "unknown" printed in a column reads as a fault."""
+        self.assertEqual(self._check({}).location, "")
+
+
+class LocationRowsTest(unittest.TestCase):
+    """One row per place, and the question it exists to answer.
+
+    Measured against two agents watching one endpoint — one slow and failing
+    a quarter of its runs, one healthy. The page said 87.5% available and a
+    response time that was true of neither of them.
+    """
+
+    def setUp(self):
+        from wdash.hub.models import MonitorCheck
+        self.MonitorCheck = MonitorCheck
+        self.end = _now()
+
+    def _check(self, location, minutes_ago, status=UP, duration_ms=100.0,
+               error=""):
+        return self.MonitorCheck(
+            timestamp=self.end - dt.timedelta(minutes=minutes_ago),
+            status=status, duration_ms=duration_ms, error=error,
+            location=location)
+
+    def _rows(self, checks):
+        from wdash.api.monitor_routes import _locations
+        return _locations(checks)
+
+    def test_nothing_when_no_check_says_where_it_ran(self):
+        self.assertEqual(self._rows([self._check("", 5)]), [])
+        self.assertEqual(self._rows([]), [])
+
+    def test_nothing_when_every_check_ran_in_the_same_place(self):
+        """One row headed "everywhere" is a column of numbers the summary
+        above it already has."""
+        self.assertEqual(
+            self._rows([self._check("dublin", m) for m in (5, 4, 3)]), [])
+
+    def test_a_row_per_place_with_its_own_numbers(self):
+        checks = ([self._check("dublin", m, duration_ms=100.0)
+                   for m in (9, 7, 5, 3)]
+                  + [self._check("frankfurt", m, duration_ms=900.0,
+                                 status=DOWN if m in (8, 6) else UP,
+                                 error="gateway timeout" if m in (8, 6)
+                                 else "")
+                     for m in (8, 6, 4, 2)])
+        rows = {r["location"]: r for r in self._rows(checks)}
+        self.assertEqual(rows["dublin"]["availability"], 100.0)
+        self.assertEqual(rows["dublin"]["median_ms"], 100.0)
+        self.assertEqual(rows["frankfurt"]["availability"], 50.0)
+        self.assertEqual(rows["frankfurt"]["failed"], 2)
+        self.assertEqual(rows["frankfurt"]["checks"], 4)
+
+    def test_the_place_with_the_problem_is_first(self):
+        """The reason to open this card is that one place disagrees with the
+        others, and that place must not be somewhere in an alphabetical
+        list."""
+        checks = ([self._check("amsterdam", m) for m in (9, 7, 5)]
+                  + [self._check("zurich", m, status=DOWN) for m in (8, 6, 4)])
+        self.assertEqual([r["location"] for r in self._rows(checks)],
+                         ["zurich", "amsterdam"])
+
+    def test_a_slower_place_outranks_a_faster_one(self):
+        checks = ([self._check("dublin", m, duration_ms=100.0)
+                   for m in (9, 7, 5)]
+                  + [self._check("frankfurt", m, duration_ms=900.0)
+                     for m in (8, 6, 4)])
+        self.assertEqual([r["location"] for r in self._rows(checks)],
+                         ["frankfurt", "dublin"])
+
+    def test_each_place_reports_its_own_latest_state(self):
+        """`checks` arrives oldest first. Taking the first would report the
+        state a place was in at the start of the window."""
+        checks = [self._check("dublin", 9, status=DOWN, error="was down"),
+                  self._check("dublin", 1, status=UP),
+                  self._check("oslo", 9), self._check("oslo", 2)]
+        rows = {r["location"]: r for r in self._rows(checks)}
+        self.assertEqual(rows["dublin"]["status"], UP)
+        self.assertEqual(rows["dublin"]["error"], "")
+        self.assertEqual(rows["dublin"]["failed"], 1)
+
+    def test_a_place_that_reported_nothing_measurable_still_gets_a_row(self):
+        """An agent that answered with no duration is a place that is being
+        watched. A row with a dash is different from no row."""
+        checks = [self._check("dublin", m, duration_ms=None) for m in (9, 7)]
+        checks += [self._check("oslo", m) for m in (8, 6)]
+        rows = {r["location"]: r for r in self._rows(checks)}
+        self.assertIsNone(rows["dublin"]["median_ms"])
+        self.assertEqual(rows["dublin"]["checks"], 2)
+
+
+class TheDetailPageSaysWhereTest(unittest.TestCase):
+    """The card and the column, rendered — and absent when they would lie.
+
+    One probe is the common case, and a "From" column repeating the same word
+    down twenty-five rows is a column.
+    """
+
+    def setUp(self):
+        from tests.support import grant
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.secrets import SecretBox
+
+        handle, self.database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        database = self.database
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "locations"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = SecretBox.generate_key()
+            ELASTICSEARCH_URL = ""
+            DASHBOARD_STORAGE = "database"
+
+        self.app = create_app(TestConfig)
+        self.client = self.app.test_client()
+        grant(self.app, "admin", ["system:admin", "monitors:read"],
+              indices=["*"])
+        with self.client.session_transaction() as session:
+            session["user_data"] = {
+                "id": "u1", "username": "admin", "email": "a@b", "groups": [],
+                "role": "admin",
+                "permissions": ["system:admin", "monitors:read"],
+                "allowed_indices": ["*"]}
+            session["_user_id"] = "u1"
+
+        self.monitor = self.app.store.monitors.create(
+            name="Checkout", kind="http", target="https://shop.example/health",
+            interval_seconds=60, timeout_seconds=10)
+
+    def tearDown(self):
+        self.app.store.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.database + suffix):
+                os.unlink(self.database + suffix)
+
+    def _probe(self, name, failing=False, duration_us=120_000):
+        agent, _ = self.app.store.agents.create(name)
+        assigned = list(self.app.store.monitors.get(
+            self.monitor["id"])["agent_ids"]) + [agent["id"]]
+        self.app.store.monitors.update(self.monitor["id"],
+                                       agent_ids=assigned)
+        self.app.store.results.record(agent["id"], [{
+            "monitor_id": self.monitor["id"],
+            "started_at": (_now() - dt.timedelta(minutes=i)).isoformat(),
+            "status": "down" if (failing and i % 4 == 0) else "up",
+            "duration_us": duration_us,
+            "error": "gateway timeout" if (failing and i % 4 == 0) else "",
+        } for i in range(8)])
+
+    def _page(self):
+        return self.client.get(
+            f"/monitors/{self.monitor['id']}?window=1h").get_data(as_text=True)
+
+    def test_two_probes_get_a_row_each(self):
+        self._probe("dublin")
+        self._probe("frankfurt", failing=True, duration_us=900_000)
+        page = self._page()
+        self.assertIn("By location", page)
+        card = page.split("By location")[1].split("</table>")[0]
+        self.assertIn("dublin", card)
+        self.assertIn("frankfurt", card)
+        # The numbers the summary above cannot give: one place is failing a
+        # quarter of its runs and the other is not.
+        self.assertIn("100.0", card)
+        self.assertIn("75.0", card)
+
+    def test_every_run_says_where_it_ran(self):
+        self._probe("dublin")
+        self._probe("frankfurt")
+        rows = self._page().split("Recent checks")[1].split("<tbody>")[1]
+        self.assertIn("dublin", rows)
+        self.assertIn("frankfurt", rows)
+
+    def test_one_probe_gets_neither(self):
+        self._probe("dublin")
+        page = self._page()
+        self.assertNotIn("By location", page)
+        rows = page.split("Recent checks")[1].split("<tbody>")[1]
+        self.assertNotIn("dublin", rows)
+
+    def _run_table_shape(self, page):
+        """(header cells, cells in the first run row)."""
+        table = page.split("Recent checks")[1]
+        head = table.split("<thead>")[1].split("</thead>")[0]
+        first = table.split("<tbody>")[1].split("</tr>")[0]
+        return head.count("<th"), first.count("<td")
+
+    def test_the_row_and_its_header_grow_together(self):
+        """A column added to one and not the other shears the whole table,
+        and it renders — every cell simply lands under the wrong heading."""
+        self._probe("dublin")
+        self.assertEqual(self._run_table_shape(self._page()), (4, 4))
+        self._probe("frankfurt")
+        self.assertEqual(self._run_table_shape(self._page()), (5, 5))

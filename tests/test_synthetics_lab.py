@@ -203,6 +203,42 @@ class ElasticScreenshotShapeTest(unittest.TestCase):
                 self.assertIsNone(step.screenshot_id)
 
 
+@unittest.skipUnless(LAB, _MISSING)
+class WhereTheAgentStoodTest(unittest.TestCase):
+    """`observer.geo.name`, measured rather than remembered.
+
+    Before the lab's Heartbeat was told where it stands, the whole `observer`
+    object was ABSENT from every document it wrote — which is why an empty
+    location is a state WDash carries rather than a gap it fills in. Fleet
+    manages that field for you; a self-managed Heartbeat does not.
+    """
+
+    def setUp(self):
+        self.source = ElasticsearchMonitorSource(CLIENT, name="lab")
+        self.window = TimeWindow.of("24h")
+        self.scope = Scope.unrestricted()
+
+    def test_the_lab_stamps_its_location_on_every_document(self):
+        found = CLIENT.search(index="synthetics-browser-*", size=1,
+                              sort=[{"@timestamp": "desc"}],
+                              query={"term": {"synthetics.type":
+                                              "journey/end"}})
+        source = _dig(found, "hits.hits")[0]["_source"]
+        self.assertEqual(_dig(source, "observer.geo.name"), "lab-frankfurt",
+                         "the lab's heartbeat.yml is meant to add this — "
+                         "without it the location column cannot be measured "
+                         "at all")
+
+    def test_a_check_carries_it_through_the_adapter(self):
+        page = self.source.monitors(self.window, self.scope)
+        journeys = [m for m in page.monitors if m.type == "browser"]
+        self.assertTrue(journeys)
+        checks = self.source.history(journeys[0].id, self.window, self.scope,
+                                     limit=5)
+        self.assertTrue(checks)
+        self.assertEqual({c.location for c in checks}, {"lab-frankfurt"})
+
+
 def _playwright():
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401

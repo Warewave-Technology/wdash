@@ -1055,3 +1055,63 @@ class CredentialRedactionTest(unittest.TestCase):
         from wdash.agent.checks import _redact
         message = "could not connect to db"
         self.assertEqual(_redact(message, {"cookies": {"s": "db"}}), message)
+
+
+class WhereTheCheckRanTest(StoreTestCase):
+    """A check knows which agent reported it, so a history can say so.
+
+    Two probes watching one endpoint is the whole reason to have two probes,
+    and until this existed the detail page averaged them: measured on one
+    slow agent failing a quarter of its runs and one healthy one, the page
+    reported 87.5% available and a response time that was true of neither.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+        self.source = StoreMonitorSource(self.store)
+        self.window = TimeWindow.of("1h")
+        self.scope = Scope.unrestricted()
+        self.monitor = self._monitor()
+        self.agents = {}
+        for name in ("frankfurt", "dublin"):
+            agent, _ = self._agent(name)
+            self.agents[name] = agent
+        self.store.monitors.update(
+            self.monitor["id"],
+            agent_ids=[a["id"] for a in self.agents.values()])
+
+    def _report(self, agent_name, count=4, status=UP, duration_us=100_000):
+        self.store.results.record(self.agents[agent_name]["id"], [{
+            "monitor_id": self.monitor["id"],
+            "started_at": (_now() - timedelta(minutes=i)).isoformat(),
+            "status": status, "duration_us": duration_us,
+            "error": "" if status == UP else "gateway timeout",
+        } for i in range(count)])
+
+    def _history(self):
+        return self.source.history(self.monitor["id"], self.window, self.scope)
+
+    def test_a_check_says_which_agent_reported_it(self):
+        self._report("frankfurt")
+        self._report("dublin")
+        places = {c.location for c in self._history()}
+        self.assertEqual(places, {"frankfurt", "dublin"})
+
+    def test_it_is_the_name_somebody_typed_not_the_id(self):
+        """An agent id is a uuid, and a page printing uuids where it means
+        "Dublin" has not answered the question."""
+        self._report("dublin", count=1)
+        location = self._history()[0].location
+        self.assertEqual(location, "dublin")
+        self.assertNotIn(self.agents["dublin"]["id"], location)
+
+    def test_a_result_from_a_deleted_agent_says_nothing_rather_than_lying(self):
+        """The agent row is gone and the results it wrote are still real
+        history. An empty location is the honest answer; the id would be a
+        label nobody can read."""
+        self._report("frankfurt", count=2)
+        self.store.agents.delete(self.agents["frankfurt"]["id"])
+        checks = self._history()
+        self.assertEqual(len(checks), 2)
+        self.assertEqual({c.location for c in checks}, {""})

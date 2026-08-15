@@ -148,6 +148,23 @@ heartbeat.monitors:
     schedule: '@every 30s'
     tags: ["lab", "tcp"]
 
+# Where this agent is standing. Fleet-managed synthetics stamp every document
+# with `observer.geo.name`, and a self-managed Heartbeat stamps nothing at all
+# — measured on this lab before the field was added, where the whole
+# `observer` object was absent.
+#
+# It is here because "is it up" and "is it up from Dublin" are different
+# questions, and a lab with one location cannot tell whether WDash is asking
+# the second one. Two Heartbeats writing different names would be more
+# faithful and cost another 2.5GB container; this is the same document shape
+# for a tenth of the memory.
+processors:
+  - add_fields:
+      target: observer
+      fields:
+        geo.name: lab-frankfurt
+        name: lab-frankfurt
+
 output.elasticsearch:
   hosts: ["http://elasticsearch:9200"]
 
