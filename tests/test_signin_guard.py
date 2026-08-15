@@ -238,3 +238,83 @@ class ClientAddressTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheSignInPageOffersNoLinkToItselfTest(unittest.TestCase):
+    """Two screens, and on one of them the link was a loop.
+
+    The navbar's `Login` showed whenever nobody was signed in — including on
+    the sign-in page, where it points at the page you are reading, and during
+    first-run setup, where `/auth/login` redirects straight back to `/setup`
+    until an account exists. On a brand-new installation the only navigation
+    control on screen did nothing at all.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.secrets import SecretBox
+
+        handle, self.database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        database = self.database
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "signin-nav"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = SecretBox.generate_key()
+            ELASTICSEARCH_URL = ""
+            DASHBOARD_STORAGE = "database"
+
+        self.app = create_app(TestConfig)
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        self.app.store.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.database + suffix):
+                os.unlink(self.database + suffix)
+
+    def _claim(self):
+        password = "first-run-only-password"
+        self.client.post("/setup", data={"username": "owner",
+                                         "password": password,
+                                         "confirm": password})
+
+    @staticmethod
+    def _navbar(page):
+        """The bar, not the page.
+
+        The landing page's own "Sign in to get started" button points at the
+        same URL, so a check over the whole document passes with the navbar
+        link deleted — which is the opposite mistake and just as easy to
+        ship.
+        """
+        return page.split("<nav")[1].split("</nav>")[0]
+
+    def test_the_setup_screen_offers_no_login_link(self):
+        page = self.client.get("/setup").get_data(as_text=True)
+        self.assertIn("Set up WDash", page)
+        self.assertNotIn('href="/auth/login"', self._navbar(page))
+
+    def test_the_sign_in_page_offers_no_link_to_itself(self):
+        self._claim()
+        page = self.client.get("/auth/login").get_data(as_text=True)
+        self.assertIn("Sign in", page)
+        self.assertNotIn('href="/auth/login"', self._navbar(page))
+
+    def test_every_other_page_still_offers_one(self):
+        """The link is how somebody signed out gets back in — removing it
+        everywhere would be the same mistake in the other direction.
+
+        A fresh client, because completing setup signs you IN: asked of the
+        client that claimed the installation, this reads the navbar of an
+        authenticated session, where there is correctly no link at all.
+        """
+        self._claim()
+        page = self.app.test_client().get("/").get_data(as_text=True)
+        self.assertIn('href="/auth/login"', self._navbar(page))

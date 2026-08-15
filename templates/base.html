@@ -198,7 +198,14 @@
                                 </a></li>
                             </ul>
                         </div>
-                    {% else %}
+                    {% elif request.endpoint not in ('auth.login',
+                                                     'setup.first_run') %}
+                        {# Not on the sign-in page, and not during first-run
+                           setup. It pointed at the page you were already on,
+                           and on a fresh installation it was worse than
+                           useless: /auth/login redirects back to /setup until
+                           an account exists, so the only control on the
+                           screen was a loop. #}
                         <a class="nav-link" href="{{ url_for('auth.login') }}">
                             <i class="fas fa-sign-in-alt"></i> Login
                         </a>

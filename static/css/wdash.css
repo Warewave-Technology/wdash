@@ -346,6 +346,71 @@ body {
     transform: translateY(-1px);
 }
 
+/* The variants that were still Bootstrap's.
+ *
+ * Measured on the sign-in page, where `.btn-outline-primary` is the only
+ * action: #0d6efd in BOTH themes, because nothing here had ever mentioned the
+ * class — 3.84:1 on the dark card and 4.23:1 on the light one, against the
+ * 4.5:1 that button text needs. Bootstrap's mid-tones are the same trap the
+ * badges were: they miss on a dark ground and on a light one, which is why
+ * neither theme is where the mistake shows up.
+ *
+ * `tests/test_contrast.py` now fails if a template uses a Bootstrap colour
+ * variant this file has not restyled, so the next one cannot arrive quietly.
+ */
+.btn-outline-primary {
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    transition: all 0.3s ease;
+}
+
+.btn-outline-primary:hover {
+    background-color: var(--fill-accent);
+    border-color: var(--accent);
+    color: var(--text-on-fill);
+}
+
+.btn-outline-info {
+    color: var(--hue-blue);
+    border: 1px solid var(--hue-blue);
+    border-radius: 8px;
+    transition: all 0.3s ease;
+}
+
+.btn-outline-info:hover {
+    background-color: var(--fill-blue);
+    border-color: var(--hue-blue);
+    color: var(--text-on-fill);
+}
+
+.btn-outline-danger {
+    color: var(--hue-red);
+    border: 1px solid var(--hue-red);
+    border-radius: 8px;
+    transition: all 0.3s ease;
+}
+
+.btn-outline-danger:hover {
+    background-color: var(--fill-red);
+    border-color: var(--hue-red);
+    color: var(--text-on-fill);
+}
+
+.btn-danger {
+    background-color: var(--fill-red);
+    border: 1px solid var(--fill-red);
+    color: var(--text-on-fill);
+    border-radius: 8px;
+    font-weight: 600;
+}
+
+.btn-danger:hover {
+    background-color: var(--fill-red-strong);
+    border-color: var(--fill-red-strong);
+    color: var(--text-on-fill);
+}
+
 .btn-secondary {
     background-color: var(--surface-raised);
     border: 1px solid var(--border);

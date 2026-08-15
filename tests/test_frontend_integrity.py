@@ -344,14 +344,41 @@ class TheMarkIsOursTest(unittest.TestCase):
         self.assertNotIn("fa-terminal", hero)
         self.assertIn("wdash-mark", hero)
 
-    def test_all_four_copies_are_the_same_drawing(self):
-        navbar = self._paths(self.NAVBAR)[:3]
-        self.assertEqual(len(navbar), 3, "the navbar mark lost a stroke")
-        hero = re.findall(r'\bd="([^"]+)"', self._hero())
-        self.assertEqual(navbar, hero, "the landing page drew a different "
-                                       "mark from the navbar")
-        self.assertEqual(navbar, self._paths(self.FAVICON))
-        self.assertEqual(navbar, self._paths(self.CANDIDATE))
+    def _inline_marks(self):
+        """Every inline copy of the mark in any template, by file.
+
+        Found by scanning rather than by naming the files: the mark went into
+        the navbar and the favicon and stopped there, and the landing page
+        kept a borrowed glyph for a day because nothing looked wider than the
+        two places the change was made.
+        """
+        found = {}
+        templates = os.path.join(ROOT, "templates")
+        for name in sorted(os.listdir(templates)):
+            if not name.endswith(".html"):
+                continue
+            markup = self._prose_removed(_read(os.path.join(templates, name)))
+            for block in re.findall(r"<svg[^>]*\bwdash-mark\b.*?</svg>",
+                                    markup, flags=re.S):
+                found.setdefault(name, []).append(
+                    re.findall(r'\bd="([^"]+)"', block))
+        return found
+
+    def test_every_copy_is_the_same_drawing(self):
+        candidate = self._paths(self.CANDIDATE)
+        self.assertEqual(len(candidate), 3, "the candidate lost a stroke")
+        self.assertEqual(candidate, self._paths(self.FAVICON),
+                         "the favicon is not the mark that was chosen")
+
+        inline = self._inline_marks()
+        # The three screens that carry it today. Named so that losing one is
+        # a failure rather than a test that quietly checks less.
+        self.assertEqual(sorted(inline), ["base.html", "index.html",
+                                          "setup.html"])
+        for name, copies in inline.items():
+            for number, paths in enumerate(copies):
+                with self.subTest(template=name, copy=number):
+                    self.assertEqual(paths, candidate)
 
     def test_the_navbar_mark_takes_its_ink_from_the_page(self):
         """`currentColor` for the brackets is what makes one file serve both

@@ -972,3 +972,61 @@ class TextPaintedWithAGradientIsStillTextTest(unittest.TestCase):
                             round(ratio, 2), AA_LARGE,
                             f"{selector} paints text with {token} "
                             f"({value}) on {page}: {ratio:.2f}:1")
+
+
+class EveryBootstrapVariantIsRestyledTest(unittest.TestCase):
+    """A class the stylesheet never mentions is Bootstrap's colour, not ours.
+
+    Measured on the sign-in page, where `.btn-outline-primary` was the only
+    action on the screen: #0d6efd in BOTH themes, because nothing in
+    wdash.css had ever named the class. 3.84:1 on the dark card and 4.23:1 on
+    the light one, against the 4.5:1 button text needs — Bootstrap's
+    mid-tones miss on a dark ground and on a light one, which is exactly why
+    neither theme is where the mistake becomes visible.
+
+    Nothing else in this file could catch it. Every other test here measures
+    a declaration, and the fault is that there is no declaration.
+    """
+
+    #: The colour variants. `btn-sm`, `btn-group`, `btn-close` and `btn-link`
+    #: are structural — they set size or behaviour and take their colour from
+    #: somewhere this file already measures.
+    VARIANTS = ("primary", "secondary", "success", "danger", "warning",
+                "info", "light", "dark")
+
+    def _used(self):
+        templates = os.path.join(ROOT, "templates")
+        markup = ""
+        for name in sorted(os.listdir(templates)):
+            if name.endswith(".html"):
+                with open(os.path.join(templates, name)) as handle:
+                    markup += handle.read()
+        pattern = r"btn-(?:outline-)?(?:" + "|".join(self.VARIANTS) + r")"
+        return sorted(set(re.findall(pattern, markup)))
+
+    def test_the_templates_use_some(self):
+        self.assertTrue(self._used(), "no button variants found to check")
+
+    def _restyled(self):
+        """The variants this stylesheet gives a RESTING colour to.
+
+        A `:hover` rule does not count, and the first version of this test
+        accepted one: it asked whether the class was mentioned anywhere, so
+        renaming `.btn-outline-primary` and leaving
+        `.btn-outline-primary:hover` behind passed — a button that is
+        Bootstrap blue until you point at it.
+        """
+        found = set()
+        for selectors in re.findall(r"([^{}]+)\{", stylesheet()):
+            for selector in selectors.split(","):
+                match = re.search(r"(?<![\w-])\.(btn-(?:outline-)?\w+)"
+                                  r"(?![\w-])", selector.strip())
+                if match and ":" not in selector.split(match.group(0))[-1]:
+                    found.add(match.group(1))
+        return found
+
+    def test_every_variant_a_template_uses_is_restyled_here(self):
+        restyled = self._restyled()
+        missing = [name for name in self._used() if name not in restyled]
+        self.assertEqual(missing, [], "\n".join(
+            ["these are Bootstrap's colours, not the palette's:"] + missing))

@@ -6,7 +6,22 @@
   <div class="col-md-6 col-lg-5">
     <div class="card mt-5">
       <div class="card-body p-4">
-        <h3 class="mb-1"><i class="fas fa-key text-primary"></i> Set up WDash</h3>
+        {# The product's own mark rather than a key glyph: this is the first
+           screen a new installation shows, and the one place it introduces
+           itself. Same drawing as the navbar, the landing page and the
+           favicon — tests/test_frontend_integrity.py compares them. #}
+        <h3 class="mb-1 d-flex align-items-center gap-2">
+          <svg class="wdash-mark landing-icon" viewBox="0 0 32 32" width="30"
+               height="30" fill="none" role="img" aria-label="WDash">
+            <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
+               stroke-linejoin="round">
+              <path d="M11.5 5.5H7v21h4.5"/>
+              <path d="M20.5 5.5H25v21h-4.5"/>
+            </g>
+            <path d="M3.5 16h6.6l2.6-7.4 3.1 15 2.3-7.6h6.4"
+                  stroke="var(--accent)" stroke-width="2.7"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+          </svg> Set up WDash</h3>
         <p class="text-muted">
           This installation has no accounts yet. Create the administrator.
         </p>
