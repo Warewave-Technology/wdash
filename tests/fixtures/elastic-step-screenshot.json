@@ -1,0 +1,1279 @@
+{
+ "measured_against": "docker.elastic.co/beats/heartbeat:8.19.9, @elastic/synthetics 1.22.0, against the lab's journey site. One step/screenshot_ref and every screenshot/block it points at, exactly as Heartbeat wrote them \u2014 including the fact that the blocks were written by OTHER check groups, days earlier, because they are addressed by content hash.",
+ "ref": {
+  "_id": "KVPuBKABHJulj4YkQqcj",
+  "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+  "_source": {
+   "@timestamp": "2026-08-15T10:18:33.950Z",
+   "agent": {
+    "name": "67f2fde86b4b",
+    "type": "heartbeat",
+    "version": "8.19.9",
+    "ephemeral_id": "7ba9eb18-8c1c-4933-a3a1-df91d587ad2e",
+    "id": "228b851d-6963-4ac8-b18f-003cada08d19"
+   },
+   "os": {
+    "platform": "linux"
+   },
+   "synthetics": {
+    "package_version": "1.22.0",
+    "index": 68,
+    "step": {
+     "status": "",
+     "duration": {
+      "us": 0
+     },
+     "name": "sign in",
+     "index": 2
+    },
+    "journey": {
+     "name": "inline",
+     "id": "inline"
+    },
+    "type": "step/screenshot_ref"
+   },
+   "screenshot_ref": {
+    "blocks": [
+     {
+      "top": 0,
+      "left": 0,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 0,
+      "left": 160
+     },
+     {
+      "hash": "df659c547a35c3e09f42887c61ff27321eae5926",
+      "top": 0,
+      "left": 320,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "hash": "6235d66d4388de5a038d2c3a5f5eee52970900c7",
+      "top": 0,
+      "left": 480,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 0,
+      "left": 640,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 0,
+      "left": 800
+     },
+     {
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 0,
+      "left": 960,
+      "width": 160
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 0,
+      "left": 1120,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 90,
+      "left": 0,
+      "width": 160
+     },
+     {
+      "top": 90,
+      "left": 160,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "height": 90,
+      "hash": "6c0a9ffc99cc1e70ae181687eb3adc10856479cd",
+      "top": 90,
+      "left": 320,
+      "width": 160
+     },
+     {
+      "left": 480,
+      "width": 160,
+      "height": 90,
+      "hash": "9003828582446598dc9802724ad403940579851b",
+      "top": 90
+     },
+     {
+      "hash": "78086dd1cb91e393ea20d4ba97c05fa387c7b2df",
+      "top": 90,
+      "left": 640,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "37ba051359e58e26e9e542ab9e65e489b151a085",
+      "top": 90,
+      "left": 800
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 90,
+      "left": 960,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 90,
+      "left": 1120,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 180,
+      "left": 0,
+      "width": 160
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 180,
+      "left": 160,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "height": 90,
+      "hash": "a6fbfddd8123a8190aaf275929ef88733461bace",
+      "top": 180,
+      "left": 320,
+      "width": 160
+     },
+     {
+      "hash": "d652a460bdcc95192cb3343820a9e82f56df7f23",
+      "top": 180,
+      "left": 480,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "08e47dbfa300dc81b8bddd39ff0e52d12760a4b0",
+      "top": 180,
+      "left": 640
+     },
+     {
+      "hash": "0f39d981c9166328410da5a3e0fd19563ea41591",
+      "top": 180,
+      "left": 800,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 180,
+      "left": 960,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "left": 1120,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 180
+     },
+     {
+      "top": 270,
+      "left": 0,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "top": 270,
+      "left": 160,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "911a31dcc36d3ea7cc39c540ff2cb3ed7c879a2f",
+      "top": 270,
+      "left": 320
+     },
+     {
+      "height": 90,
+      "hash": "2f265043d9bb436824da086098f3fa2c6750194f",
+      "top": 270,
+      "left": 480,
+      "width": 160
+     },
+     {
+      "top": 270,
+      "left": 640,
+      "width": 160,
+      "height": 90,
+      "hash": "207082a2195086bf5ac44dd41beb96b5048b56c9"
+     },
+     {
+      "top": 270,
+      "left": 800,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "top": 270,
+      "left": 960,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "left": 1120,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 270
+     },
+     {
+      "left": 0,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 360
+     },
+     {
+      "top": 360,
+      "left": 160,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 360,
+      "left": 320,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 360,
+      "left": 480,
+      "width": 160
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 360,
+      "left": 640
+     },
+     {
+      "left": 800,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 360
+     },
+     {
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 360,
+      "left": 960,
+      "width": 160
+     },
+     {
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 360,
+      "left": 1120,
+      "width": 160
+     },
+     {
+      "top": 450,
+      "left": 0,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "top": 450,
+      "left": 160,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 450,
+      "left": 320
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 450,
+      "left": 480
+     },
+     {
+      "top": 450,
+      "left": 640,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "left": 800,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 450
+     },
+     {
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 450,
+      "left": 960,
+      "width": 160
+     },
+     {
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 450,
+      "left": 1120,
+      "width": 160
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 540,
+      "left": 0
+     },
+     {
+      "left": 160,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 540
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 540,
+      "left": 320,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 540,
+      "left": 480,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 540,
+      "left": 640,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "left": 800,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 540
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 540,
+      "left": 960,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "top": 540,
+      "left": 1120,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 630,
+      "left": 0,
+      "width": 160
+     },
+     {
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 630,
+      "left": 160,
+      "width": 160,
+      "height": 90
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 630,
+      "left": 320
+     },
+     {
+      "left": 480,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 630
+     },
+     {
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 630,
+      "left": 640,
+      "width": 160
+     },
+     {
+      "top": 630,
+      "left": 800,
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820"
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 630,
+      "left": 960
+     },
+     {
+      "width": 160,
+      "height": 90,
+      "hash": "38598688de857f7163aad493c4972f9dd6ebc820",
+      "top": 630,
+      "left": 1120
+     }
+    ],
+    "width": 1280,
+    "height": 720
+   },
+   "monitor": {
+    "name": "Lab shop journey (bad password)",
+    "timespan": {
+     "lt": "2026-08-15T10:19:34.100Z",
+     "gte": "2026-08-15T10:18:34.100Z"
+    },
+    "type": "browser",
+    "check_group": "a87e71fc-9892-11f1-bffe-76fb8324fad7-1",
+    "id": "lab-journey-down"
+   },
+   "ecs": {
+    "version": "8.0.0"
+   },
+   "package": {
+    "name": "@elastic/synthetics",
+    "version": "1.22.0"
+   },
+   "event": {
+    "type": "step/screenshot_ref",
+    "dataset": "browser.screenshot"
+   },
+   "tags": [
+    "lab",
+    "browser"
+   ],
+   "data_stream": {
+    "namespace": "default",
+    "dataset": "browser.screenshot",
+    "type": "synthetics"
+   }
+  }
+ },
+ "blocks": [
+  {
+   "_id": "38598688de857f7163aad493c4972f9dd6ebc820",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:46.408Z",
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "os": {
+     "platform": "linux"
+    },
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "monitor": {
+     "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+     "id": "lab-journey-up",
+     "name": "Lab shop journey",
+     "timespan": {
+      "gte": "2026-08-13T13:59:47.433Z",
+      "lt": "2026-08-13T14:00:47.433Z"
+     },
+     "type": "browser"
+    },
+    "package": {
+     "version": "1.22.0",
+     "name": "@elastic/synthetics"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "agent": {
+     "type": "heartbeat",
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847"
+    },
+    "synthetics": {
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAj/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AKpAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB//9k=",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block",
+     "package_version": "1.22.0",
+     "index": 4
+    },
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    }
+   }
+  },
+  {
+   "_id": "df659c547a35c3e09f42887c61ff27321eae5926",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:46.296Z",
+    "os": {
+     "platform": "linux"
+    },
+    "package": {
+     "version": "1.22.0",
+     "name": "@elastic/synthetics"
+    },
+    "monitor": {
+     "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+     "id": "lab-journey-up",
+     "name": "Lab shop journey",
+     "timespan": {
+      "gte": "2026-08-13T13:59:47.435Z",
+      "lt": "2026-08-13T14:00:47.435Z"
+     },
+     "type": "browser"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "agent": {
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847",
+     "type": "heartbeat",
+     "version": "8.19.9"
+    },
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    },
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "synthetics": {
+     "type": "screenshot/block",
+     "package_version": "1.22.0",
+     "index": 71,
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAGQABAQADAQAAAAAAAAAAAAAAAAgBAgYH/8QAKhABAAIBAwIEBQUAAAAAAAAAAAECAwQFEQYHCBIxQRM3cXSzISIzgaH/xAAWAQEBAQAAAAAAAAAAAAAAAAAAAQL/xAAeEQEBAAEDBQAAAAAAAAAAAAAAARECIYEDEiIzsf/aAAwDAQACEQMRAD8AqkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGOBPvfDvL1F0H19oNj2fR7Vm0mo0+LLa+qxZLXibXtWeJrkrHHER7KApPmpE+8xykm3dC7XFbgKAAAAAAAAAAAAAAAAIy8W3zk2f7LD+W6ycX8dfpCN/Fr85dn+ywflusfHM/Dp9INHr5p1J58T45Duxsms3/ojW6Pbt9ybDqYmuSNbXNbFWsRP7ovaJifLMc/4lHrbt7snS/Tmo3vZe6e3brv2mms2wafU465bxNoiYp5ctrcxzz/Xs9E8bOozU2XpnBTNkrhyZ89r44tMVtNYrxMx6TxzPH1lMOjxY7bLrclsdJvWa+W0x+senpLGm5zhvGMSv//Z",
+     "blob_mime": "image/jpeg"
+    }
+   }
+  },
+  {
+   "_id": "6235d66d4388de5a038d2c3a5f5eee52970900c7",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:46.296Z",
+    "package": {
+     "name": "@elastic/synthetics",
+     "version": "1.22.0"
+    },
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "monitor": {
+     "name": "Lab shop journey",
+     "timespan": {
+      "lt": "2026-08-13T14:00:47.435Z",
+      "gte": "2026-08-13T13:59:47.435Z"
+     },
+     "type": "browser",
+     "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+     "id": "lab-journey-up"
+    },
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "synthetics": {
+     "index": 72,
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAGwABAAMAAwEAAAAAAAAAAAAAAAYHCAECBQP/xAA7EAACAQMCBAMCCQ0BAAAAAAAAAQIDBAUGEQcIEiETMUEycTc4YXN0dbGysxQVFyYzNUJRUoGRkrTB/8QAFwEBAQEBAAAAAAAAAAAAAAAAAAIBA//EACQRAQACAQIGAgMAAAAAAAAAAAABAhESQQMhIlFhgRPBMUNx/9oADAMBAAIRAxEAPwDVIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4B8q7ao1Gns1HzMq8qOqNQZziHmLbM53K5C2p2M5wp3d3UrQjLxYLdKTaT2bMr1TjxknlXV5w1gADQBXfGPibYcNMFRvLq3le3t1N07a1jPo62lu5OWz2it16PzRR0OYziDTto5a40XbfmKfeNdW1xGLXyVm3F/4MjEkxMNab9wvMpLiLrTJZjlxutUWVK8wV7cUqNWl4Ny1Upp1oreM49L2a93ZnblQzGUznDi5us1kr3I3KyFSCq3deVaaioQ2XVJt7d32NiMzOdmTPKJ7rsAAaAAAAAAAAAAAAAKb5a9WZHVnC+VbM3E7q9s687V1qj3nUioqUXJ+r2ltv5vYzDwW09m9WayyGDwWXqYanc0Ju9uqSbkqMZJ9K2ab3l0rbdf8AhfvJx8F2W+san4UCuOTpv9KWY+XG1G/f41MvTHy+vpOccP39vCzdnqDgBxLso2mXq3dlVUbhtJwhdUnLacZ092t1s++79GjcVrWjXt6VaHeFSKnH3NbmROdV/rdp36JU++au05+4cZ9Fp/dRFZ1cPM95baMX5dlK81ugMxqzD4vKaft53lxjPEVW2prepOnPpfVBfxNOPku/fsR/hLzEYu1xllp7W1pPG1bSEbWN3Tpt0mopRXiQ9qD7d9k17jTUvZj719plvnSx1lRssBfUbO2p3tevWhVuI0oqpUiktlKW27S3fmTWdOY8qxq5+FmcxdxbXPAjNV8fUpVbSpC3lSnSacJQdWns4tdttjP3BbhvqDiVo+8tI6mq4jTdrcSSt4UnUVetKKcnKKlFPZdPdt/Il3JhaVJ1OSut4k5T6ZuK6nvsldrZe4mXJt8Fl39ZVfuUy61xN/SZt01/sqv4B5nP6M41y0XeX9W5sZVq1lVoublTUoRk41IJ+z7Pp6PuSXmg19namrbLQ2mbqvaqrGn+USozcJ1qlR7Qp9S7qOzW69d+/kRjA/HEq/Wdb8KR14yfGjsn6q9sNn/oZXrjh53VMaZvjZ01vwX1Pwy02tXY3U86t5bShK5jbRnRnS6mlvGfU+tJtJ7pdi3dJ64uNecuuor/ACKi8lbWF1a3Mo9lUlGk2p7Ly3TTa/nuSrmK+BnVHzFP8WBTPALty68Q9v6bn/nREzNqXidobWIi1J7ygvAjSOoOIWPy+nrLUVfDYC3nG5uVTg5+LVkumMWlKO62i33e3Zdj1NFXue4M8baGl7jJTu8VWuadvWgm1Tq06u3RUUG30yXUn/ZrdomXJH+x1evRTtfsqkW48/GTxvzlj9qO37a17uf5rfOzZyAXkCFAAAAAD//Z",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block",
+     "package_version": "1.22.0"
+    },
+    "os": {
+     "platform": "linux"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    },
+    "agent": {
+     "type": "heartbeat",
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847"
+    }
+   }
+  },
+  {
+   "_id": "78086dd1cb91e393ea20d4ba97c05fa387c7b2df",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:46.296Z",
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "monitor": {
+     "timespan": {
+      "gte": "2026-08-13T13:59:47.436Z",
+      "lt": "2026-08-13T14:00:47.436Z"
+     },
+     "type": "browser",
+     "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+     "id": "lab-journey-up",
+     "name": "Lab shop journey"
+    },
+    "os": {
+     "platform": "linux"
+    },
+    "package": {
+     "version": "1.22.0",
+     "name": "@elastic/synthetics"
+    },
+    "synthetics": {
+     "index": 81,
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAFgABAQEAAAAAAAAAAAAAAAAAAAUI/8QAHhAAAQMEAwAAAAAAAAAAAAAAAAMFFgRVlNFTldP/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8A1SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkSCj4XTrKnzEgo+F06yp8yuAJEgo+F06yp8xIKPhdOsqfMrgCRIKPhdOsqfMSCj4XTrKnzK4AkSCj4XTrKnzEgo+F06yp8yuAJEgo+F06yp8xIKPhdOsqfMrgCRIKPhdOsqfMSCj4XTrKnzK4AkSCj4XTrKnzEgo+F06yp8yuAJEgo+F06yp8xIKPhdOsqfMrgCRIKPhdOsqfMSCj4XTrKnzK4AkSCj4XTrKnzEgo+F06yp8yuAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkRhhsbXiJ6EYYbG14iegK4JEYYbG14iehGGGxteInoCuCRGGGxteInoRhhsbXiJ6ArgkRhhsbXiJ6EYYbG14iegK4JEYYbG14iehGGGxteInoCuCRGGGxteInoRhhsbXiJ6ArgkRhhsbXiJ6EYYbG14iegK4JEYYbG14iehGGGxteInoCuCRGGGxteInoRhhsbXiJ6ArgkRhhsbXiJ6EYYbG14iegEYYbG14iehGGGxteInorgCRGGGxteInoRhhsbXiJ6K4AkRhhsbXiJ6EYYbG14ieiuAJEYYbG14iehGGGxteInorgCRGGGxteInoRhhsbXiJ6K4AkRhhsbXiJ6EYYbG14ieiuAJEYYbG14iehGGGxteInorgCRGGGxteInoRhhsbXiJ6K4AkRhhsbXiJ6EYYbG14ieiuAJEYYbG14iehGGGxteInorgD//2Q==",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block",
+     "package_version": "1.22.0"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "agent": {
+     "type": "heartbeat",
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847"
+    },
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    }
+   }
+  },
+  {
+   "_id": "37ba051359e58e26e9e542ab9e65e489b151a085",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:46.296Z",
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    },
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "package": {
+     "name": "@elastic/synthetics",
+     "version": "1.22.0"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "agent": {
+     "name": "c89599f13847",
+     "type": "heartbeat",
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6"
+    },
+    "synthetics": {
+     "package_version": "1.22.0",
+     "index": 82,
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAGAABAQEBAQAAAAAAAAAAAAAAAAUEAQj/xAAvEAEAAAQEAgkDBQAAAAAAAAAAAQMEBQIRFlWU0RIhMTZRU5Wz0wYUdCIjJoHh/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/APVIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJGoKPybp6ZU/Gago/JunplT8auAkago/JunplT8ZqCj8m6emVPxq4CRqCj8m6emVPxmoKPybp6ZU/GrgMdBcqav6cJEZuHHgjDpS50nHKxwz7I9HHCEco5RyjllHKPhFsRqXD/LLl4/ZUv9/uVH+rIAAAAAAAAAAAAAAAAAAJFL3tuX4NL7lQrpFL3tuX4NL7lQrgAAAAAAAAAAAACRpiw7Ha+El8jTFh2O18JL5AriRpiw7Ha+El8jTFh2O18JL5AriRpiw7Ha+El8jTFh2O18JL5A5TRhD6tuOfVnQ0vuVCwx0dBR2+TjlUNLIpZOLF044JMuEuEY5dvVCHhDrbAAAAAAAAAAAAASNMWHY7XwkvkaYsOx2vhJfJXASNMWHY7XwkvkaYsOx2vhJfJXASNMWHY7XwkvkaYsOx2vhJfJXAQLTSSKD6huNLQyJNNTQpaebCTJwQwYIY8WOdDFiyhlDOMMOGEY9v6YduUF9Ipe9ty/BpfcqFcAAAAAAAAAAAAH//2Q==",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block"
+    },
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "monitor": {
+     "timespan": {
+      "gte": "2026-08-13T13:59:47.436Z",
+      "lt": "2026-08-13T14:00:47.436Z"
+     },
+     "type": "browser",
+     "check_group": "3d851932-971f-11f1-a108-92bde760a856-1",
+     "id": "lab-journey-up",
+     "name": "Lab shop journey"
+    },
+    "os": {
+     "platform": "linux"
+    }
+   }
+  },
+  {
+   "_id": "6c0a9ffc99cc1e70ae181687eb3adc10856479cd",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:51.393Z",
+    "synthetics": {
+     "package_version": "1.22.0",
+     "index": 14,
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAGwABAQACAwEAAAAAAAAAAAAAAAUBCAIDBgf/xAA0EAABAwMCAgYJBAMAAAAAAAAAAQIDBAURBiESFgcxQVWU0QgTIjZRU3SVsyMyVNMmNeP/xAAVAQEBAAAAAAAAAAAAAAAAAAAAAf/EABwRAQACAgMBAAAAAAAAAAAAAAABMRHwAkFRIf/aAAwDAQACEQMRAD8A2pAAAAAAAAAAAAAAAAAAAAAaW+l/MkHS3bJkTi9XQQvx8cSP2PTt9LbCInJXVt/tf+JtTw9exnBOPyMLynM5ahek/S3XVWnNH60pLfMltmoOOdkarKlK5+H4cqIm2FxxKiftOiv6Sbt0g9GFRpDR2jFpqelokdW1DJEWKKOJEcvCnCiIruHbK536u03Bc1cJhDKNVEXA6njFJmpm3MAFAAAAAAAAAAAAAAAAAAAAAA3AAAAAAAAAAAAAAAAAAAAAAABI5ioF3jSulZ2SRUE8jHJ8WuaxUci9ioqovYOYKP5N0+2VP9Zx0e3/ABOyY/gwfjQsZT4gSeYKP5N0+2VP9Y5go/k3T7ZU/wBZWynxGUz1oBkAAAAAAAAAAAAAAAAAAAABI0f7pWT6GD8bSNWaompNT3mhfSS1NLQ0NPUxx0cLpZ5HyPkarcZxjLE7ExuqqiFjR/ulZPoYPxtIGqtDy3uvuVVFc0p1rIKWBYnwesjVsMrnq16cTVex/Fwq1Fbt2rnAOk689IzoEo0prVXR1aXWK31lBURsdO3jjc9vArJFYqrhuF4sJvnGCk7XtK+y1VVBRVMFfDVLRPoazgjeyZG8a8bmq5qNRntq5Fd7PVldjz1H0UVFBVOntt1ttvRa+G4sho7QkUUcscbmcLWJJjgcjt0/d1+1uipRrtC1zaKeq9fTXW7TV762pY9q0sM7HwLA6JuFerP012VVVc9a4VcSa3fSL3fH0YAFAAAAAAAAAAAAAAAAAAAR9ILjSVkz/Bg/G0sEiXT1lmnkkntFuklkcr3vfTMcrlVd1XbrX49o5YsPcdr8JH5AVwSOWLD3Ha/CR+Q5YsPcdr8JH5AVwAAAAAAAAAAAAAAAAAAAAHldN2K1VunbXVVdsoZ6meljllmlga98j3MRXOcqplVVd1Vd1KfLNh7ktfhI/Ixo/wB0rJ9DB+NpYQCRyzYe47X4SPyHLNh7jtfhI/IrKEA//9k=",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block"
+    },
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    },
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "agent": {
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847",
+     "type": "heartbeat",
+     "version": "8.19.9"
+    },
+    "package": {
+     "version": "1.22.0",
+     "name": "@elastic/synthetics"
+    },
+    "monitor": {
+     "type": "browser",
+     "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+     "id": "lab-journey-down",
+     "name": "Lab shop journey (bad password)",
+     "timespan": {
+      "gte": "2026-08-13T13:59:51.553Z",
+      "lt": "2026-08-13T14:00:51.553Z"
+     }
+    },
+    "os": {
+     "platform": "linux"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ]
+   }
+  },
+  {
+   "_id": "9003828582446598dc9802724ad403940579851b",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:51.393Z",
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "monitor": {
+     "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+     "id": "lab-journey-down",
+     "name": "Lab shop journey (bad password)",
+     "timespan": {
+      "gte": "2026-08-13T13:59:51.553Z",
+      "lt": "2026-08-13T14:00:51.553Z"
+     },
+     "type": "browser"
+    },
+    "os": {
+     "platform": "linux"
+    },
+    "package": {
+     "name": "@elastic/synthetics",
+     "version": "1.22.0"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    },
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "agent": {
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847",
+     "type": "heartbeat",
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451"
+    },
+    "synthetics": {
+     "index": 15,
+     "blob": "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",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block",
+     "package_version": "1.22.0"
+    }
+   }
+  },
+  {
+   "_id": "a6fbfddd8123a8190aaf275929ef88733461bace",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:51.393Z",
+    "synthetics": {
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAGwABAAIDAQEAAAAAAAAAAAAAAAUGAQIIAwT/xAAzEAABAwMCAgYKAgMAAAAAAAAAAQIDBAURBiEHMRITImF0sxQWNkFRUlOSldMjMnGRsf/EABgBAQADAQAAAAAAAAAAAAAAAAABAwUE/8QAHhEBAQABBAMBAAAAAAAAAAAAAAERAgORoQUy8EH/2gAMAwEAAhEDEQA/AOqQAAAAAAAAAAAAAAAAAAAAEPo/2SsngYPLaRN44i6Zs+q2acuNwWG7Pp3VXVrE9WpG1rnKquxhOy1y4z7iX0d7JWTwMHltPeey2ye5x3GW30clwjYsTKl8DXStYvNqPVMoi/DOCLkUWm42aFqae1zRXZ6suVU6kgzTSIvWN6Oekit2Ttt37+5cb1HGjRFPS3mokuknV2moZS1OKaRVR7lciI1Mbplrt+W3embXDpLT0EVJFBYrVHFRyrPTMbRxo2GRd1exMdl3em5tLpWwTQ1sMtjtUkVbIktUx1HGrah6LlHSIqdpe9ck377kTQAAAAAAAAAAAAAAAAAAAACG0guNJWTwMHltJkqNfNoeKsmZcJNOMq+mqytndAj+lntK7O+dt8nh6Vw7+vpL76YC6gpXpXDv6+kvvph6Vw7+vpL76YC6gAAAAAAAAAAAAAAAAAAAAKJo3taQsjlRMuooXuwiJlVYiqvwyqqqr3kyQ2i/Y6xeAg8tpMgAABYgAAAAAAAAAAAAAAAAAAAAFE0X7HWLwEHltJkh9GIrdH2NHIrVShgRUVOX8bc/8JgAAALEAAAAAAAAAAAAAAAAAAAAAr79IWlzlVja2FMqqMp6+ohY3KquzGPRqbqvJENfU61fPdvy9X+0sOV+BnIFd9TrV892/L1f7R6nWr57t+Xq/wBpYsjIAAAAAAAAAAAAAAAAAAAAq4RVUGsn9Hf4BEZHfrVJa33KO40T7exVR9S2dqxtVFwuXZxzN573bKelpame4UkdNVKjYJXzNa2VXJlqNVVw7Puwc9yKrODWuo2L0Y23l7UamyInWR7Y+BITPc/SHCNHuVyLXxZRVznHL/Rz6d+3rtrXxumT2/bOJl0Ei88JtyGcbY2Pmic5XLlV5t9/eZaq9c/deSls3M4ZV04f/9k=",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block",
+     "package_version": "1.22.0",
+     "index": 22
+    },
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "monitor": {
+     "id": "lab-journey-down",
+     "name": "Lab shop journey (bad password)",
+     "timespan": {
+      "gte": "2026-08-13T13:59:51.554Z",
+      "lt": "2026-08-13T14:00:51.554Z"
+     },
+     "type": "browser",
+     "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1"
+    },
+    "package": {
+     "name": "@elastic/synthetics",
+     "version": "1.22.0"
+    },
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    },
+    "os": {
+     "platform": "linux"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "agent": {
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847",
+     "type": "heartbeat",
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451"
+    }
+   }
+  },
+  {
+   "_id": "d652a460bdcc95192cb3343820a9e82f56df7f23",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:51.393Z",
+    "agent": {
+     "type": "heartbeat",
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847"
+    },
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "synthetics": {
+     "index": 23,
+     "blob": "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",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block",
+     "package_version": "1.22.0"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    },
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "monitor": {
+     "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+     "id": "lab-journey-down",
+     "name": "Lab shop journey (bad password)",
+     "timespan": {
+      "gte": "2026-08-13T13:59:51.554Z",
+      "lt": "2026-08-13T14:00:51.554Z"
+     },
+     "type": "browser"
+    },
+    "os": {
+     "platform": "linux"
+    },
+    "package": {
+     "name": "@elastic/synthetics",
+     "version": "1.22.0"
+    }
+   }
+  },
+  {
+   "_id": "08e47dbfa300dc81b8bddd39ff0e52d12760a4b0",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:51.393Z",
+    "monitor": {
+     "id": "lab-journey-down",
+     "name": "Lab shop journey (bad password)",
+     "timespan": {
+      "lt": "2026-08-13T14:00:51.554Z",
+      "gte": "2026-08-13T13:59:51.554Z"
+     },
+     "type": "browser",
+     "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1"
+    },
+    "os": {
+     "platform": "linux"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    },
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "agent": {
+     "type": "heartbeat",
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847"
+    },
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "package": {
+     "name": "@elastic/synthetics",
+     "version": "1.22.0"
+    },
+    "synthetics": {
+     "package_version": "1.22.0",
+     "index": 24,
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAHAABAQEAAQUAAAAAAAAAAAAAAAYFBAECAwcI/8QAMRAAAQEECgEDBAEFAAAAAAAAAAECAwQFBgcRFBZSU5KV0yESMWETIiNBCDRRcaGz/8QAFwEBAAMAAAAAAAAAAAAAAAAAAAECBP/EAB8RAQACAgEFAQAAAAAAAAAAAAABAgMRIRIxQWGR0f/aAAwDAQACEQMRAD8A+qQAAAAAAAAAAAAAAAAAAAAAAAAAABFXqrvXolvhhequ9eiW+GAtQRV6q716Jb4YXqrvXolvhgLUEVequ9eiW+GF6q716Jb4YC1BFXqrvXolvhhequ9eiW+GAtQRV6q716Jb4YXqrvXolvhgLUEVequ9eiW+GF6q716Jb4YC1BFXqrvXolvhhequ9eiW+GAtQRV6q716Jb4YXqrvXolvhgLUEVequ9eiW+GF6q716Jb4YC1BFXqrvXolvhhequ9eiW+GA0wYMkpbJZ2/cuZbFPHjT9ysQ5VuGeumXrtLLWmGm2URpE9SW2W2HZNqVy6Tx0a6mkQ6cOIV05eNt/kabT6rbTDNrKMWWKrPhUaVfe1GbPKeDxtQgzJNO4CcXhIF49+pDNow+dPnDxy8dqqIqWsNso15RfC2WKaYAAAAAAAAAAAAAAAAAAAAABGyWi0bAv6HtvHkMrMogHkI+9LTS+ptWHaIrH2+U+xfez9exx6U0QmE1ncbGQ72GZdP2YBGUetNI1+CIV437ItnhbE+fC2F148+3k6ePj/H9xvcxb2iO0wwpRJ38HSifTJ425VzMEcI6RlpVaZ+mwqL6vHj38eVN4W/P+wEgAAAAAAAAAAAAAAAAAAAABg6VZ5ty8X2jB0qzzbl4vtKG34HqAnsHSrPNuXi+0YOlWebcvF9pRACdwdKs825eL7Rg6VZ5ty8X2lEAJ3B0qzzbl4vtGDpVnm3LxfaUQAncHSrPNuXi+0YOlWebcvF9pRACdwdKs825eL7Rg6VZ5ty8X2lEAJ3B0qzzbl4vtGDpVnm3LxfaUQAncHSrPNuXi+0YOlWebcvF9pRACdwdKs825eL7Rg6VZ5ty8X2lEAJ3B0qzzbl4vtGDpVnm3LxfaUQA8bTxlllpppUSxLVVV9kONLpjCTOEYipdEuIqGbt9L5w8RthbFsWxU8e5x5z/QPU/Sum7fnwRf8AHzzVXKbc7/8A6tFK36rTVorg3gnLvmJiPu/x7JABdnAAAAAAAAAAAAAAAAAAAAAH/9k=",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block"
+    }
+   }
+  },
+  {
+   "_id": "0f39d981c9166328410da5a3e0fd19563ea41591",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:51.393Z",
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "synthetics": {
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block",
+     "package_version": "1.22.0",
+     "index": 25,
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAGwABAQEAAgMAAAAAAAAAAAAAAAUGAQQCAwj/xAAxEAEAAQIDAgwGAwAAAAAAAAAAAQIEAwUGERYHFCExNlJTdJKVs9MiI1VhlNFBUbH/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8A+qQAAAAASLXpbmXcbX1LhXSLXpbmXcbX1LhXAAAAAAAAAAAAAGK41wd9vpLx2xxrg77fSXjtgbUYrjXB32+kvHbPbazoO7x6MC0jTGPj1zEU4eHxeqqqZ5tkc8g2AkbsZD9Eyv8AEw/0bsZD9Eyv8TD/AEDi2qje3Mu42vqXCw6thl1nl+FOFYWuBbYVVU1zRg4cURMzERt2R/PJHL9naAAAAAAAAAAAABnQAEbWXw6QzuqIjbTZY1dO2InZMUTMT/W2JiJj7rKNrTodnvcMf06gbsAAAAAAAAAAAAAAAGdAARtadDs97hj+nUso+s4mrR+eRTE1TNjjxERHP8urZ/oN0AAAAAAAAAAAAAAADO7nZV18283u/dNzsq6+beb3futEAzu52VdfNvN7v3XlRpDKaaomum9xo2xM0XF/cY1FWyYnlorrmmeWI54loAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH/2Q=="
+    },
+    "package": {
+     "name": "@elastic/synthetics",
+     "version": "1.22.0"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    },
+    "agent": {
+     "name": "c89599f13847",
+     "type": "heartbeat",
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6"
+    },
+    "monitor": {
+     "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+     "name": "Lab shop journey (bad password)",
+     "id": "lab-journey-down",
+     "timespan": {
+      "gte": "2026-08-13T13:59:51.554Z",
+      "lt": "2026-08-13T14:00:51.554Z"
+     },
+     "type": "browser"
+    },
+    "os": {
+     "platform": "linux"
+    },
+    "ecs": {
+     "version": "8.0.0"
+    }
+   }
+  },
+  {
+   "_id": "911a31dcc36d3ea7cc39c540ff2cb3ed7c879a2f",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:51.393Z",
+    "monitor": {
+     "id": "lab-journey-down",
+     "name": "Lab shop journey (bad password)",
+     "timespan": {
+      "lt": "2026-08-13T14:00:51.554Z",
+      "gte": "2026-08-13T13:59:51.554Z"
+     },
+     "type": "browser",
+     "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1"
+    },
+    "synthetics": {
+     "index": 30,
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAGwABAAICAwAAAAAAAAAAAAAAAAEIAgUDBAf/xAAoEAEAAQQBAwQABwAAAAAAAAAAAQIDBAURBhIhBxMxURRhcYGRoaL/xAAXAQEAAwAAAAAAAAAAAAAAAAAAAQQF/8QAJBEBAAIBAgQHAAAAAAAAAAAAAAECEUFhAwQhgQUSFSIxkfD/2gAMAwEAAhEDEQA/ALUgAAAAAAAAAAAAAEx4kAVr3GFcp9R9h0TTRP4TabmxsezieJtdk13P25p/pyen9m9m+oGn6byIrmz0vczbk90THdE1RFE/6hYGvU66raU7OrAxZ2NFPZTlTZp92Kfrv4548z/LHG1GtxdhfzsbAxbWbfji7kUWaYuXI+qqojmVanLzEx1/afTbt4vmk18vXGO+MTPeHhfpzo6r+i6i6gsV5d/a67JzaddZ9yZtWq5pmeaaI8TVM1fP6NDpruuxMTozadObO9e6uzs2mnYURlTXcu0zM9/uUTPiI4iPMfE8+VlsDW4Out12tdh4+LbuVzcrps24oiqqfmqYj5n83Xw9BqMLYXc7E1eFYzbvM15FuxTTcq5+6ojmUxwJ9u0Qj1aJte01+d9MTGJ21bUBYYoAAAAAAAAAAAAABx5R2wkBHEJ4gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/2Q==",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block",
+     "package_version": "1.22.0"
+    },
+    "os": {
+     "platform": "linux"
+    },
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "package": {
+     "name": "@elastic/synthetics",
+     "version": "1.22.0"
+    },
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    },
+    "agent": {
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847",
+     "type": "heartbeat"
+    }
+   }
+  },
+  {
+   "_id": "2f265043d9bb436824da086098f3fa2c6750194f",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:51.393Z",
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    },
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "synthetics": {
+     "package_version": "1.22.0",
+     "index": 31,
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAHAABAAEFAQEAAAAAAAAAAAAAAAEDBAYHCAUC/8QANRAAAQQCAQMCAwYDCQAAAAAAAQACAwQFEQYSITEHEyJBURQVMmFxgSdCkTM0U2JyobHh8f/EABkBAQEAAwEAAAAAAAAAAAAAAAABAgMFBP/EAC4RAAIBAgIIBQQDAAAAAAAAAAABAgMRITEEBRNBYXGRsRJRgaHBFCJC8NHh8f/aAAwDAQACEQMRAD8A9m1x2nncx6nWchJZLse7368bJXMayTocesgHRPwjz8lSuW2Zmj6bVOXXpG4GzWkdYklmMbZZGghoe/Y79m9977nxtdBsw2MY665uPqA3f7zqFo9/tr4+3xeT535WLc245krWPx9HjON41JQh37lTJ1yYm+OksawaGu/9V5JUfCk+R3KetFOSi8EsuH22w9cTF/QQVRleZDHTvs0m3mthlfIZC5oBH4j3I7dj9FiPqDFYzHqXnquYtY2GKtDGaH3lfkqMiBaNyR9PYkO33P8A5tf0x4hZ4vWyc+Smry5HJWDPMKzC2Jn0a0edDfzWT5PB4vLGM5THU7pZ3b9ohbJ0/p1A6WeycoxT/cDCenwpaVOpDG6ST6fwaMyeJmy2e9NcZmsiL3v1bDJ7NSd2rDAAdB40SHAAO8bXgQ8VpP49z8umuluAtPGOZ9pd01yCTsDet/LZXShwuNNipMcfU96o0trP9pvVACNEMOvhH6L4GBxQiuR/dtL27h6rTfYbqc/V418X7qS0e6fr8FjrdxSSWVu9+2BpLkubxeXx3E8VnMUMlefi47bp7eSdTiaHNALnO/mPw+P+1jtG3Yt+mvGftE0kzIeTRRRF7y/pYN6AcfIGz3XRVnjWEtCo2xiKEragDa4fXYRCB4DNj4R2+SqO49h3wiF+KoOibP8Aag012aE3+J4/H/m8quk27/uaJHWdOMFBRed8+eXlmYBwofxr50QAB7FU9hr+QLwfUBuNyfqu3Hc1tmtgIsd79Zj7JhifLvRPUCNuHftv5Bbkr4ujWu2LsFSvFbsACadsYD5Ndh1O8n91Sy+ExeZYxmWx1S6xh6mixC2QNP5dQOlXSfhUTRHToqttGvxUeKskr+xzgZshk+CcUjnuWxE7kJrVLXURL7Gi0EO1/q158DyuheOYGlxzBtx2Ma8QN6n7kkL3Fx7kkn81dzYbG2I6sc+PqyR1XB8AfC1wicPBbsfCR9Qr+RvVGR+XZWFPwJ7/APEY6Xp31CUYqyu31ZyLXOLi4FZvw5OZnKaeU1SgbZPUxpeN9Ee9aOydgeRpZv6n5PE5fLX6N/DMkyeNotL7dnJuqMicWdY9uPv1u2fp/wAhbB9M+BM45jR99VcbZyjLEksNmNnW6NjiCAHuaHD59h2WYWsDiLWQZkLWMpTXYwA2w+BrpGgeAHEb+Z/qtUaDcEvO3Y6NfWlLbuSTaTdnfl5bsPc54zUc2Z4NxHI5DKULUtepI6XG5K46A2mgkBwcHglwAHkjx+yr8nFHO8O4vk6ctKGpBXkc7B5S+9nvNDyC5shcC47B1sj5fot8T8V4/Zr14LGDxksFcahjfUjLYwTvTRrQ79+yq5DjeEyYgbkMTj7TYB0xCaux/QPo3Y7fssnQbvxNK1rBNNRybfo74e+eZoXK5eviMPw/mmIqT1K7q1mhJDLK6Rw7O6B1O7uHWCQT8vK8mtibdGajwOQSObl7NK/IHeegxky/t1M/2K6WvYTGZClHTu4+pYqxkFkMsLXsaR4IBGgvqTD42TIw35KFV16FvRFYMLTIxvfs12tgdz4+qbGV733r++pY63goWUMce949DnzkoxV7kHOZOW331snjW6w8RsmL22hhLDE0EdRJ19fKrNq3OUci9PqmfsW4pLmLlFl0byySRgBOifI6gG7+vfwt75Dj+HyNqO1kMXRt2Yv7OWeBr3N/QkbCuZcbRlvQ3ZKVZ92BpZFO6JpkjB8hrtbAP0CqoNNPl8mD1rGyUY7sODtbDuXmgmgpReg4xGhtTpEQDSaCIgGkREA0oDQDtSiAAaTSIgI0E0FKIBpNIiAjQU6REA0mkRAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREB//2Q==",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block"
+    },
+    "package": {
+     "version": "1.22.0",
+     "name": "@elastic/synthetics"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "agent": {
+     "type": "heartbeat",
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451",
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847"
+    },
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "monitor": {
+     "timespan": {
+      "lt": "2026-08-13T14:00:51.554Z",
+      "gte": "2026-08-13T13:59:51.554Z"
+     },
+     "type": "browser",
+     "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+     "id": "lab-journey-down",
+     "name": "Lab shop journey (bad password)"
+    },
+    "os": {
+     "platform": "linux"
+    }
+   }
+  },
+  {
+   "_id": "207082a2195086bf5ac44dd41beb96b5048b56c9",
+   "_index": ".ds-synthetics-browser.screenshot-default-2026.08.13-000001",
+   "_source": {
+    "@timestamp": "2026-08-13T13:59:51.393Z",
+    "os": {
+     "platform": "linux"
+    },
+    "monitor": {
+     "name": "Lab shop journey (bad password)",
+     "timespan": {
+      "gte": "2026-08-13T13:59:51.554Z",
+      "lt": "2026-08-13T14:00:51.554Z"
+     },
+     "type": "browser",
+     "check_group": "3d851ee8-971f-11f1-a108-92bde760a856-1",
+     "id": "lab-journey-down"
+    },
+    "tags": [
+     "lab",
+     "browser"
+    ],
+    "ecs": {
+     "version": "8.0.0"
+    },
+    "agent": {
+     "id": "ffdb6c87-945f-4c4f-9966-c213e82fd3d6",
+     "name": "c89599f13847",
+     "type": "heartbeat",
+     "version": "8.19.9",
+     "ephemeral_id": "63d585e9-b4e4-4808-ae87-03806f33e451"
+    },
+    "package": {
+     "name": "@elastic/synthetics",
+     "version": "1.22.0"
+    },
+    "event": {
+     "type": "screenshot/block",
+     "dataset": "browser.screenshot"
+    },
+    "synthetics": {
+     "index": 32,
+     "blob": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCABaAKADASIAAhEBAxEB/8QAGAABAAMBAAAAAAAAAAAAAAAAAAEDBgT/xAAkEAEAAQUAAAUFAAAAAAAAAAAAAQIDBAURBgcSITEIUmKBs//EABYBAQEBAAAAAAAAAAAAAAAAAAADBf/EACIRAQABAwEJAAAAAAAAAAAAAAABAgMRBAUSEyExUXGh8P/aAAwDAQACEQMRAD8A0G5wtFa8x9prPEufdwNbqdbbp1NNWXVZimPREeqiexM1d7yPfs9+W/8Ap9nvlXqoj7739am4z9Jq9hlWMnO12Jk5Fie2rl2zTXVbn8ZmOx+l+vwMTXYtONr8azjWKZmYtWqIopjvv8R7I27U01b33Vp6naMX7HBx28comPecusBZmAAAAAAAAAAAAAAAAI9MJiOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/2Q==",
+     "blob_mime": "image/jpeg",
+     "type": "screenshot/block",
+     "package_version": "1.22.0"
+    },
+    "data_stream": {
+     "namespace": "default",
+     "dataset": "browser.screenshot",
+     "type": "synthetics"
+    }
+   }
+  }
+ ]
+}

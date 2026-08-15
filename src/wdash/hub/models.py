@@ -634,6 +634,13 @@ class StepResult:
     status: str = STEP_SKIPPED
     duration_us: int = None
     error: str = ""
+    #: How to ask this step's SOURCE for the picture of the page, or None
+    #: where the source keeps none per step. Opaque on purpose: WDash's own
+    #: runs store one image per run and identify it by a row id, while
+    #: Elastic stores one per step, in pieces, addressed by check group and
+    #: step index. A page that had to know which is which would be a page
+    #: that breaks when a third kind appears.
+    screenshot_id: str = None
 
     @property
     def duration_ms(self):

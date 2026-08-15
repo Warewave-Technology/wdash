@@ -624,6 +624,8 @@ def _step(step):
         "index": step.index,
         "description": step.description,
         "status": step.status,
+        # Opaque, and handed straight back to the source that issued it.
+        "screenshot_id": getattr(step, "screenshot_id", None),
         "duration_ms": (round(step.duration_ms, 1)
                         if step.duration_ms is not None else None),
         "error": step.error,
@@ -709,6 +711,50 @@ def response_chart(points):
         "failure_count": sum(f for f in failures if f),
         "peak_ms": round(max(peaks + measured), 1),
     }
+
+
+@monitor_bp.route("/api/monitors/step-screenshot/<path:token>")
+@login_required
+def step_screenshot(token):
+    """One step's screenshot, as the pieces a browser can draw.
+
+    Elastic does not store a screenshot; it stores a reference to 64 tiles
+    and the tiles themselves, deduplicated by content hash across every run
+    of every monitor. Assembling them here would mean decoding and
+    re-encoding JPEG — an imaging library in the dependency list, for one
+    screen, when the browser already has a canvas.
+
+    Asked of every source that can answer, rather than of a named one: the
+    check group is a uuid, so the source that has it is the source it came
+    from, and a page that had to pass the source name back would break the
+    moment somebody bookmarked the link.
+    """
+    if not _require():
+        return jsonify({"error": "monitors:read is required"}), 403
+
+    hub = getattr(current_app, "hub", None)
+    for source in (hub.monitor_sources if hub else []):
+        getter = getattr(source, "step_screenshot", None)
+        if getter is None:
+            continue
+        try:
+            shot = getter(token, _scope())
+        except Exception:
+            shot = None
+        if shot:
+            response = jsonify(shot)
+            # Immutable: a check group and a step index name one moment that
+            # has already happened.
+            response.headers["Cache-Control"] = (
+                "private, max-age=86400, immutable")
+            return response
+    # 404 with a sentence rather than an empty body: "the agent stored none"
+    # and "this has aged out" are the two real answers, and both are worth
+    # saying on the screen.
+    return jsonify({"error": "No screenshot is stored for this step. Elastic "
+                             "writes one per step when the monitor asks for "
+                             "them, and whatever prunes the data stream "
+                             "removes them like anything else."}), 404
 
 
 @monitor_bp.route("/monitors/screenshot/<screenshot_id>")

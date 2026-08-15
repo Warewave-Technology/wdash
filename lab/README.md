@@ -149,10 +149,32 @@ measured against, and they write somewhere the HTTP monitors do not:
 ```
 synthetics-browser-default              journey and step documents
 synthetics-browser.network-default      one per request the page made
-synthetics-browser.screenshot-default   screenshots — several documents per
-                                        run, and how they assemble into an
-                                        image has not been measured
+synthetics-browser.screenshot-default   screenshots, in pieces — see below
 ```
+
+### How a screenshot is stored, measured
+
+Elastic does not store a screenshot. `tests/test_synthetics_lab.py` asks this
+lab the question and holds the answer:
+
+* one `step/screenshot_ref` per step, carrying the size of the picture and a
+  list of **blocks** — 64 of them for 1280x720, each 160x90, each named by a
+  content **hash** and placed by `top`/`left`;
+* one `screenshot/block` per distinct hash, whose `_id` IS the hash and whose
+  `synthetics.blob` is a base64 JPEG of that tile.
+
+Three things follow, and all three shaped the code that reads them:
+
+* **Blocks are shared.** In this lab 125 references pointed at 30 stored
+  blocks, and a screenshot taken this morning was built almost entirely out
+  of blocks written two days earlier by different runs of a *different*
+  monitor. So they are looked up by hash, never by check group.
+* **Whatever prunes the data stream punches holes in newer screenshots.**
+  WDash counts the missing tiles and says so, rather than drawing the gap and
+  letting somebody read it as a blank part of the page.
+* **A skipped step has no screenshot at all.** It writes a `step/end`
+  document like every other step, and nothing else — the step never ran, so
+  there was nothing on screen. WDash offers no camera button for one.
 
 Two things about running them, both learned the hard way:
 

@@ -66,6 +66,13 @@ MAX_MONITORS = 500
 #: How many past checks a history returns.
 MAX_HISTORY = 500
 
+#: Screenshot blocks fetched per request. A 1280x720 screenshot is 64 blocks
+#: and, measured, holds far fewer distinct ones — 14 was typical — so this is
+#: one request in practice. It is a cap rather than a promise: a taller page
+#: is more blocks, and one query asking for a thousand ids is a query that
+#: eventually times out instead of returning a picture.
+MAX_BLOCK_LOOKUP = 128
+
 #: What Elastic calls a step outcome, in the words WDash already uses for its
 #: own journeys. The three mean the same thing on both sides, including the
 #: one that matters: a step after a failure is `skipped`, not failed, because
@@ -535,17 +542,32 @@ class ElasticsearchMonitorSource(MonitorSource):
                 continue
             status = (_dig(source, "synthetics.step.status") or "").lower()
             duration = _dig(source, "synthetics.step.duration.us")
+            index = _dig(source, "synthetics.step.index") or 0
+            # Passed through when it is not one of the three measured values:
+            # an agent that reports something new should show what it said,
+            # rather than have it translated into one of ours.
+            outcome = STEP_STATUS.get(status, status or STEP_SKIPPED)
             found.setdefault(group, []).append(StepResult(
-                index=_dig(source, "synthetics.step.index") or 0,
+                # Where the picture of this step lives, derived rather than
+                # looked up: the screenshot documents are keyed by exactly
+                # these two values, so asking the cluster whether one exists
+                # would be a second query per page to decide whether to draw
+                # a button.
+                #
+                # Except for a SKIPPED step, which is measured: it writes a
+                # `step/end` document like any other and no screenshot at
+                # all, because the step never ran and there was nothing on
+                # screen to photograph. A token for it would be a button
+                # that always fails.
+                screenshot_id=(None if outcome == STEP_SKIPPED
+                               else f"{group}:{index}"),
+                index=index,
                 kind="browser",
                 # What the journey's author called the step. Not
                 # `synthetics.payload.source`, which is the step's code and
                 # carries whatever literal was typed into it.
                 description=_dig(source, "synthetics.step.name") or "",
-                # Passed through when it is not one of the three measured
-                # values: an agent that reports something new should show what
-                # it said, rather than have it translated into one of ours.
-                status=STEP_STATUS.get(status, status or STEP_SKIPPED),
+                status=outcome,
                 duration_us=duration,
                 # The synthetics message, which is the browser's own; the ECS
                 # one prefixes it with "error executing step: ".
@@ -558,6 +580,108 @@ class ElasticsearchMonitorSource(MonitorSource):
         # happened to return them.
         return {group: tuple(sorted(steps, key=lambda step: step.index))
                 for group, steps in found.items()}
+
+    def step_screenshot(self, token, scope):
+        """The page as it was at the end of one step, in pieces.
+
+        Measured against a running Heartbeat 8.19 rather than transcribed.
+        What it writes is not an image:
+
+          * one `step/screenshot_ref` document per step, carrying the size of
+            the picture and a list of BLOCKS — 64 of them for a 1280x720
+            screen, each 160x90, each with a `hash` and its `top`/`left`;
+          * one `screenshot/block` document per distinct hash, whose `_id` IS
+            the hash and whose `synthetics.blob` is a base64 JPEG of that
+            tile.
+
+        The blocks are content-addressed and written once. In the lab, a
+        screenshot taken today was assembled almost entirely out of blocks
+        stored two days earlier by different runs of a different monitor —
+        125 references pointing at 30 stored blocks. Three consequences, and
+        all three are why this is not a `get` by check group:
+
+          * blocks are looked up by hash, across the whole data stream;
+          * a screenshot with 64 blocks may hold only 14 distinct ones, so
+            one lookup covers many tiles;
+          * whatever deletes old documents punches holes in NEWER
+            screenshots. `missing` counts them, so the page can say a piece
+            is gone rather than drawing the gap and letting somebody read it
+            as a blank region of the page.
+
+        Returns the pieces, not an image. Assembling them server-side would
+        mean decoding and re-encoding JPEG, which means an imaging library in
+        the dependency list for one screen; the browser already has a canvas.
+        """
+        group, _, index = str(token or "").rpartition(":")
+        if not group or not index.isdigit():
+            return None
+
+        try:
+            response = self._search({
+                "size": 1,
+                "query": {"bool": {"filter": [
+                    {"term": {"synthetics.type": "step/screenshot_ref"}},
+                    {"term": {"monitor.check_group": group}},
+                    {"term": {"synthetics.step.index": int(index)}},
+                ]}},
+                "_source": ["screenshot_ref", "synthetics.step",
+                            "monitor.id", "@timestamp"],
+            })
+        except Exception:
+            return None
+
+        hits = _dig(response, "hits.hits") or []
+        if not hits:
+            return None
+        source = hits[0].get("_source") or {}
+        reference = _dig(source, "screenshot_ref") or {}
+        blocks = reference.get("blocks") or []
+        if not blocks:
+            return None
+
+        hashes = sorted({block.get("hash") for block in blocks
+                         if block.get("hash")})
+        blobs = {}
+        for start in range(0, len(hashes), MAX_BLOCK_LOOKUP):
+            batch = hashes[start:start + MAX_BLOCK_LOOKUP]
+            try:
+                found = self._search({
+                    "size": len(batch),
+                    "query": {"ids": {"values": batch}},
+                    "_source": ["synthetics.blob", "synthetics.blob_mime"],
+                })
+            except Exception:
+                found = None
+            for hit in (_dig(found, "hits.hits") or []):
+                blob = _dig(hit.get("_source") or {}, "synthetics.blob")
+                if blob:
+                    blobs[hit.get("_id")] = (
+                        blob,
+                        _dig(hit.get("_source") or {},
+                             "synthetics.blob_mime") or "image/jpeg")
+
+        tiles, missing = [], 0
+        for block in blocks:
+            blob = blobs.get(block.get("hash"))
+            if blob is None:
+                missing += 1
+                continue
+            tiles.append({
+                "left": block.get("left") or 0, "top": block.get("top") or 0,
+                "width": block.get("width") or 0,
+                "height": block.get("height") or 0,
+                "blob": blob[0], "mime": blob[1],
+            })
+        return {
+            "width": reference.get("width") or 0,
+            "height": reference.get("height") or 0,
+            "step": _dig(source, "synthetics.step.name") or "",
+            "monitor": _dig(source, "monitor.id") or "",
+            "taken_at": source.get("@timestamp"),
+            "blocks": tiles,
+            "missing": missing,
+            "source": self.name,
+        }
 
     def certificates(self, window, scope):
         """Every monitor that saw a certificate, its certificate attached.

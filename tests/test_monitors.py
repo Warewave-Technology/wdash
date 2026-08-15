@@ -1632,3 +1632,335 @@ class StepHistoryTest(unittest.TestCase):
                            for i in range(STEP_POINTS + 40)])
         self.assertEqual(rows[0]["runs"], STEP_POINTS + 40)
         self.assertEqual(rows[0]["drawn"], STEP_POINTS)
+
+
+SCREENSHOT_FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures",
+                                  "elastic-step-screenshot.json")
+
+
+def _screenshot_fixture():
+    with open(SCREENSHOT_FIXTURE) as handle:
+        return json.load(handle)
+
+
+class ReplayScreenshotElasticsearch:
+    """Answers the two queries a step screenshot issues, from real documents.
+
+    Routes on what is asked for, not on call order: an adapter that stopped
+    filtering by step index would get every step's reference back and pass a
+    test that a call-order fake would wave through.
+    """
+
+    def __init__(self, fixture, drop=()):
+        self.ref = fixture["ref"]
+        self.blocks = {b["_id"]: b for b in fixture["blocks"]
+                       if b["_id"] not in drop}
+        self.requests = []
+
+    def ping(self):
+        return True
+
+    def search(self, index=None, **kwargs):
+        self.requests.append(kwargs)
+        ids = _dig(kwargs, "query.ids.values")
+        if ids is not None:
+            return NotADict({"hits": {"hits": [
+                self.blocks[i] for i in ids if i in self.blocks]}})
+
+        wanted = {}
+        for clause in (_dig(kwargs, "query.bool.filter") or []):
+            wanted.update(clause.get("term") or {})
+        source = self.ref["_source"]
+        if wanted.get("synthetics.type") != "step/screenshot_ref":
+            return NotADict({"hits": {"hits": []}})
+        if wanted.get("monitor.check_group") != _dig(source,
+                                                     "monitor.check_group"):
+            return NotADict({"hits": {"hits": []}})
+        if wanted.get("synthetics.step.index") != _dig(
+                source, "synthetics.step.index"):
+            return NotADict({"hits": {"hits": []}})
+        return NotADict({"hits": {"hits": [self.ref]}})
+
+
+class ElasticStepScreenshotTest(unittest.TestCase):
+    """The picture of a step, out of the pieces Elastic actually stores.
+
+    Measured against a running Heartbeat 8.19 rather than transcribed, and the
+    shape is the reason this took a lab: Elastic does not store a screenshot.
+    It stores one `step/screenshot_ref` per step listing 64 tiles by content
+    HASH, and one `screenshot/block` per distinct hash whose `_id` is that
+    hash. In the lab, 125 references pointed at 30 stored blocks, and the
+    blocks behind a screenshot taken today had been written two days earlier
+    by different runs of a different monitor.
+
+    Which is why none of this can be a `get` by check group, and why a
+    missing block is a fact the screen has to be able to state.
+    """
+
+    def setUp(self):
+        self.fixture = _screenshot_fixture()
+        self.reference = self.fixture["ref"]["_source"]
+        self.group = _dig(self.reference, "monitor.check_group")
+        self.index = _dig(self.reference, "synthetics.step.index")
+        self.token = f"{self.group}:{self.index}"
+
+    def _source(self, drop=()):
+        return ElasticsearchMonitorSource(
+            ReplayScreenshotElasticsearch(self.fixture, drop=drop),
+            name="lab")
+
+    def _shot(self, drop=()):
+        return self._source(drop).step_screenshot(self.token,
+                                                  Scope.unrestricted())
+
+    # ---------- what the fixture itself says ----------
+
+    def test_the_fixture_is_the_shape_that_needed_measuring(self):
+        """If this ever fails, the rest of the class is testing a fiction."""
+        blocks = self.reference["screenshot_ref"]["blocks"]
+        self.assertEqual(len(blocks), 64)
+        self.assertEqual({(b["width"], b["height"]) for b in blocks},
+                         {(160, 90)})
+        self.assertLess(len({b["hash"] for b in blocks}), len(blocks),
+                        "no tile repeated, so this fixture cannot show "
+                        "deduplication at all")
+        stored = {b["_source"]["monitor"]["check_group"]
+                  for b in self.fixture["blocks"]}
+        self.assertNotIn(self.group, stored,
+                         "every block was written by this run, so the fixture "
+                         "cannot show that blocks outlive their run")
+
+    # ---------- assembling ----------
+
+    def test_it_returns_the_size_and_every_tile(self):
+        shot = self._shot()
+        self.assertEqual(shot["width"],
+                         self.reference["screenshot_ref"]["width"])
+        self.assertEqual(shot["height"],
+                         self.reference["screenshot_ref"]["height"])
+        self.assertEqual(len(shot["blocks"]), 64)
+        self.assertEqual(shot["missing"], 0)
+
+    def test_every_tile_carries_where_it_goes(self):
+        """A tile without its position is a piece of a page nobody can put
+        back. `top` of zero is a real position, so the check is on presence."""
+        for tile in self._shot()["blocks"]:
+            for field in ("left", "top", "width", "height", "blob", "mime"):
+                self.assertIn(field, tile)
+            self.assertTrue(tile["blob"])
+            self.assertEqual(tile["mime"], "image/jpeg")
+
+    def test_a_repeated_tile_is_fetched_once_and_drawn_many_times(self):
+        """64 tiles, 14 of them distinct. Fetching per tile would be four and
+        a half times the bytes for the same picture."""
+        source = self._source()
+        source.step_screenshot(self.token, Scope.unrestricted())
+        asked = [r for r in source._es.requests if _dig(r, "query.ids.values")]
+        self.assertEqual(len(asked), 1)
+        requested = asked[0]["query"]["ids"]["values"]
+        self.assertEqual(len(requested), len(set(requested)))
+        self.assertLess(len(requested), 64)
+
+    def test_a_block_that_is_gone_is_counted_not_invented(self):
+        """Blocks are content-addressed and outlive the run that wrote them,
+        so whatever prunes the data stream punches holes in NEWER
+        screenshots. A hole reported as a tile would read as a blank region
+        of the page under test."""
+        gone = self.fixture["blocks"][0]["_id"]
+        repeats = sum(1 for b in self.reference["screenshot_ref"]["blocks"]
+                      if b["hash"] == gone)
+        shot = self._shot(drop=(gone,))
+        self.assertEqual(shot["missing"], repeats)
+        self.assertEqual(len(shot["blocks"]), 64 - repeats)
+
+    def test_the_step_and_the_moment_travel_with_it(self):
+        shot = self._shot()
+        self.assertEqual(shot["step"],
+                         _dig(self.reference, "synthetics.step.name"))
+        self.assertEqual(shot["taken_at"], self.reference["@timestamp"])
+        self.assertEqual(shot["source"], "lab")
+
+    # ---------- refusing ----------
+
+    def test_a_token_for_another_step_finds_nothing(self):
+        source = self._source()
+        self.assertIsNone(source.step_screenshot(f"{self.group}:99",
+                                                 Scope.unrestricted()))
+
+    def test_rubbish_is_refused_without_a_query(self):
+        """A token arrives from a URL. Anything that is not `group:index`
+        must not become a search."""
+        source = self._source()
+        for token in ("", None, "no-colon", "group:", "group:two",
+                      "group:2:3:x"):
+            with self.subTest(token=token):
+                self.assertIsNone(
+                    source.step_screenshot(token, Scope.unrestricted()))
+        self.assertEqual(source._es.requests, [])
+
+    def test_a_group_with_a_colon_in_it_still_works(self):
+        """Split from the RIGHT. A check group is a uuid today; a source that
+        one day writes `region:group` would otherwise take the region as the
+        whole id and find nothing."""
+        source = self._source()
+        source.step_screenshot(f"eu-west:{self.group}:{self.index}",
+                               Scope.unrestricted())
+        asked = source._es.requests[0]
+        wanted = {}
+        for clause in _dig(asked, "query.bool.filter") or []:
+            wanted.update(clause.get("term") or {})
+        self.assertEqual(wanted["monitor.check_group"],
+                         f"eu-west:{self.group}")
+
+    def test_a_cluster_that_refuses_is_no_screenshot_not_an_error(self):
+        source = ElasticsearchMonitorSource(FakeElasticsearch(fail=True),
+                                            name="lab")
+        self.assertIsNone(source.step_screenshot(self.token,
+                                                 Scope.unrestricted()))
+
+
+class SkippedStepScreenshotTest(unittest.TestCase):
+    """No token for a step that never ran — measured, then held here.
+
+    The lab found it (`tests/test_synthetics_lab.py`): a skipped step writes
+    a `step/end` document like any other and no screenshot at all, because
+    nothing was on screen. Guarded from the fixture too, so the rule survives
+    a machine with no lab on it.
+    """
+
+    def setUp(self):
+        self.window = TimeWindow.of("24h")
+        self.scope = Scope.unrestricted()
+        run = _browser_runs("lab-journey-down")[-1]
+        source = ElasticsearchMonitorSource(ReplayElasticsearch([run]))
+        self.check = source.history("lab-journey-down", self.window,
+                                    self.scope, limit=5)[-1]
+
+    def test_the_fixture_holds_a_run_that_stopped_early(self):
+        self.assertIn("skipped", [s.status for s in self.check.steps])
+
+    def test_a_step_that_ran_carries_a_token(self):
+        for step in self.check.steps:
+            if step.status == "skipped":
+                continue
+            with self.subTest(step=step.index):
+                self.assertTrue(step.screenshot_id)
+                self.assertTrue(step.screenshot_id.endswith(f":{step.index}"))
+
+    def test_a_skipped_step_carries_none(self):
+        for step in self.check.steps:
+            if step.status != "skipped":
+                continue
+            with self.subTest(step=step.index):
+                self.assertIsNone(step.screenshot_id)
+
+
+class StepScreenshotRouteTest(unittest.TestCase):
+    """The endpoint the page fetches, and what it says when there is nothing.
+
+    Asked of every source that can answer rather than of a named one — the
+    check group is a uuid, so the source that has it is the source it came
+    from, and a link that carried the source name would rot the moment
+    somebody renamed one.
+    """
+
+    class Answering:
+        name = "answers"
+
+        def __init__(self, shot=None):
+            self.shot, self.asked = shot, []
+
+        def step_screenshot(self, token, scope):
+            self.asked.append(token)
+            return self.shot
+
+    class Exploding:
+        name = "explodes"
+
+        def step_screenshot(self, token, scope):
+            raise RuntimeError("cluster unreachable")
+
+    class Deaf:
+        """A source with no screenshots at all — the store adapter's shape."""
+        name = "deaf"
+
+    SHOT = {"width": 4, "height": 2, "blocks": [], "missing": 0}
+
+    def setUp(self):
+        from tests.support import grant
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.secrets import SecretBox
+
+        handle, self.database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        database = self.database
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "shots"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = SecretBox.generate_key()
+            ELASTICSEARCH_URL = ""
+            DASHBOARD_STORAGE = "database"
+
+        self.app = create_app(TestConfig)
+        self.client = self.app.test_client()
+        grant(self.app, "admin", ["system:admin", "monitors:read"],
+              indices=["*"])
+        with self.client.session_transaction() as session:
+            session["user_data"] = {
+                "id": "u1", "username": "admin", "email": "a@b", "groups": [],
+                "role": "admin",
+                "permissions": ["system:admin", "monitors:read"],
+                "allowed_indices": ["*"]}
+            session["_user_id"] = "u1"
+
+    def tearDown(self):
+        self.app.store.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.database + suffix):
+                os.unlink(self.database + suffix)
+
+    def _register(self, *sources):
+        for source in sources:
+            self.app.hub._monitors[source.name] = source
+
+    def _get(self, token="group-1:2"):
+        return self.client.get(f"/api/monitors/step-screenshot/{token}")
+
+    def test_the_source_that_has_it_answers(self):
+        answering = self.Answering(self.SHOT)
+        self._register(self.Deaf(), answering)
+        response = self._get()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["width"], 4)
+        self.assertEqual(answering.asked, ["group-1:2"])
+
+    def test_a_source_that_cannot_answer_is_stepped_over(self):
+        """A cluster being unreachable must not turn every other source's
+        screenshots into an error page."""
+        answering = self.Answering(self.SHOT)
+        self._register(self.Exploding(), answering)
+        self.assertEqual(self._get().status_code, 200)
+
+    def test_nothing_stored_is_a_404_that_says_why(self):
+        self._register(self.Answering(None))
+        response = self._get()
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("per step", response.get_json()["error"])
+
+    def test_it_needs_the_monitors_permission(self):
+        """A screenshot of a signed-in session is at least as sensitive as
+        the check that produced it."""
+        from tests.support import grant
+        self._register(self.Answering(self.SHOT))
+        grant(self.app, "admin", ["system:admin"], indices=["*"])
+        response = self._get()
+        self.assertEqual(response.status_code, 403)
+
+    def test_the_answer_is_cacheable_because_the_moment_has_passed(self):
+        self._register(self.Answering(self.SHOT))
+        self.assertIn("immutable",
+                      self._get().headers.get("Cache-Control", ""))

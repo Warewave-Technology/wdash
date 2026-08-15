@@ -776,14 +776,18 @@ Stated plainly, because they affect whether this fits your deployment:
   be written. It buys a journey that can be shown as rows rather than as one
   number, a failure that names the step, and an edit form that is not remote
   code execution on every probe host.
-- **Elastic's browser monitors show their steps, but not their screenshots.**
-  A `monitor.type: browser` check from Heartbeat or the Synthetics integration
-  is read down to the individual step — name, outcome, duration, and the error
-  on the one that broke — from the `synthetics-browser-*` data stream, and
-  rendered by the same screen as WDash's own journeys. Elastic also writes
-  screenshots, into `synthetics-browser.screenshot-*` and at more than one
-  document per run; how they are assembled has not been measured, so they are
-  not read. WDash keeps its own journeys' screenshots.
+- **An Elastic screenshot is reassembled, and can arrive incomplete.**
+  A `monitor.type: browser` check from Heartbeat or the Synthetics
+  integration is read down to the individual step — name, outcome, duration,
+  the error on the one that broke, and the page as the browser saw it. That
+  last one is not a stored image: Elastic writes a reference to 64 tiles and
+  the tiles themselves, addressed by content hash and shared across every run
+  of every monitor, so WDash fetches the tiles and the browser draws them.
+  Two consequences worth knowing before relying on it. Whatever prunes
+  `synthetics-browser.screenshot-*` removes tiles that NEWER screenshots
+  still point at, and the screen says how many are gone rather than drawing
+  the gap. And a step that never ran has no screenshot at all — nothing was
+  on screen — so no button is offered for one.
 
 What is planned, and what is missing on purpose, is in
 [ROADMAP.md](ROADMAP.md).

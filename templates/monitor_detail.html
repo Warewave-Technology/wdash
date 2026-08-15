@@ -325,6 +325,19 @@
                                 </td>
                                 <td><code style="font-size:.75rem"
                                     >{{ step.description }}</code>
+                                    {% if step.screenshot_id %}
+                                    {# Elastic keeps one per STEP, in tiles.
+                                       Fetched when somebody asks for it:
+                                       drawing them all would be sixty-four
+                                       images a step. #}
+                                    <button type="button"
+                                            class="btn btn-link btn-sm p-0 ms-2 align-baseline"
+                                            style="font-size:.7rem"
+                                            data-step-screenshot="{{ step.screenshot_id }}"
+                                            data-step-name="{{ step.description }}">
+                                        <i class="fas fa-camera"></i>
+                                        screenshot</button>
+                                    {% endif %}
                                     {% if step.error %}
                                     <div class="text-danger"
                                          style="font-size:.75rem"
@@ -422,6 +435,27 @@
     </div>
     {% endif %}
     {% endif %}
+</div>
+
+{# The picture of one step, assembled in the browser out of the tiles Elastic
+   stores. A modal rather than a thumbnail per row: 64 tiles a step, twenty-
+   five runs to a page. #}
+<div class="modal fade" id="stepShot" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="stepShotTitle">Step screenshot</h5>
+                <button type="button" class="btn-close"
+                        data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <canvas id="stepShotCanvas" class="border rounded"
+                        style="max-width:100%; height:auto"></canvas>
+                <div class="text-muted mt-2" style="font-size:.75rem"
+                     id="stepShotStatus"></div>
+            </div>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
@@ -540,6 +574,84 @@ document.getElementById('monitorWindow')?.addEventListener('change', function ()
     url.searchParams.set('window', this.value);
     window.location.href = url.toString();
 });
+
+// ---------------------------------------------------------------------------
+// A step's screenshot, assembled here.
+//
+// Elastic does not store a picture. It stores a list of 64 tiles and the
+// tiles themselves, deduplicated by content hash across every run of every
+// monitor — measured against a running Heartbeat, where a screenshot taken
+// today was built almost entirely out of tiles written two days earlier by a
+// different monitor. Whatever prunes that data stream therefore punches holes
+// in newer screenshots, which is why `missing` is reported rather than left
+// to look like a blank part of the page.
+//
+// Drawn on a canvas rather than composed on the server, which would mean
+// decoding and re-encoding JPEG and an imaging library in the dependency list
+// for one screen.
+// ---------------------------------------------------------------------------
+(function () {
+    const modal = document.getElementById('stepShot');
+    if (!modal) { return; }
+    const canvas = document.getElementById('stepShotCanvas');
+    const status = document.getElementById('stepShotStatus');
+    const title = document.getElementById('stepShotTitle');
+
+    function draw(shot) {
+        canvas.width = shot.width || 0;
+        canvas.height = shot.height || 0;
+        const context = canvas.getContext('2d');
+        // The gaps are painted before anything else, so a missing tile is a
+        // flat block rather than whatever the canvas happened to hold. From
+        // the palette, with no fallback colour written here: a literal in a
+        // template is a colour no theme can reach, and an unpainted canvas
+        // is transparent, which shows the modal's own background.
+        const fill = getComputedStyle(document.documentElement)
+            .getPropertyValue('--surface-sunken').trim();
+        if (fill) {
+            context.fillStyle = fill;
+            context.fillRect(0, 0, canvas.width, canvas.height);
+        }
+        return Promise.all(shot.blocks.map(block => new Promise(resolve => {
+            const image = new Image();
+            image.onload = () => {
+                context.drawImage(image, block.left, block.top,
+                                  block.width, block.height);
+                resolve();
+            };
+            image.onerror = () => resolve();
+            image.src = `data:${block.mime};base64,${block.blob}`;
+        })));
+    }
+
+    document.querySelectorAll('[data-step-screenshot]').forEach(button => {
+        button.addEventListener('click', function () {
+            const token = this.dataset.stepScreenshot;
+            title.textContent = this.dataset.stepName || 'Step screenshot';
+            status.textContent = 'Fetching the tiles…';
+            canvas.width = canvas.height = 0;
+            new bootstrap.Modal(modal).show();
+            fetch(`/api/monitors/step-screenshot/${encodeURIComponent(token)}`)
+                .then(response => response.json().then(body => ({
+                    ok: response.ok, body})))
+                .then(({ok, body}) => {
+                    if (!ok) { status.textContent = body.error; return; }
+                    return draw(body).then(() => {
+                        const when = body.taken_at
+                            ? new Date(body.taken_at).toLocaleString() : '';
+                        status.textContent =
+                            `${body.blocks.length} tile(s)` +
+                            (body.missing
+                                ? `, ${body.missing} no longer stored` : '') +
+                            (when ? ` — ${when}` : '');
+                    });
+                })
+                .catch(() => {
+                    status.textContent = 'The screenshot could not be read.';
+                });
+        });
+    });
+})();
 
 // Timestamps arrive as ISO strings so the server does not have to guess the
 // reader's timezone.

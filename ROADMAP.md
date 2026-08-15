@@ -144,12 +144,15 @@ somebody can point at today.
   underneath, because the step says where and only the error says what. The
   model already knew which step was to blame; the serializer between it and
   the page was dropping the answer.
-* **Elastic's journey screenshots are not shown.** WDash's own journeys keep
-  the picture of the page as it failed, and the two kinds now share a screen —
-  so a run with no screenshot reads as "none was taken" rather than "this one
-  comes from somewhere else". They are in
-  `synthetics-browser.screenshot-*`, several documents per run, and how they
-  assemble has not been measured.
+* ~~**Elastic's journey screenshots are not shown.**~~ Done. Every step that
+  ran offers the page as the browser saw it. Elastic stores no screenshot: it
+  stores a reference to 64 tiles and the tiles themselves, deduplicated by
+  content hash across every run of every monitor, so they are assembled — in
+  the browser, on a canvas, rather than by adding an imaging library to
+  compose JPEG on the server. What that measurement found is in
+  [lab/README.md](lab/README.md#how-a-screenshot-is-stored-measured), and
+  `tests/test_synthetics_lab.py` asks a running Heartbeat the same questions
+  so the fixture cannot quietly stop matching reality.
 
 ## Deliberately absent
 
