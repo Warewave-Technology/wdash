@@ -299,14 +299,17 @@ class LabSeedTest(unittest.TestCase):
 class TheMarkIsOursTest(unittest.TestCase):
     """The navbar carries WDash's own mark, in three places that must agree.
 
-    It replaced a Font Awesome magnifying glass — an icon the product
-    borrowed, which means "search" on every other site that uses it. The
-    drawing now exists as the navbar's inline SVG, as the favicon, and as the
-    candidate it was chosen from; three copies of one shape drift, and the
-    only symptom is a tab icon that stops being the logo.
+    It replaced a Font Awesome magnifying glass in the navbar and a terminal
+    glyph on the landing page — icons the product borrowed, which mean
+    "search" and "a shell" on every other site that uses them. The drawing
+    now exists four times: the navbar, the landing hero, the favicon, and the
+    candidate it was chosen from. Copies of one shape drift, and the only
+    symptom is a mark on one screen that has quietly stopped matching the
+    others.
     """
 
     NAVBAR = os.path.join(ROOT, "templates", "base.html")
+    HERO = os.path.join(ROOT, "templates", "index.html")
     FAVICON = os.path.join(ROOT, "static", "img", "wdash-mark.svg")
     PNG = os.path.join(ROOT, "static", "img", "wdash-mark-32.png")
     CANDIDATE = os.path.join(ROOT, "docs", "logo", "1-pulse-in-brackets.svg")
@@ -315,15 +318,38 @@ class TheMarkIsOursTest(unittest.TestCase):
         """Every `d` attribute in a file, in order."""
         return re.findall(r'\bd="([^"]+)"', _read(path))
 
-    def test_the_navbar_no_longer_borrows_an_icon(self):
+    @staticmethod
+    def _prose_removed(markup):
+        """Jinja and HTML comments dropped.
+
+        Both files explain what the mark replaced, and they name it: the
+        check below reads `fa-terminal` in a sentence about `fa-terminal` as
+        the fault it is looking for. The same trap as a CSS comment that
+        writes out the token it is describing, which is why `stylesheet()`
+        in tests/test_contrast.py strips first too.
+        """
+        markup = re.sub(r"\{#.*?#\}", "", markup, flags=re.S)
+        return re.sub(r"<!--.*?-->", "", markup, flags=re.S)
+
+    def _hero(self):
+        hero = _read(self.HERO).split('class="landing-logo"')[1]
+        return self._prose_removed(hero.split("</div>")[0])
+
+    def test_no_screen_borrows_an_icon_for_the_brand(self):
         brand = _read(self.NAVBAR).split('class="navbar-brand"')[1]
-        brand = brand.split("</a>")[0]
+        brand = self._prose_removed(brand.split("</a>")[0])
         self.assertNotIn("fa-search", brand)
         self.assertIn('class="wdash-mark"', brand)
+        hero = self._hero()
+        self.assertNotIn("fa-terminal", hero)
+        self.assertIn("wdash-mark", hero)
 
-    def test_all_three_copies_are_the_same_drawing(self):
+    def test_all_four_copies_are_the_same_drawing(self):
         navbar = self._paths(self.NAVBAR)[:3]
         self.assertEqual(len(navbar), 3, "the navbar mark lost a stroke")
+        hero = re.findall(r'\bd="([^"]+)"', self._hero())
+        self.assertEqual(navbar, hero, "the landing page drew a different "
+                                       "mark from the navbar")
         self.assertEqual(navbar, self._paths(self.FAVICON))
         self.assertEqual(navbar, self._paths(self.CANDIDATE))
 
@@ -332,7 +358,7 @@ class TheMarkIsOursTest(unittest.TestCase):
         themes. The accent is the only colour written, and it is written as
         the palette's own name."""
         brand = _read(self.NAVBAR).split('class="navbar-brand"')[1]
-        brand = brand.split("</a>")[0]
+        brand = self._prose_removed(brand.split("</a>")[0])
         self.assertIn('stroke="currentColor"', brand)
         self.assertIn('stroke="var(--accent)"', brand)
 

@@ -203,7 +203,10 @@ body {
     font-weight: bold;
     font-size: 1.5rem;
     color: var(--accent) !important;
-    text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
+    /* No glow. It was a 10-pixel halo of the accent behind the word, which
+       on the dark theme reads as a smudge around the name and, next to a
+       drawn mark, as something rendering wrong. The mark is the brand now;
+       the word does not have to shout. */
     display: inline-flex;
     align-items: center;
     gap: 8px;
@@ -1485,20 +1488,36 @@ code {
     margin-bottom: 12px;
 }
 
+/* The wordmark's gradient is drawn from the INK hues, not the fills.
+ *
+ * It used to run `--fill-accent` to `--fill-blue`, and those two are
+ * deliberately theme-INDEPENDENT: they are chip backgrounds, sized to carry
+ * `--text-on-fill` on top of them. Clipped to text on a white page they gave
+ * the product's name a measured 2.07:1 — under the 3:1 that large text
+ * needs, and the one word on the page nobody can afford to squint at. The
+ * hues are per-theme and are meant to be read: 4.6:1 light, 9.5:1 dark.
+ *
+ * No stylesheet check can catch this one. `-webkit-text-fill-color:
+ * transparent` means the colour a reader sees is the background's, so the
+ * contrast tests see a transparent glyph and nothing to measure; this was
+ * read off the rendered pixels. */
 .landing-logo h1 {
     font-size: 3.5rem;
     font-weight: 700;
     margin: 0;
-    background: linear-gradient(135deg, var(--fill-accent), var(--fill-blue));
+    background: linear-gradient(135deg, var(--accent), var(--hue-blue));
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
 }
 
+/* The hero mark. Ink rather than accent, for the same reason as the navbar's:
+   the drawing is two-tone and the pulse is the tone that matters. The glow
+   that used to be here belonged to a glyph; a stroked mark with a 30-pixel
+   halo behind it reads as a rendering fault rather than as light. */
 .landing-icon {
-    font-size: 2.8rem;
-    color: var(--accent);
-    text-shadow: 0 0 30px color-mix(in srgb, var(--accent) 40%, transparent);
+    color: var(--text-primary);
+    flex: none;
 }
 
 .landing-tagline {

@@ -25,6 +25,9 @@ CSS = os.path.join(ROOT, "static", "css", "wdash.css")
 #: WCAG 2.1 AA for normal-sized text.
 AA_NORMAL = 4.5
 
+#: And for large or bold text — the wordmark on the landing page is 3.5rem.
+AA_LARGE = 3.0
+
 
 def stylesheet():
     """`wdash.css`, with its comments removed.
@@ -913,3 +916,59 @@ class EveryThemeIsMeasuredTest(unittest.TestCase):
         self.assertEqual(light["--fill-red"], palettes()["dark"]["--fill-red"])
         self.assertEqual(light["--text-on-fill"],
                          palettes()["dark"]["--text-on-fill"])
+
+
+class TextPaintedWithAGradientIsStillTextTest(unittest.TestCase):
+    """The one kind of ink no other test in this file can see.
+
+    `-webkit-text-fill-color: transparent` with a gradient clipped to the
+    glyphs means the colour a reader sees is the BACKGROUND's, so every check
+    here that measures a `color` declaration finds a transparent glyph and
+    nothing to measure. It has to be read off the gradient instead.
+
+    Measured on the landing page's wordmark, which ran `--fill-accent` to
+    `--fill-blue`: 2.09:1 and 1.95:1 on a white page, against the 3:1 large
+    text needs. Those two tokens are deliberately theme-INDEPENDENT — they
+    are chip backgrounds, sized to carry `--text-on-fill` on top of them —
+    and clipping them to text put the product's own name below the threshold
+    on half the installations.
+    """
+
+    def _clipped(self):
+        """Every rule that paints its text with a gradient."""
+        css = stylesheet()
+        found = []
+        for block in re.findall(r"([^{}]+)\{([^}]*)\}", css):
+            selector, body = block[0].strip(), block[1]
+            if "text-fill-color: transparent" not in body.replace("-webkit-",
+                                                                  ""):
+                continue
+            gradient = re.search(r"background:\s*([^;]*gradient[^;]*)", body)
+            if gradient:
+                found.append((selector, gradient.group(1)))
+        return found
+
+    def test_there_is_something_to_measure(self):
+        """If the landing page stops using one, this class should be deleted
+        rather than left passing over nothing."""
+        self.assertTrue(self._clipped(),
+                        "no clipped gradient found — is this still true?")
+
+    def test_both_ends_are_readable_in_both_themes(self):
+        for selector, gradient in self._clipped():
+            tokens = re.findall(r"var\((--[\w-]+)\)", gradient)
+            self.assertTrue(tokens, f"{selector}: gradient with no token in "
+                                    f"it, so nothing here can follow a theme")
+            for theme, palette in palettes().items():
+                page = palette["--surface-page"]
+                for token in tokens:
+                    value = palette.get(token)
+                    with self.subTest(selector=selector, theme=theme,
+                                      token=token):
+                        self.assertIsNotNone(value, f"{token} is not in the "
+                                                    f"{theme} palette")
+                        ratio = contrast(value, page)
+                        self.assertGreaterEqual(
+                            round(ratio, 2), AA_LARGE,
+                            f"{selector} paints text with {token} "
+                            f"({value}) on {page}: {ratio:.2f}:1")
