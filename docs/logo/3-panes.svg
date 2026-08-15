@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32"
+     height="32" fill="none" id="wdash-mark-panes" role="img"
+     aria-label="WDash">
+  <!--
+    The dashboard itself, at the smallest size it still means anything.
+
+    One wide pane with a line in it and two narrow ones beside: the layout
+    every screen in this product already has. It is the most literal of the
+    three and the most legible at 16 pixels, because it is four rectangles
+    and a stroke rather than a shape somebody has to recognise.
+
+    The line is the accent, so the eye lands on the only part that is data.
+  -->
+  <style>
+    #wdash-mark-panes { color: #1f2328; }
+    @media (prefers-color-scheme: dark) {
+      #wdash-mark-panes { color: #f0f6fc; }
+    }
+  </style>
+  <rect x="3.3" y="5.3" width="25.4" height="21.4" rx="4.2"
+        stroke="currentColor" stroke-width="2.4"/>
+  <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+    <path d="M20.5 6.5v19"/>
+    <path d="M20.5 16h8.2"/>
+  </g>
+  <path d="M7.5 19.5l3.4-4.6 2.6 3 3.4-6"
+        stroke="var(--wdash-accent, #39c5cf)" stroke-width="2.4"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

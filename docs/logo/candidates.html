@@ -1,0 +1,531 @@
+<title>Three Marks for WDash</title>
+<style>
+  /* The product's own palette, not a new one: these are the tokens in
+     static/css/wdash.css, so a mark judged here is judged against the ground
+     it will actually sit on. Light is the bare :root; dark is redefined
+     twice, once for the system setting and once for an explicit choice. */
+  :root {
+    --page: #ffffff;
+    --card: #f6f8fa;
+    --sunken: #eaeef2;
+    --border: #d0d7de;
+    --ink: #1f2328;
+    --muted: #636c76;
+    --accent: #0e7490;
+    --on-accent: #ffffff;
+    --shadow: rgba(31, 35, 40, .10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page: #0d1117;
+      --card: #161b22;
+      --sunken: #0b0f14;
+      --border: #30363d;
+      --ink: #f0f6fc;
+      --muted: #8b949e;
+      --accent: #39c5cf;
+      --on-accent: #0d1117;
+      --shadow: rgba(0, 0, 0, .5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --page: #0d1117;
+    --card: #161b22;
+    --sunken: #0b0f14;
+    --border: #30363d;
+    --ink: #f0f6fc;
+    --muted: #8b949e;
+    --accent: #39c5cf;
+    --on-accent: #0d1117;
+    --shadow: rgba(0, 0, 0, .5);
+  }
+
+  /* One family, doing every job. WDash is a screen for people who live in a
+     terminal and its whole interface is monospaced; a proportional display
+     face here would be judging the marks in somebody else's typography. */
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font: 400 15px/1.65 ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+          Consolas, "Liberation Mono", monospace;
+    margin: 0;
+    padding: 48px 28px 72px;
+  }
+  .sheet { max-width: 1000px; margin: 0 auto; }
+
+  .eyebrow {
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: .22em;
+    text-transform: uppercase;
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-size: clamp(26px, 4vw, 38px);
+    font-weight: 600;
+    letter-spacing: -.02em;
+    line-height: 1.15;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+  .lede { color: var(--muted); margin: 0; max-width: 62ch; }
+  .lede b { color: var(--ink); font-weight: 600; }
+
+  .controls {
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 30px 0 34px;
+    padding-bottom: 18px;
+  }
+  .controls .spacer { flex: 1 1 auto; }
+  button {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--ink);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    padding: 7px 13px;
+  }
+  button[aria-pressed="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+  }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .hint { color: var(--muted); font-size: 12px; }
+
+  .mark {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    margin-bottom: 20px;
+    overflow: hidden;
+  }
+  .mark > header {
+    align-items: baseline;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 12px;
+    padding: 14px 20px;
+  }
+  .mark h2 { font-size: 15px; font-weight: 600; margin: 0; }
+  .mark .num {
+    color: var(--muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .mark .idea { color: var(--muted); font-size: 12px; margin-left: auto; }
+
+  .contexts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 34px;
+    padding: 26px 20px;
+  }
+  .ctx { display: flex; flex-direction: column; gap: 10px; }
+  .ctx > .caption {
+    color: var(--muted);
+    font-size: 10.5px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .stage { align-items: center; display: flex; gap: 11px; min-height: 96px; }
+  .stage.small { min-height: auto; }
+  .wordmark { font-size: 21px; font-weight: 600; letter-spacing: .01em; }
+
+  /* A browser tab, because 16 pixels beside a page title is where most marks
+     stop being a shape and start being a smudge. */
+  .tab {
+    align-items: center;
+    background: var(--page);
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    display: flex;
+    gap: 8px;
+    padding: 8px 13px 9px;
+  }
+  .tab span { color: var(--muted); font-size: 11.5px; }
+
+  .filled {
+    align-items: center;
+    background: var(--accent);
+    border-radius: 8px;
+    color: var(--on-accent);
+    display: flex;
+    gap: 11px;
+    padding: 11px 16px;
+  }
+  /* On a filled button the accent IS the ground, so the mark's accent has to
+     step aside — the same trick a good mark has to survive anywhere. */
+  .filled svg { --wdash-accent: var(--on-accent); }
+
+  .notes {
+    border-top: 1px solid var(--border);
+    display: grid;
+    gap: 4px 18px;
+    grid-template-columns: 7.5rem 1fr;
+    padding: 16px 20px 18px;
+  }
+  .notes dt {
+    color: var(--muted);
+    font-size: 10.5px;
+    letter-spacing: .08em;
+    padding-top: 3px;
+    text-transform: uppercase;
+  }
+  .notes dd { margin: 0; }
+  .notes dd.against { color: var(--muted); }
+
+  footer {
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 34px;
+    padding-top: 22px;
+  }
+  footer code {
+    background: var(--sunken);
+    border-radius: 4px;
+    color: var(--ink);
+    padding: 1px 5px;
+  }
+  footer p { max-width: 68ch; }
+
+  :root.mono { --wdash-accent: currentColor; }
+</style>
+
+<div class="sheet">
+  <p class="eyebrow">WDash · identity · candidates</p>
+  <h1>Three marks for WDash</h1>
+  <p class="lede">The navbar currently carries a Font Awesome magnifying
+    glass. It is an icon the product borrowed, it means <b>search</b> on every
+    other site that uses it, and it says nothing about the two signals WDash
+    has that a search box does not. These three are drawn for it. Nothing is
+    wired in — pick one first.</p>
+
+  <div class="controls">
+    <button id="theme" type="button">Switch to dark</button>
+    <button id="mono" type="button" aria-pressed="false">One colour</button>
+    <span class="spacer"></span>
+    <span class="hint">Every mark is one file. Ink follows the page;
+      one element takes the accent.</span>
+  </div>
+
+  <section class="mark">
+    <header>
+      <span class="num">01</span>
+      <h2>Pulse in brackets</h2>
+      <span class="idea">a terminal that watches</span>
+    </header>
+    <div class="contexts">
+      <div class="ctx">
+        <div class="stage">
+          <svg viewBox="0 0 32 32" width="96" height="96" fill="none"
+               role="img" aria-label="WDash">
+            <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
+               stroke-linejoin="round">
+              <path d="M11.5 5.5H7v21h4.5"/>
+              <path d="M20.5 5.5H25v21h-4.5"/>
+            </g>
+            <path d="M3.5 16h6.6l2.6-7.4 3.1 15 2.3-7.6h6.4"
+                  stroke="var(--wdash-accent, var(--accent))"
+                  stroke-width="2.7" stroke-linecap="round"
+                  stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <span class="caption">96 px</span>
+      </div>
+      <div class="ctx">
+        <div class="stage">
+          <svg viewBox="0 0 32 32" width="26" height="26" fill="none"
+               role="img" aria-label="WDash">
+            <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
+               stroke-linejoin="round">
+              <path d="M11.5 5.5H7v21h4.5"/>
+              <path d="M20.5 5.5H25v21h-4.5"/>
+            </g>
+            <path d="M3.5 16h6.6l2.6-7.4 3.1 15 2.3-7.6h6.4"
+                  stroke="var(--wdash-accent, var(--accent))"
+                  stroke-width="2.7" stroke-linecap="round"
+                  stroke-linejoin="round"/>
+          </svg>
+          <span class="wordmark">WDash</span>
+        </div>
+        <span class="caption">navbar · 26 px</span>
+      </div>
+      <div class="ctx">
+        <div class="stage small">
+          <span class="tab">
+            <svg viewBox="0 0 32 32" width="16" height="16" fill="none"
+                 role="img" aria-label="WDash">
+              <g stroke="currentColor" stroke-width="2.4"
+                 stroke-linecap="round" stroke-linejoin="round">
+                <path d="M11.5 5.5H7v21h4.5"/>
+                <path d="M20.5 5.5H25v21h-4.5"/>
+              </g>
+              <path d="M3.5 16h6.6l2.6-7.4 3.1 15 2.3-7.6h6.4"
+                    stroke="var(--wdash-accent, var(--accent))"
+                    stroke-width="2.7" stroke-linecap="round"
+                    stroke-linejoin="round"/>
+            </svg>
+            <span>WDash — Monitors</span>
+          </span>
+        </div>
+        <span class="caption">tab · 16 px</span>
+      </div>
+      <div class="ctx">
+        <div class="stage small">
+          <span class="filled">
+            <svg viewBox="0 0 32 32" width="24" height="24" fill="none"
+                 role="img" aria-label="WDash">
+              <g stroke="currentColor" stroke-width="2.4"
+                 stroke-linecap="round" stroke-linejoin="round">
+                <path d="M11.5 5.5H7v21h4.5"/>
+                <path d="M20.5 5.5H25v21h-4.5"/>
+              </g>
+              <path d="M3.5 16h6.6l2.6-7.4 3.1 15 2.3-7.6h6.4"
+                    stroke="var(--wdash-accent, var(--accent))"
+                    stroke-width="2.7" stroke-linecap="round"
+                    stroke-linejoin="round"/>
+            </svg>
+            <b>WDash</b>
+          </span>
+        </div>
+        <span class="caption">on the accent</span>
+      </div>
+    </div>
+    <dl class="notes">
+      <dt>For</dt>
+      <dd>The brackets are the product's own idiom, and the line is the only
+        thing on the screen that moves. It crosses them on purpose: what is
+        being watched does not stop at the edge of the window.</dd>
+      <dt>Against</dt>
+      <dd class="against">It reads "monitoring" before it reads "WDash", and
+        every uptime tool on the market owns a heartbeat.</dd>
+    </dl>
+  </section>
+
+  <section class="mark">
+    <header>
+      <span class="num">02</span>
+      <h2>Waveform W</h2>
+      <span class="idea">the monogram is the chart</span>
+    </header>
+    <div class="contexts">
+      <div class="ctx">
+        <div class="stage">
+          <svg viewBox="0 0 32 32" width="96" height="96" fill="none"
+               role="img" aria-label="WDash">
+            <path d="M4 7.5l5.4 17 6.6-11 6.6 11 4.2-13.5" stroke="currentColor"
+                  stroke-width="2.9" stroke-linecap="round"
+                  stroke-linejoin="round"/>
+            <circle cx="26.8" cy="11" r="3.1"
+                    fill="var(--wdash-accent, var(--accent))"/>
+          </svg>
+        </div>
+        <span class="caption">96 px</span>
+      </div>
+      <div class="ctx">
+        <div class="stage">
+          <svg viewBox="0 0 32 32" width="26" height="26" fill="none"
+               role="img" aria-label="WDash">
+            <path d="M4 7.5l5.4 17 6.6-11 6.6 11 4.2-13.5" stroke="currentColor"
+                  stroke-width="2.9" stroke-linecap="round"
+                  stroke-linejoin="round"/>
+            <circle cx="26.8" cy="11" r="3.1"
+                    fill="var(--wdash-accent, var(--accent))"/>
+          </svg>
+          <span class="wordmark">WDash</span>
+        </div>
+        <span class="caption">navbar · 26 px</span>
+      </div>
+      <div class="ctx">
+        <div class="stage small">
+          <span class="tab">
+            <svg viewBox="0 0 32 32" width="16" height="16" fill="none"
+                 role="img" aria-label="WDash">
+              <path d="M4 7.5l5.4 17 6.6-11 6.6 11 4.2-13.5"
+                    stroke="currentColor" stroke-width="2.9"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="26.8" cy="11" r="3.1"
+                      fill="var(--wdash-accent, var(--accent))"/>
+            </svg>
+            <span>WDash — Monitors</span>
+          </span>
+        </div>
+        <span class="caption">tab · 16 px</span>
+      </div>
+      <div class="ctx">
+        <div class="stage small">
+          <span class="filled">
+            <svg viewBox="0 0 32 32" width="24" height="24" fill="none"
+                 role="img" aria-label="WDash">
+              <path d="M4 7.5l5.4 17 6.6-11 6.6 11 4.2-13.5"
+                    stroke="currentColor" stroke-width="2.9"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="26.8" cy="11" r="3.1"
+                      fill="var(--wdash-accent, var(--accent))"/>
+            </svg>
+            <b>WDash</b>
+          </span>
+        </div>
+        <span class="caption">on the accent</span>
+      </div>
+    </div>
+    <dl class="notes">
+      <dt>For</dt>
+      <dd>A W drawn as a time series — two troughs, a peak, and a line still
+        climbing at the right edge where the newest reading sits. The only one
+        of the three that could belong to no other product.</dd>
+      <dt>Against</dt>
+      <dd class="against">It carries the letter and nothing about a dashboard;
+        somebody who has not read the name sees a chart.</dd>
+    </dl>
+  </section>
+
+  <section class="mark">
+    <header>
+      <span class="num">03</span>
+      <h2>Panes</h2>
+      <span class="idea">the dashboard itself</span>
+    </header>
+    <div class="contexts">
+      <div class="ctx">
+        <div class="stage">
+          <svg viewBox="0 0 32 32" width="96" height="96" fill="none"
+               role="img" aria-label="WDash">
+            <rect x="3.3" y="5.3" width="25.4" height="21.4" rx="4.2"
+                  stroke="currentColor" stroke-width="2.4"/>
+            <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+              <path d="M20.5 6.5v19"/>
+              <path d="M20.5 16h8.2"/>
+            </g>
+            <path d="M7.5 19.5l3.4-4.6 2.6 3 3.4-6"
+                  stroke="var(--wdash-accent, var(--accent))"
+                  stroke-width="2.4" stroke-linecap="round"
+                  stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <span class="caption">96 px</span>
+      </div>
+      <div class="ctx">
+        <div class="stage">
+          <svg viewBox="0 0 32 32" width="26" height="26" fill="none"
+               role="img" aria-label="WDash">
+            <rect x="3.3" y="5.3" width="25.4" height="21.4" rx="4.2"
+                  stroke="currentColor" stroke-width="2.4"/>
+            <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+              <path d="M20.5 6.5v19"/>
+              <path d="M20.5 16h8.2"/>
+            </g>
+            <path d="M7.5 19.5l3.4-4.6 2.6 3 3.4-6"
+                  stroke="var(--wdash-accent, var(--accent))"
+                  stroke-width="2.4" stroke-linecap="round"
+                  stroke-linejoin="round"/>
+          </svg>
+          <span class="wordmark">WDash</span>
+        </div>
+        <span class="caption">navbar · 26 px</span>
+      </div>
+      <div class="ctx">
+        <div class="stage small">
+          <span class="tab">
+            <svg viewBox="0 0 32 32" width="16" height="16" fill="none"
+                 role="img" aria-label="WDash">
+              <rect x="3.3" y="5.3" width="25.4" height="21.4" rx="4.2"
+                    stroke="currentColor" stroke-width="2.4"/>
+              <g stroke="currentColor" stroke-width="2.4"
+                 stroke-linecap="round">
+                <path d="M20.5 6.5v19"/>
+                <path d="M20.5 16h8.2"/>
+              </g>
+              <path d="M7.5 19.5l3.4-4.6 2.6 3 3.4-6"
+                    stroke="var(--wdash-accent, var(--accent))"
+                    stroke-width="2.4" stroke-linecap="round"
+                    stroke-linejoin="round"/>
+            </svg>
+            <span>WDash — Monitors</span>
+          </span>
+        </div>
+        <span class="caption">tab · 16 px</span>
+      </div>
+      <div class="ctx">
+        <div class="stage small">
+          <span class="filled">
+            <svg viewBox="0 0 32 32" width="24" height="24" fill="none"
+                 role="img" aria-label="WDash">
+              <rect x="3.3" y="5.3" width="25.4" height="21.4" rx="4.2"
+                    stroke="currentColor" stroke-width="2.4"/>
+              <g stroke="currentColor" stroke-width="2.4"
+                 stroke-linecap="round">
+                <path d="M20.5 6.5v19"/>
+                <path d="M20.5 16h8.2"/>
+              </g>
+              <path d="M7.5 19.5l3.4-4.6 2.6 3 3.4-6"
+                    stroke="var(--wdash-accent, var(--accent))"
+                    stroke-width="2.4" stroke-linecap="round"
+                    stroke-linejoin="round"/>
+            </svg>
+            <b>WDash</b>
+          </span>
+        </div>
+        <span class="caption">on the accent</span>
+      </div>
+    </div>
+    <dl class="notes">
+      <dt>For</dt>
+      <dd>One wide pane with a line in it and two narrow ones beside — the
+        layout every screen in this product already has. Four rectangles and a
+        stroke, so it is the most legible of the three at 16 pixels.</dd>
+      <dt>Against</dt>
+      <dd class="against">The most literal and the least distinctive: a
+        rounded rectangle holding a sparkline is a shape a dozen tools already
+        use.</dd>
+    </dl>
+  </section>
+
+  <footer>
+    <p>One file each, no light and dark variants to keep in step. Everything
+      except one element is <code>currentColor</code>, so a mark takes the ink
+      of whatever it sits in; the pulse, the live point and the sparkline are
+      <code>var(--wdash-accent)</code>, which the palette sets. Press
+      <b>One colour</b> above to see what survives when the accent is taken
+      away — a mark that needs two colours to work is a mark that breaks in a
+      favicon.</p>
+    <p>The files are in <code>docs/logo/</code>, beside the sheet they were
+      checked against.</p>
+  </footer>
+</div>
+
+<script>
+  const root = document.documentElement;
+  const themeButton = document.getElementById('theme');
+  const monoButton = document.getElementById('mono');
+
+  function dark() {
+    const chosen = root.getAttribute('data-theme');
+    if (chosen) { return chosen === 'dark'; }
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+  function label() {
+    themeButton.textContent = dark() ? 'Switch to light' : 'Switch to dark';
+  }
+  themeButton.addEventListener('click', () => {
+    root.setAttribute('data-theme', dark() ? 'light' : 'dark');
+    label();
+  });
+  window.matchMedia('(prefers-color-scheme: dark)')
+    .addEventListener('change', label);
+  monoButton.addEventListener('click', () => {
+    const on = monoButton.getAttribute('aria-pressed') === 'true';
+    monoButton.setAttribute('aria-pressed', String(!on));
+    root.classList.toggle('mono', !on);
+  });
+  label();
+</script>

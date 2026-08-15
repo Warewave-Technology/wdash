@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32"
+     height="32" fill="none" id="wdash-mark-waveform" role="img"
+     aria-label="WDash">
+  <!--
+    The monogram IS the chart.
+
+    A W drawn as a time series: two troughs, one peak between them, and the
+    line still climbing at the right edge where a filled point sits — the
+    most recent reading, the one anybody looks at first.
+
+    It is one continuous stroke, so it survives being drawn at 16 pixels in a
+    browser tab, and it says "W" before it says "chart" to somebody who has
+    never seen it.
+  -->
+  <style>
+    #wdash-mark-waveform { color: #1f2328; }
+    @media (prefers-color-scheme: dark) {
+      #wdash-mark-waveform { color: #f0f6fc; }
+    }
+  </style>
+  <path d="M4 7.5l5.4 17 6.6-11 6.6 11 4.2-13.5"
+        stroke="currentColor" stroke-width="2.9" stroke-linecap="round"
+        stroke-linejoin="round"/>
+  <circle cx="26.8" cy="11" r="3.1" fill="var(--wdash-accent, #39c5cf)"/>
+</svg>
