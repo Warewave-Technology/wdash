@@ -814,6 +814,40 @@ class NoTemplateNamesAThemeTest(unittest.TestCase):
         self.assertEqual(offenders, [], "\n".join(
             ["a theme cannot reach these:"] + offenders))
 
+    def test_nothing_asks_a_third_party_for_a_theme(self):
+        """The other way a fixed theme gets in: not a class, a stylesheet.
+
+        flatpickr's dark theme arrived from a CDN and was the last surface in
+        the product that could not follow the page — a dark panel over a white
+        one. What it was still deciding after the palette took over was
+        measured, with every state of the calendar captured with the sheet and
+        without it: the rule above the clock, a fixed #20222c, and the month
+        dropdown's options, a fixed #3f4458 — dark ink on a dark panel once
+        the page was light. Both are in the palette now.
+
+        A `theme:` option in a widget's configuration is the same fault with
+        a different spelling, so both are looked for.
+        """
+        offenders = []
+        for folder, suffixes in ((os.path.join(ROOT, "templates"), (".html",)),
+                                 (os.path.join(ROOT, "static", "js"),
+                                  (".js",))):
+            for name in sorted(os.listdir(folder)):
+                if not name.endswith(suffixes) or name.endswith(".min.js"):
+                    continue
+                with open(os.path.join(folder, name)) as handle:
+                    text = _blank_comments(handle.read())
+                for number, line in enumerate(text.splitlines(), start=1):
+                    if re.search(r'href="[^"]*themes?/(dark|light)', line):
+                        offenders.append(f"{name}:{number}: a themed "
+                                         f"stylesheet from somewhere else")
+                    if re.search(r"""["']?theme["']?\s*:\s*["'](dark|light)""",
+                                 line):
+                        offenders.append(f"{name}:{number}: a widget told "
+                                         f"which theme it is in")
+        self.assertEqual(offenders, [], "\n".join(
+            ["the palette cannot reach these:"] + offenders))
+
     def test_the_stylesheet_does_not_hang_a_rule_on_one(self):
         """A rule keyed on `.table-dark` is dead the moment the templates stop
         asking for it — and dead in the quietest way, because the table still

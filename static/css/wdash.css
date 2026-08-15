@@ -1666,14 +1666,20 @@ code {
 /* ---------------------------------------------------------------------------
  * The date picker
  *
- * flatpickr's own dark theme arrives from a CDN, which means the calendar was
- * the one surface in the product that could not follow a theme: on a light
- * page it stayed a dark panel floating over white. Painted from the palette
- * here instead, so it goes wherever the rest of the page goes.
+ * flatpickr's own dark theme used to arrive from a CDN, which means the
+ * calendar was the one surface in the product that could not follow a theme:
+ * on a light page it stayed a dark panel floating over white. Painted from
+ * the palette here instead, so it goes wherever the rest of the page goes.
  *
- * The CDN theme is still loaded and still wins on anything not listed below —
- * removing that link is a separate change, and one worth making only after
- * somebody has clicked through every state of this calendar.
+ * That link is gone now, and what it was still deciding was measured rather
+ * than guessed — every state of the calendar captured with it and without it,
+ * and every computed colour compared. Two things came back, both wrong in
+ * BOTH themes because the CDN sheet had no idea a theme existed:
+ *
+ *   - the rule above the time row, a fixed #20222c, which is why the two
+ *     selectors below are written specifically enough to win;
+ *   - the month dropdown's options, a fixed #3f4458 — dark ink on a dark
+ *     panel once the page was light.
  * ------------------------------------------------------------------------ */
 .flatpickr-calendar {
     background: var(--surface-card);
@@ -1702,12 +1708,15 @@ span.flatpickr-weekday {
     color: var(--text-primary);
 }
 
-/* The month is a native <select>, and both flatpickr's theme and the browser
-   have an opinion about it — which is why it came out dark on the light page
-   and light on the dark one. Named specifically enough to win, including the
-   options, which are drawn by the browser and inherit nothing. */
+/* The month is a native <select>, and both flatpickr's stylesheet and the
+   browser have an opinion about it — which is why it came out dark on the
+   light page and light on the dark one. Named specifically enough to win,
+   including the options, which are drawn by the browser and inherit
+   nothing. */
 .flatpickr-current-month .flatpickr-monthDropdown-months,
 .flatpickr-current-month .flatpickr-monthDropdown-months option,
+.flatpickr-current-month .flatpickr-monthDropdown-months
+    .flatpickr-monthDropdown-month,
 .flatpickr-monthDropdown-months .flatpickr-monthDropdown-month {
     background: var(--surface-card);
     color: var(--text-primary);
@@ -1754,6 +1763,14 @@ span.flatpickr-weekday {
 .flatpickr-time .flatpickr-am-pm {
     background: var(--surface-raised);
     color: var(--text-primary);
+}
+
+/* The line above the clock. Written with `.hasTime` because that is how
+   flatpickr's own sheet writes it, and a rule one class less specific loses
+   silently — this one was a fixed dark line on the light page for as long as
+   the light page existed. */
+.flatpickr-calendar.hasTime .flatpickr-time,
+.flatpickr-time {
     border-top-color: var(--border);
 }
 
