@@ -1285,3 +1285,195 @@ class ElasticBrowserJourneyTest(unittest.TestCase):
         check = source.history("lab-journey-up", self.window,
                                Scope.unrestricted(), limit=25)[-1]
         self.assertEqual(check.steps[1].status, "flaky")
+
+
+class TheDetailPageAsksForWhatItDrawsTest(unittest.TestCase):
+    """What one load of the detail page costs the source.
+
+    Measured rather than reasoned about, against the store adapter with 20
+    monitors and a day of minute-by-minute checks — 28,800 rows:
+
+        monitors(series=True)   93 ms
+        series                   5 ms
+        history(limit, offset)   4 ms
+        history                  5 ms
+        ------------------------------
+        116 ms, of which 93 built a sparkline for every monitor on a page
+        that shows one and draws its own chart from `series`.
+
+    Two calls went. `monitors` is asked without series, and the page of checks
+    is sliced out of the history the availability figures had already read.
+    The same page is now 52 ms and three calls. Both are asserted here because
+    both are invisible from the screen: nothing renders differently, so the
+    only thing that can notice a regression is a test that counts.
+    """
+
+    def setUp(self):
+        from datetime import datetime, timedelta, timezone
+
+        import sqlalchemy
+
+        from tests.support import grant
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.schema import monitor_results
+        from wdash.store.secrets import SecretBox
+
+        handle, self.database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        database = self.database
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "detail-page"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = SecretBox.generate_key()
+            ELASTICSEARCH_URL = ""
+            DASHBOARD_STORAGE = "database"
+
+        self.app = create_app(TestConfig)
+        self.client = self.app.test_client()
+        grant(self.app, "admin", ["system:admin", "monitors:read"],
+              indices=["*"])
+        with self.client.session_transaction() as session:
+            session["user_data"] = {
+                "id": "u1", "username": "admin", "email": "a@b", "groups": [],
+                "role": "admin",
+                "permissions": ["system:admin", "monitors:read"],
+                "allowed_indices": ["*"]}
+            session["_user_id"] = "u1"
+
+        # More than one monitor, or the wasted work has nothing to be wasted
+        # on: `series=True` costs whatever the OTHER monitors cost.
+        now = datetime.now(timezone.utc)
+        self.ids = []
+        for n in range(4):
+            monitor = self.app.store.monitors.create(
+                name=f"check-{n}", kind="http",
+                target=f"https://x{n}.example/health",
+                interval_seconds=60, timeout_seconds=10)
+            self.ids.append(monitor["id"])
+        rows = [{"monitor_id": monitor_id, "agent_id": "a1",
+                 "started_at": now - timedelta(seconds=60 * i),
+                 "received_at": now - timedelta(seconds=60 * i),
+                 "status": "down" if i % 10 == 0 else "up",
+                 "duration_us": 100_000 + i, "error": "", "steps": None,
+                 "screenshot_id": None}
+                for monitor_id in self.ids for i in range(30)]
+        with self.app.store.engine.begin() as connection:
+            connection.execute(sqlalchemy.insert(monitor_results), rows)
+
+    def tearDown(self):
+        self.app.store.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.database + suffix):
+                os.unlink(self.database + suffix)
+
+    def _calls(self, url):
+        """Every source call one request makes, as (method, kwargs)."""
+        calls = []
+
+        def wrap(source, name):
+            original = getattr(source, name)
+
+            def counted(*args, **kwargs):
+                calls.append((name, dict(kwargs)))
+                return original(*args, **kwargs)
+            setattr(source, name, counted)
+
+        with self.app.app_context():
+            sources = list(self.app.hub.monitor_sources)
+        for source in sources:
+            for name in ("monitors", "history", "series"):
+                wrap(source, name)
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200, response.status_code)
+        for source in sources:
+            for name in ("monitors", "history", "series"):
+                # Instance attributes only; the class methods are untouched.
+                delattr(source, name)
+        return calls, response.get_data(as_text=True)
+
+    def test_no_sparkline_is_built_for_a_page_that_shows_one_monitor(self):
+        calls, _ = self._calls(f"/monitors/{self.ids[0]}?window=1h")
+        for name, kwargs in calls:
+            if name == "monitors":
+                self.assertNotIn("series", kwargs,
+                                 "the detail page asked for a sparkline per "
+                                 "monitor and renders none of them")
+
+    def test_the_history_is_read_once(self):
+        calls, _ = self._calls(f"/monitors/{self.ids[0]}?window=1h")
+        history = [kwargs for name, kwargs in calls if name == "history"]
+        self.assertEqual(len(history), 1, history)
+
+    def test_the_listing_still_gets_its_sparklines(self):
+        """The saving is specific to the detail page. The listing draws one
+        shape per row and must go on asking for them."""
+        calls, _ = self._calls("/monitors?window=1h")
+        asked = [kwargs for name, kwargs in calls if name == "monitors"]
+        self.assertTrue(any(kwargs.get("series") for kwargs in asked), asked)
+
+    def test_the_rows_are_the_newest_ones(self):
+        """The page is now a slice of a list the route already held rather
+        than a query written for it, and a slice taken from the wrong end
+        looks like a page that renders."""
+        import re
+        _, page = self._calls(f"/monitors/{self.ids[0]}?window=1h")
+        body = page.split("<tbody>")[1]
+        # 30 checks, 25 to a page: the first page is the newest 25, and the
+        # oldest five are not on it.
+        self.assertEqual(body.count('class="monitor-status'), 25)
+        self.assertIn("1–25 of 30 checks", " ".join(page.split())
+                      .replace("&ndash;", "–"))
+        # Counting rows is not enough: the source returns them oldest-first
+        # for the chart, so a slice taken from the wrong end is 25 rows of
+        # last hour's checks under a heading that says "newest first".
+        stamps = re.findall(r'data-timestamp="([^"]+)"', body)
+        self.assertEqual(len(stamps), 25)
+        self.assertEqual(stamps, sorted(stamps, reverse=True))
+        self.newest = stamps
+
+    def test_the_second_page_is_the_rest(self):
+        import re
+        _, first = self._calls(f"/monitors/{self.ids[0]}?window=1h")
+        _, page = self._calls(f"/monitors/{self.ids[0]}?window=1h&page=2")
+        body = page.split("<tbody>")[1]
+        self.assertEqual(body.count('class="monitor-status'), 5)
+        stamps = re.findall(r'data-timestamp="([^"]+)"', body)
+        oldest_on_page_one = re.findall(
+            r'data-timestamp="([^"]+)"', first.split("<tbody>")[1])[-1]
+        self.assertTrue(all(stamp < oldest_on_page_one for stamp in stamps),
+                        "page two overlaps page one")
+
+    def test_a_window_bigger_than_the_source_can_hold_is_still_paged(self):
+        """The shortcut is only valid while the whole window is in hand. A
+        source with a ceiling — Elasticsearch stops at 500 — reports a total
+        larger than the list it returned, and page 40 can only come from a
+        query written for it."""
+        from wdash.api.monitor_routes import _checks_page
+        from wdash.hub.source import Capability
+
+        class Capped:
+            def __init__(self):
+                self.asked = []
+
+            def supports(self, capability):
+                return capability == Capability.MONITOR_HISTORY
+
+            def history(self, monitor_id, window, scope, offset=0, limit=None):
+                self.asked.append((offset, limit))
+                return []
+
+        ceiling = _CountedList([object()] * 500)
+        ceiling.total = 5000
+        source = Capped()
+        with self.app.test_request_context("/monitors/x"):
+            _checks_page(source, "x", None, 40, ceiling)
+        self.assertEqual(source.asked, [(975, 25)])
+
+
+class _CountedList(list):
+    """A history list that knows the window holds more than it returned."""
+    total = 0

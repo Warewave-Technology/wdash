@@ -320,7 +320,12 @@ def monitor_detail(monitor_id):
     if source is None:
         return redirect(url_for("monitors.monitors_page"))
 
-    page = _with_series(source, window)
+    # WITHOUT series, unlike the listing. This page draws its own chart from
+    # `series(monitor_id, ...)` below and never reads the per-row sparkline
+    # data — but asking for it built one for every monitor the source has.
+    # Measured against 20 monitors and a day of minute-by-minute checks, that
+    # was 93 ms of a 116 ms page, to compute nineteen shapes nothing renders.
+    page = source.monitors(window, _scope())
     monitor = next((m for m in page.monitors if m.id == monitor_id), None)
     if monitor is None:
         # Not a 404: the monitor may simply not have reported inside the
@@ -332,7 +337,21 @@ def monitor_detail(monitor_id):
 
     points = _series_for(source, monitor_id, window)
     page_number = max(1, request.args.get("page", type=int) or 1)
-    checks, total = _checks_page(source, monitor_id, window, page_number)
+
+    # Availability comes from the WHOLE window, not from the page on screen.
+    # Computed from twenty-five rows it would change every time somebody
+    # turned a page, which is a number nobody can act on.
+    #
+    # Read BEFORE the page of checks, because it usually IS the page of
+    # checks: when the window fits under the source's own ceiling there is
+    # nothing a second, narrower query could return that this does not
+    # already hold. On Elasticsearch that second query costs two round trips
+    # rather than one — a browser journey's steps are separate documents, so
+    # every history call fetches them as well.
+    everything = (source.history(monitor_id, window, _scope())
+                  if source.supports(Capability.MONITOR_HISTORY) else [])
+    checks, total = _checks_page(source, monitor_id, window, page_number,
+                                 everything)
 
     # Clamp AFTER the count is known, then fetch again. `?page=99` on ten
     # pages used to render an empty table under a pager insisting it was on
@@ -341,13 +360,8 @@ def monitor_detail(monitor_id):
     pages = max(1, (total + CHECKS_PER_PAGE - 1) // CHECKS_PER_PAGE)
     if page_number > pages:
         page_number = pages
-        checks, total = _checks_page(source, monitor_id, window, page_number)
-
-    # Availability comes from the WHOLE window, not from the page on screen.
-    # Computed from twenty-five rows it would change every time somebody
-    # turned a page, which is a number nobody can act on.
-    everything = (source.history(monitor_id, window, _scope())
-                  if source.supports(Capability.MONITOR_HISTORY) else [])
+        checks, total = _checks_page(source, monitor_id, window, page_number,
+                                     everything)
 
     return render_template(
         "monitor_detail.html",
@@ -367,12 +381,27 @@ def monitor_detail(monitor_id):
 CHECKS_PER_PAGE = 25
 
 
-def _checks_page(source, monitor_id, window, page_number):
-    """One page of checks, newest first, and how many there are in total."""
+def _checks_page(source, monitor_id, window, page_number, window_history=None):
+    """One page of checks, newest first, and how many there are in total.
+
+    `window_history` is what the caller already read for the availability
+    figures. When it holds the whole window — which it does whenever the
+    window has fewer checks than the source's own ceiling, so on most loads of
+    most monitors — the page is a slice of it and no second query is asked
+    for. It is a paging shortcut and nothing more: when the window is larger
+    than the ceiling, the narrow query is still the only thing that can reach
+    page forty.
+    """
     if not source.supports(Capability.MONITOR_HISTORY):
         return [], 0
 
     offset = (page_number - 1) * CHECKS_PER_PAGE
+    if window_history is not None:
+        total = getattr(window_history, "total", len(window_history))
+        if len(window_history) >= total:
+            newest = list(reversed(window_history))
+            return newest[offset:offset + CHECKS_PER_PAGE], total
+
     try:
         rows = source.history(monitor_id, window, _scope(),
                               offset=offset, limit=CHECKS_PER_PAGE)
