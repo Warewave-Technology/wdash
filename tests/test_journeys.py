@@ -879,6 +879,80 @@ class JourneyPageTest(unittest.TestCase):
             f"/monitors/{journey['id']}?window=1h").get_data(as_text=True)
         self.assertNotIn("/monitors/screenshot/", page)
 
+    # ---------- naming the failed step ----------
+
+    def _page(self, monitor_id):
+        return self.client.get(
+            f"/monitors/{monitor_id}?window=1h").get_data(as_text=True)
+
+    def _run_row(self, page):
+        """The first row of the run table — not the page.
+
+        The header alert above it repeats the same error, and the folded steps
+        below it repeat the same description, so a test scoped to the page
+        passes with this row rendering nothing at all.
+        """
+        import html
+        return html.unescape(page.split("<tbody>")[1].split("</tr>")[0])
+
+    def _named_step(self, page):
+        """What the row says about the failed step, on its own, or None.
+
+        Scoped this tightly on purpose. WDash's own agent writes
+        `step 5 (Expect URL "/dashboard") failed` into the error, so the step
+        number and the description are both in the row whether or not this
+        feature exists — and a test that reads them from anywhere in the row
+        is reading the fixture. Elastic's journeys say `error executing step:`
+        and name nothing, which is the case that needed the row to say it.
+        """
+        import html
+        import re
+        found = re.search(r'<div class="failed-step[^"]*">(.*?)</div>',
+                          page, re.S)
+        return html.unescape(" ".join(found.group(1).split())) if found else None
+
+    def test_the_row_names_the_step_that_failed(self):
+        journey = self._report()
+        named = self._named_step(self._page(journey["id"]))
+        self.assertIsNotNone(named, "the row named no step")
+        self.assertIn("step 5", named)
+        self.assertIn('Expect URL "/dashboard"', named)
+
+    def test_the_error_survives_next_to_it(self):
+        """The step name says where; only the error says what. Replacing one
+        with the other trades a question for a question."""
+        row = self._run_row(self._page(self._report()["id"]))
+        self.assertIn('step 5 (Expect URL "/dashboard") failed', row)
+
+    def test_a_passing_run_names_no_step(self):
+        page = self._page(self._report(failed=False)["id"])
+        self.assertIsNone(self._named_step(page))
+
+    def test_a_check_with_no_steps_still_shows_its_error(self):
+        """An HTTP monitor has no steps at all, and the row it has always had
+        is the one being changed underneath it."""
+        from datetime import datetime, timezone
+        self.client.post("/admin/monitors",
+                         data={"name": "Health", "kind": "http",
+                               "target": "https://x.example/health",
+                               "interval_seconds": "60",
+                               "timeout_seconds": "10"},
+                         follow_redirects=True)
+        check = self.app.store.monitors.all()[0]
+        agent, token = self.app.store.agents.create("http-probe")
+        self.app.store.monitors.update(check["id"], agent_ids=[agent["id"]])
+        self.client.post(
+            "/api/agent/results",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"results": [{
+                "monitor_id": check["id"],
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "status": "down", "duration_us": 1_000,
+                "error": "connection refused"}]})
+        page = self._page(check["id"])
+        self.assertIn("connection refused", self._run_row(page))
+        self.assertIsNone(self._named_step(page))
+
 
 class JourneyDeletionTest(unittest.TestCase):
     """Deleting a journey has to take its screenshots with it.

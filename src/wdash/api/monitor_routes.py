@@ -437,6 +437,12 @@ def _check(check):
                         if check.duration_ms is not None else None),
         "error": check.error,
         "steps": [_step(s) for s in getattr(check, "steps", ())],
+        # Sent separately rather than left for the template to find. The model
+        # already decides which step is to blame — a journey stops at the first
+        # failure, and "the first failed one" is a rule that belongs in one
+        # place rather than in every screen that asks the question.
+        "failed_step": (_step(check.failed_step)
+                        if getattr(check, "failed_step", None) else None),
         "screenshot_id": getattr(check, "screenshot_id", None),
     }
 

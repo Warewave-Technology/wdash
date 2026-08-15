@@ -122,9 +122,6 @@ Nothing is committed.
 * **Journeys from more than one place.** A journey already runs on every agent
   assigned to it, but the page shows one status. "Slow from Frankfurt, fine
   from Dublin" is a different question from "is it up".
-* **More alert destinations.** Webhook reaches Slack, Teams, PagerDuty,
-  Opsgenie and Alertmanager, which is most of it. Email is the obvious gap and
-  brings an SMTP configuration screen with it.
 * **Per-step history.** "Which step got slower this week" is answerable from
   what is already stored — for WDash's own journeys and now for Elastic's too
   — and would need a chart per step rather than per journey.
@@ -139,10 +136,11 @@ somebody can point at today.
   [docs/themes](docs/themes/), including the part that mattered: the palette
   was a third of the work.
 
-* **A failed journey does not name its step until you click.** The run row
-  prints the raw error and a "3 steps" button; "sign in" is one collapse away.
-  `failed_step` already exists on the model and on both journey kinds, so the
-  row could say which step broke without asking for anything new.
+* ~~**A failed journey does not name its step until you click.**~~ Done. The
+  run row names it — `step 5 · Expect URL "/dashboard"` — with the error kept
+  underneath, because the step says where and only the error says what. The
+  model already knew which step was to blame; the serializer between it and
+  the page was dropping the answer.
 * **Elastic's journey screenshots are not shown.** WDash's own journeys keep
   the picture of the page as it failed, and the two kinds now share a screen —
   so a run with no screenshot reads as "none was taken" rather than "this one
@@ -151,6 +149,12 @@ somebody can point at today.
   assemble has not been measured.
 
 ## Deliberately absent
+
+**Email as an alert destination.** Webhook already reaches Slack, Teams,
+PagerDuty, Opsgenie and Alertmanager, and every one of them sends email better
+than WDash would: an SMTP screen means credentials, a queue, retries and
+bounce handling for a delivery path that ends in somebody's spam folder. Named
+here so it stops being proposed.
 
 **ICMP checks.** A ping needs a raw socket, which needs `NET_RAW`, which needs
 a privileged container. That is a trade worth making in some deployments and

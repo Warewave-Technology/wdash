@@ -178,7 +178,22 @@
                     {% else %}<span class="text-muted">—</span>{% endif %}
                 </td>
                 <td>
+                    {% if check.failed_step %}
+                    {# Which step broke, on the row itself. The error says what
+                       the browser could not do and never says where in the
+                       journey it happened — which is the first thing anybody
+                       asks, and it used to be one collapse away. The error
+                       stays, demoted: it is the only place the assertion is
+                       written out. #}
+                    <div class="failed-step text-danger">
+                        step {{ check.failed_step.index }}{% if
+                        check.failed_step.description %} &middot;
+                        {{ check.failed_step.description }}{% endif %}</div>
                     {% if check.error %}
+                    <div class="text-muted" style="font-size:.75rem"
+                    >{{ check.error }}</div>
+                    {% endif %}
+                    {% elif check.error %}
                     <span class="text-danger">{{ check.error }}</span>
                     {% else %}<span class="text-muted">&mdash;</span>{% endif %}
                     {% if check.steps %}
