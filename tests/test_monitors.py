@@ -1421,7 +1421,7 @@ class TheDetailPageAsksForWhatItDrawsTest(unittest.TestCase):
         looks like a page that renders."""
         import re
         _, page = self._calls(f"/monitors/{self.ids[0]}?window=1h")
-        body = page.split("<tbody>")[1]
+        body = page.split("Recent checks")[1].split("<tbody>")[1]
         # 30 checks, 25 to a page: the first page is the newest 25, and the
         # oldest five are not on it.
         self.assertEqual(body.count('class="monitor-status'), 25)
@@ -1439,11 +1439,12 @@ class TheDetailPageAsksForWhatItDrawsTest(unittest.TestCase):
         import re
         _, first = self._calls(f"/monitors/{self.ids[0]}?window=1h")
         _, page = self._calls(f"/monitors/{self.ids[0]}?window=1h&page=2")
-        body = page.split("<tbody>")[1]
+        body = page.split("Recent checks")[1].split("<tbody>")[1]
         self.assertEqual(body.count('class="monitor-status'), 5)
         stamps = re.findall(r'data-timestamp="([^"]+)"', body)
         oldest_on_page_one = re.findall(
-            r'data-timestamp="([^"]+)"', first.split("<tbody>")[1])[-1]
+            r'data-timestamp="([^"]+)"',
+            first.split("Recent checks")[1].split("<tbody>")[1])[-1]
         self.assertTrue(all(stamp < oldest_on_page_one for stamp in stamps),
                         "page two overlaps page one")
 
@@ -1477,3 +1478,157 @@ class TheDetailPageAsksForWhatItDrawsTest(unittest.TestCase):
 class _CountedList(list):
     """A history list that knows the window holds more than it returned."""
     total = 0
+
+
+class StepHistoryTest(unittest.TestCase):
+    """Which step got slower, from the history the page already read.
+
+    A journey's run list answers "did it work". It cannot answer the question
+    somebody actually has when a checkout takes nine seconds — which of the
+    seven steps IS the nine seconds, and was it always. That is what these
+    rows are, and every number in them is computed from `history`, so the
+    feature costs no query of its own.
+    """
+
+    def setUp(self):
+        from wdash.hub.models import (
+            MonitorCheck, STEP_FAILED, STEP_PASSED, STEP_SKIPPED, StepResult)
+        self.MonitorCheck = MonitorCheck
+        self.StepResult = StepResult
+        self.PASSED, self.FAILED, self.SKIPPED = (
+            STEP_PASSED, STEP_FAILED, STEP_SKIPPED)
+        self.end = _now()
+        self.start = self.end - dt.timedelta(hours=1)
+        self.window = TimeWindow.exact(self.start, self.end)
+
+    def _run(self, minutes_ago, durations, statuses=None, names=None):
+        """One journey run, oldest-first order being the caller's business."""
+        statuses = statuses or [self.PASSED] * len(durations)
+        names = names or [f"step {i + 1}" for i in range(len(durations))]
+        steps = tuple(
+            self.StepResult(index=i + 1, kind="browser", description=names[i],
+                            status=statuses[i],
+                            duration_us=(None if durations[i] is None
+                                         else int(durations[i] * 1000)))
+            for i in range(len(durations)))
+        return self.MonitorCheck(
+            timestamp=self.end - dt.timedelta(minutes=minutes_ago),
+            status=UP, duration_ms=sum(d for d in durations if d),
+            steps=steps)
+
+    def _rows(self, checks):
+        from wdash.api.monitor_routes import _step_history
+        return _step_history(checks, self.window)
+
+    def test_a_monitor_with_no_steps_gets_no_rows(self):
+        """Every HTTP check in the product goes through this. An empty list is
+        what keeps the card off their pages."""
+        plain = [self.MonitorCheck(timestamp=self.end, status=UP,
+                                   duration_ms=12.0)]
+        self.assertEqual(self._rows(plain), [])
+        self.assertEqual(self._rows([]), [])
+
+    def test_one_row_per_step_in_order(self):
+        rows = self._rows([self._run(50, [900, 120, 2000]),
+                           self._run(10, [800, 130, 2200])])
+        self.assertEqual([r["index"] for r in rows], [1, 2, 3])
+        self.assertEqual([r["runs"] for r in rows], [2, 2, 2])
+
+    def test_the_median_is_per_step(self):
+        rows = self._rows([self._run(50, [100, 900]),
+                           self._run(30, [200, 950]),
+                           self._run(10, [300, 1000])])
+        self.assertEqual(rows[0]["median_ms"], 200.0)
+        self.assertEqual(rows[1]["median_ms"], 950.0)
+
+    def test_the_share_says_which_step_is_the_run(self):
+        """The whole point of the column: 'the checkout takes nine seconds' is
+        not actionable, 'the basket page is eight of the nine' is."""
+        rows = self._rows([self._run(30, [100, 800, 100])])
+        self.assertEqual([r["share"] for r in rows], [10.0, 80.0, 10.0])
+
+    def test_a_step_that_never_ran_is_absent_not_fast(self):
+        """A journey stops at its first failure. Counting the steps after it
+        as zero-duration is how a broken sign-in reports the checkout getting
+        quicker."""
+        rows = self._rows([
+            self._run(40, [100, 200, 300]),
+            self._run(20, [100, 200, None],
+                      statuses=[self.PASSED, self.FAILED, self.SKIPPED])])
+        self.assertEqual(rows[2]["median_ms"], 300.0)
+        self.assertEqual(rows[2]["skipped"], 1)
+        self.assertEqual(rows[1]["failed"], 1)
+
+    def test_the_rows_are_keyed_on_the_index_not_the_name(self):
+        """Descriptions are stored per run so an old run stays readable after
+        the journey is edited. Grouping on them would split one step into two
+        rows the day somebody fixed a typo — and the newer name is the one to
+        show."""
+        rows = self._rows([self._run(40, [100], names=["Clcik submit"]),
+                           self._run(10, [120], names=["Click submit"])])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["runs"], 2)
+        self.assertEqual(rows[0]["description"], "Click submit")
+
+    # ---------- the trend ----------
+
+    def test_a_step_that_got_slower_says_so(self):
+        early = [self._run(minutes, [100, 1000]) for minutes in (55, 50, 45)]
+        late = [self._run(minutes, [100, 2000]) for minutes in (15, 10, 5)]
+        rows = self._rows(early + late)
+        self.assertEqual(rows[1]["trend"]["percent"], 100.0)
+        self.assertEqual(rows[1]["trend"]["was_ms"], 1000.0)
+        self.assertEqual(rows[1]["trend"]["now_ms"], 2000.0)
+        self.assertEqual(rows[0]["trend"]["percent"], 0.0)
+
+    def test_a_step_that_got_faster_says_so(self):
+        rows = self._rows([self._run(m, [200]) for m in (55, 50, 45)]
+                          + [self._run(m, [100]) for m in (15, 10, 5)])
+        self.assertEqual(rows[0]["trend"]["percent"], -50.0)
+
+    def test_too_few_runs_on_either_side_is_no_trend(self):
+        """Two against two is not a trend, it is two numbers — and a
+        percentage printed from them is a coin toss with a decimal point."""
+        rows = self._rows([self._run(m, [100]) for m in (55, 50)]
+                          + [self._run(m, [400]) for m in (10, 5)])
+        self.assertIsNone(rows[0]["trend"])
+
+    def test_a_window_with_nothing_in_its_first_half_has_no_trend(self):
+        """The common case for a monitor added this morning: everything is in
+        the second half, and 'stable' would be a claim about a period with no
+        data in it."""
+        rows = self._rows([self._run(m, [100]) for m in (20, 15, 10, 5)])
+        self.assertIsNone(rows[0]["trend"])
+
+    # ---------- the sparkline ----------
+
+    def test_the_sparkline_is_drawn_per_run(self):
+        """Bucketed by time it drew NOTHING: a polyline needs two adjacent
+        marks, a journey on a five-minute schedule fills one bucket in twelve,
+        and every mark was an island. The column rendered blank on every row,
+        which no assertion about numbers would have caught."""
+        rows = self._rows([self._run(m, [100 + m]) for m in (50, 40, 30, 20)])
+        self.assertIsNotNone(rows[0]["spark"])
+        self.assertTrue(rows[0]["spark"]["runs"], "no polyline was drawn")
+        self.assertEqual(rows[0]["drawn"], 4)
+
+    def test_a_failed_step_is_marked_on_its_line(self):
+        rows = self._rows([
+            self._run(40, [100]),
+            self._run(30, [100], statuses=[self.FAILED]),
+            self._run(20, [100])])
+        self.assertEqual(len(rows[0]["spark"]["failures"]), 1)
+
+    def test_one_run_is_not_a_line(self):
+        """A single mark drawn as a chart reads as a trend."""
+        rows = self._rows([self._run(30, [100])])
+        self.assertIsNone(rows[0]["spark"])
+
+    def test_only_the_last_marks_are_drawn(self):
+        """A window can hold five hundred runs; the sparkline is 110 pixels
+        wide. The newest are the ones worth the pixels."""
+        from wdash.api.monitor_routes import STEP_POINTS
+        rows = self._rows([self._run(50 - i * 0.05, [100])
+                           for i in range(STEP_POINTS + 40)])
+        self.assertEqual(rows[0]["runs"], STEP_POINTS + 40)
+        self.assertEqual(rows[0]["drawn"], STEP_POINTS)

@@ -890,10 +890,13 @@ class JourneyPageTest(unittest.TestCase):
 
         The header alert above it repeats the same error, and the folded steps
         below it repeat the same description, so a test scoped to the page
-        passes with this row rendering nothing at all.
+        passes with this row rendering nothing at all. Anchored on the card's
+        own heading rather than on "the first table": the steps card sits
+        above this one, and on a journey it is the first table on the page.
         """
         import html
-        return html.unescape(page.split("<tbody>")[1].split("</tr>")[0])
+        card = page.split("Recent checks")[1]
+        return html.unescape(card.split("<tbody>")[1].split("</tr>")[0])
 
     def _named_step(self, page):
         """What the row says about the failed step, on its own, or None.
@@ -928,6 +931,19 @@ class JourneyPageTest(unittest.TestCase):
         page = self._page(self._report(failed=False)["id"])
         self.assertIsNone(self._named_step(page))
 
+    def test_the_page_carries_a_row_per_step_over_the_window(self):
+        """The card is per STEP over the window, above the per-RUN table.
+        Both exist because they answer different questions."""
+        import html
+        journey = self._report()
+        page = self._page(journey["id"])
+        card = html.unescape(
+            page.split("Steps over the last")[1].split("Recent checks")[0])
+        for description in ("Go to https://shop.example/login",
+                            "Type into #password", 'Expect URL "/dashboard"'):
+            self.assertIn(description, card)
+        self.assertIn("Share of a run", card)
+
     def test_a_check_with_no_steps_still_shows_its_error(self):
         """An HTTP monitor has no steps at all, and the row it has always had
         is the one being changed underneath it."""
@@ -952,6 +968,9 @@ class JourneyPageTest(unittest.TestCase):
         page = self._page(check["id"])
         self.assertIn("connection refused", self._run_row(page))
         self.assertIsNone(self._named_step(page))
+        # And no steps card: an HTTP check has no steps, and a table of one
+        # row called "the whole check" is a row that says nothing.
+        self.assertNotIn("Steps over the last", page)
 
 
 class JourneyDeletionTest(unittest.TestCase):

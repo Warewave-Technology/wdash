@@ -905,6 +905,22 @@ tr.monitor-row-warning {
     fill: var(--hue-red);
 }
 
+/* How much of a journey one step accounts for. A bar rather than a number
+   alone: "38%" against "12%" is arithmetic, two bars of different lengths is
+   a glance. Painted from the palette, like everything else. */
+.step-share {
+    background: var(--surface-sunken);
+    border-radius: 3px;
+    height: 6px;
+    overflow: hidden;
+}
+
+.step-share span {
+    background: var(--fill-accent);
+    display: block;
+    height: 100%;
+}
+
 .monitor-link {
     color: var(--text-primary);
     text-decoration: none;

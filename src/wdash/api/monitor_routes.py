@@ -155,6 +155,145 @@ def sparkline(points):
     }
 
 
+#: Marks behind each step's sparkline. One per RUN, not per minute — and that
+#: is a measurement, not a preference. Bucketed by time it drew nothing at
+#: all: a polyline needs two adjacent marks, a journey on a five-minute
+#: schedule fills one bucket in twelve, and every mark was therefore an island
+#: with a gap on both sides. Rendered, the column was blank on every row.
+#:
+#: Per run the line is always continuous, and a gap means what a gap should
+#: mean — that run never reached this step. The cost is an axis that is not
+#: linear in time, which at 110 pixels wide nobody was reading off anyway.
+STEP_POINTS = 60
+
+#: Runs each half of the window needs before the two are compared. Two runs
+#: against two is not a trend, it is two numbers — and "this step got 40%
+#: slower" printed from them is worse than printing nothing.
+TREND_MINIMUM = 3
+
+
+def _step_history(checks, window):
+    """Every step of a journey, over the whole window, one row each.
+
+    Answers the question a run-by-run view cannot: which step got slower.
+    "The checkout takes nine seconds" is not actionable; "the basket page
+    takes eight of the nine, and last week it took four" is.
+
+    Computed from the history the availability figures already read — no
+    query of its own. That also means it inherits that read's limits: a
+    source with a ceiling returns the newest checks and the older ones come
+    back without steps, so each row carries the number of runs behind it
+    rather than implying the whole window.
+
+    Keyed on the step INDEX, not its description. A journey that is edited
+    changes what step 4 is called, and the descriptions are stored per run
+    precisely so an old run stays readable — grouping on them would split one
+    step into two rows the day somebody fixed a typo. The description shown
+    is the most recent one.
+    """
+    from ..hub.models import MonitorPoint, STEP_FAILED, STEP_SKIPPED
+
+    runs = [c for c in checks if c.steps]
+    if not runs:
+        return []
+
+    middle = window.start.timestamp() + max(1.0,
+                                            window.duration_seconds) / 2
+    drawn = runs[-STEP_POINTS:]
+
+    steps = {}
+    for position, check in enumerate(runs):
+        when = check.timestamp.timestamp() if check.timestamp else None
+        for step in check.steps:
+            row = steps.setdefault(step.index, {
+                "index": step.index, "description": step.description,
+                "durations": [], "failed": 0, "skipped": 0, "runs": 0,
+                "marks": {}, "before": [], "after": []})
+            # Latest wins: `checks` arrives oldest first.
+            if step.description:
+                row["description"] = step.description
+            row["runs"] += 1
+            if step.status == STEP_FAILED:
+                row["failed"] += 1
+            elif step.status == STEP_SKIPPED:
+                # A step that never ran is absent, not fast. Counting its
+                # missing duration as zero is how a journey that broke at
+                # step 2 reports steps 3 to 7 getting quicker.
+                row["skipped"] += 1
+            if step.duration_ms is None:
+                continue
+            row["durations"].append(step.duration_ms)
+            if position >= len(runs) - len(drawn):
+                row["marks"][position - (len(runs) - len(drawn))] = (
+                    step.duration_ms, step.status == STEP_FAILED)
+            if when is not None:
+                (row["before"] if when < middle else row["after"]).append(
+                    step.duration_ms)
+
+    rows = []
+    for row in sorted(steps.values(), key=lambda r: r["index"]):
+        durations = sorted(row["durations"])
+        series = []
+        for mark in range(len(drawn)):
+            held = row["marks"].get(mark)
+            series.append(MonitorPoint(
+                timestamp=None,
+                duration_ms=held[0] if held else None,
+                down=1 if held and held[1] else 0,
+                checks=1 if held else 0))
+        rows.append({
+            "index": row["index"],
+            "description": row["description"],
+            "runs": row["runs"],
+            "failed": row["failed"],
+            "skipped": row["skipped"],
+            "median_ms": _percentile(durations, 0.5),
+            "p95_ms": _percentile(durations, 0.95),
+            "worst_ms": round(durations[-1], 1) if durations else None,
+            # What share of a typical run this step accounts for. Filled in
+            # below, once every step's median is known.
+            "share": None,
+            "trend": _trend(row["before"], row["after"]),
+            "spark": sparkline(series),
+            # What the sparkline's marks are, so the column can say so
+            # rather than implying a time axis it does not have.
+            "drawn": len(drawn),
+        })
+
+    whole = sum(r["median_ms"] or 0 for r in rows)
+    for row in rows:
+        if whole and row["median_ms"] is not None:
+            row["share"] = round(100.0 * row["median_ms"] / whole, 1)
+    return rows
+
+
+def _percentile(ordered, fraction):
+    """Nearest-rank, so the number shown is one that actually happened."""
+    if not ordered:
+        return None
+    rank = max(0, min(len(ordered) - 1,
+                      int(round(fraction * len(ordered))) - 1))
+    return round(ordered[rank], 1)
+
+
+def _trend(before, after):
+    """How the second half of the window compares with the first, or None.
+
+    A percentage rather than two numbers: "step 4 is 40% slower than it was
+    earlier in this window" is the sentence somebody acts on. None whenever
+    either half is too thin to mean anything — a trend printed from two runs
+    is a coin toss with a decimal point.
+    """
+    if len(before) < TREND_MINIMUM or len(after) < TREND_MINIMUM:
+        return None
+    was = _percentile(sorted(before), 0.5)
+    now = _percentile(sorted(after), 0.5)
+    if not was:
+        return None
+    return {"was_ms": was, "now_ms": now,
+            "percent": round(100.0 * (now - was) / was, 1)}
+
+
 def _payload(page, certificates):
     """One JSON shape, used by the page and by the API."""
     def monitor(m):
@@ -367,6 +506,10 @@ def monitor_detail(monitor_id):
         "monitor_detail.html",
         monitor=_payload(MonitorPage(monitors=[monitor]), [])["monitors"][0],
         chart=response_chart(points),
+        # Per step, over the whole window, from the history already read.
+        # Empty for everything that is not a journey, which is what keeps the
+        # card off every HTTP monitor's page.
+        steps=_step_history(everything, window),
         checks=[_check(c) for c in checks],
         pager=_pager(page_number, total),
         summary=_availability(points, everything),
@@ -509,9 +652,7 @@ def _availability(points, checks):
         summary["median_ms"] = round(durations[len(durations) // 2], 1)
         # Nearest-rank, so the value shown is one that actually happened
         # rather than an interpolation between two that did.
-        rank = max(0, min(len(durations) - 1,
-                          int(round(0.95 * len(durations))) - 1))
-        summary["p95_ms"] = round(durations[rank], 1)
+        summary["p95_ms"] = _percentile(durations, 0.95)
         summary["worst_ms"] = round(durations[-1], 1)
     return summary
 

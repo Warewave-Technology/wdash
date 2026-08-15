@@ -139,6 +139,106 @@
 </div>
 {% endif %}
 
+{# ---------------- the steps, over the whole window ----------------
+   A journey's runs answer "did it work". This answers the question they
+   cannot: which step is the nine seconds, and which step is slower than it
+   was. Only for journeys — `steps` is empty for everything else. #}
+{% if steps %}
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="fas fa-shoe-prints"></i> Steps over the last
+            {{ window }}</span>
+        <small class="text-muted">median per step</small>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-hover mb-0" style="font-size:.85rem">
+            <thead><tr>
+                <th style="width:2.5rem"></th>
+                <th>Step</th>
+                <th style="width:9rem">Share of a run</th>
+                <th style="width:7rem" class="text-end">Median</th>
+                <th style="width:6rem" class="text-end">p95</th>
+                <th style="width:9rem" class="text-end">Trend</th>
+                <th style="width:7rem" class="text-end">Failed</th>
+                <th style="width:8rem">Per run
+                    {% if steps[0].drawn %}<small class="text-muted"
+                    >(last {{ steps[0].drawn }})</small>{% endif %}</th>
+            </tr></thead>
+            <tbody>
+            {% for step in steps %}
+            <tr>
+                <td class="text-muted">{{ step.index }}</td>
+                <td><code style="font-size:.75rem">{{ step.description }}</code>
+                    <div class="text-muted" style="font-size:.7rem">
+                        {{ step.runs }} run(s){% if step.skipped %},
+                        {{ step.skipped }} never reached{% endif %}</div>
+                </td>
+                <td>
+                    {% if step.share is not none %}
+                    <div class="step-share" role="img"
+                         aria-label="{{ step.share }}% of a run">
+                        <span style="width:{{ step.share }}%"></span>
+                    </div>
+                    <small class="text-muted">{{ step.share }}%</small>
+                    {% else %}<span class="text-muted">—</span>{% endif %}
+                </td>
+                <td class="text-end">
+                    {% if step.median_ms is not none
+                    %}{{ step.median_ms }} ms{% else
+                    %}<span class="text-muted">—</span>{% endif %}
+                </td>
+                <td class="text-end text-muted">
+                    {% if step.p95_ms is not none
+                    %}{{ step.p95_ms }} ms{% endif %}
+                </td>
+                <td class="text-end">
+                    {# Silent unless both halves of the window hold enough
+                       runs to compare. A percentage printed from two runs
+                       against two is a coin toss with a decimal point. #}
+                    {% if step.trend %}
+                    <span class="{% if step.trend.percent > 10 %}text-danger
+                                 {% elif step.trend.percent < -10 %}text-success
+                                 {% else %}text-muted{% endif %}"
+                          title="{{ step.trend.was_ms }} ms earlier in this
+                                 window, {{ step.trend.now_ms }} ms lately">
+                        {{ '+' if step.trend.percent > 0 }}{{ step.trend.percent }}%
+                    </span>
+                    {% else %}<span class="text-muted">—</span>{% endif %}
+                </td>
+                <td class="text-end">
+                    {% if step.failed %}
+                    <span class="text-danger">{{ step.failed }}</span>
+                    {% else %}<span class="text-muted">0</span>{% endif %}
+                </td>
+                <td>
+                    {% if step.spark %}
+                    <svg class="sparkline" width="{{ step.spark.width }}"
+                         height="{{ step.spark.height }}"
+                         viewBox="0 0 {{ step.spark.width }} {{ step.spark.height }}"
+                         role="img"
+                         aria-label="peak {{ step.spark.peak_ms }} ms">
+                      <title>peak {{ step.spark.peak_ms }} ms</title>
+                      {% for run in step.spark.runs %}
+                      <polyline points="{{ run }}" fill="none"
+                                stroke-width="1.5" stroke-linejoin="round"/>
+                      {% endfor %}
+                      {% for x, y in step.spark.failures %}
+                      <circle cx="{{ x }}" cy="{{ y }}" r="2"/>
+                      {% endfor %}
+                    </svg>
+                    {% else %}
+                    <span class="text-muted" style="font-size:.7rem"
+                    >not enough data</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
 <div class="card">
     <div class="card-header">
         <i class="fas fa-list"></i> Recent checks

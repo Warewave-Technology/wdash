@@ -122,9 +122,12 @@ Nothing is committed.
 * **Journeys from more than one place.** A journey already runs on every agent
   assigned to it, but the page shows one status. "Slow from Frankfurt, fine
   from Dublin" is a different question from "is it up".
-* **Per-step history.** "Which step got slower this week" is answerable from
-  what is already stored — for WDash's own journeys and now for Elastic's too
-  — and would need a chart per step rather than per journey.
+* ~~**Per-step history.**~~ Done. A journey's detail page carries a row per
+  step over the window — its share of a typical run, median, p95, failures,
+  and the second half of the window against the first, so "which step got
+  slower" is a column rather than an investigation. Computed from the history
+  the page already reads, so it costs no query; the sparkline is one mark per
+  RUN, because bucketed by time it drew nothing at all.
 
 ### The screen itself
 
