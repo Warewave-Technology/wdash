@@ -485,6 +485,34 @@ class TheTwoSetsOfDefaultsAgreeTest(unittest.TestCase):
                             f"{group!r} is a name somebody else's directory "
                             f"probably already uses")
 
+    def test_the_permissions_match(self):
+        """Names and groups agreeing is not enough, and the gap was measured
+        rather than imagined: the file predated `monitors:read` and granted it
+        to nobody, so a fresh installation that had it — which is every clone
+        of this repository — had no Monitors screen for anyone at all,
+        including the administrator. No error; the nav item simply was not
+        there."""
+        from_code = {name: sorted(definition["permissions"])
+                     for name, definition in self.code.items()}
+        from_file = {name: sorted(definition["permissions"])
+                     for name, definition in self.file["roles"].items()}
+        self.assertEqual(from_code, from_file)
+
+    def test_every_permission_is_granted_by_some_default_role(self):
+        """A permission no shipped role holds is a screen a fresh install
+        cannot open, and the only symptom is a missing menu item. Both sets
+        are checked: a deployment lands on one of them, not on the union."""
+        from wdash.permissions import PERMISSIONS
+        for label, roles in (("roles.py", self.code),
+                             ("rbac.yaml", self.file["roles"])):
+            granted = {permission for definition in roles.values()
+                       for permission in definition["permissions"]}
+            for permission in PERMISSIONS:
+                with self.subTest(source=label, permission=permission):
+                    self.assertIn(permission, granted,
+                                  f"{label} grants {permission} to no role, "
+                                  f"so nothing it gates can be reached")
+
     def test_the_shipped_file_maps_no_named_person(self):
         """It is imported into every fresh installation, so anything here is
         a mapping a stranger inherits. It used to carry a maintainer's own

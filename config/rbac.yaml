@@ -21,6 +21,7 @@ roles:
     permissions:
       - logs:read
       - traces:read
+      - monitors:read
       - dashboard:create
       - dashboard:edit
       - dashboard:delete
@@ -37,6 +38,7 @@ roles:
     permissions:
       - logs:read
       - traces:read
+      - monitors:read
       - dashboard:create
       - dashboard:edit
       - dashboard:view

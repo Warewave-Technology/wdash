@@ -65,7 +65,11 @@ DEFAULT_ROLES = {
     },
     "viewer": {
         "description": "Read-only.",
-        "permissions": ["logs:read", "dashboard:view"],
+        # `traces:read` is here because the file's viewer has always had it,
+        # and because this definition already declared trace containers — a
+        # boundary drawn around a permission the role did not hold, which is
+        # what an omission looks like rather than a decision.
+        "permissions": ["logs:read", "traces:read", "dashboard:view"],
         "containers": ["app-*"],
         "trace_containers": ["*"],
         "services": None,
