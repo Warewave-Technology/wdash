@@ -126,13 +126,15 @@ def build_source(record, credential, catalogue=None, signal=None):
     raise ValueError(f"Unknown source type: {kind}")
 
 
-def register_configured_sources(hub, store, catalogue=None):
-    """Add every enabled stored source to the hub.
+def build_configured_sources(store, catalogue=None):
+    """Every enabled stored source, built, grouped by signal.
 
-    Returns the number registered, so the caller can decide whether the
-    environment-configured source is still needed.
+    Separate from registering them because the hub reloads this set without a
+    restart: it needs the sources in hand before it swaps them in, so that a
+    store it cannot read leaves the previous ones running rather than taking
+    them all away.
     """
-    registered = 0
+    built = {"logs": [], "traces": [], "monitors": []}
     for record in store.sources.all(enabled_only=True):
         try:
             credential = store.sources.credential(record["id"])
@@ -158,15 +160,28 @@ def register_configured_sources(hub, store, catalogue=None):
                     f"built: {exc}")
                 continue
 
-            if signal == "logs":
-                hub.add_logs(source)
-            elif signal == "monitors":
-                hub.add_monitors(source)
-            else:
-                hub.add_traces(source)
-            registered += 1
+            built["logs" if signal == "logs"
+                  else "monitors" if signal == "monitors"
+                  else "traces"].append(source)
             logger.info(
-                f"Registered {signal} source '{record['name']}' "
+                f"Built {signal} source '{record['name']}' "
                 f"({record['kind']})")
 
-    return registered
+    return built
+
+
+def register_configured_sources(hub, store, catalogue=None):
+    """Add every enabled stored source to the hub, once.
+
+    Returns the number registered. Kept for callers that want a hub loaded
+    and left alone; the application uses `Hub.reload_with` instead, so that
+    saving the configuration page does not need a restart to take effect.
+    """
+    built = build_configured_sources(store, catalogue)
+    for source in built["logs"]:
+        hub.add_logs(source)
+    for source in built["traces"]:
+        hub.add_traces(source)
+    for source in built["monitors"]:
+        hub.add_monitors(source)
+    return sum(len(group) for group in built.values())

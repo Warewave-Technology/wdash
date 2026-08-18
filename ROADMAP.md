@@ -172,6 +172,65 @@ somebody can point at today.
   `tests/test_synthetics_lab.py` asks a running Heartbeat the same questions
   so the fixture cannot quietly stop matching reality.
 
+## Phase 5 — candidates
+
+Nothing is committed except the first, which is done. The list is ordered by
+what it would change for somebody using WDash, not by what is interesting to
+build.
+
+* ~~**A source configured on the page needs a restart.**~~ Done. The screen
+  whose entire job is configuring the application used to say "Restart WDash
+  for it to be used for queries". A source is now in use in the worker that
+  saved it before the page redraws, and in every other worker within five
+  seconds — a stamp in the store that each one reads on a clock, because the
+  administrator's form only ever reached one of them. The environment's own
+  sources are held apart and never rebuilt, so an edit cannot disturb the
+  connections a running query is using. Measured: 0.33 µs to read the sources,
+  49 µs for the stamp once per five seconds, 627 µs for a rebuild that only
+  happens when something changed.
+
+### Capability
+
+* **Alert on a log query.** The three rule kinds are all about monitoring —
+  `monitor_down`, `agent_silent`, `certificate_expiring`. The thing most often
+  wanted from a log tool is "tell me when `level:ERROR` crosses a threshold",
+  and everything it needs already exists: an evaluator in its own process,
+  channels, silences, a history that records what was not delivered, and a
+  neutral `LogSource` so one rule would work against all five backends. The
+  hard parts are honest ones — every evaluation is a real query, so the
+  schedule has a cost; and "crossed a threshold" needs a definition that does
+  not page somebody twice for one incident. Binding a rule to a SAVED SEARCH
+  rather than to a query string keeps the query language from being
+  implemented a second time.
+* **A monitor panel on a dashboard.** Panels cover logs (`timeseries`,
+  `terms`) and traces (`trace_services`); the third signal is missing from the
+  one screen whose job is putting signals side by side.
+* **API tokens for people.** Agents have tokens, hashed and rotatable, and
+  every use is audited. A person has no way to reach WDash without a browser,
+  so anything scripted has to borrow an agent's token or a session cookie.
+* **Retention and rollup for monitor results.** The SQLite cliff below is
+  measured and its only answer is "move to Postgres". Folding results older
+  than a few days into hourly summaries would make the cliff something the
+  product handles rather than something it documents.
+
+### Reach
+
+* **A demo that runs out of the box.** The lab has data; getting to a WDash
+  with monitors, journeys, dashboards and alert rules in it is a sequence of
+  manual steps that was done by hand to take the screenshots in
+  [docs/logo](docs/logo/). One `./lab.sh demo` is the difference between
+  trying WDash and reading about it.
+* **A release line behind the tag.** `v2.4.0` exists and nothing stands behind
+  it: no published image, no changelog, and a tag message doing the work of
+  release notes.
+
+### Honesty
+
+* **Paging a merged search.** It is first-page only, and the reason is good —
+  a cursor that silently skips records is worse than no paging. Either the
+  merged cursor gets written, or the limit is said louder on the screen than
+  it is in this file.
+
 ## Deliberately absent
 
 **Email as an alert destination.** Webhook already reaches Slack, Teams,

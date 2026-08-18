@@ -709,10 +709,11 @@ Stated plainly, because they affect whether this fits your deployment:
   ```
 
   The JSON files are left untouched, so the move is reversible.
-- **Sources added in the UI are used after a restart.** They are stored
-  immediately and validated immediately, but the hub is assembled at startup.
-  Use **Test connection** to check one before then. Identity provider settings
-  are the exception — those take effect at once.
+- **A source saved in the UI is used within a few seconds.** The worker that
+  handled the save uses it immediately; the others notice on their next check,
+  which is at most five seconds later. Sources from `ELASTICSEARCH_URL` are
+  built once and never rebuilt, so a configuration edit never disturbs the
+  connections a running query is using.
 - **A merged search is first-page only.** Paging a time-ordered merge needs
   every source's cursor advanced together, and each backend's cursor means
   something different — a cursor that silently skips records is worse than no

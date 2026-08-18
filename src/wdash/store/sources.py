@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .schema import sources
 
@@ -232,6 +232,32 @@ class SourceRepository:
             row = connection.execute(
                 select(sources).where(sources.c.id == source_id)).mappings().first()
         return self._public(row) if row else None
+
+    def stamp(self):
+        """A fingerprint of the enabled sources: (count, newest change).
+
+        For deciding whether the live sources are out of date, which is a
+        question every worker asks and only rarely acts on — so it has to be
+        one small query rather than a rebuild.
+
+        Derived from the rows rather than kept as a counter this class
+        increments. A counter is only correct while every writer remembers to
+        bump it; this notices an edit made directly against the database, and
+        a `pg_restore` that puts a different set of sources under the same
+        application.
+
+        Both halves are needed. `count` alone misses an edit to an existing
+        row; `max(updated_at)` alone misses a deletion, which lowers the
+        count and can leave the newest timestamp exactly where it was.
+        """
+        with self._engine.connect() as connection:
+            row = connection.execute(select(
+                func.count(sources.c.id), func.max(sources.c.updated_at),
+            ).where(sources.c.enabled.is_(True))).first()
+        count, newest = (row or (0, None))
+        # A string, because SQLite hands back a `datetime` and Postgres an
+        # aware one — and this value is only ever compared with itself.
+        return (int(count or 0), str(newest))
 
     @staticmethod
     def _public(row):

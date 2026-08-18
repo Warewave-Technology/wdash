@@ -24,6 +24,10 @@ Usage:
     page = hub.logs().search(LogQuery(window=TimeWindow.of("1h")), scope)
 """
 
+import logging
+import threading
+import time
+
 from .models import (
     FieldStat, FieldValue, LogPage, LogRecord, Service, SourceRef, Span, Trace,
     iso_millis, normalise_severity, TraceSummary,
@@ -33,6 +37,8 @@ from .query import LogQuery, TimeWindow, TraceQuery, SORT_RECENT, SORT_SLOWEST
 from .scope import Scope, ScopeViolation
 from .fanout import FanOutLogSource, FanOutTraceSource
 from .source import Capability, LogSource, Source, TraceSource
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "Hub", "Scope", "ScopeViolation", "Capability", "FanOutLogSource",
@@ -52,12 +58,45 @@ class Hub:
     so callers depend on the interface rather than a concrete adapter. When
     multiple sources are needed (separate clusters, for example) the fan-out
     happens here and callers stay unchanged.
+
+    Sources come from two places, and the difference is why this class has a
+    reload at all:
+
+      * the ENVIRONMENT — `ELASTICSEARCH_URL`, and the store's own agents.
+        These cannot change while the process runs, so they are registered
+        once and never rebuilt. Rebuilding them would throw away live
+        connection pools to answer a question whose answer never changes.
+      * the CONFIGURATION PAGE. These change whenever an administrator saves
+        the form, in a worker that may not be this one, and until this existed
+        the page said "restart WDash for it to be used for queries" — the
+        configuration screen refusing to configure anything.
+
+    So the second set is held apart and swapped as a unit. `reload_with` says
+    how to rebuild it and how to tell whether it needs rebuilding; without one
+    a Hub behaves exactly as it did before, which is what every test that
+    builds sources by hand relies on.
     """
+
+    #: How long a process may go on trusting the sources it holds without
+    #: asking the store whether they changed. The question is one small query;
+    #: this stops it being one per request.
+    #:
+    #: It is also the honest answer to "how long until my new source works on
+    #: the other workers", and it is short enough to be the same answer as
+    #: "immediately" to somebody who saved a form and reached for the tab.
+    RELOAD_TTL = 5.0
 
     def __init__(self):
         self._logs = {}
         self._traces = {}
         self._monitors = {}
+        # The configured layer, kept apart from the three above.
+        self._configured = {"logs": {}, "traces": {}, "monitors": {}}
+        self._build = None
+        self._stamp_of = None
+        self._stamp = None
+        self._checked_at = 0.0
+        self._lock = threading.Lock()
 
     def add_logs(self, source):
         self._logs[source.name] = source
@@ -70,6 +109,104 @@ class Hub:
     def add_monitors(self, source):
         self._monitors[source.name] = source
         return source
+
+    # ---------- the configured layer ----------
+
+    def reload_with(self, build, stamp):
+        """Teach this hub to rebuild its configured sources.
+
+        `build()` returns {"logs": [...], "traces": [...], "monitors": [...]}.
+        `stamp()` returns any comparable value that changes when the stored
+        sources do — it is called often and must be cheap.
+
+        Loads once, now, so a hub that has been given a builder is never
+        briefly missing the sources an operator configured.
+        """
+        self._build = build
+        self._stamp_of = stamp
+        self.reload()
+
+    def reload(self):
+        """Rebuild the configured sources now. Returns how many there are.
+
+        Called directly by the configuration page, so the worker that handled
+        the save is correct before it renders the next screen; every other
+        worker notices within `RELOAD_TTL`.
+        """
+        if self._build is None:
+            return 0
+        try:
+            stamp = self._stamp_of() if self._stamp_of else None
+            built = self._build()
+        except Exception:
+            # The sources already loaded keep working. A store that cannot be
+            # read right now is a reason to go on serving the last good
+            # picture, not to take every configured source away — the same
+            # rule the role resolver follows.
+            logger.exception("Could not reload the configured sources")
+            return sum(len(group) for group in self._configured.values())
+
+        swapped = {signal: {source.name: source
+                            for source in built.get(signal, ())}
+                   for signal in ("logs", "traces", "monitors")}
+        with self._lock:
+            # Swapped whole, never mutated in place: a search that is reading
+            # `log_sources` while this runs gets the old set or the new one,
+            # and not half of each.
+            #
+            # The replaced sources are NOT closed. Something may be mid-query
+            # against one, and closing a client out from under a request in
+            # flight turns somebody else's configuration edit into a failed
+            # search. They are released when the last reference goes.
+            self._configured = swapped
+            self._stamp = stamp
+            self._checked_at = time.monotonic()
+        return sum(len(group) for group in swapped.values())
+
+    @property
+    def configured_count(self):
+        """How many sources came from the configuration page."""
+        with self._lock:
+            return sum(len(group) for group in self._configured.values())
+
+    def _fresh(self):
+        """Reload if the store says the configured sources have changed.
+
+        Asked before every read, and almost always answered from the clock:
+        the store is consulted once per `RELOAD_TTL`, and a rebuild only
+        happens when the stamp has actually moved.
+        """
+        if self._build is None:
+            return
+        now = time.monotonic()
+        with self._lock:
+            if (now - self._checked_at) < self.RELOAD_TTL:
+                return
+            # Stamped before the query rather than after, so a store that is
+            # slow or down is asked once per TTL and not once per request.
+            self._checked_at = now
+            known = self._stamp
+        try:
+            current = self._stamp_of() if self._stamp_of else None
+        except Exception:
+            logger.exception("Could not check whether the sources changed")
+            return
+        if current != known:
+            self.reload()
+
+    def _registry(self, kind):
+        """One signal's sources: the environment's first, then the configured.
+
+        Order is the interface. `logs()` with no name returns the first, so a
+        deployment that has always used `ELASTICSEARCH_URL` keeps answering
+        from it, and an operator adding a source on the configuration page
+        does not silently take over every query that names no source.
+        """
+        with self._lock:
+            configured = self._configured[kind]
+        base = {"logs": self._logs, "traces": self._traces,
+                "monitors": self._monitors}[kind]
+        return {**base, **configured}
 
     def replace_all(self, logs=(), traces=(), monitors=()):
         """Swap every registered source out.
@@ -84,6 +221,14 @@ class Hub:
         self._logs = {source.name: source for source in logs}
         self._traces = {source.name: source for source in traces}
         self._monitors = {source.name: source for source in monitors}
+        # Including the configured layer, and the reloader that would put it
+        # back. "Swap every registered source out" has to mean every one, or
+        # a test that asks what a scope reaches gets its own sources plus
+        # whatever the machine it runs on happens to have configured.
+        with self._lock:
+            self._configured = {"logs": {}, "traces": {}, "monitors": {}}
+            self._build = None
+            self._stamp_of = None
 
     #: Reserved name for "search everything". Not a registered source, so it
     #: cannot collide with one an operator configures.
@@ -97,6 +242,7 @@ class Hub:
         pool, an intersection and a merge to answer a question one object
         already answers.
         """
+        self._fresh()
         if name == self.ALL_SOURCES:
             sources = self.log_sources
             if not sources:
@@ -105,7 +251,7 @@ class Hub:
                 return sources[0]
             from .fanout import FanOutLogSource, FanOutTraceSource
             return FanOutLogSource(sources)
-        return self._pick(self._logs, name, "log")
+        return self._pick(self._registry("logs"), name, "log")
 
     def traces(self, name=None):
         """One trace source, or the fan-out over all of them.
@@ -116,6 +262,7 @@ class Hub:
         whichever one happened to be first. Registered and unreachable is
         worse than absent — the page says it is there.
         """
+        self._fresh()
         if name == self.ALL_SOURCES:
             sources = self.trace_sources
             if not sources:
@@ -124,7 +271,7 @@ class Hub:
                 return sources[0]
             from .fanout import FanOutTraceSource
             return FanOutTraceSource(sources)
-        return self._pick(self._traces, name, "trace")
+        return self._pick(self._registry("traces"), name, "trace")
 
     def monitors(self, name=None):
         """One monitor source, or the fan-out over all of them.
@@ -134,6 +281,7 @@ class Hub:
         watching from another region, which is the whole point of running
         checks from outside.
         """
+        self._fresh()
         if name == self.ALL_SOURCES:
             sources = self.monitor_sources
             if not sources:
@@ -142,7 +290,7 @@ class Hub:
                 return sources[0]
             from .fanout import FanOutMonitorSource
             return FanOutMonitorSource(sources)
-        return self._pick(self._monitors, name, "monitor")
+        return self._pick(self._registry("monitors"), name, "monitor")
 
     @staticmethod
     def _pick(registry, name, kind):
@@ -156,15 +304,18 @@ class Hub:
 
     @property
     def log_sources(self):
-        return list(self._logs.values())
+        self._fresh()
+        return list(self._registry("logs").values())
 
     @property
     def trace_sources(self):
-        return list(self._traces.values())
+        self._fresh()
+        return list(self._registry("traces").values())
 
     @property
     def monitor_sources(self):
-        return list(self._monitors.values())
+        self._fresh()
+        return list(self._registry("monitors").values())
 
     def _all(self):
         """Every registered source, once each.
@@ -175,8 +326,8 @@ class Hub:
         would silently win.
         """
         seen, out = set(), []
-        for registry in (self._logs, self._traces, self._monitors):
-            for source in registry.values():
+        for kind in ("logs", "traces", "monitors"):
+            for source in self._registry(kind).values():
                 if id(source) not in seen:
                     seen.add(id(source))
                     out.append(source)

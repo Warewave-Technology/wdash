@@ -33,7 +33,7 @@ from wdash.api.dashboard_routes import dashboard_bp
 from wdash.hub import Hub
 from wdash.hub.adapters import ElasticsearchLogSource, ElasticsearchTraceSource
 from wdash.hub.adapters.elasticsearch import _IndexCatalogue
-from wdash.hub.factory import register_configured_sources
+from wdash.hub.factory import build_configured_sources
 from datetime import datetime, timedelta
 import uuid
 
@@ -203,23 +203,43 @@ def create_app(config_class=Config):
             es_client.es, name="elasticsearch-monitors",
             patterns=monitor_patterns, catalogue=catalogue))
 
-    # Sources added through the config page. Registered AFTER the
-    # environment-configured ones so a deployment that has always worked keeps
-    # its default, and an operator adding a source does not silently take it
-    # over. A broken one is logged and skipped; it must not stop startup.
-    configured = register_configured_sources(hub, store, catalogue)
-    if configured:
-        app.logger.info(f"{configured} source(s) registered from configuration")
-
     # The checks WDash runs itself. Registered unconditionally and cheap when
     # unused: with no agents and no monitors it reports an empty list, which
     # is the truth rather than an absence the page has to explain.
+    #
+    # Part of the BASE set, with the environment's sources: it reads the
+    # metadata store this process already holds, so there is nothing about it
+    # that a configuration edit could change.
     if store is not None:
         from wdash.hub.adapters.store_monitors import StoreMonitorSource
         hub.add_monitors(StoreMonitorSource(store))
 
-    app.duplicate_sources = _same_backend_twice(app, store)
-    for warning in app.duplicate_sources:
+    # Sources added through the config page. Loaded AFTER the environment ones
+    # so a deployment that has always worked keeps its default, and an
+    # operator adding a source does not silently take over the queries that
+    # name no source. A broken one is logged and skipped; it must not stop
+    # startup.
+    #
+    # Handed to the hub as a recipe rather than a result, so an administrator
+    # saving the form does not have to restart WDash to use what they just
+    # configured. The page used to say so out loud, which made the
+    # configuration screen the one screen that could not configure anything.
+    if store is not None:
+        hub.reload_with(
+            build=lambda: build_configured_sources(store, catalogue),
+            # A lambda rather than the bound method: it is looked up on
+            # the repository each time, so a store that swaps one in is
+            # honoured rather than shadowed by what was captured here.
+            stamp=lambda: store.sources.stamp())
+        if hub.configured_count:
+            app.logger.info(
+                f"{hub.configured_count} source(s) from configuration")
+
+    # Recomputed on demand rather than at startup, because the sources it
+    # compares are now live: a duplicate added on the configuration page has
+    # to be reported by the configuration page, not by the next restart.
+    app.duplicate_sources = lambda: _same_backend_twice(app, store)
+    for warning in app.duplicate_sources():
         app.logger.warning(warning)
 
     app.hub = hub

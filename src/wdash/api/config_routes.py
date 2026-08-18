@@ -45,6 +45,50 @@ logger = logging.getLogger(__name__)
 config_bp = Blueprint("config", __name__, url_prefix="/admin")
 
 
+def _reloaded():
+    """Put the change into force here and now, and say what happened.
+
+    The hub reloads its configured sources by itself within a few seconds, so
+    this is not what makes the edit take effect — it is what makes it take
+    effect BEFORE the redirect renders the page the administrator is about to
+    read. Without it the screen that just accepted a source would still be
+    listing the sources from before it.
+
+    The sentence is part of the job. "Saved" with nothing after it leaves
+    somebody wondering whether they now have to restart something, which is
+    exactly the doubt this feature exists to remove.
+    """
+    hub = getattr(current_app, "hub", None)
+    if hub is None or not hasattr(hub, "reload"):
+        return "."
+    try:
+        hub.reload()
+    except Exception:
+        current_app.logger.exception("Could not reload sources after a save")
+        return (". It could not be put into use straight away — restart "
+                "WDash, and check the log for why.")
+    return " and in use now. Other workers pick it up within a few seconds."
+
+
+def _duplicate_sources():
+    """Two registrations of one backend, as it stands right now.
+
+    A callable on the app rather than a list computed at startup: the sources
+    it compares can change while the process runs, and a warning that only
+    appears after a restart is a warning about a mistake somebody has already
+    walked away from. Tolerates the old list, so an app object built by
+    something that has not caught up still renders.
+    """
+    warnings = getattr(current_app, "duplicate_sources", None)
+    if callable(warnings):
+        try:
+            return list(warnings())
+        except Exception:
+            current_app.logger.exception("Could not check for duplicates")
+            return []
+    return list(warnings or [])
+
+
 def _store():
     return getattr(current_app, "store", None)
 
@@ -106,7 +150,7 @@ def config_page():
         # because a warning in a log file is a warning nobody reads, and the
         # symptom — a merged total that is quietly too big — never points at
         # its cause.
-        duplicate_sources=list(getattr(current_app, "duplicate_sources", [])),
+        duplicate_sources=_duplicate_sources(),
         # {kind: [signals]} for the form. Derived here rather than written
         # out in JavaScript, so adding a backend cannot leave the two
         # disagreeing about what it serves.
@@ -242,8 +286,7 @@ def save_source():
                 kind=form.get("kind"), config=config, secret=password,
                 enabled=form.get("enabled") == "on")
             _audit("source created", name=saved["name"], kind=saved["kind"])
-        flash(f"Source '{saved['name']}' saved. "
-              f"Restart WDash for it to be used for queries.", "success")
+        flash(f"Source '{saved['name']}' saved{_reloaded()}", "success")
     except SecretsUnavailable as exc:
         flash(str(exc).split("\n")[0], "error")
     except SourceError as exc:
@@ -263,7 +306,7 @@ def delete_source(source_id):
     source = store.sources.get(source_id)
     if source and store.sources.delete(source_id):
         _audit("source deleted", name=source["name"], id=source_id)
-        flash(f"Source '{source['name']}' deleted.", "success")
+        flash(f"Source '{source['name']}' deleted{_reloaded()}", "success")
     else:
         flash("That source no longer exists.", "warning")
     return redirect(url_for("config.config_page"))

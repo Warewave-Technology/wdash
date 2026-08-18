@@ -55,12 +55,23 @@ def _client():
 
 def _has_screenshots(client):
     """Not just "is a cluster there" — the CI cluster is, and has no
-    Heartbeat writing into it."""
+    Heartbeat writing into it.
+
+    Bounded to the same 24 hours the tests below ask for, and that bound was
+    added after a lab brought up WITHOUT the synthetics profile failed five of
+    them. The index still held last week's screenshots, so this said yes; the
+    tests then asked for a browser monitor that had run recently and found
+    none. A gate that admits a stale lab turns "Heartbeat is not running" into
+    five failures that point at the product.
+    """
     try:
-        found = client.search(index=SCREENSHOTS, size=1,
-                              query={"term": {
-                                  "synthetics.type": "step/screenshot_ref"}},
-                              ignore_unavailable=True, allow_no_indices=True)
+        found = client.search(
+            index=SCREENSHOTS, size=1,
+            query={"bool": {"filter": [
+                {"term": {"synthetics.type": "step/screenshot_ref"}},
+                {"range": {"@timestamp": {"gte": "now-24h"}}},
+            ]}},
+            ignore_unavailable=True, allow_no_indices=True)
         return bool(_dig(found, "hits.hits"))
     except Exception:
         return False
@@ -69,8 +80,9 @@ def _has_screenshots(client):
 CLIENT = _client()
 LAB = CLIENT is not None and _has_screenshots(CLIENT)
 
-_MISSING = (f"no browser screenshots at {LAB_URL} — `cd lab && ./lab.sh up "
-            f"synthetics` and wait for a journey to run, or set WDASH_LAB_URL")
+_MISSING = (f"no browser screenshot from the last 24h at {LAB_URL} — "
+            f"`cd lab && ./lab.sh up synthetics` and wait for a journey to "
+            f"run, or set WDASH_LAB_URL")
 
 
 class TheLabIsThereWhenPromisedTest(unittest.TestCase):
