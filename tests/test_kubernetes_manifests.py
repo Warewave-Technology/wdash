@@ -1,9 +1,8 @@
 """
 The shipped Kubernetes manifests, checked against the application.
 
-These files drift silently. Nothing runs them in CI, nobody reads them until
-a deployment misbehaves, and the ways they go wrong all look like something
-else:
+These files drift silently. Nobody reads them until a deployment misbehaves,
+and the ways they go wrong all look like something else:
 
   * `DATABASE_URL` unset means the metadata store lands on the container's own
     layer instead of the mounted volume. The symptom is that every restart
@@ -24,6 +23,12 @@ else:
 
 So this is a consistency test, not a deployment test. It cannot tell you the
 manifests work; it can tell you they still describe this application.
+
+It also cannot tell you a cluster would accept them — a whole file of Traefik
+CRDs on a group removed in v3 passed every test in here. That is the
+`manifests` job in .github/workflows/tests.yml, which builds the kustomization
+and puts every object through kubeconform in strict mode against three
+Kubernetes versions.
 """
 
 import os

@@ -174,6 +174,62 @@ class JobsStillDoWhatTheyAreForTest(unittest.TestCase):
         self.assertIn("docker build", steps)
         self.assertNotIn("--target browser", steps)
 
+    def test_the_manifests_are_validated_against_the_api_schemas(self):
+        """tests/test_kubernetes_manifests.py checks that the manifests still
+        describe this application. It cannot check that a cluster would accept
+        them: a whole file of Traefik CRDs on `traefik.containo.us/v1alpha1`,
+        a group removed in v3, passed every test in this repository.
+
+        `-strict` is the half that matters. Without it an unknown field — a
+        typo in `startupProbe`, a field that moved between versions —
+        validates happily and is then silently ignored by the cluster, which
+        is the same shape as every other fault these files have had.
+        """
+        steps = self._steps("manifests")
+        self.assertIn("kubeconform", steps)
+        self.assertIn("-strict", steps,
+                      "without -strict an unknown field validates and is then "
+                      "ignored by the cluster")
+        self.assertIn("kubectl kustomize", steps,
+                      "the objects are validated as applied, not as written")
+
+    def test_every_manifest_is_validated_by_something(self):
+        """The kustomization deliberately leaves two files out, so building it
+        and validating the result covers everything except exactly those two.
+        They have to be named in the job or they are the only manifests in the
+        repository that nothing checks at all."""
+        import yaml as _yaml
+
+        directory = os.path.join(ROOT, "kubernetes")
+        with open(os.path.join(directory, "kustomization.yaml")) as handle:
+            applied = set(_yaml.safe_load(handle)["resources"])
+        steps = self._steps("manifests")
+        for name in sorted(os.listdir(directory)):
+            if not name.endswith(".yaml") or name == "kustomization.yaml":
+                continue
+            if name in applied:
+                continue
+            with self.subTest(manifest=name):
+                self.assertIn(f"kubernetes/{name}", steps,
+                              f"{name} is in neither the kustomization nor "
+                              f"the validation step")
+
+    def test_the_validator_is_pinned(self):
+        """An unpinned validator is a check whose meaning changes without a
+        commit — and the direction it changes in is usually laxer, because
+        that is the change nobody notices."""
+        steps = self._steps("manifests")
+        job = str(self.jobs["manifests"])
+        self.assertRegex(job, r"v\d+\.\d+\.\d+",
+                         "the kubeconform release is not pinned")
+        self.assertNotIn("/latest/", steps)
+
+    def test_it_validates_more_than_one_kubernetes_version(self):
+        """A kind that stops being served between two releases is the failure
+        this catches, and one version cannot see it."""
+        versions = set(re.findall(r"1\.\d+\.0", self._steps("manifests")))
+        self.assertGreaterEqual(len(versions), 2, sorted(versions))
+
     def test_the_elasticsearch_service_matches_the_lab(self):
         """The document shapes these tests check were read off the lab's
         cluster. Measuring them against a different version is measuring

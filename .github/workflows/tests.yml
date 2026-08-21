@@ -7,16 +7,25 @@
 # as much as the thing that runs it, and until this file existed that was
 # somebody remembering.
 #
-# Three jobs rather than one, because the suite means three different things
+# Several jobs rather than one, because the suite means different things
 # depending on what is installed beside it:
 #
 #   suite         no browser, no cluster — 19 tests skip and say so
 #   browser       + Playwright and Chromium — 13 of those 19
 #   live-schema   + a seeded Elasticsearch — the other 6
+#   image         the Dockerfile, which no test touches
+#   manifests     the Kubernetes objects, against the real API schemas
 #
-# The last two set WDASH_REQUIRE_LAB / check the skip count, because a job
-# that exists to run a test and goes green by skipping it is worse than no
-# job at all.
+# The browser and live jobs set WDASH_REQUIRE_LAB / check the skip count,
+# because a job that exists to run a test and goes green by skipping it is
+# worse than no job at all.
+#
+# `manifests` is here because tests/test_kubernetes_manifests.py cannot do
+# what it does: that file checks the manifests still describe THIS
+# APPLICATION — every setting reaching the process, something evaluating the
+# alert rules — and it would not notice a misspelled field or an apiVersion a
+# cluster no longer serves. A whole file of Traefik CRDs on a group removed
+# in v3 passed every test in this repository.
 
 name: tests
 
@@ -190,3 +199,45 @@ jobs:
           import sys; sys.path.insert(0, 'src')
           from wdash.app import create_app
           print('imports and builds an app:', bool(create_app))"
+
+  manifests:
+    name: kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned. An unpinned validator is a check whose meaning changes
+      # without a commit.
+      - name: kubeconform
+        env:
+          VERSION: v0.8.0
+        run: |
+          curl -sSfL -o /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp
+          sudo install /tmp/kubeconform /usr/local/bin/
+
+      - name: The kustomization builds
+        run: kubectl kustomize kubernetes/ > /tmp/built.yaml
+
+      # `-strict` is the point: without it an unknown field — a typo in
+      # `startupProbe`, a field that moved between versions — validates
+      # happily and is then silently ignored by the cluster.
+      #
+      # Three versions, because the manifests have to work on what people
+      # actually run. 1.25 is where several of these apiVersions settled and
+      # 1.34 is current; a kind that stops being served in between shows up
+      # as one of the three failing rather than as a deployment that cannot
+      # be applied.
+      #
+      # The two files the kustomization deliberately leaves out are named
+      # here as well, or they would be the only manifests nothing validates.
+      - name: Every object, against the API schemas
+        run: |
+          for version in 1.25.0 1.31.0 1.34.0; do
+            echo "--- kubernetes $version"
+            kubeconform -strict -summary -kubernetes-version "$version" \
+                /tmp/built.yaml \
+                kubernetes/secrets.yaml \
+                kubernetes/wdash-agent.yaml
+          done
