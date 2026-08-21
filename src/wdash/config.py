@@ -23,6 +23,13 @@ DEFAULT_DATABASE_URL = 'sqlite:///data/wdash.db'
 #: the same comparison the database URL needs, and for the same reason.
 DEFAULT_DASHBOARD_FILE = 'data/dashboards.json'
 
+#: The session key when nobody sets one. Named, rather than written inline,
+#: because `create_app` has to be able to say "not THAT one" about it: the
+#: string is printed in this repository, it signs session cookies, and anybody
+#: holding it can mint the administrator's. Right for `python main.py` on a
+#: laptop, and nowhere else.
+DEV_SECRET_KEY = 'dev-secret-key-change-in-production'
+
 #: What holds traces when nobody says otherwise. Named so the log
 #: source can keep excluding spans even when the environment trace
 #: source is switched off — those are different statements.
@@ -33,7 +40,7 @@ class Config:
     """Application configuration"""
     
     # Flask Configuration
-    SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
+    SECRET_KEY = os.environ.get('SECRET_KEY') or DEV_SECRET_KEY
     DEBUG = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
 
     # Elasticsearch Configuration

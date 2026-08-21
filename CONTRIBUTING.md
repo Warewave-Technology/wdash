@@ -85,7 +85,8 @@ They are not style rules; each exists because something went wrong once.
 | `test_version.py` | the version in the package, `package.json`, the lockfile or the Kubernetes manifests disagree |
 | `test_ci.py` | the workflow stops running what it claims, or the Python matrix and the packaging classifiers drift apart |
 | `test_no_elasticsearch.py` | the suite can reach a cluster or a database nobody declared |
-| `test_frontend_integrity.py` | `wdash.min.js` is stale, or a bundle references a method that does not exist |
+| `test_frontend_integrity.py` | `wdash.min.js` is stale, a bundle references a method that does not exist, or a static asset is asked for without a version |
+| `test_kubernetes_manifests.py` | the shipped manifests stop describing this application — a setting that never reaches the process, a roles file in a schema nothing reads, a workload that does not exist |
 
 If one of them blocks something reasonable, that is worth a conversation
 rather than an exemption — but every exemption list in this repository

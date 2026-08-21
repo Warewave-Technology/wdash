@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from wdash import __version__
 from wdash.config import (
-    Config, DEFAULT_DASHBOARD_FILE, DEFAULT_TRACE_PATTERNS)
+    Config, DEV_SECRET_KEY, DEFAULT_DASHBOARD_FILE, DEFAULT_TRACE_PATTERNS)
 from wdash.auth import auth_bp, load_user_from_session
 from wdash.auth.setup import register_setup_gate, setup_bp
 from wdash.logs import ElasticsearchClient
@@ -35,6 +35,7 @@ from wdash.hub.adapters import ElasticsearchLogSource, ElasticsearchTraceSource
 from wdash.hub.adapters.elasticsearch import _IndexCatalogue
 from wdash.hub.factory import build_configured_sources
 from datetime import datetime, timedelta
+import time
 import uuid
 
 
@@ -44,7 +45,73 @@ def create_app(config_class=Config):
                 template_folder='../../templates',
                 static_folder='../../static')
     app.config.from_object(config_class)
-    
+
+    # The development session key must not reach a deployment serving real
+    # people.
+    #
+    # `SECRET_KEY` falls back to a literal printed in this repository. That is
+    # right for `python main.py` on a laptop and catastrophic anywhere else:
+    # it signs the session cookie, so anybody who has read the source can mint
+    # the administrator's session.
+    #
+    # This exists because of what happened when the shipped Kubernetes Secret
+    # stopped carrying a working key. It used to publish a real, decodable
+    # `secret-key`, and a comment asking for it to be changed — so an
+    # unedited `kubectl apply` ran on a key everybody can read. Emptying it
+    # fixes that only if the empty value is LOUD: an empty environment
+    # variable lands right back on this fallback, and the deployment would
+    # have been just as forgeable and no longer obvious.
+    #
+    # SESSION_COOKIE_SECURE is the signal. Nobody turns it on except to serve
+    # over TLS to real people, and every other reading of "is this
+    # production?" — DEBUG, TESTING, a hostname — is either wrong on a laptop
+    # or wrong in a cluster. Refuse there; warn everywhere else.
+    #
+    # Empty counts as well as the literal. An empty environment variable is
+    # what an unfilled Secret produces, and `Config` turns that back into the
+    # development key one line later — so the two are the same deployment, and
+    # a check that knew only about the literal would be a check that passes on
+    # the exact file being shipped.
+    key = app.config.get('SECRET_KEY')
+    if not key or key == DEV_SECRET_KEY:
+        if app.config.get('SESSION_COOKIE_SECURE'):
+            raise RuntimeError(
+                "SECRET_KEY is unset or empty, so the built-in development "
+                "key is in use — and SESSION_COOKIE_SECURE says this instance "
+                "is served over TLS to real people. That key is published in "
+                "this repository and signs every session cookie, including "
+                "the administrator's. Set a real one:\n"
+                "  python -c \"import secrets; print(secrets.token_urlsafe(48))\"\n"
+                "In Kubernetes it is `secret-key` in kubernetes/secrets.yaml.")
+        app.logger.warning(
+            "SECRET_KEY is not set: using the built-in development key. "
+            "Sessions signed with it can be forged by anyone who has read "
+            "this repository.")
+
+    # What `?v=` on a static URL is for.
+    #
+    # The three templates that load this application's own CSS and JavaScript
+    # appended `?v={{ range(1000,9999) | random }}` — a NEW number on every
+    # page load. So wdash.css and wdash.min.js were re-downloaded on every
+    # single view, and the nginx sidecar's `expires 1y, immutable` never
+    # applied to the two files it was written for.
+    #
+    # The favicon and the mark got the opposite treatment: no version at all,
+    # so they WERE pinned for a year — and the release that changed the mark
+    # would have gone on showing the old one to everybody who had ever loaded
+    # a page.
+    #
+    # The version is the honest stamp: it changes exactly when the files can.
+    # Under debug it is the process start instead, because editing a
+    # stylesheet locally must not need a version bump to be visible — and the
+    # reloader restarts on the edit, so the number moves with it.
+    asset_version = (str(int(time.time())) if app.config.get('DEBUG')
+                     else __version__)
+
+    @app.context_processor
+    def _asset_version():
+        return {'asset_version': asset_version}
+
     # Initialize Flask-Login
     login_manager = LoginManager()
     login_manager.init_app(app)

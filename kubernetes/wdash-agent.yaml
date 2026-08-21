@@ -1,0 +1,111 @@
+# A probe agent.
+#
+# NOT part of the default kustomization, and not because it is optional
+# scenery: it needs a token that does not exist until somebody creates the
+# agent on the configuration page. Applied blindly it would start, find no
+# token, and exit — a CrashLoopBackOff on a fresh install, which is a bad way
+# to learn about a feature.
+#
+#   1. Configuration → Agents → Add agent, and copy the token
+#   2. kubectl -n wdash create secret generic wdash-agent \
+#          --from-literal=agent-token=<the token>
+#   3. kubectl -n wdash apply -f kubernetes/wdash-agent.yaml
+#
+# The agent PULLS its configuration and PUSHES results back, so it works from
+# anywhere it can reach the server — another namespace, another cluster, a
+# machine behind NAT — and restarting WDash misses no check. Running one here
+# measures the service from inside the cluster; running one outside measures
+# what your users actually experience. They are different questions and it is
+# reasonable to have both.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wdash-agent
+  labels:
+    app.kubernetes.io/name: wdash-agent
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: wdash
+spec:
+  # More than one is fine and is how you cover several vantage points — but
+  # give each its own token and its own Deployment, because the agents page
+  # identifies an agent by its token. Two pods sharing one look like a single
+  # agent that keeps changing its mind about what it just measured.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wdash-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wdash-agent
+        app.kubernetes.io/component: agent
+        # The NetworkPolicy allows this label to reach the server on port 80.
+        app.kubernetes.io/part-of: wdash
+    spec:
+      # Nothing here reads the Kubernetes API either.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: agent
+        # The small image — the server's, with a different entry point. Http
+        # and tcp checks need nothing else, and the browser image is 1.77GB
+        # against 260MB.
+        #
+        # For BROWSER JOURNEYS, build and push the other target and use it
+        # here instead:
+        #     docker build -t <registry>/wdash-browser:2.4.0 --target browser .
+        # A journey assigned to an agent that has no browser reports as
+        # unknown rather than as down — a probe that is not there says nothing
+        # about the site.
+        image: yigitbasalma/wdash-elastic-dashboard:2.4.0
+        imagePullPolicy: IfNotPresent
+        command: ["python", "-m", "wdash.agent"]
+        env:
+        # The in-cluster Service. Port 80 is the nginx sidecar, the same door
+        # everyone else comes through.
+        - name: WDASH_SERVER
+          value: "http://wdash"
+        # From the environment rather than an argument, because an argument is
+        # visible in `ps` to anything sharing the namespace.
+        - name: WDASH_AGENT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: wdash-agent
+              key: agent-token
+        # Results that have not been delivered yet. On a volume because the
+        # spool exists precisely so a restart loses no measurement — and /app
+        # is read-only here, so the default path would fail to open at all.
+        #
+        # emptyDir, not a PVC: it survives a container restart, which is the
+        # case the spool is for. A rescheduled pod loses what it had not yet
+        # delivered, and that is the honest trade for not attaching a volume
+        # to every vantage point.
+        - name: WDASH_AGENT_SPOOL
+          value: "/var/spool/wdash/agent-spool.jsonl"
+        volumeMounts:
+        - name: spool
+          mountPath: /var/spool/wdash
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            # Http and tcp checks run up to sixteen at a time. A browser image
+            # runs two journeys at a time and needs gigabytes, not megabytes —
+            # raise this with the image, or Chromium is killed mid-journey and
+            # the site is reported down.
+            memory: "256Mi"
+            cpu: "250m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: spool
+        emptyDir: {}

@@ -601,6 +601,7 @@ src/wdash/
 ├── dashboard/          panels, thresholds, visibility, system invariants
 └── utils/timerange.py  time-range parsing and alignment
 
+kubernetes/             manifests, kustomization, and kubernetes/README.md
 lab/                    docker-compose environment, data generator, collector
 docs/                   hub, advisor and OpenTelemetry documentation
 tests/                  unit tests, adapter conformance suite, fixtures
@@ -658,10 +659,33 @@ as a break, because `>=3.8` was never installable: `psycopg` has required
 - Put WDash on the only network path to Elasticsearch. Application-level
   authorization is worthless if the cluster is directly reachable — the
   Advisor's `SEC001` check exists to remind you.
-- Set a real `SECRET_KEY` and serve over HTTPS with
-  `SESSION_COOKIE_SECURE=true`.
+- **Set a real `SECRET_KEY`** and serve over HTTPS with
+  `SESSION_COOKIE_SECURE=true`. WDash refuses to start if those two disagree —
+  the built-in development key is printed in this repository and signs the
+  administrator's session cookie, so an instance served over TLS may not use
+  it. Generate one with
+  `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
 - Enable Elasticsearch security and give WDash a dedicated user.
 - Run the Advisor against your cluster before going live.
+
+### Kubernetes
+
+`kubernetes/` installs the server, its database on a volume, the alert
+evaluator beside it and a plain `networking.k8s.io/v1` Ingress:
+
+```bash
+kubectl apply -k kubernetes/
+```
+
+Read [kubernetes/README.md](kubernetes/README.md) first — three values have to
+change before that command, and nothing starts until they do. The two secrets
+ship empty on purpose, and WDash refuses to start on its built-in development
+key while `SESSION_COOKIE_SECURE` is true, so an unfilled Secret fails with a
+message instead of quietly signing every session cookie with a string printed
+in this repository.
+
+`replicas: 1` and `strategy: Recreate` are the SQLite file, not caution. The
+page above says what to change to scale out, and in which order.
 
 ### Probes
 

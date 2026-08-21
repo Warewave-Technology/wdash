@@ -107,7 +107,10 @@ deliberately and written down.
 * **Defaults are development defaults.** `SECRET_KEY` has a placeholder value
   and `SESSION_COOKIE_SECURE` is off until set. Running a deployment on them
   is a deployment fault, not a product one — the README's production notes
-  list what has to be set.
+  list what has to be set. One case is refused rather than left to the
+  operator: the placeholder key with `SESSION_COOKIE_SECURE=true` stops the
+  application from starting, because that combination is a TLS deployment
+  signing the administrator's session cookie with a string published here.
 
 ## What is already in place
 

@@ -687,5 +687,5 @@
 <script nonce="{{ csp_nonce }}" type="application/json" id="sourceSignals">
   {{ signal_map | tojson }}
 </script>
-<script nonce="{{ csp_nonce }}" src="{{ url_for('static', filename='js/config.js') }}?v={{ range(1000,9999) | random }}"></script>
+<script nonce="{{ csp_nonce }}" src="{{ url_for('static', filename='js/config.js') }}?v={{ asset_version }}"></script>
 {% endblock %}

@@ -1,0 +1,94 @@
+# Who may reach WDash.
+#
+# The README says to put WDash on the only network path to Elasticsearch,
+# because application-level authorization is worthless if the cluster is
+# reachable around it — and the Advisor's SEC001 check exists to say so. The
+# manifests enforced none of it: any pod in the cluster could open port 5000
+# on the WDash pod and, since TRUSTED_PROXY_COUNT trusts `X-Forwarded-For`,
+# name its own client address while doing it.
+#
+# Half of that is closed in the Service (no port 5000) and half here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wdash-ingress
+  labels:
+    app.kubernetes.io/name: wdash
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wdash
+  # Ingress only. An egress rule here would be a bigger claim than this file
+  # can honestly make: WDash talks to the identity provider, to whatever
+  # backends the configuration page declares, and to the webhook or Slack URL
+  # an alert channel names — all of which are chosen after this is applied,
+  # and none of which announce themselves when they are blocked. A rule that
+  # silently stops an alert from being delivered is worse than no rule.
+  # There is a starting point at the bottom of this file for whoever wants it.
+  policyTypes:
+  - Ingress
+  ingress:
+  # The ingress controller, on the sidecar's port. Adjust the namespace label
+  # to match your controller — `kubectl get ns --show-labels` will name it.
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 80
+  # WDash's own agents, pushing check results back to the server. They speak
+  # to the same port as everybody else; there is no privileged path.
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: wdash
+    ports:
+    - protocol: TCP
+      port: 80
+  # NOT LISTED, deliberately: port 5000. The application's own port is
+  # reachable only from inside the pod, which is where the sidecar is.
+  #
+  # ONE CAVEAT, because it fails as a CrashLoopBackOff rather than as a
+  # network error: liveness and readiness probes come from the kubelet, not
+  # from a pod. Calico and Cilium both allow node-to-pod traffic by default,
+  # so probes keep working. If yours does not, add your node CIDR:
+  #
+  #   - from:
+  #     - ipBlock:
+  #         cidr: 10.0.0.0/16
+  #     ports:
+  #     - protocol: TCP
+  #       port: 5000
+
+# ---------------------------------------------------------------------------
+# The other half, which is not ours to apply.
+#
+# Restricting who may reach WDash does nothing about who may reach
+# Elasticsearch. That policy belongs in the cluster's namespace, selects its
+# pods, and looks roughly like this — with the port and the labels of whatever
+# you actually run:
+#
+#   apiVersion: networking.k8s.io/v1
+#   kind: NetworkPolicy
+#   metadata:
+#     name: elasticsearch-from-wdash-only
+#     namespace: elastic
+#   spec:
+#     podSelector:
+#       matchLabels:
+#         app: elasticsearch
+#     policyTypes:
+#     - Ingress
+#     ingress:
+#     - from:
+#       - namespaceSelector:
+#           matchLabels:
+#             kubernetes.io/metadata.name: wdash
+#       ports:
+#       - protocol: TCP
+#         port: 9200
+#
+# Apply that and the Advisor's SEC001 finding stops being a reminder.
+# ---------------------------------------------------------------------------

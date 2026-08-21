@@ -1,0 +1,41 @@
+# Everything a WDash installation needs, in the order it has to exist.
+#
+#   kubectl apply -k kubernetes/
+#
+# There was no such file, and no Kubernetes section in the README either — so
+# the order was whatever `kubectl apply -f kubernetes/` derived from the
+# filenames, which put the Deployment before the ConfigMap it reads. That
+# works, in the sense that the pod crash-loops until the ConfigMap arrives a
+# moment later; it just tells you nothing about whether it was supposed to.
+#
+# Read kubernetes/README.md first. Three values have to change before this is
+# applied — the two secrets and the hostname — and nothing starts until they
+# do, on purpose.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: wdash
+
+resources:
+- namespace.yaml
+- serviceaccount.yaml
+- configmap.yaml
+- wdash-deployment.yaml
+- ingress.yaml
+- networkpolicy.yaml
+
+# NOT here, and each for its own reason:
+#
+#   secrets.yaml       a template with empty values. Applying it would
+#                      overwrite a real Secret with nothing every time
+#                      somebody re-ran this, and the deployment would then
+#                      refuse to start on a session key it no longer has.
+#                      Create the Secret once with `kubectl create secret`;
+#                      the file stays as the record of what goes in it.
+#
+#   wdash-agent.yaml   needs a token that does not exist until an agent is
+#                      created on the configuration page. Applied blind it
+#                      crash-loops.
+#
+# The alert evaluator is not missing — it is a container in the wdash pod,
+# because it needs the same SQLite database on the same ReadWriteOnce volume.

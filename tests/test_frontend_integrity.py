@@ -434,3 +434,100 @@ class TheMarkIsOursTest(unittest.TestCase):
         self.assertEqual(data[12:16], b"IHDR")
         self.assertEqual(int.from_bytes(data[16:20], "big"), 32)
         self.assertEqual(int.from_bytes(data[20:24], "big"), 32)
+
+
+class AssetsAreVersionedTest(unittest.TestCase):
+    """`?v=` on a static URL, and what it was actually doing.
+
+    Every template appended `?v={{ range(1000,9999) | random }}` — a new
+    number on every page load. That is not cache-busting, it is cache
+    DEFEATING: wdash.css and wdash.min.js were fetched again on every single
+    view, and the nginx sidecar's `expires 1y; immutable` never applied to the
+    two files it was written for.
+
+    The favicon and the mark had the opposite problem. They carried no version
+    at all, so they were the only assets the year-long cache really held — and
+    the release that changed the mark would have gone on showing the old one
+    to everyone who had loaded a page before it.
+
+    Both halves are one rule: the stamp changes when the files can change, and
+    not otherwise.
+    """
+
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+    TEMPLATES = os.path.join(ROOT, "templates")
+
+    def _templates(self):
+        for directory, _, files in os.walk(self.TEMPLATES):
+            for filename in files:
+                if filename.endswith(".html"):
+                    yield os.path.join(directory, filename)
+
+    def test_every_local_asset_carries_the_version(self):
+        """Anything served from /static, including the icons."""
+        unversioned = []
+        for path in self._templates():
+            for line in _read(path).splitlines():
+                for match in re.finditer(r"url_for\(\s*'static'.*?\}\}", line):
+                    tail = line[match.end():match.end() + 24]
+                    if not tail.startswith("?v={{ asset_version }}"):
+                        unversioned.append(
+                            f"{os.path.basename(path)}: {match.group(0)[:60]}")
+        self.assertEqual(unversioned, [], "\n".join([""] + unversioned))
+
+    def test_no_template_stamps_a_number_that_moves_on_its_own(self):
+        """The literal that was there. Named so that putting it back fails
+        here rather than in a page-load measurement nobody takes."""
+        for path in self._templates():
+            self.assertNotIn("random }}", _read(path),
+                             f"{os.path.basename(path)} versions an asset "
+                             f"with a value that changes every render")
+
+    def test_two_renders_of_one_page_ask_for_the_same_url(self):
+        """The check that survives a rewrite: whatever the stamp is spelled
+        as, a second visit must be allowed to hit the cache."""
+        import sys
+        sys.path.insert(0, os.path.join(self.ROOT, "src"))
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.secrets import SecretBox
+
+        class RenderConfig(Config):
+            TESTING = True
+            SECRET_KEY = "assets"
+            DATABASE_URL = "sqlite:///:memory:"
+            ELASTICSEARCH_URL = ""
+            ENCRYPTION_KEY = SecretBox.generate_key()
+
+        client = create_app(RenderConfig).test_client()
+        stamps = []
+        for _ in range(2):
+            # Followed, because a fresh store sends every route to /setup —
+            # and a 302 has no body to measure.
+            body = client.get("/auth/login",
+                              follow_redirects=True).get_data(as_text=True)
+            stamps.append(re.findall(r"\?v=([^\"'&]+)", body))
+        self.assertTrue(stamps[0], "the page asks for no versioned asset")
+        self.assertEqual(stamps[0], stamps[1])
+
+    def test_the_stamp_is_the_release(self):
+        """A number that is not the version is a number nobody can reason
+        about during an upgrade."""
+        import sys
+        sys.path.insert(0, os.path.join(self.ROOT, "src"))
+        from wdash import __version__
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.secrets import SecretBox
+
+        class RenderConfig(Config):
+            TESTING = True
+            DEBUG = False
+            SECRET_KEY = "assets"
+            DATABASE_URL = "sqlite:///:memory:"
+            ELASTICSEARCH_URL = ""
+            ENCRYPTION_KEY = SecretBox.generate_key()
+
+        body = create_app(RenderConfig).test_client().get(
+            "/auth/login", follow_redirects=True).get_data(as_text=True)
+        self.assertIn(f"?v={__version__}", body)

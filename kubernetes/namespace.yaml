@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wdash
+  labels:
+    app.kubernetes.io/name: wdash
+    # Named so a NetworkPolicy elsewhere — the one that should stand in front
+    # of Elasticsearch — can say "only from here" without matching on
+    # something as fragile as a pod label.
+    kubernetes.io/metadata.name: wdash

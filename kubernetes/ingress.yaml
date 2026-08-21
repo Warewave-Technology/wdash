@@ -1,90 +1,71 @@
-apiVersion: traefik.containo.us/v1alpha1
-kind: IngressRoute
+# The way in.
+#
+# This was two Traefik `IngressRoute` CRDs plus three `Middleware` objects, on
+# apiVersion `traefik.containo.us/v1alpha1` — a group Traefik removed in v3, so
+# on any current installation the whole file failed to apply with "no matches
+# for kind IngressRoute". It is a plain `networking.k8s.io/v1` Ingress now:
+# every controller understands it, and a cluster that does run Traefik serves
+# it just as well.
+#
+# Two things went with the CRDs, and both were faults rather than features:
+#
+#   * a plain-HTTP route on `wdash.local` with no redirect, while
+#     SESSION_COOKIE_SECURE is true. A Secure cookie is never stored over
+#     http://, so sign-in succeeded and returned to the sign-in page — a
+#     login loop with no error anywhere. The `redirectScheme` middleware that
+#     would have fixed it was attached to the HTTPS route, where there is
+#     nothing left to redirect;
+#
+#   * a `customResponseHeaders` block that SET (not appended)
+#     Content-Security-Policy, X-Frame-Options, X-XSS-Protection and the rest.
+#     It therefore replaced the application's own policy — which carries a
+#     per-response script nonce — with one containing `'unsafe-inline'`, and
+#     turned the nonce protection off at the door. It also downgraded
+#     X-Frame-Options from the app's DENY to SAMEORIGIN and brought back
+#     X-XSS-Protection, which was deliberately removed from the nginx sidecar
+#     for being an XSS vector in itself.
+#
+# Headers belong to the application. src/wdash/security.py sets them on every
+# response, including redirects and error pages, and explains each one.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
-  name: wdash-ingressroute
+  name: wdash
   labels:
     app.kubernetes.io/name: wdash
     app.kubernetes.io/component: ingress
+  annotations:
+    # ingress-nginx redirects http:// to https:// on its own once a host
+    # appears in `tls:` below; this states it rather than relying on a default
+    # that a ConfigMap in the controller's namespace can change. Another
+    # controller ignores it and needs its own equivalent — and MUST have one,
+    # because of the Secure cookie.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Uncomment with cert-manager installed, and the controller will obtain
+    # and renew the certificate named in `tls:`.
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
-  entryPoints:
-    - web
-  routes:
-  - match: Host(`wdash.local`)  # Change to your domain
-    kind: Rule
-    services:
-    - name: wdash
-      port: 80
-    middlewares:
-    - name: wdash-security-headers
-    - name: wdash-rate-limit
-
----
-apiVersion: traefik.containo.us/v1alpha1
-kind: IngressRoute
-metadata:
-  name: wdash-ingressroute-tls
-  labels:
-    app.kubernetes.io/name: wdash
-    app.kubernetes.io/component: ingress-tls
-spec:
-  entryPoints:
-    - websecure
-  routes:
-  - match: Host(`wdash.yourdomain.com`)  # Change to your domain
-    kind: Rule
-    services:
-    - name: wdash
-      port: 80
-    middlewares:
-    - name: wdash-security-headers
-    - name: wdash-rate-limit
-    - name: wdash-redirect-https
+  # The class of your controller. `kubectl get ingressclass` names it.
+  ingressClassName: nginx
   tls:
-    certResolver: letsencrypt
-
----
-apiVersion: traefik.containo.us/v1alpha1
-kind: Middleware
-metadata:
-  name: wdash-security-headers
-  labels:
-    app.kubernetes.io/name: wdash
-    app.kubernetes.io/component: middleware
-spec:
-  headers:
-    customRequestHeaders:
-      X-Forwarded-Proto: https
-    customResponseHeaders:
-      X-Frame-Options: "SAMEORIGIN"
-      X-Content-Type-Options: "nosniff"
-      X-XSS-Protection: "1; mode=block"
-      Referrer-Policy: "strict-origin-when-cross-origin"
-      Strict-Transport-Security: "max-age=31536000; includeSubDomains"
-      Content-Security-Policy: "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com; img-src 'self' data:; connect-src 'self';"
-
----
-apiVersion: traefik.containo.us/v1alpha1
-kind: Middleware
-metadata:
-  name: wdash-rate-limit
-  labels:
-    app.kubernetes.io/name: wdash
-    app.kubernetes.io/component: middleware
-spec:
-  rateLimit:
-    average: 100
-    period: 1m
-    burst: 200
-
----
-apiVersion: traefik.containo.us/v1alpha1
-kind: Middleware
-metadata:
-  name: wdash-redirect-https
-  labels:
-    app.kubernetes.io/name: wdash
-    app.kubernetes.io/component: middleware
-spec:
-  redirectScheme:
-    scheme: https
-    permanent: true
+  # REQUIRED, not decorative: TRUSTED_PROXY_COUNT and SESSION_COOKIE_SECURE in
+  # the ConfigMap both assume TLS terminates here. Remove this block and the
+  # session cookie stops being stored at all.
+  - hosts:
+    - wdash.example.com          # Change to your domain
+    secretName: wdash-tls
+  rules:
+  - host: wdash.example.com      # Change to your domain, and OIDC_REDIRECT_URI with it
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: wdash
+            # 80 — the nginx sidecar, which serves the static files and adds
+            # the X-Forwarded-For entry TRUSTED_PROXY_COUNT counts. The
+            # application's own port is deliberately not on the Service; see
+            # the comment there.
+            port:
+              number: 80

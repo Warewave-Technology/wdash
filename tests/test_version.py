@@ -88,13 +88,26 @@ class EverythingElseReadsItTest(unittest.TestCase):
     def test_the_manifests_deploy_this_version(self):
         """They pinned `:1.0.0`. Whatever else is true of a deployment, the
         manifests in the repository should not install something older than
-        the repository."""
-        manifest = _read("kubernetes", "wdash-deployment.yaml")
-        tags = re.findall(r"image:\s*\S*wdash-elastic-dashboard:(\S+)",
-                          manifest)
-        self.assertTrue(tags, "the deployment names no wdash image at all")
-        for tag in tags:
-            self.assertEqual(tag, self.version)
+        the repository.
+
+        Every file in the directory, not just the Deployment: the agent
+        manifest pulls the same image under a different entry point, and a
+        version bump that moved one and not the other would run an agent from
+        a release the server has never seen.
+        """
+        import os
+        directory = os.path.join(ROOT, "kubernetes")
+        found = 0
+        for name in sorted(os.listdir(directory)):
+            if not name.endswith(".yaml"):
+                continue
+            tags = re.findall(r"image:\s*\S*wdash-elastic-dashboard:(\S+)",
+                              _read("kubernetes", name))
+            found += len(tags)
+            for tag in tags:
+                with self.subTest(manifest=name):
+                    self.assertEqual(tag, self.version)
+        self.assertTrue(found, "no manifest names a wdash image at all")
 
     def test_a_running_instance_can_be_asked(self):
         """`/health` is the one endpoint that answers before sign-in, which

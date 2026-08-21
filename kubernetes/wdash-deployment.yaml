@@ -8,11 +8,22 @@ metadata:
     app.kubernetes.io/part-of: wdash
 spec:
   replicas: 1
+  # Recreate, not RollingUpdate.
+  #
+  # The volume below is ReadWriteOnce and holds the SQLite database. A rolling
+  # update starts the new pod BEFORE the old one releases the volume, so the
+  # new pod cannot mount it: if the scheduler puts it on another node the
+  # rollout stops dead with a Multi-Attach error, and if it puts it on the
+  # same node two processes write one SQLite file. The symptom is an upgrade
+  # that hangs in ContainerCreating with a healthy-looking old pod still
+  # serving, which reads as a storage fault rather than as a manifest.
+  #
+  # The cost is honest and small: a few seconds of downtime per upgrade for a
+  # single-replica deployment that already had exactly one pod. With Postgres
+  # in DATABASE_URL and no PVC, RollingUpdate is right again — and so is
+  # replicas > 1, provided the alert evaluator moves out of this pod first.
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 1
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: wdash
@@ -42,66 +53,21 @@ spec:
         ports:
         - containerPort: 5000
           name: http
+        # The whole ConfigMap, rather than nine keys named one at a time.
+        # Naming them individually left six keys in that file describing a
+        # deployment they never reached — including RBAC_CONFIG_FILE, which is
+        # why the roles mounted at /etc/config were never read.
+        envFrom:
+        - configMapRef:
+            name: wdash-config
         env:
-        # Load configuration from ConfigMap
-        - name: FLASK_DEBUG
-          valueFrom:
-            configMapKeyRef:
-              name: wdash-config
-              key: FLASK_DEBUG
-        - name: ELASTICSEARCH_URL
-          valueFrom:
-            configMapKeyRef:
-              name: wdash-config
-              key: ELASTICSEARCH_URL
-        - name: OIDC_DISCOVERY_URL
-          valueFrom:
-            configMapKeyRef:
-              name: wdash-config
-              key: OIDC_DISCOVERY_URL
-        - name: OIDC_CLIENT_ID
-          valueFrom:
-            configMapKeyRef:
-              name: wdash-config
-              key: OIDC_CLIENT_ID
-        - name: OIDC_REDIRECT_URI
-          valueFrom:
-            configMapKeyRef:
-              name: wdash-config
-              key: OIDC_REDIRECT_URI
-        # Where the metadata lives. Without this the default is relative to
-        # WORKDIR — /app/data/wdash.db — which is the container's own layer,
-        # not the volume mounted at /data. Every restart would lose the local
-        # accounts, the audit trail, the sources and the dashboards, and
-        # first-run setup would reopen on an empty database.
-        - name: DATABASE_URL
-          valueFrom:
-            configMapKeyRef:
-              name: wdash-config
-              key: DATABASE_URL
-        - name: DASHBOARD_STORAGE
-          valueFrom:
-            configMapKeyRef:
-              name: wdash-config
-              key: DASHBOARD_STORAGE
-        # How many proxies are in front. The nginx sidecar is one. Left at the
-        # default of 0, every request is counted as coming from 127.0.0.1, so
-        # all users share one sign-in throttle bucket and one attacker locks
-        # out everybody.
-        - name: TRUSTED_PROXY_COUNT
-          valueFrom:
-            configMapKeyRef:
-              name: wdash-config
-              key: TRUSTED_PROXY_COUNT
-        # TLS is terminated at the ingress, so the session cookie must carry
-        # the Secure flag or it also travels over plain HTTP to this host.
-        - name: SESSION_COOKIE_SECURE
-          valueFrom:
-            configMapKeyRef:
-              name: wdash-config
-              key: SESSION_COOKIE_SECURE
-
-        # Load secrets
+        # Secrets stay explicit: the keys are named for what they are, not for
+        # the variables that read them.
+        #
+        # Signs the session cookie. Empty in the shipped Secret on purpose —
+        # the application refuses to start on its development key while
+        # SESSION_COOKIE_SECURE is true, so an unedited apply fails with a
+        # message instead of running on a key published in this repository.
         - name: SECRET_KEY
           valueFrom:
             secretKeyRef:
@@ -133,21 +99,11 @@ spec:
               name: wdash-secrets
               key: elasticsearch-password
               optional: true
-        
-        # Kubernetes metadata
-        - name: KUBERNETES_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
-        - name: KUBERNETES_POD_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        - name: KUBERNETES_NODE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: spec.nodeName
-        
+        # KUBERNETES_NAMESPACE, KUBERNETES_POD_NAME and KUBERNETES_NODE_NAME
+        # used to be here from the downward API. Nothing in src/ reads any of
+        # them, and they went out with the cluster RBAC that was their only
+        # plausible reason to exist.
+
         volumeMounts:
         - name: rbac-config
           mountPath: /etc/config
@@ -156,7 +112,7 @@ spec:
           mountPath: /data
         - name: tmp
           mountPath: /tmp
-        
+
         resources:
           requests:
             memory: "256Mi"
@@ -164,32 +120,120 @@ spec:
           limits:
             memory: "512Mi"
             cpu: "500m"
-        
+
+        # Three probes, and the first one is why the other two can be
+        # impatient. Migrations run at start-up against whatever DATABASE_URL
+        # names; on a large Postgres that is not instant, and a liveness probe
+        # with a fixed 30-second head start restarts the container in the
+        # middle of one — repeatedly, which looks like a crash loop and is
+        # actually a timeout.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          periodSeconds: 5
+          # Five minutes to become ready, then liveness takes over.
+          failureThreshold: 60
         livenessProbe:
           httpGet:
             path: /health
             port: 5000
-          initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
-        
         readinessProbe:
           httpGet:
             path: /health
             port: 5000
-          initialDelaySeconds: 5
           periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 3
-        
+
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities:
             drop:
             - ALL
-      
+
+      # The alert evaluator.
+      #
+      # `python -m wdash.alerts` is a separate process on purpose: evaluation
+      # has to run when nothing is arriving, because an agent going completely
+      # silent produces no requests at all and that is exactly when somebody
+      # needs telling. There was no workload for it anywhere in these
+      # manifests, so a deployment made from them let people write alert rules
+      # that were never evaluated — and nothing, anywhere, said so.
+      #
+      # In this pod rather than in a Deployment of its own because it needs
+      # the same metadata database, and that database is a SQLite file on a
+      # ReadWriteOnce volume. A second pod would have to be scheduled onto the
+      # same node to mount it. Move it out when DATABASE_URL points at
+      # Postgres — and only then.
+      #
+      # Run ONE. Two would evaluate the same rules and deliver the same alert
+      # twice; the state table is shared, so the second usually finds the
+      # transition already made, but "usually" is not a guarantee to page
+      # somebody on. `replicas: 1` above is what holds it, and
+      # tests/test_kubernetes_manifests.py holds `replicas: 1`.
+      - name: alerts
+        image: yigitbasalma/wdash-elastic-dashboard:2.4.0
+        imagePullPolicy: IfNotPresent
+        command: ["python", "-m", "wdash.alerts"]
+        envFrom:
+        - configMapRef:
+            name: wdash-config
+        env:
+        # The same secrets: the evaluator opens the same store and reads the
+        # same encrypted source credentials to query the backends.
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: wdash-secrets
+              key: secret-key
+        - name: WDASH_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: wdash-secrets
+              key: encryption-key
+        - name: ELASTICSEARCH_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: wdash-secrets
+              key: elasticsearch-username
+              optional: true
+        - name: ELASTICSEARCH_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: wdash-secrets
+              key: elasticsearch-password
+              optional: true
+        volumeMounts:
+        - name: rbac-config
+          mountPath: /etc/config
+          readOnly: true
+        - name: dashboard-storage
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+        # No probe. It serves nothing, so there is no endpoint to ask; if the
+        # loop dies the process exits and the kubelet restarts the container.
+        # A probe that asked the evaluator about itself would answer that it
+        # can reach itself.
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+
       # Nginx sidecar for static file serving and reverse proxy
       - name: nginx
         image: nginx:1.25-alpine
@@ -225,7 +269,7 @@ spec:
             - ALL
             add:
             - NET_BIND_SERVICE
-      
+
       volumes:
       - name: rbac-config
         configMap:
@@ -244,7 +288,7 @@ spec:
         emptyDir: {}
       - name: nginx-run
         emptyDir: {}
-      
+
       initContainers:
       - name: copy-static-files
         image: yigitbasalma/wdash-elastic-dashboard:2.4.0
@@ -253,9 +297,14 @@ spec:
         - name: static-files
           mountPath: /shared/static
         securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
           runAsNonRoot: true
           runAsUser: 1000
           runAsGroup: 1000
+          capabilities:
+            drop:
+            - ALL
 
 ---
 apiVersion: v1
@@ -274,9 +323,17 @@ spec:
   - port: 80
     targetPort: 80
     name: http
-  - port: 5000
-    targetPort: 5000
-    name: wdash
+  # Port 5000 is NOT here.
+  #
+  # It used to be, and it published the application's own port beside the
+  # proxied one — so anything in the cluster could skip the sidecar. That
+  # matters because TRUSTED_PROXY_COUNT tells WDash to believe
+  # `X-Forwarded-For`: a request arriving directly on 5000 can name any client
+  # address it likes, and with it walk through the per-address sign-in
+  # throttle and write someone else's address into the audit trail.
+  #
+  # Nothing needed it. The Ingress targets 80, and the kubelet's probes go to
+  # the pod's own address rather than through a Service.
   type: ClusterIP
 
 ---
