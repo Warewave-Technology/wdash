@@ -393,31 +393,79 @@ function type(w, id, value) {
           && hostile.document.querySelector('#mappingRows b') === null,
           hostile.document.getElementById('mappingRows').innerHTML);
 
+    // And values, not attributes: a quote in a role name or an identifier
+    // must not end the attribute it is written into.
+    const quoted = buildMappings(['q" data-x="1'], { 'w" data-y="1': 'q" data-x="1' });
+    const quotedRows = quoted.document.getElementById('mappingRows');
+    check('a quote cannot end an attribute',
+          quotedRows.querySelector('[data-x],[data-y]') === null,
+          quotedRows.innerHTML);
+    check('and the values survive the round trip exactly',
+          quotedRows.querySelector('.mapping-role').value === 'q" data-x="1'
+          && quoted.document.getElementById('mappingField').value
+             === 'w" data-y="1 = q" data-x="1',
+          quoted.document.getElementById('mappingField').value);
+
     // What a change does, including the two things it used to leave out.
+    // The fake server works the change out from what the form SENT, the
+    // way the real one does, so nothing on screen comes from the fixture:
+    // a group typed into the box has to reach the server to be reported,
+    // and clearing the services box has to be what empties it.
     console.log('role change');
-    const edited = build().w;
-    let previewBody = null;
-    edited.fetch = (url, options) => {
-        if (url.includes('/preview')) previewBody = JSON.parse(options.body);
-        return Promise.resolve({ json: () => Promise.resolve({
-            logs: [], traces: [], services: 'every service', permissions: [],
-            warnings: [], reaches_nothing: false,
-            reaches_everything: { logs: false, traces: false, services: true },
-            change: { logs_added: [], logs_removed: [], traces_added: [],
-                      traces_removed: [], permissions_added: [],
-                      permissions_removed: [], groups_added: [],
-                      groups_removed: [], services_added: ['every service'],
-                      services_removed: [], widens: true } }) });
-    };
-    type(edited, 'roleGroups', 'wdash-developers');
+    const STORED = { services: ['payment-service'], groups: [] };
+    function answerChange(edited) {
+        let body = null;
+        edited.fetch = (url, options) => {
+            if (!url.includes('/preview')) {
+                return Promise.resolve({ json: () => Promise.resolve({
+                    logs: [], traces: [], services: [] }) });
+            }
+            body = JSON.parse(options.body);
+            const sentGroups = body.groups || [];
+            const cleared = (body.services || []).length === 0;
+            const change = {
+                logs_added: [], logs_removed: [], traces_added: [],
+                traces_removed: [], permissions_added: [],
+                permissions_removed: [],
+                groups_added: sentGroups.filter(g => !STORED.groups.includes(g)),
+                groups_removed: STORED.groups.filter(g => !sentGroups.includes(g)),
+                services_added: cleared ? ['every service'] : [],
+                services_removed: [],
+            };
+            change.widens = change.groups_added.length > 0
+                            || change.services_added.length > 0;
+            return Promise.resolve({ json: () => Promise.resolve({
+                logs: [], traces: [], services: 'every service',
+                permissions: [], warnings: [], reaches_nothing: false,
+                reaches_everything: { logs: false, traces: false,
+                                      services: cleared },
+                change }) });
+        };
+        return () => body;
+    }
+
+    const grouped = build().w;
+    const groupedBody = answerChange(grouped);
+    type(grouped, 'roleServices', 'payment-service');
+    type(grouped, 'roleGroups', 'wdash-developers');
     await settle();
-    check('the preview is told the groups the role will have',
-          previewBody && JSON.stringify(previewBody.groups)
-                         === JSON.stringify(['wdash-developers']),
-          JSON.stringify(previewBody && previewBody.groups));
-    const said = edited.document.getElementById('rolePreview').textContent;
+    const groupSaid = grouped.document.getElementById('rolePreview').textContent;
+    check('a group added to the role is shown as widening',
+          groupSaid.includes('hands the role to groups')
+          && groupSaid.includes('wdash-developers')
+          && groupSaid.includes('widens'),
+          `${groupSaid} | sent ${JSON.stringify(groupedBody())}`);
+
+    const cleared = build().w;
+    answerChange(cleared);
+    type(cleared, 'roleServices', 'payment-service');
+    await settle();
+    type(cleared, 'roleServices', '');
+    await settle();
+    const clearSaid = cleared.document.getElementById('rolePreview').textContent;
     check('clearing the services box shows as a change that widens',
-          said.includes('widens') && said.includes('every service'), said);
+          clearSaid.includes('grants services') && clearSaid.includes('every service')
+          && clearSaid.includes('widens'), clearSaid);
 
     console.log(failures.length ? `\n${failures.length} failure(s)`
                                 : '\nall role editor checks passed');

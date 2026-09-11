@@ -13,6 +13,7 @@ writing SQL under pressure.
 
     PYTHONPATH=src python -m wdash.store.recover --status
     PYTHONPATH=src python -m wdash.store.recover --grant-admin alice
+    PYTHONPATH=src python -m wdash.store.recover --set-role alice admin
     PYTHONPATH=src python -m wdash.store.recover --reset-password alice
 """
 
@@ -88,6 +89,41 @@ def grant_admin(store, username):
     return 0
 
 
+def set_role(store, username, role):
+    """Put one local account on a role that already exists.
+
+    The configuration page refuses to delete a role a local account holds,
+    and has no control for a local account's role — so this is the one way to
+    move the account first. `--grant-admin` could not stand in for it: it
+    always moves the account to `recovery-admin`, which left that role, once
+    created, impossible to delete from the page.
+    """
+    account = store.users.by_username(username)
+    if account is None:
+        print(f"No local account called '{username}'.", file=sys.stderr)
+        return 1
+    definition = store.roles.get(role)
+    if definition is None:
+        print(f"No role called '{role}'. Roles: "
+              + ", ".join(r["name"] for r in store.roles.all()),
+              file=sys.stderr)
+        return 1
+
+    with store.engine.begin() as connection:
+        from .schema import users
+        connection.execute(users.update()
+                           .where(users.c.username == account["username"])
+                           .values(role=role))
+
+    store.rbac.invalidate()
+    administers = ADMIN_PERMISSION in (definition.get("permissions") or [])
+    print(f"'{account['username']}' now holds '{role}'."
+          + ("" if administers else
+             f" It does NOT grant {ADMIN_PERMISSION}: this account is no "
+             f"longer a way back in to the configuration page."))
+    return 0
+
+
 def reset_password(store, username, password=None):
     account = store.users.by_username(username)
     if account is None:
@@ -115,6 +151,8 @@ def main(argv=None):
     parser.add_argument("--status", action="store_true",
                         help="who can administer, and who cannot")
     parser.add_argument("--grant-admin", metavar="USERNAME")
+    parser.add_argument("--set-role", nargs=2, metavar=("USERNAME", "ROLE"),
+                        help="move a local account to an existing role")
     parser.add_argument("--reset-password", metavar="USERNAME")
     parser.add_argument("--password", help="for scripted use; prompts otherwise")
     arguments = parser.parse_args(argv)
@@ -123,6 +161,8 @@ def main(argv=None):
 
     if arguments.grant_admin:
         return grant_admin(store, arguments.grant_admin)
+    if arguments.set_role:
+        return set_role(store, *arguments.set_role)
     if arguments.reset_password:
         return reset_password(store, arguments.reset_password,
                               arguments.password)

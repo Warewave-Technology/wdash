@@ -246,20 +246,69 @@ def _dockerfile():
         return handle.read()
 
 
+def _stages():
+    """The Dockerfile's stages, in order, with what each one inherits.
+
+    Each is (name, parent, directives): `parent` is the stage it is built
+    FROM when that is an earlier stage, and `directives` its own lines. An
+    environment is only real along a stage's FROM chain — an ENV written in
+    one stage says nothing about a sibling.
+    """
+    stages = []
+    for line in _dockerfile().splitlines():
+        match = re.match(r"^FROM\s+(\S+)(?:\s+AS\s+(\S+))?", line, re.IGNORECASE)
+        if match:
+            parent = match.group(1)
+            known = {name for name, _, _ in stages}
+            stages.append((match.group(2) or f"stage{len(stages)}",
+                           parent if parent in known else None, []))
+        elif stages and line.strip() and not line.lstrip().startswith("#"):
+            stages[-1][2].append(line.strip())
+    return stages
+
+
+def _stage_environment(stage):
+    """ENV along a stage's FROM chain, later lines overriding earlier ones —
+    an empty value included, because `ENV PYTHONPATH=` is an override too."""
+    by_name = {name: (parent, directives)
+               for name, parent, directives in _stages()}
+    chain = []
+    while stage is not None:
+        chain.insert(0, stage)
+        stage = by_name[stage][0]
+    environment = {}
+    for name in chain:
+        for directive in by_name[name][1]:
+            match = re.match(r"^ENV\s+(\w+)=(\S*)$", directive)
+            if match:
+                environment[match.group(1)] = match.group(2)
+            elif re.match(r"^WORKDIR\s+", directive):
+                environment["__WORKDIR__"] = directive.split(None, 1)[1]
+    return environment
+
+
 def _module_entry_points():
-    """Every `python -m <module>` the image or the manifests start.
+    """Every `python -m <module>` the image or the manifests start, with the
+    stage whose environment it starts in.
 
     Read from the files that start them — the Dockerfile's exec-form
-    ENTRYPOINT/CMD and every container `command` in kubernetes/ — so a new
-    process is covered the day it is written down, not the day somebody
-    remembers this test.
+    ENTRYPOINT/CMD (their own stage) and every container `command` in
+    kubernetes/ (the image a plain `docker build` produces, the last stage)
+    — so a new process is covered the day it is written down, not the day
+    somebody remembers this test.
     """
     found = set()
-    for array in re.findall(r'^(?:ENTRYPOINT|CMD)\s+(\[.*\])', _dockerfile(),
-                            re.MULTILINE):
-        parts = yaml.safe_load(array)
-        if parts[:2] == ["python", "-m"]:
-            found.add(parts[2])
+    stage = None
+    for line in _dockerfile().splitlines():
+        match = re.match(r"^FROM\s+\S+(?:\s+AS\s+(\S+))?", line, re.IGNORECASE)
+        if match:
+            stage = match.group(1)
+        array = re.match(r"^(?:ENTRYPOINT|CMD)\s+(\[.*\])", line)
+        if array:
+            parts = yaml.safe_load(array.group(1))
+            if parts[:2] == ["python", "-m"]:
+                found.add((parts[2], stage))
+    last = _stages()[-1][0]
     manifests = os.path.join(ROOT, "kubernetes")
     for name in sorted(os.listdir(manifests)):
         if not name.endswith(".yaml"):
@@ -272,7 +321,7 @@ def _module_entry_points():
                         spec.get("initContainers") or []):
                     command = container.get("command") or []
                     if command[:2] == ["python", "-m"]:
-                        found.add(command[2])
+                        found.add((command[2], last))
     return found
 
 
@@ -291,47 +340,65 @@ class EveryEntryPointImportsTest(unittest.TestCase):
     and none of this process's own.
     """
 
-    def _image_environment(self):
+    def _image_environment(self, stage):
+        """The environment `stage` sets, with its paths mapped from the
+        image's WORKDIR onto the repository — and none of this process's own
+        PYTHONPATH, which would answer the question for it."""
+        image = _stage_environment(stage)
+        workdir = image.pop("__WORKDIR__", None)
+        self.assertEqual(workdir, "/app", "the image's tree moved")
         environment = {key: value for key, value in os.environ.items()
                        if key != "PYTHONPATH"}
-        workdir = re.findall(r"^WORKDIR\s+(\S+)", _dockerfile(), re.MULTILINE)
-        self.assertEqual(workdir[:1], ["/app"], "the image's tree moved")
-        for value in re.findall(r"^ENV\s+PYTHONPATH=(\S+)", _dockerfile(),
-                                re.MULTILINE):
-            environment["PYTHONPATH"] = os.pathsep.join(
-                os.path.abspath(os.path.join(ROOT, os.path.relpath(
-                    part, workdir[0]))) for part in value.split(":"))
+        for key, value in image.items():
+            if key == "PYTHONPATH":
+                value = os.pathsep.join(
+                    os.path.abspath(os.path.join(
+                        ROOT, os.path.relpath(part, workdir)))
+                    for part in value.split(":") if part)
+            environment[key] = value
         environment["WDASH_NO_DOTENV"] = "1"
         return environment
 
     def test_the_processes_that_start_this_way_were_found(self):
         """Otherwise the test below passes by finding nothing to start."""
-        self.assertLessEqual({"wdash.alerts", "wdash.agent"},
-                             _module_entry_points())
+        modules = {module for module, _ in _module_entry_points()}
+        self.assertLessEqual({"wdash.alerts", "wdash.agent"}, modules)
+        stages = {stage for _, stage in _module_entry_points()}
+        self.assertLessEqual({"browser", "server"}, stages,
+                             "the browser image's ENTRYPOINT and the "
+                             "manifests' image are both covered")
 
-    def test_each_one_imports_with_the_image_environment(self):
+    def test_each_one_imports_with_its_own_stages_environment(self):
+        """Per stage, along its FROM chain: an ENV in a sibling stage is not
+        in this one's environment, and a later empty ENV is an override."""
         import subprocess
         import sys
 
-        environment = self._image_environment()
-        for module in sorted(_module_entry_points()):
-            with self.subTest(module=module):
+        for module, stage in sorted(_module_entry_points()):
+            with self.subTest(module=module, stage=stage):
                 result = subprocess.run(
                     [sys.executable, "-m", module, "--help"], cwd=ROOT,
-                    env=environment, capture_output=True, text=True,
-                    timeout=60)
+                    env=self._image_environment(stage), capture_output=True,
+                    text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stderr[-500:])
                 self.assertIn("usage:", result.stdout)
 
-    def test_the_image_job_starts_them_without_editing_the_path(self):
+    def test_the_image_job_starts_them_as_the_image_does(self):
         """A check that fixes the path before it looks cannot see the path
-        being wrong."""
+        being wrong — and there are more ways to fix it than sys.path: an
+        environment flag, a working directory, a different entry point, or a
+        step that cannot fail."""
         steps = "\n".join(step.get("run", "")
                           for step in _workflow()["jobs"]["image"]["steps"])
-        self.assertNotIn("sys.path", steps)
-        for module in sorted(_module_entry_points()):
+        for forbidden in ("sys.path", "PYTHONPATH", " -e ", "--env",
+                          " -w ", "--workdir", "--entrypoint", "|| true"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, steps)
+        for module in sorted({module for module, _ in _module_entry_points()}):
             with self.subTest(module=module):
-                self.assertIn(f"python -m {module}", steps)
+                self.assertRegex(
+                    steps, rf"(?m)^\s*docker run --rm wdash:ci python -m "
+                           rf"{re.escape(module)} --help\s*$")
 
 
 if __name__ == "__main__":

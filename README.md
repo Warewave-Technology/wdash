@@ -277,6 +277,9 @@ so the next "Save mappings" made everybody unmapped an administrator.
 If it happens anyway, `python -m wdash.store.recover --status` says who can
 administer and `--grant-admin <username>` puts one account back. The recovery
 role grants no data access; it exists to reach the configuration page.
+`--set-role <username> <role>` moves a local account to a role that exists —
+which is how a role a local account holds is freed to be deleted, since the
+page has no control for a local account's role.
 
 ### Authorization is resolved per request
 

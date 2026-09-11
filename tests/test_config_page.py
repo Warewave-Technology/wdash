@@ -448,11 +448,16 @@ class MappingTest(ConfigTestCase):
         self.assertIn("no longer exists", selected[0])
 
         # And what the browser would therefore submit is refused, by name.
+        # Asserted on what only a refusal produces: the page re-renders the
+        # missing default with "no longer exists" either way, and the stored
+        # value was already "auditor".
         response = self.client.post("/admin/mappings", data={
             "default_role": "auditor", "user_roles": ""}, follow_redirects=True)
-        self.assertIn(b"no longer exists", response.data)
-        self.assertEqual(self.app.store.settings.get("rbac.default_role"),
-                         "auditor")
+        self.assertIn(b"The default role &#39;auditor&#39; no longer exists",
+                      response.data)
+        self.assertNotIn(b"Role mappings saved", response.data)
+        self.assertNotIn("mappings updated", [
+            row["action"] for row in self.app.store.audit.recent()])
 
 
 class RoleDependentsTest(ConfigTestCase):
@@ -476,7 +481,12 @@ class RoleDependentsTest(ConfigTestCase):
         response = self.client.post("/admin/roles/developer/delete",
                                     follow_redirects=True)
         self.assertIsNotNone(self.app.store.roles.get("developer"))
-        self.assertIn(b"alice@example.com", response.data)
+        # The page embeds the stored mappings whatever happened, so the
+        # identifier is read from the refusal itself.
+        self.assertIn(b"These mappings still give", response.data)
+        refused = [row for row in self.app.store.audit.recent()
+                   if row["action"] == "role delete refused"]
+        self.assertIn("alice@example.com", refused[0]["state"]["reason"])
 
     def test_a_role_a_local_account_holds_cannot_be_deleted(self):
         """Its stored role is what makes a local account the way back in."""
@@ -502,6 +512,67 @@ class RoleDependentsTest(ConfigTestCase):
         self.client.post("/admin/roles/viewer/delete")
         actions = [row["action"] for row in self.app.store.audit.recent()]
         self.assertIn("role delete refused", actions)
+
+
+class DirectoryAdministratorTest(ConfigTestCase):
+    """An administrator who is one because a directory group says so.
+
+    Every other test here signs in as the local `owner`, whose stored role
+    comes first in the resolver's order — so nothing these routes now pass
+    the invariants (email, groups, mappings, the default) could change an
+    answer. These sign in the way an OIDC or LDAP administrator does.
+    """
+
+    def setUp(self):
+        super().setUp()
+        admin = self.app.store.roles.get("admin")
+        self.assertIn("wdash-admins", admin["groups"])  # seeded by rbac.yaml
+        with self.client.session_transaction() as session:
+            session["user_data"] = {
+                "id": "directory-1", "email": "alice@example.com",
+                "username": "alice", "groups": ["wdash-admins"],
+                "local_role": None}
+            session["_user_id"] = "directory-1"
+        self.app.store.rbac.invalidate()
+        self.assertEqual(self.client.get("/admin/config").status_code, 200,
+                         "alice should reach the page through her group")
+
+    def test_changing_the_default_role_is_allowed(self):
+        """Refused before: the old rule never looked at groups, decided she
+        would land on the new default, and blocked a harmless edit."""
+        response = self.client.post("/admin/mappings", data={
+            "default_role": "developer", "user_roles": ""},
+            follow_redirects=True)
+        self.assertIn(b"Role mappings saved", response.data)
+        self.assertEqual(self.app.store.settings.get("rbac.default_role"),
+                         "developer")
+
+    def test_mapping_her_email_below_her_username_is_refused(self):
+        """The resolver reads the email first. The old rule read the username
+        first, saw admin, and saved a change that demoted her on the next
+        request."""
+        response = self.client.post("/admin/mappings", data={
+            "default_role": "viewer",
+            "user_roles": "alice@example.com = viewer\nalice = admin"},
+            follow_redirects=True)
+        self.assertIn(b"lose access", response.data)
+        self.assertEqual(self.app.store.settings.get("rbac.user_roles") or {},
+                         {})
+
+        refused = [row for row in self.app.store.audit.recent()
+                   if row["action"] == "mappings save refused"]
+        self.assertEqual(len(refused), 1, "the refusal was not recorded")
+        self.assertIn("lose access", refused[0]["state"]["reason"])
+
+    def test_taking_her_group_off_the_admin_role_is_refused(self):
+        admin = self.app.store.roles.get("admin")
+        response = self.client.post("/admin/roles", data={
+            "name": "admin", "permissions": "\n".join(admin["permissions"]),
+            "containers": "\n".join(admin["containers"] or []),
+            "trace_containers": "\n".join(admin["trace_containers"] or []),
+            "services": "", "groups": ""}, follow_redirects=True)
+        self.assertIn(b"lock you out", response.data)
+        self.assertIn("wdash-admins", self.app.store.roles.get("admin")["groups"])
 
 
 class SecretsUnavailableTest(unittest.TestCase):

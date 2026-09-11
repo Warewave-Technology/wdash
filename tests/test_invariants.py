@@ -225,19 +225,38 @@ class TheRulesAskTheResolverTest(unittest.TestCase):
         }.get(key, default)
         resolver = RoleResolver(roles, settings)
 
-        cases = [dict(email="alice@example.com", username="alice",
-                      groups=["wdash-admins"]),
-                 dict(email=None, username="bob", groups=["wdash-admins"]),
-                 dict(email=None, username="carol", groups=[]),
-                 dict(email=None, username="owner", groups=[],
-                      explicit="admin")]
+        # Each with the answer written down, not recomputed: a comparison
+        # of choose_role with itself would move with it and prove nothing
+        # about the order.
+        cases = [
+            # a direct mapping beats a group
+            (dict(email="alice@example.com", username="alice",
+                  groups=["wdash-admins"]), "viewer"),
+            # a group beats the default
+            (dict(email=None, username="bob", groups=["wdash-admins"]),
+             "admin"),
+            # nothing matches: the default
+            (dict(email=None, username="carol", groups=[]), "viewer"),
+            # a local account's own role beats everything
+            (dict(email="alice@example.com", username="owner", groups=[],
+                  explicit="admin"), "admin"),
+            # the email is read before the username
+            (dict(email="dave@example.com", username="dave", groups=[]),
+             "viewer"),
+        ]
+        user_roles = {"alice@example.com": "viewer",
+                      "dave@example.com": "viewer", "dave": "admin"}
+        settings.get.side_effect = lambda key, default=None: {
+            "rbac.default_role": "viewer", "rbac.user_roles": user_roles,
+        }.get(key, default)
+        resolver.invalidate()
         by_name = {r["name"]: r for r in roles.all.return_value}
-        for case in cases:
+        for case, expected in cases:
             with self.subTest(**case):
                 self.assertEqual(
-                    resolver.role_for(**case),
-                    choose_role(by_name, {"alice@example.com": "viewer"},
-                                "viewer", **case))
+                    choose_role(by_name, user_roles, "viewer", **case),
+                    expected)
+                self.assertEqual(resolver.role_for(**case), expected)
 
 
 class RecoveryToolTest(unittest.TestCase):
@@ -278,6 +297,44 @@ class RecoveryToolTest(unittest.TestCase):
     def test_status_names_who_can_administer(self):
         _, output = self.run_tool("--status")
         self.assertIn("admin", output)
+
+    def test_an_account_can_be_moved_to_a_role_that_exists(self):
+        """The configuration page refuses to delete a role a local account
+        holds and has no control for that account's role, so this is how the
+        account is moved first. `--grant-admin` could not do it: it always
+        lands on `recovery-admin`, which then could never be deleted."""
+        self.run_tool("--grant-admin", "owner")
+        code, _ = self.run_tool("--set-role", "owner", "admin")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.store.users.by_username("owner")["role"], "admin")
+
+        from wdash.dashboard.invariants import refuses_role_delete
+        self.assertIsNone(refuses_role_delete(
+            self.store.roles.all(), "recovery-admin", local("admin"),
+            default_role="viewer", user_roles={},
+            local_accounts=self.store.users.all()),
+            "the role the account left is still held by something")
+
+    def test_a_role_that_does_not_exist_is_refused(self):
+        code, output = self.run_tool("--set-role", "owner", "nonexistent")
+        self.assertEqual(code, 1)
+        self.assertIn("No role called", output)
+        self.assertEqual(self.store.users.by_username("owner")["role"], "admin")
+
+    def test_it_says_when_the_account_stops_being_a_way_back_in(self):
+        _, output = self.run_tool("--set-role", "owner", "viewer")
+        self.assertIn("NOT grant system:admin", output)
+
+    def test_the_delete_refusal_names_a_remedy_that_works(self):
+        """It named `--grant-admin`, which cannot move an account OFF the
+        recovery role — following the advice changed nothing."""
+        from wdash.dashboard.invariants import refuses_role_delete
+        refusal = refuses_role_delete(
+            [ADMIN, CO_ADMIN, VIEWER], "co-admin", local("admin"),
+            default_role="viewer",
+            local_accounts=[{"username": "breakglass", "role": "co-admin"}])
+        self.assertIn("--set-role", refusal)
+        self.assertNotIn("--grant-admin", refusal)
 
     def test_status_says_plainly_when_nobody_can(self):
         self.break_everything()

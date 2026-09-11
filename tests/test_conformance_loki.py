@@ -297,6 +297,31 @@ class LokiSpecificTest(unittest.TestCase):
                          sorted(allowed),
                          f"{selector} selects streams the scope refused")
 
+    def test_every_character_re2_reads_as_syntax_is_escaped(self):
+        """Every one of them, not the handful the case above happens to use.
+
+        Dropping `[`, `^`, `*` or `?` from the escape passed every other test
+        here, and each still widens a grant: with `team-a-*` and `-*-pii*`,
+        an allowed name `team-a-[^q]*` selected the `team-a-billing-pii` the
+        scope had refused.
+        """
+        from wdash.hub import Scope
+        from wdash.hub.adapters.loki import _literal
+
+        for character in "\\.+*?()|[]{}^$":
+            with self.subTest(character=character):
+                self.assertEqual(_literal(character), "\\" + character)
+
+        available = ["team-a-[^q]*", "team-a-x?", "team-a-y{0}",
+                     "team-a-$^", "team-a-billing-pii"]
+        scope = Scope(principal="p", containers=("team-a-*", "-*-pii*"))
+        allowed = scope.resolve(available, source=self.source.name)
+        self.assertNotIn("team-a-billing-pii", allowed)
+        selector = self.source._selector(allowed)
+        self.assertEqual(sorted(_selects(selector, available)),
+                         sorted(allowed),
+                         f"{selector} selects streams the scope refused")
+
     def test_one_allowed_name_selects_only_itself_too(self):
         """The single-stream form is equality, which has no syntax to leak
         through; asserted so that it stays that way."""

@@ -154,8 +154,8 @@ def refuses_role_delete(roles, name, actor, default_role=None,
                 f"account whose role is gone falls back to the default role, "
                 f"which normally cannot administer — and a local account is "
                 f"the way back in when the identity provider is not. Move it "
-                f"first: python -m wdash.store.recover --grant-admin "
-                f"<username>.")
+                f"to another role first: python -m wdash.store.recover "
+                f"--set-role <username> <role>.")
 
     return None
 
