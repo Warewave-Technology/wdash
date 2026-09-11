@@ -237,11 +237,16 @@ class VictoriaLogsSource(LogSource):
         """
         if not targets:
             raise VictoriaLogsError("no containers are in scope")
-        field = self._stream_field
-        if len(targets) == 1:
-            return f"{field}:{_quote(targets[0])}"
-        inner = " OR ".join(f"{field}:{_quote(name)}" for name in targets)
-        return f"({inner})"
+        # EXACT values, never phrases. `service:"pay"` is LogsQL's phrase
+        # filter: it matches `pay` wherever it sits on word boundaries inside
+        # a longer value, so a grant of `pay` also returned `pay-api` and
+        # `pay worker`, and a role holding `app-*` with `-*-pii-*` read
+        # `app-billing-pii-eu` through its allowed `app-billing`. The scope
+        # decides which values may be read; the filter has to say exactly
+        # those. `in(...)` is the multi-exact filter, and one form for one
+        # value or many is one form to get right.
+        values = ", ".join(_quote(name) for name in targets)
+        return f"{self._stream_field}:in({values})"
 
     def _targets(self, query, scope):
         """Containers to search, resolved over the query's own window.

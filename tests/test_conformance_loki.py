@@ -24,6 +24,27 @@ from wdash.hub.adapters.loki import LokiLogSource, _escape  # noqa: E402
 SERVICES = ["api-gateway", "payment-service"]
 
 
+def _selects(selector, values):
+    """Which of `values` a LogQL stream selector would select.
+
+    `{l="v"}` is equality. `{l=~"re"}` is a regular expression that Loki,
+    like Prometheus, anchors at both ends, so it is judged with fullmatch.
+    The selector's own string layer is undone first, the way Loki's parser
+    does, and what is left is handed to Python's `re`, which agrees with
+    RE2 on everything an escaped literal and `|` can express.
+    """
+    import re
+
+    match = re.fullmatch(r'\{(\w+)(=~|=)"((?:[^"\\]|\\.)*)"\}', selector)
+    if not match:
+        raise AssertionError(f"not a single-label selector: {selector!r}")
+    operator, body = match.group(2), re.sub(r"\\(.)", r"\1", match.group(3))
+    if operator == "=":
+        return {value for value in values if value == body}
+    pattern = re.compile(body)
+    return {value for value in values if pattern.fullmatch(value)}
+
+
 class FakeResponse:
     def __init__(self, payload, status_code=200, text=""):
         self._payload = payload
@@ -246,6 +267,42 @@ class LokiSpecificTest(unittest.TestCase):
         self.assertNotIn('"', _escape('bad"value')[1:-1].replace('\\"', ""))
         selector = self.source._selector(['a"b'])
         self.assertIn('\\"', selector)
+
+    def test_an_allowed_name_selects_only_itself(self):
+        """Several streams are selected by one regular expression, and the
+        names in it are the values the scope allowed: data, not syntax.
+
+        They were joined with `|` and nothing else, so `pay.svc` also
+        selected `payXsvc`, and a service somebody named `team-a-x|.+` (a
+        name anyone who can set OTEL_SERVICE_NAME inside an allowed prefix
+        can choose) turned a grant of `team-a-*` into every stream in Loki,
+        `billing-pii` included.
+        """
+        from wdash.hub import Scope
+
+        # The quote is there for the ORDER of the two escapes: regex first,
+        # string second. The other way round, the regex escape doubles the
+        # string escape's backslash and the quote closes the string.
+        available = ["team-a-api", "team-a-x|.+", "billing-pii", "payXsvc",
+                     "pay.svc", "(a)", "back\\slash", 'q"uote']
+        scope = Scope(principal="p", containers=(
+            "team-a-*", "pay.svc", "(a)", "back\\slash", 'q"uote'))
+        allowed = scope.resolve(available, source=self.source.name)
+        self.assertEqual(sorted(allowed), sorted(
+            ["team-a-api", "team-a-x|.+", "pay.svc", "(a)", "back\\slash",
+             'q"uote']))
+
+        selector = self.source._selector(allowed)
+        self.assertEqual(sorted(_selects(selector, available)),
+                         sorted(allowed),
+                         f"{selector} selects streams the scope refused")
+
+    def test_one_allowed_name_selects_only_itself_too(self):
+        """The single-stream form is equality, which has no syntax to leak
+        through; asserted so that it stays that way."""
+        selector = self.source._selector(["pay.svc"])
+        self.assertEqual(_selects(selector, ["pay.svc", "payXsvc"]),
+                         {"pay.svc"})
 
     def test_the_scope_reaches_the_selector(self):
         from wdash.hub import Scope

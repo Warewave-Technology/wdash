@@ -29,6 +29,7 @@ every log has structured severity.
 
 import json
 import logging
+import re
 import time
 import datetime as dt
 from datetime import datetime, timezone
@@ -62,6 +63,22 @@ def _escape(value):
     problem as an LDAP filter or a SQL string, and the same answer.
     """
     return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+#: What RE2 reads as syntax rather than as the character itself.
+_REGEX_SYNTAX = re.compile(r"([\\.+*?()|\[\]{}^$])")
+
+
+def _literal(value):
+    """A label value as a regular expression that matches only itself.
+
+    Several streams are selected with `label=~"a|b"`, and the names in that
+    alternation are the values the scope allowed — so a name is data, and a
+    `.` or a `|` inside it must not become syntax. Unescaped, `pay.svc`
+    also selected `payXsvc`, and a service somebody named `team-a-x|.+`
+    turned a grant of `team-a-*` into every stream Loki holds.
+    """
+    return _REGEX_SYNTAX.sub(r"\\\1", str(value))
 
 
 def _nanoseconds(moment):
@@ -200,7 +217,10 @@ class LokiLogSource(LogSource):
             raise LokiError("no streams are in scope")
         if len(targets) == 1:
             return f'{{{self._stream_label}="{_escape(targets[0])}"}}'
-        alternation = "|".join(_escape(name) for name in targets)
+        # Regex-escaped first, because each name is a literal inside an
+        # alternation; string-escaped second, because the whole regex then
+        # sits inside a LogQL string, where a backslash is itself an escape.
+        alternation = "|".join(_escape(_literal(name)) for name in targets)
         return f'{{{self._stream_label}=~"{alternation}"}}'
 
     def _targets(self, query, scope):

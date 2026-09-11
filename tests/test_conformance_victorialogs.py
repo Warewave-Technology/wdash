@@ -38,6 +38,36 @@ ROWS = [
 ]
 
 
+def _selects(selector, field, values):
+    """Which of `values` a LogsQL container filter would select.
+
+    Enough of LogsQL's documented semantics to judge the scope filter this
+    adapter renders, and no more: `field:"phrase"` is a phrase filter, which
+    matches the phrase anywhere in the value on word boundaries;
+    `field:in("a", ...)` is the multi-exact filter, which matches whole
+    values; `OR` between them. Anything else is a test failure, not a guess.
+    """
+    import re
+
+    string = r'"((?:[^"\\]|\\.)*)"'
+    unquote = lambda text: re.sub(r"\\(.)", r"\1", text)  # noqa: E731
+    inner = selector[1:-1] if selector.startswith("(") else selector
+    chosen = set()
+    for clause in inner.split(" OR "):
+        exact = re.fullmatch(rf"{re.escape(field)}:in\((.*)\)", clause)
+        phrase = re.fullmatch(rf"{re.escape(field)}:{string}", clause)
+        if exact:
+            wanted = {unquote(v) for v in re.findall(string, exact.group(1))}
+            chosen |= {value for value in values if value in wanted}
+        elif phrase:
+            words = re.compile(rf"(?<!\w){re.escape(unquote(phrase.group(1)))}"
+                               rf"(?!\w)")
+            chosen |= {value for value in values if words.search(value)}
+        else:
+            raise AssertionError(f"not a container filter: {clause!r}")
+    return chosen
+
+
 class FakeResponse:
     def __init__(self, text="", status_code=200, payload=None):
         self.status_code = status_code
@@ -200,16 +230,47 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
         with self.assertRaises(VictoriaLogsError):
             self.source._selector([])
 
-    def test_one_container_and_several_render_differently(self):
+    def test_one_container_and_several_use_the_same_exact_filter(self):
         self.assertEqual(self.source._selector(["api-gateway"]),
-                         'service:"api-gateway"')
-        self.assertIn(" OR ", self.source._selector(SERVICES))
+                         'service:in("api-gateway")')
+        self.assertEqual(self.source._selector(["a", "b"]),
+                         'service:in("a", "b")')
 
     def test_values_are_always_quoted(self):
         """An unquoted value ends at the first space and the rest becomes a
         separate filter, which silently widens the query."""
         rendered = self.source._selector(["payment service"])
-        self.assertEqual(rendered, 'service:"payment service"')
+        self.assertEqual(rendered, 'service:in("payment service")')
+
+    def test_an_allowed_name_selects_only_itself(self):
+        """The scope decides which values may be read, and the filter has to
+        select exactly those.
+
+        It rendered `service:"app-billing"`, which LogsQL reads as a PHRASE
+        filter: the words `app billing` anywhere in the value, on word
+        boundaries. So a role holding `app-*` and `-*-pii-*` was correctly
+        refused `app-billing-pii-eu` by the scope, and read it anyway through
+        the `app-billing` it was allowed. The same shape widened every exact
+        grant (`pay` read `pay-api`) and every suffix pattern.
+
+        Judged with LogsQL's documented semantics, modelled in `_selects`:
+        a phrase filter matches on word boundaries, `in(...)` matches whole
+        values.
+        """
+        from wdash.hub import Scope
+
+        available = ["app-billing", "app-billing-pii-eu", "app-web",
+                     "api-gateway", "api-gateway-internal", "pay", "pay-api"]
+        scope = Scope(principal="p",
+                      containers=("app-*", "-*-pii-*", "api-gateway", "pay"))
+        allowed = scope.resolve(available, source=self.source.name)
+        self.assertEqual(sorted(allowed),
+                         ["api-gateway", "app-billing", "app-web", "pay"])
+
+        rendered = self.source._selector(allowed)
+        self.assertEqual(sorted(_selects(rendered, "service", available)),
+                         sorted(allowed),
+                         f"{rendered} selects values the scope refused")
 
     def test_a_quote_in_a_value_cannot_end_the_string(self):
         rendered = self.source._selector(['evil" OR service:*'])
@@ -439,7 +500,7 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
         from wdash.hub import Scope
         self._search(scope=Scope(principal="p", containers=("api-*",)))
         query = self._sent()["params"]["query"]
-        self.assertIn('service:"api-gateway"', query)
+        self.assertIn('service:in("api-gateway")', query)
         self.assertNotIn("payment-service", query)
 
     # --- transport ---
