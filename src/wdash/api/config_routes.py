@@ -95,6 +95,18 @@ def _not_live(hub, saved):
     # "your source could not be built" is not what that means.
     if not getattr(hub, "rebuilds_from_store", True):
         return None
+
+    # The hub's own answer first. A name FOUND in the registry is not proof
+    # that this row is the one answering to it: when the name is a base one,
+    # the environment's source is holding it, every signal looks live, and
+    # the save flashed "saved and in use now" in green on the very render
+    # that drew "not in use" beside the row it was about. Two sentences about
+    # one row, in one response, disagreeing.
+    reasons = getattr(hub, "source_failures", None) or {}
+    recorded = reasons.get(saved["name"])
+    if recorded:
+        return recorded
+
     live = {}
     for signal in saved.get("signals") or ():
         try:
@@ -108,9 +120,9 @@ def _not_live(hub, saved):
               if saved["name"] not in names]
     if not absent:
         return None
-    reasons = getattr(hub, "source_failures", None) or {}
-    return reasons.get(saved["name"]) or (
-        f"nothing is registered for {', '.join(absent)}. The log says why.")
+    # Absent and unexplained: a rebuild that failed wholesale keeps the last
+    # good picture and records nothing about this row.
+    return f"nothing is registered for {', '.join(absent)}. The log says why."
 
 
 def _duplicate_sources():
@@ -134,6 +146,26 @@ def _duplicate_sources():
 
 def _store():
     return getattr(current_app, "store", None)
+
+
+def _why(exc, limit=200):
+    """An exception as a bounded sentence for the page, cut in the MIDDLE.
+
+    `str(exc)[:120]` kept the head, and the head of a refused connection is
+    the URL requests has just repeated back: every one of them read
+    "HTTPConnectionPool(host='...', port=1): Max retries exceeded with url:
+    /api/v2/search/tag/resource.ser" and stopped there. The cause is the LAST
+    clause of that message — "[Errno 61] Connection refused" — so the only
+    part worth showing was the only part guaranteed to be cut.
+
+    Both ends are kept: which store and which call, then what happened.
+    Bounded still, because this goes onto a screen and not into a log.
+    """
+    text = " ".join(str(exc).split())
+    if len(text) <= limit:
+        return text
+    head = (limit - 3) // 2
+    return f"{text[:head]}...{text[len(text) - (limit - 3 - head):]}"
 
 
 def _source_failures():
@@ -379,6 +411,10 @@ def save_source():
     store = _store()
     source_id = request.form.get("id") or None
     form = request.form
+    # Read once, here: the save needs the row it is replacing both to carry
+    # forward the fields the form does not carry and to check what a rename
+    # would do to the roles.
+    existing = store.sources.get(source_id) if source_id else None
 
     # Signals are checkboxes now: one source serves whichever of them it
     # holds. Two rows for one cluster meant two credentials to rotate and two
@@ -404,10 +440,26 @@ def save_source():
     # adding `monitors` gave the form a box somebody could type into and the
     # save silently dropped it. A field that accepts input and discards it is
     # worse than one that is missing.
+    #
+    # And a field the form does not carry AT ALL is carried forward from the
+    # stored row rather than written blank. The catalogue declares
+    # `exclude_patterns` for every signal and the modal has one box for it —
+    # the log one — so an edit made to rename a source or rotate its password
+    # emptied `traces.exclude_patterns` and `monitors.exclude_patterns`: the
+    # monitor-pattern fault again, one field further along. `None` is "no such
+    # box on this form"; `""` is a box that is there and was cleared, which
+    # means empty and is saved as empty.
+    stored = (existing or {}).get("config") or {}
     for signal in _signals_with_fields():
         block = {}
         for field in SOURCE_KINDS["elasticsearch"]["signal_fields"]:
-            block[field] = form.get(f"{signal}_{field}")
+            value = form.get(f"{signal}_{field}")
+            if value is None:
+                kept = (stored.get(signal) or {}).get(field)
+                if kept:
+                    block[field] = list(kept)
+                continue
+            block[field] = value
         config[signal] = block
     password = form.get("password") or None
 
@@ -418,7 +470,6 @@ def save_source():
     # with `-primary:secret-*` could read `secret-*` the moment the page
     # saved, with no preview and nothing in the audit row but the new name.
     if source_id:
-        existing = store.sources.get(source_id)
         new_name = (form.get("name") or "").strip()
         moved = (_moves_secret(existing["config"], config, "url",
                                "verify_certs")
@@ -747,7 +798,7 @@ def available_targets():
                             "containers": source.containers(unrestricted)})
             except Exception as exc:
                 out.append({"source": source.name, "containers": [],
-                            "error": str(exc)[:120]})
+                            "error": _why(exc)})
         return out
 
     # A store that could not be asked is NAMED, not skipped. Tempo and Jaeger
@@ -766,7 +817,7 @@ def available_targets():
                 "Trace source '%s' could not list its services: %s",
                 source.name, exc)
             service_errors.append({"source": source.name,
-                                   "error": str(exc)[:120]})
+                                   "error": _why(exc)})
 
     return jsonify({
         "logs": listing(hub.log_sources if hub else []),

@@ -121,11 +121,14 @@ function build() {
         if (url.includes('/available')) {
             return Promise.resolve({ json: () => Promise.resolve({
                 logs: [{ source: 'es',
-                         // Three shapes a real cluster holds: an ILM
-                         // sequence, Logstash's own date roll-over, and a
-                         // name that does not rotate at all.
+                         // Five shapes a real cluster holds: an ILM
+                         // sequence, Logstash's own date roll-over, a data
+                         // stream carrying the Beats version before its
+                         // date, a name whose last component is a single
+                         // digit, and a name that does not rotate at all.
                          containers: ['app-logs-000001', 'logstash-2026.09.11',
-                                      'payments'] }],
+                                      '.ds-heartbeat-8.19.9-2026.09.11-000001',
+                                      'app-logs-2', 'payments'] }],
                 traces: [], services: ['api-gateway'],
                 service_errors: [{ source: 'tempo-down',
                                    error: 'Connection refused' }] }) });
@@ -255,11 +258,34 @@ function type(w, id, value) {
     // `payments*` as one is the same promise broken the other way: it grants
     // `payments-secrets` as well.
     const rows = Array.from(w.document.querySelectorAll('#targetPickerBody tr'));
-    const plain = rows.find(row => row.querySelector('code').textContent === 'payments');
+    const rowFor = name => rows.find(
+        row => row.querySelector('code').textContent === name);
+    const onlyExact = name => {
+        const row = rowFor(name);
+        return row && row.querySelectorAll('.insert-target').length === 1
+            && row.querySelector('.insert-target').textContent.trim() === 'exact';
+    };
     check('a name that does not rotate is offered only as itself',
-          plain && plain.querySelectorAll('.insert-target').length === 1
-          && plain.querySelector('.insert-target').textContent.trim() === 'exact',
-          plain ? plain.innerHTML : 'no row for payments');
+          onlyExact('payments'),
+          rowFor('payments') ? rowFor('payments').innerHTML : 'no row');
+
+    // What rotates is a DATE and an ILM sequence, and stripping the whole
+    // trailing run of digits, dots and dashes takes more than that. These
+    // suggestions are written into role grants, so the over-reach is the
+    // same fault as the under-reach: `.ds-heartbeat-*` covers a Beats 9.x
+    // stream this cluster has never had, and the grant would follow it.
+    const heartbeat = rowFor('.ds-heartbeat-8.19.9-2026.09.11-000001');
+    check('the version in a data stream name survives the strip',
+          heartbeat
+          && heartbeat.textContent.includes('.ds-heartbeat-8.19.9-*')
+          && !heartbeat.textContent.includes('>.ds-heartbeat-*<'),
+          heartbeat ? heartbeat.innerHTML : 'no row for the data stream');
+
+    // `app-logs-2` is a name, not a rotation: stripped to `app-logs-*` it
+    // reaches `app-logs-secret-000001` next door.
+    check('a one-digit last component is not a rotation suffix',
+          onlyExact('app-logs-2'),
+          rowFor('app-logs-2') ? rowFor('app-logs-2').innerHTML : 'no row');
 
     // The services side. A trace store that could not be asked used to be
     // dropped with `except Exception: continue`, so a shorter list of names

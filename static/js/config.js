@@ -590,19 +590,34 @@ document.querySelectorAll('.pick-target').forEach(button => {
                     // Strip the trailing rotation suffix to suggest a pattern
                     // that survives the next roll-over.
                     //
-                    // The whole trailing run of digits, dots and dashes, not
-                    // a single group of four or more digits. `-000001` was
-                    // the only shape the old expression stripped, so every
-                    // DATE-rotated name — Logstash's own `logstash-
-                    // 2026.09.11`, Beats' `filebeat-8.14.0-2026.09.11`, a
-                    // data stream's `.ds-logs-app-default-2026.09.11-000001`
-                    // — was offered back with its date still on it, under a
-                    // button titled "Survives rotation". It did not: the
-                    // role lost access the next day.
+                    // What rotates is a DATE (`2026.09.11`, `2026-09-11`) and
+                    // an ILM sequence (`-000001`), either or both, and only
+                    // those are taken. `-000001` alone was stripped once, so
+                    // every date-rotated name — Logstash's own
+                    // `logstash-2026.09.11`, Beats'
+                    // `filebeat-8.14.0-2026.09.11`, a data stream's
+                    // `.ds-logs-app-default-2026.09.11-000001` — came back
+                    // with its date still on it under a button titled
+                    // "Survives rotation": the role lost access the next day.
                     //
+                    // The whole trailing run of digits, dots and dashes is
+                    // too much in the other direction, and these suggestions
+                    // are written into role GRANTS. It ate the Beats version
+                    // (`.ds-heartbeat-8.19.9-...` offered as
+                    // `.ds-heartbeat-*`, which covers a 9.x stream nobody has
+                    // seen yet) and turned `app-logs-2`, a name, into
+                    // `app-logs-*`, which reaches `app-logs-secret-000001`.
+                    const ROTATION = /[-.](\d{4}[-.]\d{2}[-.]\d{2}|\d{4,})$/;
+                    let stem = name, separator = '';
+                    for (let match = stem.match(ROTATION); match;
+                         match = stem.match(ROTATION)) {
+                        separator = stem[match.index];
+                        stem = stem.slice(0, match.index);
+                    }
                     // The separator is kept, so `app-logs-*` rather than
-                    // `app-logs*` — the wider one also reaches `app-logsomething`.
-                    const stripped = name.replace(/([-.])[\d.-]+$/, '$1');
+                    // `app-logs*` — the wider one also reaches
+                    // `app-logsomething`.
+                    const stripped = stem + separator;
                     // Nothing to strip means nothing rotates: `payments` has
                     // no rotation-proof form, and offering `payments*` as one
                     // is the same promise broken a different way.

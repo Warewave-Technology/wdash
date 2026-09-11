@@ -29,11 +29,14 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from wdash.api.config_routes import _not_live  # noqa: E402
 from wdash.app import create_app  # noqa: E402
 from wdash.config import Config  # noqa: E402
+from wdash.hub import Hub  # noqa: E402
 from wdash.store import SecretBox  # noqa: E402
 from wdash.store.sources import SourceError  # noqa: E402
 
@@ -246,6 +249,29 @@ class ABaseNameIsNotAvailableTest(_Store):
         body = self.client.get("/admin/config").get_data(as_text=True)
         self.assertIn("not in use", body)
 
+    def test_saving_a_shadowed_row_does_not_call_it_in_use(self):
+        """The flash and the table have to be about the same row.
+
+        `_not_live` asked whether the saved NAME appears in the hub's
+        registries, and for a shadowed row it does — the ENVIRONMENT's source
+        is holding it. So one response flashed "saved and in use now" in
+        green and drew "not in use" beside the row it was about, and the
+        source answering under that name was somebody else's.
+        """
+        self.app.store.sources.reserved_names = None
+        row = self.app.store.sources.create(
+            name="elasticsearch-logs", signal=["logs"], kind="loki",
+            config={"url": "http://localhost:3100"})
+        self.app.store.sources.reserved_names = self.app.hub.base_source_names
+
+        response = self.save(id=row["id"], name="elasticsearch-logs")
+        said = " ".join(flashes(response))
+        self.assertIn("NOT in use", said)
+        self.assertIn("still answering; this row is not", said)
+        self.assertNotIn("in use now", said)
+        # The same response, the table beside it: one story, not two.
+        self.assertIn("not in use", response.get_data(as_text=True))
+
     def test_a_row_can_still_be_edited_under_the_name_it_already_has(self):
         """Refusing the name on every save would leave such a row unsavable —
         it could not even be disabled."""
@@ -260,6 +286,58 @@ class ABaseNameIsNotAvailableTest(_Store):
         self.assertFalse(updated["enabled"])
         with self.assertRaises(SourceError):
             self.app.store.sources.update(row["id"], name="elasticsearch-traces")
+
+
+class ThePageLooksBeforeItReportsTest(_Store):
+    """The marker is only as fresh as the hub the page asked.
+
+    `source_failures` read the registries without `_fresh()`, which every
+    other liveness read on the hub calls first. `/admin/config` touches the
+    hub through that property and nothing else, so a worker that had served
+    no query since the change rendered the row with no badge and no warning —
+    a failure looking like ordinary data, on the screen that exists to say
+    otherwise.
+    """
+
+    def other_worker(self):
+        """Another process, another deployment key, already settled: it was
+        built before the row existed, so nothing is wrong with it yet."""
+        other = self.worker(key=SecretBox.generate_key())
+        client = other.test_client()
+        self.sign_in(client)
+        return other, client
+
+    def test_the_page_of_a_worker_that_has_served_nothing_says_so(self):
+        other, client = self.other_worker()
+        self.save(name="loki-a", username="u", password="p")
+        with mock.patch.object(Hub, "RELOAD_TTL", 0.0):
+            body = client.get("/admin/config").get_data(as_text=True)
+        self.assertIn("loki-a", body)
+        self.assertIn("not in use", body)
+        self.assertIn("could not be decrypted", body)
+
+    def test_the_property_itself_is_what_looks(self):
+        """Not the template, and not some other read happening to run first."""
+        other, _ = self.other_worker()
+        self.save(name="loki-a", username="u", password="p")
+        with mock.patch.object(Hub, "RELOAD_TTL", 0.0), other.app_context():
+            self.assertIn("loki-a", other.hub.source_failures)
+
+    def test_it_is_still_asked_only_once_a_ttl(self):
+        """The refresh is a clock read almost every time. Left unguarded it
+        would be a store query per render, on a property the page reads for
+        every row."""
+        other, client = self.other_worker()
+        self.save(name="loki-a", username="u", password="p")
+        with mock.patch.object(Hub, "RELOAD_TTL", 0.0), other.app_context():
+            other.hub.source_failures
+        stamps = []
+        original = other.hub._stamp_of
+        other.hub._stamp_of = lambda: (stamps.append(1), original())[1]
+        with other.app_context():
+            for _ in range(5):
+                other.hub.source_failures
+        self.assertEqual(stamps, [])
 
 
 class TheDefaultDoesNotMoveTest(_Store):
@@ -328,6 +406,19 @@ class ServicePickerTest(_Store):
         available = self.client.get("/admin/api/available").get_json()
         self.assertEqual(available["services"], ["api-gateway"])
 
+    def test_the_reason_reaches_the_reader(self):
+        """Naming the store is half of it; the sentence has to say what
+        happened. `str(exc)[:120]` stopped inside the query string of the URL
+        requests had just repeated back, so every connection failure read as
+        "Max retries exceeded with url: /api/v2/sea" — the cause is the last
+        clause of that message, and it was the part that was cut."""
+        available = self.client.get("/admin/api/available").get_json()
+        reason = {entry["source"]: entry["error"]
+                  for entry in available["service_errors"]}["tempo-down"]
+        self.assertIn("Connection refused", reason)
+        # And still bounded: this goes into a page, not a log file.
+        self.assertLessEqual(len(reason), 200)
+
     def test_every_store_answering_reports_no_errors(self):
         from tests.test_trace_fanout import StubTraceSource
         from wdash.hub.models import Service
@@ -337,6 +428,30 @@ class ServicePickerTest(_Store):
                               error_count=0)])])
         available = self.client.get("/admin/api/available").get_json()
         self.assertEqual(available["service_errors"], [])
+
+
+class ARowTheHubDidNotExplainTest(unittest.TestCase):
+    """The fallback sentence, when the hub holds neither the source nor a
+    reason for not holding it — a rebuild that failed wholesale, say, which
+    keeps the last good picture and records nothing about the new row."""
+
+    class Hub:
+        rebuilds_from_store = True
+        log_sources = ()
+        trace_sources = ()
+        source_failures = {}
+
+    def test_a_row_absent_from_the_registry_is_not_in_use(self):
+        why = _not_live(self.Hub(), {"name": "loki-a", "signals": ["logs"]})
+        self.assertIsNotNone(why)
+        self.assertIn("nothing is registered for logs", why)
+
+    def test_a_row_the_hub_holds_is_in_use(self):
+        """The control: the check must not cry wolf over a live source."""
+        held = self.Hub()
+        held.log_sources = (type("Source", (), {"name": "loki-a"})(),)
+        self.assertIsNone(
+            _not_live(held, {"name": "loki-a", "signals": ["logs"]}))
 
 
 if __name__ == "__main__":  # pragma: no cover - run through unittest

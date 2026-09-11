@@ -1068,6 +1068,40 @@ class SignalFormTest(ConfigTestCase):
         self.assertEqual(row["config"]["monitors"]["index_patterns"],
                          ["heartbeat-*"])
 
+    def test_a_field_the_form_does_not_carry_is_not_saved_blank(self):
+        """The save writes every per-signal field the catalogue declares,
+        whatever the form sent. The modal has one exclude box —
+        `logs_exclude_patterns` — so an edit made to rename a source, or to
+        rotate its password, silently emptied `traces.exclude_patterns` and
+        `monitors.exclude_patterns`. The same shape as the monitor pattern
+        box, one field further along: a field the editor does not fill is a
+        field saved empty.
+
+        A box that IS on the form and left empty still means empty. The
+        difference is between "" and the field not being submitted at all.
+        """
+        row = self.app.store.sources.create(
+            name="cluster", signal=["logs", "traces"], kind="elasticsearch",
+            config={"url": "http://cluster:9200",
+                    "logs": {"index_patterns": ["app-*"],
+                             "exclude_patterns": ["*audit*"]},
+                    "traces": {"index_patterns": ["*traces*"],
+                               "exclude_patterns": ["*-pii-*"]}})
+
+        # Exactly the fields the page's form carries, nothing more.
+        self.client.post("/admin/sources", data={
+            "id": row["id"], "name": "cluster", "kind": "elasticsearch",
+            "signals": ["logs", "traces"], "url": "http://cluster:9200",
+            "enabled": "on", "logs_index_patterns": "app-*",
+            "traces_index_patterns": "*traces*", "logs_exclude_patterns": "",
+        }, follow_redirects=True)
+
+        stored = self.app.store.sources.get(row["id"])["config"]
+        self.assertEqual(stored["traces"].get("exclude_patterns"), ["*-pii-*"])
+        self.assertEqual(stored["traces"].get("index_patterns"), ["*traces*"])
+        # The box the form does have, cleared on purpose, is cleared.
+        self.assertEqual(stored["logs"].get("exclude_patterns"), [])
+
     def test_saving_it_registers_a_monitor_adapter(self):
         """Stored and unreachable is worse than absent: the configuration page
         says it is there."""

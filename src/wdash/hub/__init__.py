@@ -203,6 +203,14 @@ class Hub:
         keeps it and this one is unreachable. Both used to be a line in the
         log, under a screen that said the source was in use.
         """
+        # Asked the store first, like every other liveness read on this class.
+        # The configuration page touches the hub through this property and
+        # nothing else, so without it the page never checked whether the
+        # sources had changed: a worker that had served no query since the
+        # save listed the row with no badge and no warning — a failure
+        # looking exactly like ordinary data, on the one screen whose job is
+        # to say otherwise.
+        self._fresh()
         # Touched so a name that collides is noticed even when nothing has
         # read that signal's registry yet.
         for kind in ("logs", "traces", "monitors"):
