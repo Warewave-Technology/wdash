@@ -202,7 +202,9 @@ def create_app(config_class=Config):
     if not store.secrets.available:
         app.logger.warning(
             "WDASH_ENCRYPTION_KEY is not set: secrets cannot be stored, so "
-            "OIDC and LDAP credentials cannot be saved from the config page")
+            "OIDC and LDAP credentials cannot be saved from the config page, "
+            "no alert channel can be defined or delivered to, and no check "
+            "can carry credentials")
 
     # Where dashboards live. 'database' is the destination; 'file' remains the
     # default until an existing deployment has run the migration, because

@@ -50,6 +50,15 @@ def run_check(monitor, session=None):
     monitors on purpose: a pool shared across targets makes one slow host
     hold connections another is waiting for.
     """
+    problem = monitor.get("config_error")
+    if problem:
+        # WDash could not assemble this check — almost always an encryption
+        # key that changed, so the credential could not be unsealed. Sending
+        # the request anyway measures the missing credential: the target
+        # answers 401 and a server that is perfectly healthy is reported
+        # broken, for a reason nobody looking at it can act on.
+        return _result(monitor, _now(), "down", str(problem))
+
     kind = (monitor.get("kind") or "").lower()
     if kind == "http":
         return _http(monitor, session)

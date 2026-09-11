@@ -37,7 +37,19 @@ BATCH = 500
 
 
 class SinkError(RuntimeError):
-    """A destination refused a batch. The rows stay unforwarded."""
+    """A destination refused a batch. The rows stay unforwarded.
+
+    `accepted` names the row ids it DID take, when it took some of them.
+    Elasticsearch's bulk API answers per document, and a single audit row it
+    will never index — a free-shaped `state` its mapping refuses — used to
+    fail the whole batch for ever: the sweep re-selects the oldest rows by id,
+    so the one poison row stayed at the head of the queue and nothing behind
+    it moved again.
+    """
+
+    def __init__(self, message, accepted=()):
+        super().__init__(message)
+        self.accepted = tuple(accepted)
 
 
 class Sink:
@@ -48,6 +60,45 @@ class Sink:
     def send(self, entries):
         """Deliver a batch. Raise `SinkError` to leave the rows unmarked."""
         raise NotImplementedError
+
+
+def _accepted_status(response, destination):
+    """Anything outside 2xx is a refusal, a redirect included.
+
+    `status_code >= 400` let a 3xx through, and with redirects no longer
+    followed that is exactly the answer an SSO proxy gives.
+    """
+    if not 200 <= response.status_code < 300:
+        location = ""
+        try:
+            target = (response.headers or {}).get("Location")
+            location = f" to {target}" if target else ""
+        except Exception:
+            pass
+        raise SinkError(
+            f"{destination} answered HTTP {response.status_code}{location}: "
+            f"{response.text[:200]}")
+
+
+def _json_body(response, destination):
+    """The answer as JSON, or a refusal.
+
+    A body that will not parse used to be read as success. The body a proxy
+    returns is an HTML login form, and taking that for an acknowledgement is
+    how a whole batch is marked as delivered to something that never saw it.
+    """
+    try:
+        body = response.json()
+    except Exception as exc:
+        raise SinkError(
+            f"{destination} answered HTTP {response.status_code} with "
+            f"something that is not its own reply: "
+            f"{response.text[:200]!r}") from exc
+    if not isinstance(body, dict):
+        raise SinkError(
+            f"{destination} answered HTTP {response.status_code} with "
+            f"{type(body).__name__}, not an object")
+    return body
 
 
 class SplunkSink(Sink):
@@ -97,14 +148,24 @@ class SplunkSink(Sink):
                 data=payload.encode("utf-8"),
                 headers={"Authorization": f"Splunk {self._token}",
                          "Content-Type": "application/json"},
-                timeout=self._timeout, verify=self._verify)
+                timeout=self._timeout, verify=self._verify,
+                # A destination behind an SSO proxy answers the POST with a
+                # redirect to a login page. Followed, `requests` turns it into
+                # a GET, the login page's 200 reads as acceptance, and the
+                # rows are marked as sent to a SIEM that never saw them.
+                allow_redirects=False)
         except Exception as exc:
             raise SinkError(f"Splunk is unreachable: {exc}") from exc
 
-        if response.status_code >= 400:
+        _accepted_status(response, "Splunk")
+        # HEC answers `{"text": "Success", "code": 0}`. Anything else with a
+        # 200 is not the event collector: a proxy, a load balancer's health
+        # page, or an error rendered as HTML.
+        body = _json_body(response, "Splunk")
+        if body.get("code") != 0:
             raise SinkError(
-                f"Splunk answered HTTP {response.status_code}: "
-                f"{response.text[:200]}")
+                f"Splunk did not accept the batch: "
+                f"{body.get('text') or response.text[:200]}")
 
 
 class ElasticsearchSink(Sink):
@@ -139,35 +200,63 @@ class ElasticsearchSink(Sink):
             # this is what keeps at-least-once from meaning "eventually many".
             lines.append(json.dumps(
                 {"index": {"_index": self._index, "_id": str(entry["id"])}}))
-            lines.append(json.dumps(_serialisable(entry)))
+            # `state` as TEXT, not as an object. It is whatever the audited
+            # action left behind — 'mappings updated' stores `user_roles`
+            # keyed by user identifiers, so 'john' and 'john.doe' arrive as
+            # sibling keys. Under dynamic mapping the first makes `john` a
+            # string field and the second needs it to be an object, which is
+            # a rejection that never goes away, and per-user keys walk into
+            # the 1,000-field limit besides. Splunk keeps the object; it has
+            # no mapping to break.
+            lines.append(json.dumps(_serialisable(entry, as_text=("state",))))
         payload = "\n".join(lines) + "\n"
 
         try:
             response = self._http().post(
                 f"{self._url}/_bulk", data=payload.encode("utf-8"),
                 headers={"Content-Type": "application/x-ndjson"},
-                auth=self._auth, timeout=self._timeout, verify=self._verify)
+                auth=self._auth, timeout=self._timeout, verify=self._verify,
+                # See SplunkSink.send: a redirect to a login page that is
+                # followed reads as a successful delivery.
+                allow_redirects=False)
         except Exception as exc:
             raise SinkError(f"Elasticsearch is unreachable: {exc}") from exc
 
-        if response.status_code >= 400:
-            raise SinkError(
-                f"Elasticsearch answered HTTP {response.status_code}: "
-                f"{response.text[:200]}")
+        _accepted_status(response, "Elasticsearch")
 
         # A 200 from _bulk says the request was accepted, not that the
         # documents were. `errors: true` with a 200 is the standard way to
-        # lose data while believing it was written.
-        try:
-            body = response.json()
-        except Exception:
-            return
-        if body.get("errors"):
-            first = next((item for item in body.get("items", [])
-                          if item.get("index", {}).get("error")), {})
+        # lose data while believing it was written — and a body that is not
+        # the bulk API's answer at all means something else replied.
+        body = _json_body(response, "Elasticsearch")
+        items = body.get("items")
+        if not isinstance(items, list) or len(items) != len(entries):
             raise SinkError(
-                f"Elasticsearch rejected part of the batch: "
-                f"{first.get('index', {}).get('error')}")
+                f"Elasticsearch answered for "
+                f"{len(items) if isinstance(items, list) else 'no'} of "
+                f"{len(entries)} documents, so what it did with the rest is "
+                f"unknown")
+
+        accepted, refused = [], None
+        for entry, item in zip(entries, items):
+            result = item.get("index") or item.get("create") or {}
+            error = result.get("error")
+            if error is None and int(result.get("status") or 200) < 300:
+                accepted.append(entry["id"])
+            elif refused is None:
+                refused = error or f"HTTP {result.get('status')}"
+        if refused is not None:
+            # The ones it took are marked, so a row it will never index stops
+            # dragging every row behind it back through the same refusal.
+            raise SinkError(
+                f"Elasticsearch rejected {len(entries) - len(accepted)} of "
+                f"{len(entries)} documents: {refused}", accepted=accepted)
+        if body.get("errors"):
+            # It says something went wrong and names nothing. Nothing is
+            # marked: guessing which half arrived is how rows go missing.
+            raise SinkError(
+                f"Elasticsearch reported errors for the batch of "
+                f"{len(entries)} without naming a document")
 
 
 class AuditForwarder:
@@ -211,14 +300,26 @@ class AuditForwarder:
             return 0
 
         entries = [dict(row) for row in rows]
-        self._sink.send(entries)          # raises SinkError; rows stay unmarked
+        try:
+            self._sink.send(entries)      # raises SinkError; rows stay unmarked
+        except SinkError as exc:
+            # Except the ones it says it took. A destination that refuses one
+            # document out of five hundred otherwise holds the other 499
+            # behind it for ever, because the sweep asks for the oldest rows
+            # by id and gets the same refusal every time.
+            if exc.accepted:
+                self._mark(exc.accepted)
+            raise
 
         identifiers = [entry["id"] for entry in entries]
+        self._mark(identifiers)
+        return len(identifiers)
+
+    def _mark(self, identifiers):
         with self._engine.begin() as connection:
             connection.execute(
-                update(audit).where(audit.c.id.in_(identifiers))
+                update(audit).where(audit.c.id.in_(list(identifiers)))
                 .values(forwarded_at=datetime.now(timezone.utc)))
-        return len(identifiers)
 
     def drain(self, limit=50, batch=BATCH):
         """Sweep until nothing is left, or `limit` batches have gone.
@@ -268,14 +369,24 @@ def _epoch(moment):
     return moment.timestamp()
 
 
-def _serialisable(entry):
-    """A row as JSON-safe values, with the queue bookkeeping left behind."""
+def _serialisable(entry, as_text=()):
+    """A row as JSON-safe values, with the queue bookkeeping left behind.
+
+    `as_text` names columns to hand over as a JSON STRING rather than as a
+    nested object, for a destination that has to map what it is given. The
+    value is still all there and still JSON; what changes is that the
+    receiver indexes one field instead of one per key it has never seen.
+    """
     out = {}
     for key, value in entry.items():
         if key == "forwarded_at":
             continue          # our bookkeeping, not the receiver's business
         if hasattr(value, "isoformat"):
             out[key] = value.isoformat()
+        elif key in as_text and value is not None:
+            # None stays None: "null" as a string is a value that reads as a
+            # value, and a search for rows with no state would find them all.
+            out[key] = json.dumps(value, default=str)
         else:
             out[key] = value
     return out

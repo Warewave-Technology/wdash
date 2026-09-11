@@ -92,7 +92,9 @@ issues carries an explicit authorization scope.
   sign-in, sign-out and lockout, each with the address it came from. Read-only
   from the application, filterable, exportable as JSON lines, and forwardable
   to Splunk or Elasticsearch — including everything recorded before forwarding
-  was switched on.
+  was switched on. The recorded state travels to Elasticsearch as JSON text,
+  so an index mapping cannot be broken by whatever one change happened to
+  contain; Splunk gets the object.
 
 ## Quick start
 

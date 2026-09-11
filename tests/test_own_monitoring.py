@@ -1358,3 +1358,192 @@ class WhereTheCheckRanTest(StoreTestCase):
         checks = self._history()
         self.assertEqual(len(checks), 2)
         self.assertEqual({c.location for c in checks}, {""})
+
+
+class UnreadableCredentialsTest(unittest.TestCase):
+    """A key that changed must not look like the target refusing a password.
+
+    Sealed with one key and read with another, `credentials()` logged a line
+    with no reason and returned {}. The agent then made the request with no
+    Authorization header and the target answered 401, so every authenticated
+    check reported the target down — while the page still said the check has
+    credentials and the edit form said the secret does not exist. The one
+    thing to fix, the server's key, was the one thing nothing said.
+    """
+
+    def setUp(self):
+        from wdash.store.secrets import SecretBox
+
+        handle, self.database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        self.url = f"sqlite:///{self.database}"
+        self.sealed = Store.open(
+            self.url, secret_box=SecretBox(SecretBox.generate_key()))
+        self.monitor = self.sealed.monitors.create(
+            name="billing", kind="http", target="https://billing.example/health",
+            request={"auth": {"type": "bearer", "token": "TOKEN-A"}})
+        self.journey = self.sealed.monitors.create(
+            name="Sign in", kind="browser", target=None, steps=[
+                {"kind": "goto", "value": "https://shop.example/login"},
+                {"kind": "fill", "selector": "#p",
+                 "value": "{{ secret.password }}"},
+                {"kind": "expect_url", "value": "/dashboard"}],
+            journey_secrets={"password": "PW-A"})
+        self.agent, self.token = self.sealed.agents.create("probe")
+        self.opened = []
+
+    def tearDown(self):
+        self.sealed.engine.dispose()
+        for store in self.opened:
+            store.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.database + suffix):
+                os.unlink(self.database + suffix)
+
+    def _reopened(self, box):
+        store = Store.open(self.url, secret_box=box)
+        self.opened.append(store)
+        return store
+
+    def _rotated(self):
+        from wdash.store.secrets import SecretBox
+        return self._reopened(SecretBox(SecretBox.generate_key()))
+
+    def test_a_rotated_key_is_an_error_rather_than_no_credentials(self):
+        store = self._rotated()
+        with self.assertRaises(MonitoringError) as caught:
+            store.monitors.credentials(self.monitor["id"])
+        self.assertIn("WDASH_ENCRYPTION_KEY", str(caught.exception))
+
+    def test_no_key_at_all_says_that_instead(self):
+        from wdash.store.secrets import SecretBox
+        store = self._reopened(SecretBox(None))
+        with self.assertRaises(MonitoringError) as caught:
+            store.monitors.credentials(self.journey["id"])
+        self.assertIn("WDASH_ENCRYPTION_KEY", str(caught.exception))
+
+    def test_a_check_with_no_credentials_is_untouched(self):
+        store = self._rotated()
+        plain = self.sealed.monitors.create(
+            name="plain", kind="http", target="https://x.example")
+        self.assertEqual(store.monitors.credentials(plain["id"]), {})
+
+    def test_editing_the_journey_names_the_key_rather_than_the_secret(self):
+        """`update()` feeds `credentials()` into the step merge, so the edit
+        failed with "there is no such secret" — a sentence that sends somebody
+        to re-type a password into a box that will seal it with a key the
+        other process cannot read either."""
+        store = self._rotated()
+        with self.assertRaises(MonitoringError) as caught:
+            store.monitors.update(
+                self.journey["id"], steps=self.sealed.monitors.get(
+                    self.journey["id"])["steps"])
+        self.assertIn("WDASH_ENCRYPTION_KEY", str(caught.exception))
+
+
+class UnreadableCredentialsAgentTest(unittest.TestCase):
+    """What the agent is told, and what it does with it."""
+
+    def setUp(self):
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.secrets import SecretBox
+
+        handle, self.database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        database = self.database
+
+        # Sealed with one key, then read by a process holding another: what a
+        # rotation, a lost key or a second deployment with its own key does.
+        self.sealed = Store.open(
+            f"sqlite:///{database}",
+            secret_box=SecretBox(SecretBox.generate_key()))
+        self.monitor = self.sealed.monitors.create(
+            name="billing", kind="http", target="https://billing.example/health",
+            request={"auth": {"type": "bearer", "token": "TOKEN-A"}})
+        self.journey = self.sealed.monitors.create(
+            name="Sign in", kind="browser", target=None, steps=[
+                {"kind": "goto", "value": "https://shop.example/login"},
+                {"kind": "fill", "selector": "#p",
+                 "value": "{{ secret.password }}"},
+                {"kind": "expect_url", "value": "/dashboard"}],
+            journey_secrets={"password": "PW-A"})
+        self.plain = self.sealed.monitors.create(
+            name="health", kind="http", target="https://shop.example/health")
+        _, self.token = self.sealed.agents.create("probe")
+        self.sealed.engine.dispose()
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "monitors"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = SecretBox.generate_key()
+            ELASTICSEARCH_URL = ""
+            DASHBOARD_STORAGE = "database"
+
+        self.app = create_app(TestConfig)
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        self.app.store.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.database + suffix):
+                os.unlink(self.database + suffix)
+
+    def _configuration(self):
+        reply = self.client.get(
+            "/api/agent/config",
+            headers={"Authorization": f"Bearer {self.token}"})
+        self.assertEqual(reply.status_code, 200)
+        return {m["name"]: m for m in reply.get_json()["monitors"]}
+
+    def test_the_check_carries_the_reason_instead_of_half_a_request(self):
+        monitor = self._configuration()["billing"]
+        self.assertIn("WDASH_ENCRYPTION_KEY", monitor.get("config_error", ""))
+        self.assertNotIn("auth", monitor["request"],
+                         "a bearer block with no token was sent")
+
+    def test_a_journey_says_so_rather_than_sending_no_secrets(self):
+        monitor = self._configuration()["Sign in"]
+        self.assertIn("WDASH_ENCRYPTION_KEY", monitor.get("config_error", ""))
+        self.assertFalse(monitor.get("secrets"))
+
+    def test_the_checks_that_need_no_credentials_still_run(self):
+        """One unreadable secret must not take the other checks with it —
+        that was the shape of the 500 this endpoint had before."""
+        monitor = self._configuration()["health"]
+        self.assertNotIn("config_error", monitor)
+
+    def test_the_agent_reports_it_down_without_making_the_request(self):
+        """Making the request anyway measures the credential that is missing
+        and reports a target that is fine as broken."""
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        from tests.support import serve_in_background
+        from wdash.agent.checks import run_check
+
+        asked = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                asked.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *arguments):
+                pass
+
+        server = serve_in_background(HTTPServer(("127.0.0.1", 0), Handler))
+        try:
+            monitor = dict(self._configuration()["billing"],
+                           target=f"http://127.0.0.1:{server.server_port}/health")
+            result = run_check(monitor)
+        finally:
+            server.shutdown()
+        self.assertEqual(result["status"], "down")
+        self.assertIn("WDASH_ENCRYPTION_KEY", result["error"])
+        self.assertEqual(asked, [], "the request was made anyway")

@@ -113,11 +113,16 @@ def _setting(rule, name, default):
     return default if value is None else value
 
 
-def evaluate(rule, previous, observations, now, silenced=()):
+def evaluate(rule, previous, observations, now, silenced=(), complete=True):
     """Work out what changed. Returns a list of Decision.
 
     `rule` needs `threshold` and `repeat_minutes`. `previous` maps subject to
     State. `silenced` is the set of subjects under a silence right now.
+
+    `complete` says whether `observations` is the whole picture. False means a
+    source could not be read, and then a subject that is absent has not gone
+    away — nobody looked. Resolving it would announce a recovery in the middle
+    of the outage and throw away the failure count on the way.
     """
     threshold = max(1, int(_setting(rule, "threshold", 1) or 1))
     repeat = int(_setting(rule, "repeat_minutes", 0) or 0)
@@ -134,14 +139,19 @@ def evaluate(rule, previous, observations, now, silenced=()):
     # ever: the thing being complained about no longer exists, and a rule that
     # keeps complaining about it is one nobody can silence except by deleting
     # the rule.
-    seen = {o.subject for o in observations}
-    for subject, before in previous.items():
-        if subject in seen or before.state != FIRING:
-            continue
-        decisions.append(Decision(
-            subject, subject, State(state=OK, failures=0, since=now),
-            notify=NOTIFY_RESOLVED,
-            detail="no longer being checked", since=before.since))
+    #
+    # Only from a listing that is COMPLETE. "Absent" and "not looked at" are
+    # the same shape here and opposite facts, and reading the second as the
+    # first sent a recovery for a monitor that was still down.
+    if complete:
+        seen = {o.subject for o in observations}
+        for subject, before in previous.items():
+            if subject in seen or before.state != FIRING:
+                continue
+            decisions.append(Decision(
+                subject, subject, State(state=OK, failures=0, since=now),
+                notify=NOTIFY_RESOLVED,
+                detail="no longer being checked", since=before.since))
     return decisions
 
 

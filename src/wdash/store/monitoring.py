@@ -719,19 +719,41 @@ class MonitorRepository:
 
         Never on the public shape and never in a template: the agent needs
         them to make the request, and there is nowhere else they belong.
+
+        Raises `MonitoringError` when the box will not open. Returning {} on a
+        changed key sent the agent a bearer block with no token and a journey
+        with no secrets, so the target answered 401 and every authenticated
+        check reported the TARGET as down — while the page still said the
+        check has credentials, and editing it said the secret does not exist.
+        The one thing anybody could act on, the server's key, was the one
+        thing nothing said.
         """
         import json
+
+        from .secrets import SecretsCorrupt, SecretsUnavailable
+
         with self._engine.connect() as connection:
             row = connection.execute(
                 select(monitors.c.secrets).where(
                     monitors.c.id == monitor_id)).first()
-        if not row or not row[0] or self._secrets is None:
+        if not row or not row[0]:
             return {}
         try:
+            if self._secrets is None:
+                raise SecretsUnavailable(
+                    "WDASH_ENCRYPTION_KEY is not set in this process, so this "
+                    "check's stored credentials cannot be read.")
             return json.loads(self._secrets.open(row[0]) or "{}")
-        except Exception:
-            logger.error(f"could not read the credentials for {monitor_id}")
-            return {}
+        except (SecretsCorrupt, SecretsUnavailable) as exc:
+            logger.error(f"could not read the credentials for {monitor_id}: "
+                         f"{exc}")
+            raise MonitoringError(str(exc)) from exc
+        except Exception as exc:
+            logger.error(f"could not read the credentials for {monitor_id}: "
+                         f"{exc}")
+            raise MonitoringError(
+                f"This check's stored credentials could not be read "
+                f"({type(exc).__name__}).") from exc
 
     @staticmethod
     def _public(row, agent_ids):

@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 from .channels import DeliveryError, payload, send
 from .evaluate import (
-    AGENT_SILENT, CERTIFICATE_EXPIRING, MONITOR_DOWN, NOTIFY_FIRING,
+    AGENT_SILENT, CERTIFICATE_EXPIRING, MONITOR_DOWN, NOTIFY_RESOLVED,
     Observation, evaluate,
 )
 
@@ -34,8 +34,27 @@ INTERVAL = 30
 WINDOW = "1h"
 
 
+class Observed:
+    """What a rule sees right now, and whether that is all of it.
+
+    The two travel together because the second decides what the first MEANS.
+    A subject missing from a COMPLETE listing has gone away and its alert
+    should be resolved; the same subject missing because the backend timed
+    out has not, and resolving it announces a recovery in the middle of the
+    outage — then forgets the failure count it was keeping.
+    """
+
+    __slots__ = ("observations", "complete", "warnings")
+
+    def __init__(self, observations, complete=True, warnings=()):
+        self.observations = list(observations)
+        self.complete = bool(complete)
+        #: Why it is incomplete, in words, for the log.
+        self.warnings = tuple(warnings)
+
+
 def observe(rule, source, store, window, now):
-    """What this rule sees right now, as a list of Observation.
+    """What this rule sees right now, as an `Observed`.
 
     The judgement — what counts as bad — lives here rather than in the state
     machine, because it differs per rule kind and the state machine should not
@@ -43,9 +62,18 @@ def observe(rule, source, store, window, now):
     """
     kind = rule.get("kind")
     if kind == AGENT_SILENT:
-        return _agents(store, now)
+        # A store failure is allowed out: `evaluate_once` catches it and skips
+        # the rule for this pass. Swallowed, it became an empty agent list,
+        # which reads exactly like "every agent was deleted".
+        return Observed(_agents(store, now))
 
     page = source.monitors(window, _scope()) if source else None
+    # A monitor source that failed answers `MonitorPage(partial=True)` with no
+    # monitors — the Elasticsearch adapter on any exception, the fan-out when
+    # one of its members fails. No source configured at all is the same fact.
+    complete = page is not None and not page.partial
+    warnings = (tuple(page.warnings) if page is not None
+                else ("no monitor source is configured",))
     monitors = list(page.monitors) if page else []
     monitors = [m for m in monitors if _selected(rule, m)]
 
@@ -63,9 +91,9 @@ def observe(rule, source, store, window, now):
             if m.id not in worst or (m.status == "down"
                                      and worst[m.id].status != "down"):
                 worst[m.id] = m
-        return [Observation(m.id, m.status == "down",
-                            m.error or "the check failed", m.name)
-                for m in worst.values()]
+        return Observed([Observation(m.id, m.status == "down",
+                                     m.error or "the check failed", m.name)
+                         for m in worst.values()], complete, warnings)
 
     if kind == CERTIFICATE_EXPIRING:
         days = int(rule.get("days_before") or 30)
@@ -82,10 +110,13 @@ def observe(rule, source, store, window, now):
                 (f"expired {abs(remaining)} day(s) ago" if certificate.expired
                  else f"expires in {remaining} day(s)"),
                 f"{monitor.name} ({certificate.common_name})"))
-        return out
+        return Observed(out, complete, warnings)
 
     logger.warning(f"rule '{rule.get('name')}' has an unknown kind {kind!r}")
-    return []
+    # Not complete: a kind this version cannot evaluate observes nothing, and
+    # nothing is not "everything this rule watched has recovered".
+    return Observed([], False, (f"{kind!r} is not a rule kind this version "
+                                f"knows how to evaluate",))
 
 
 def _agents(store, now):
@@ -96,12 +127,12 @@ def _agents(store, now):
     whoever owns payments; "the Frankfurt probe is dead" goes to whoever runs
     the probes, and telling the first audience the second thing is how both
     learn to ignore the channel.
+
+    A store failure is NOT caught here. It used to be, and the empty list it
+    returned said "no agent exists", which resolved every agent_silent alert
+    that was firing. The caller skips the rule for the pass instead.
     """
-    try:
-        agents = store.agents.all()
-    except Exception as exc:
-        logger.error(f"could not list agents: {exc}")
-        return []
+    agents = store.agents.all()
     return [Observation(
         a["id"], a["enabled"] and a["stale"],
         ("has never reported" if a["last_seen_at"] is None
@@ -155,10 +186,18 @@ class AlertRunner:
         return sent
 
     def _one_rule(self, rule, source, window, now, silenced):
-        observations = observe(rule, source, self._store, window, now)
+        seen = observe(rule, source, self._store, window, now)
+        if not seen.complete:
+            # Said out loud, because the pass then declines to resolve
+            # anything: a silent decision not to act is a second silent
+            # failure sitting on top of the first.
+            logger.warning(
+                f"rule '{rule.get('name')}': the listing was incomplete, so "
+                f"nothing was resolved this pass — "
+                f"{'; '.join(seen.warnings) or 'no reason given'}")
         previous = self._store.alert_state.load(rule["id"])
-        decisions = evaluate(rule, previous, observations, now,
-                             silenced=silenced)
+        decisions = evaluate(rule, previous, seen.observations, now,
+                             silenced=silenced, complete=seen.complete)
 
         sent = 0
         for decision in decisions:
@@ -175,6 +214,14 @@ class AlertRunner:
                     rule["id"], decision.subject, decision.notify,
                     decision.detail, delivered=delivered, error=error,
                     label=decision.label)
+                if not delivered and decision.notify == NOTIFY_RESOLVED:
+                    # Keep the FIRING state, so the next pass produces the
+                    # recovery again. Saving the OK state here loses it for
+                    # good: the subject is healthy, so the machine never
+                    # transitions again, and the last thing anybody was told
+                    # is that it is broken. `last_notified_at` unset on a
+                    # firing state only retries the FIRING message.
+                    continue
 
             self._store.alert_state.save(rule["id"], decision.subject,
                                          decision.state)
@@ -192,9 +239,13 @@ class AlertRunner:
             return False, "the channel this rule sends to no longer exists"
         if not channel["enabled"]:
             return False, "the channel is disabled"
-        secrets = self._store.channels.credentials(channel["id"])
         body = payload(rule, decision, decision.notify)
         try:
+            # Inside the try: reading the sealed half is part of delivering,
+            # and it fails for a reason a person has to be told (a changed
+            # encryption key). Outside it, that reason escaped to the
+            # per-rule handler and the history recorded nothing at all.
+            secrets = self._store.channels.credentials(channel["id"])
             send(channel, secrets, body, session=self._session)
         except DeliveryError as exc:
             logger.warning(f"alert for {decision.label} was not delivered: {exc}")

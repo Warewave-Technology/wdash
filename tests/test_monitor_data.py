@@ -808,7 +808,7 @@ class TheAlertSeesOneMonitorOnceTest(_PageCase):
             self.assertEqual(sorted(m.status for m in listed), [DOWN, UP],
                              "the store should list one row per agent")
             observations = observe(rule, source, store, TimeWindow.of("1h"),
-                                   now)
+                                   now).observations
             self.assertEqual([(o.subject, o.bad) for o in observations],
                              [(monitor["id"], True)])
             for decision in evaluate(rule, previous, observations,
@@ -832,7 +832,7 @@ class TheAlertSeesOneMonitorOnceTest(_PageCase):
                     Monitor(id="web", name="Web", status=UP)])
 
         observations = observe({"kind": MONITOR_DOWN}, Listed(), None,
-                               TimeWindow.of("1h"), _now())
+                               TimeWindow.of("1h"), _now()).observations
         self.assertEqual(sorted((o.subject, o.bad, o.detail)
                                 for o in observations),
                          [("api", True, "received 500"),

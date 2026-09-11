@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -33,21 +34,42 @@ class FakeResponse:
         return self._payload
 
 
+def _as_the_real_thing(url, data):
+    """What the destination itself answers a batch it accepted.
+
+    A fake that answers `{}` to everything models a proxy, not a SIEM: Splunk
+    replies `{"text": "Success", "code": 0}` and `_bulk` replies with one item
+    per action. A sink that checks either of those would be untestable against
+    a fake that does not send them.
+    """
+    if url.endswith("/_bulk"):
+        documents = len((data or b"").decode().strip().splitlines()) // 2
+        return FakeResponse(payload={
+            "errors": False,
+            "items": [{"index": {"status": 201, "_id": str(n)}}
+                      for n in range(documents)]})
+    return FakeResponse(payload={"text": "Success", "code": 0})
+
+
 class FakeHttp:
     """The `requests` surface these sinks use, and nothing else."""
 
     def __init__(self, response=None, explode=False):
         self.calls = []
-        self.response = response or FakeResponse()
+        #: None means "answer the way the destination would".
+        self.response = response
         self.explode = explode
 
     def post(self, url, data=None, headers=None, auth=None, timeout=None,
-             verify=None):
+             verify=None, allow_redirects=None):
         self.calls.append({"url": url, "data": data, "headers": headers or {},
-                           "auth": auth, "verify": verify})
+                           "auth": auth, "verify": verify,
+                           "allow_redirects": allow_redirects})
         if self.explode:
             raise OSError("connection refused")
-        return self.response
+        if self.response is not None:
+            return self.response
+        return _as_the_real_thing(url, data)
 
 
 class CountingSink(Sink):
@@ -213,6 +235,21 @@ class SplunkTest(ForwarderTestCase):
             forwarder.sweep()
         self.assertEqual(len(self.unforwarded()), 1)
 
+    def test_a_200_that_says_no_is_a_sink_error_too(self):
+        """HEC answers `code: 0` for success and a non-zero code with a
+        reason for everything else — over HTTP 200. Reading the status alone
+        marks rows as delivered that the collector refused."""
+        self.write(1)
+        http = FakeHttp(FakeResponse(
+            payload={"text": "Incorrect index", "code": 7}))
+        forwarder = AuditForwarder(
+            self.engine, SplunkSink("https://splunk.example:8088", "t",
+                                    session=http))
+        with self.assertRaises(SinkError) as caught:
+            forwarder.sweep()
+        self.assertIn("Incorrect index", str(caught.exception))
+        self.assertEqual(len(self.unforwarded()), 1)
+
     def test_an_unreachable_host_is_a_sink_error(self):
         self.write(1)
         forwarder = AuditForwarder(
@@ -265,7 +302,8 @@ class ElasticsearchTest(ForwarderTestCase):
 
     def test_a_clean_bulk_response_marks_the_rows(self):
         self.write(1)
-        response = FakeResponse(payload={"errors": False, "items": []})
+        response = FakeResponse(payload={
+            "errors": False, "items": [{"index": {"status": 201}}]})
         shipped = AuditForwarder(
             self.engine,
             ElasticsearchSink("https://audit.example:9200",
@@ -306,6 +344,230 @@ class BuildSinkTest(unittest.TestCase):
         sink = build_sink({"enabled": True, "kind": "elasticsearch",
                            "url": "https://audit.example:9200"}, None)
         self.assertEqual(sink._index, "wdash-audit")
+
+
+class ProxiedDestinationTest(ForwarderTestCase):
+    """A destination behind an SSO proxy, against a real listener.
+
+    Measured with the real `requests`: the proxy answered the POST with a 302
+    to its login page, `requests` followed it as a GET, the login page's 200
+    was read as acceptance, and three rows were marked as sent to a SIEM that
+    never received them. This is the whole reason the sweep marks rows.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.seen = []
+        self.mode = "redirect"
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(
+                    int(self.headers.get("Content-Length", 0)))
+                outer.seen.append(("POST", self.path))
+                if outer.mode == "redirect":
+                    self.send_response(302)
+                    self.send_header(
+                        "Location", f"http://127.0.0.1:{outer.port}/login")
+                    self.end_headers()
+                elif outer.mode == "html":
+                    self._write(200, b"<html>Sign in</html>", "text/html")
+                else:
+                    self._write(200, outer.accepted(self.path, body),
+                                "application/json")
+
+            def do_GET(self):
+                outer.seen.append(("GET", self.path))
+                self._write(200, b"<html>Sign in</html>", "text/html")
+
+            def _write(self, status, body, kind):
+                self.send_response(status)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *arguments):
+                pass
+
+        from tests.support import serve_in_background
+        self.server = serve_in_background(
+            HTTPServer(("127.0.0.1", 0), Handler))
+        self.port = self.server.server_port
+
+    def tearDown(self):
+        self.server.shutdown()
+        super().tearDown()
+
+    @staticmethod
+    def accepted(path, body):
+        """What the destination itself answers a batch it took."""
+        if path.endswith("/_bulk"):
+            documents = len(body.decode().strip().splitlines()) // 2
+            return json.dumps({"errors": False,
+                               "items": [{"index": {"status": 201}}
+                                         for _ in range(documents)]}).encode()
+        return b'{"text": "Success", "code": 0}'
+
+    def _sinks(self):
+        url = f"http://127.0.0.1:{self.port}"
+        return (("splunk", SplunkSink(url, "hec-token")),
+                ("elasticsearch", ElasticsearchSink(url)))
+
+    def _refused(self, mode):
+        """Both sinks against the proxy. name -> (reason, what it received).
+
+        The same three rows for both, because nothing may be marked: a sink
+        that marked them would leave the second with nothing to send.
+        """
+        self.mode = mode
+        self.write(3)
+        out = {}
+        for name, sink in self._sinks():
+            self.seen.clear()
+            with self.assertRaises(SinkError) as caught:
+                AuditForwarder(self.engine, sink).sweep()
+            self.assertEqual(len(self.unforwarded()), 3,
+                             f"{name}: rows were marked as sent")
+            out[name] = (str(caught.exception), list(self.seen))
+        return out
+
+    def test_a_redirect_to_a_login_page_is_not_a_delivery(self):
+        for name, (message, seen) in self._refused("redirect").items():
+            self.assertIn("302", message, name)
+            # Where it was being sent is the whole diagnosis: the URL is
+            # right and something in front of it wants a sign-in.
+            self.assertIn("/login", message,
+                          f"{name}: the reason does not say where it went")
+            self.assertEqual([kind for kind, _ in seen], ["POST"],
+                             f"{name}: the redirect was followed")
+
+    def test_an_html_page_answered_with_200_is_not_a_delivery_either(self):
+        """The same proxy, serving the login form to the POST directly."""
+        for name, (message, _) in self._refused("html").items():
+            self.assertTrue(message, name)
+
+    def test_the_destinations_own_answer_still_ships(self):
+        """The refusals above are worth nothing if nothing gets through."""
+        self.mode = "accept"
+        for name, sink in self._sinks():
+            self.write(3, action=f"{name} row")
+            self.assertEqual(AuditForwarder(self.engine, sink).sweep(), 3,
+                             name)
+            self.assertEqual(self.unforwarded(), [], name)
+
+
+class PartialBulkTest(ForwarderTestCase):
+    """One row Elasticsearch will never index must not hold up the rest.
+
+    `state` is a free-shaped object; an audit row whose state carries per-user
+    keys ('john', 'john.doe') is refused by dynamic mapping for ever. The
+    whole batch failed, the sweep always re-selects the oldest rows by id, and
+    the queue stopped moving at 1,202 rows.
+    """
+
+    def _answer(self, *statuses):
+        return FakeResponse(payload={
+            "errors": any(status >= 300 for status in statuses),
+            "items": [
+                {"index": ({"status": status} if status < 300 else
+                           {"status": status,
+                            "error": {"type": "mapper_parsing_exception",
+                                      "reason": "object mapping for [state."
+                                                "user_roles.john] tried to "
+                                                "parse field as object"}})}
+                for status in statuses]})
+
+    def _sweep(self, response):
+        forwarder = AuditForwarder(
+            self.engine,
+            ElasticsearchSink("https://audit.example:9200",
+                              session=FakeHttp(response)))
+        with self.assertRaises(SinkError) as caught:
+            forwarder.sweep()
+        return str(caught.exception)
+
+    def test_the_documents_it_took_are_not_sent_again(self):
+        self.write(3)
+        self._sweep(self._answer(201, 400, 201))
+        self.assertEqual([row["subject"] for row in self.unforwarded()],
+                         ["role:1"])
+
+    def test_the_rejection_says_how_many_and_why(self):
+        self.write(3)
+        message = self._sweep(self._answer(201, 400, 201))
+        self.assertIn("1 of 3", message)
+        self.assertIn("mapper_parsing_exception", message)
+
+    def test_an_answer_that_skips_documents_is_not_a_success(self):
+        """Fewer items than actions means the far end is not the far end —
+        an aggregating proxy, or a truncated body. Marking the rows on that
+        is loss that looks like delivery."""
+        self.write(3)
+        message = self._sweep(
+            FakeResponse(payload={"errors": False,
+                                  "items": [{"index": {"status": 201}}]}))
+        self.assertIn("3", message)
+        self.assertEqual(len(self.unforwarded()), 3)
+
+    def test_a_body_that_is_not_json_is_not_a_success(self):
+        self.write(1)
+        message = self._sweep(FakeResponse(text="<html>Sign in</html>"))
+        self.assertTrue(message)
+        self.assertEqual(len(self.unforwarded()), 1)
+
+
+class FreeShapedStateTest(ForwarderTestCase):
+    """The audited state is somebody else's shape, and it is not a mapping.
+
+    'mappings updated' stores `user_roles` keyed by user identifiers — emails,
+    names with dots. Under dynamic mapping 'john' is a string field and
+    'john.doe' wants 'john' to be an object, which is a permanent rejection.
+    """
+
+    def _mappings_row(self):
+        self.log.record("owner", "mappings updated", subject="roles",
+                        state={"default_role": "viewer",
+                               "user_roles": {"john": "admin",
+                                              "john.doe": "viewer"}})
+
+    def test_elasticsearch_gets_the_state_as_text(self):
+        self._mappings_row()
+        http = FakeHttp()
+        AuditForwarder(
+            self.engine,
+            ElasticsearchSink("https://audit.example:9200",
+                              session=http)).sweep()
+        document = json.loads(http.calls[0]["data"].decode().splitlines()[1])
+        self.assertIsInstance(document["state"], str,
+                              "a free-shaped object under dynamic mapping")
+        self.assertEqual(json.loads(document["state"])["user_roles"],
+                         {"john": "admin", "john.doe": "viewer"},
+                         "the state must still be there in full")
+
+    def test_a_row_with_no_state_does_not_become_the_word_null(self):
+        self.log.record("owner", "signed in", subject="owner")
+        http = FakeHttp()
+        AuditForwarder(
+            self.engine,
+            ElasticsearchSink("https://audit.example:9200",
+                              session=http)).sweep()
+        document = json.loads(http.calls[0]["data"].decode().splitlines()[1])
+        self.assertIsNone(document["state"])
+
+    def test_splunk_still_gets_the_object(self):
+        """HEC indexes arbitrary JSON without a mapping. Flattening it there
+        would cost the structure for nothing."""
+        self._mappings_row()
+        http = FakeHttp()
+        AuditForwarder(
+            self.engine,
+            SplunkSink("https://splunk.example:8088", "t",
+                       session=http)).sweep()
+        event = json.JSONDecoder().raw_decode(
+            http.calls[0]["data"].decode(), 0)[0]["event"]
+        self.assertEqual(event["state"]["user_roles"]["john.doe"], "viewer")
 
 
 if __name__ == "__main__":

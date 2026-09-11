@@ -88,14 +88,31 @@ def config():
             # is the ONLY place they leave the database — not the config page,
             # not the audit trail, not a result. Over TLS, to a caller that
             # proved it holds this agent's token.
-            "request": _request_for(store, m),
-            **_journey_for(store, m),
+            **_credentials_for(store, m),
         } for m in monitors],
         # A version the agent can compare against what it already has, so a
         # poll that changes nothing costs one comparison rather than a
         # reschedule of everything.
         "version": _configuration_version(monitors),
     })
+
+
+def _credentials_for(store, monitor):
+    """The request (and a journey's steps) with the credentials filled in.
+
+    One monitor whose secrets will not decrypt does not spoil the others, and
+    it is not sent as a request with the credential quietly missing either:
+    the agent is told why, verbatim, and reports the check down with that
+    sentence rather than measuring a 401 the target was right to send.
+    """
+    from ..store.monitoring import MonitoringError
+    try:
+        return {"request": _request_for(store, monitor),
+                **_journey_for(store, monitor)}
+    except MonitoringError as exc:
+        logger.error(f"check '{monitor.get('name')}' cannot be configured: "
+                     f"{exc}")
+        return {"request": {}, "config_error": str(exc)}
 
 
 def _request_for(store, monitor):

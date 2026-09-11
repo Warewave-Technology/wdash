@@ -21,13 +21,13 @@
 <div class="alert alert-warning py-2" style="font-size:.85rem">
     <i class="fas fa-triangle-exclamation"></i>
     {# An alert that failed to send and was not noticed is the worst of both:
-       nobody was told, and nobody knows they were not. The runner retries a
-       firing state it never announced, so this list should drain by itself —
-       an entry that stays is a channel that is still broken. #}
+       nobody was told, and nobody knows they were not. One entry per subject
+       — its latest word, not every attempt — and the runner tries each of
+       them again every pass, so the list drains by itself. #}
     <strong>{{ undelivered }} alert(s) never reached anybody.</strong>
-    The runner keeps retrying anything still firing, so this drains by itself
-    once the channel works &mdash; an entry that stays is a channel that is
-    still broken.
+    The runner tries each of them again on every pass, a recovery as well as
+    a firing alert, so this drains by itself once the channel works &mdash;
+    an entry that stays is a channel that is still broken.
 </div>
 {% endif %}
 

@@ -98,19 +98,39 @@ class ChannelRepository:
         return self._public(row) if row else None
 
     def credentials(self, channel_id):
-        """The sealed half. For the alert runner, and nowhere else."""
+        """The sealed half. For the alert runner, and nowhere else.
+
+        Raises `DeliveryError` when the box will not open. It used to log a
+        line with no reason and return {}, and `send` then refused for the
+        only thing it could see — "This channel has no URL." — so every alert
+        during a key rotation went into the history blaming a URL that was
+        fine, and sent whoever read it to check the wrong thing.
+        """
+        from ..alerts.channels import DeliveryError
+        from .secrets import SecretsCorrupt, SecretsUnavailable
+
         with self._engine.connect() as connection:
             row = connection.execute(
                 select(alert_channels.c.secrets).where(
                     alert_channels.c.id == channel_id)).first()
-        if not row or not row[0] or self._secrets is None:
+        if not row or not row[0]:
             return {}
         try:
+            if self._secrets is None:
+                raise SecretsUnavailable(
+                    "WDASH_ENCRYPTION_KEY is not set in this process, so this "
+                    "channel's sealed URL cannot be read.")
             return json.loads(self._secrets.open(row[0]) or "{}")
-        except Exception:
+        except (SecretsCorrupt, SecretsUnavailable) as exc:
             logger.error(f"could not read the credentials for channel "
-                         f"{channel_id}")
-            return {}
+                         f"{channel_id}: {exc}")
+            raise DeliveryError(str(exc)) from exc
+        except Exception as exc:
+            logger.error(f"could not read the credentials for channel "
+                         f"{channel_id}: {exc}")
+            raise DeliveryError(
+                f"this channel's stored credentials could not be read "
+                f"({type(exc).__name__})") from exc
 
     def _seal(self, secret):
         if not secret:
@@ -329,10 +349,30 @@ class AlertHistoryRepository:
                 delivered=bool(delivered),
                 delivery_error=(error or None)))
 
+    @staticmethod
+    def _outstanding():
+        """Rows that are the LAST word on their (rule, subject).
+
+        "Never delivered" has to be a thing that can drain. Counting every
+        failed row ever written is one row per evaluation while a channel is
+        broken — about 2,880 a day per subject at a thirty-second interval —
+        and no later success ever took one away, so the badge on /alerts only
+        ever went up while promising it drains by itself.
+
+        By the primary key rather than `at`: several rows for one subject can
+        share a timestamp to the millisecond, and then max(at) picks whichever
+        the dialect happens to return.
+        """
+        from sqlalchemy import func
+        newest = (select(func.max(alert_history.c.id))
+                  .group_by(alert_history.c.rule_id, alert_history.c.subject))
+        return (alert_history.c.delivered.is_(False),
+                alert_history.c.id.in_(newest))
+
     def recent(self, limit=100, offset=0, undelivered_only=False):
         query = select(alert_history).order_by(alert_history.c.at.desc())
         if undelivered_only:
-            query = query.where(alert_history.c.delivered.is_(False))
+            query = query.where(*self._outstanding())
         query = query.limit(int(limit)).offset(int(offset))
         with self._engine.connect() as connection:
             return [dict(r, at=_aware(r["at"])) for r in
@@ -342,6 +382,6 @@ class AlertHistoryRepository:
         from sqlalchemy import func
         query = select(func.count()).select_from(alert_history)
         if undelivered_only:
-            query = query.where(alert_history.c.delivered.is_(False))
+            query = query.where(*self._outstanding())
         with self._engine.connect() as connection:
             return connection.execute(query).scalar() or 0

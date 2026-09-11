@@ -385,7 +385,8 @@ class ObservationTest(AlertingTestCase):
         from wdash.hub.query import TimeWindow
         hub = self._hub(*monitors)
         return observe(rule, hub.monitors(hub.ALL_SOURCES), self.store,
-                       TimeWindow.of("1h"), datetime.now(timezone.utc))
+                       TimeWindow.of("1h"),
+                       datetime.now(timezone.utc)).observations
 
     def test_monitor_down_ignores_unknown(self):
         observations = self._observe(
@@ -808,3 +809,313 @@ class SilenceFormTest(ManagementPageTest):
         silences = self.app.store.silences.all()
         self.assertEqual(len(silences), 1)
         self.assertEqual(silences[0]["reason"], "migration")
+
+
+class IncompleteListingTest(AlertingTestCase):
+    """A listing that failed is not a monitor that recovered.
+
+    The Elasticsearch monitor adapter answers any exception with
+    `MonitorPage(partial=True)` and no monitors, and the fan-out does the same
+    when one member fails. Read as a complete listing, every firing subject
+    has "disappeared", which resolves it, tells somebody it recovered, and
+    deletes the failure count it had been keeping during the outage.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.failing = {"now": False}
+
+    def _runner(self, *monitors):
+        failing = self.failing
+
+        class Source:
+            name = "es"
+            capabilities = frozenset({"monitor_list"})
+
+            def monitors(self, window, scope, series=False):
+                if failing["now"]:
+                    return MonitorPage(
+                        partial=True, sources=(), missing_sources=("es",),
+                        warnings=("es: read timed out",))
+                return MonitorPage(monitors=list(monitors), sources=("es",))
+
+            def health(self):
+                return True, "ok"
+
+            def containers(self, scope):
+                return []
+
+        hub = Hub()
+        hub.add_monitors(Source())
+        return AlertRunner(self.store, hub)
+
+    def _state(self, rule):
+        return {subject: (s.state, s.failures) for subject, s
+                in self.store.alert_state.load(rule["id"]).items()}
+
+    def _fired(self):
+        rule = self.store.rules.create(
+            channel_id=self._channel()["id"], name="API down",
+            kind="monitor_down", threshold=3)
+        runner = self._runner(Monitor(id="m1", name="API", status=DOWN,
+                                      error="500"))
+        for _ in range(3):
+            runner.evaluate_once()
+        self.assertEqual(self._state(rule), {"m1": ("firing", 3)})
+        return rule, runner
+
+    def test_a_partial_listing_does_not_resolve_what_is_still_firing(self):
+        rule, runner = self._fired()
+        self.failing["now"] = True
+        runner.evaluate_once()
+        self.assertEqual(
+            [entry["transition"] for entry in self.store.alert_history.recent()
+             if entry["transition"] == "resolved"], [],
+            "a failed listing was reported as a recovery")
+        self.assertNotIn(
+            "no longer being checked",
+            json.dumps([m["body"] for m in self.receiver.received]))
+
+    def test_the_failure_count_is_not_thrown_away(self):
+        """Forgetting it restarts the threshold, so the second page for the
+        same outage arrives three evaluations after the source recovers."""
+        rule, runner = self._fired()
+        self.failing["now"] = True
+        runner.evaluate_once()
+        self.assertEqual(self._state(rule), {"m1": ("firing", 3)})
+        self.failing["now"] = False
+        runner.evaluate_once()
+        self.assertEqual(self._state(rule), {"m1": ("firing", 4)})
+
+    def test_the_pass_says_which_source_could_not_be_read(self):
+        """Skipping the resolution silently would be a second silent failure:
+        somebody reading the log has to be able to see why nothing moved."""
+        rule, runner = self._fired()
+        self.failing["now"] = True
+        with self.assertLogs("wdash.alerts.runner", "WARNING") as caught:
+            runner.evaluate_once()
+        self.assertIn("es", " ".join(caught.output))
+
+    def test_a_monitor_that_really_went_away_still_resolves(self):
+        """The disappearance path is made conditional, not deleted: a monitor
+        deleted while it was down must not stay firing for ever."""
+        rule, runner = self._fired()
+        self._runner().evaluate_once()     # a complete listing, nothing in it
+        entry = self.store.alert_history.recent()[0]
+        self.assertEqual(entry["transition"], "resolved")
+        self.assertEqual(entry["detail"], "no longer being checked")
+        self.assertEqual(self._state(rule), {})
+
+    def test_a_rule_kind_this_version_cannot_evaluate_resolves_nothing(self):
+        """A row written by a newer version, or edited by hand. It observes
+        nothing, and nothing is not "everything this rule watched recovered"
+        — which would announce a recovery and forget the outage."""
+        rule, runner = self._fired()
+        with self.store.engine.begin() as connection:
+            from sqlalchemy import update as _update
+
+            from wdash.store.schema import alert_rules
+            connection.execute(
+                _update(alert_rules).where(alert_rules.c.id == rule["id"])
+                .values(kind="monitor_flapping"))
+        runner.evaluate_once()
+        self.assertEqual(self._state(rule), {"m1": ("firing", 3)})
+        self.assertEqual(
+            [e["transition"] for e in self.store.alert_history.recent()],
+            ["firing"])
+
+    def test_a_store_error_skips_an_agent_rule_rather_than_resolving_it(self):
+        """`_agents` returned [] on a store error, which reads exactly like
+        "every agent was deleted"."""
+        agent, _ = self.store.agents.create("frankfurt")
+        rule = self.store.rules.create(
+            channel_id=self._channel()["id"], name="probe quiet",
+            kind="agent_silent", threshold=1)
+        runner = self._runner()
+        runner.evaluate_once()
+        self.assertEqual(self._state(rule), {agent["id"]: ("firing", 1)})
+
+        def explode():
+            raise RuntimeError("database is locked")
+
+        original, self.store.agents.all = self.store.agents.all, explode
+        try:
+            runner.evaluate_once()
+        finally:
+            self.store.agents.all = original
+        self.assertEqual(self._state(rule), {agent["id"]: ("firing", 1)})
+        self.assertEqual(
+            [e["transition"] for e in self.store.alert_history.recent()],
+            ["firing"])
+
+
+class UnreadableChannelCredentialsTest(AlertingTestCase):
+    """A key that changed must say so, not "This channel has no URL."
+
+    The sealed half of a channel is the URL. When `SecretBox.open` failed the
+    repository logged a line with no reason and returned {}, `send` then found
+    no URL, and every alert went into the history blaming a URL that is fine.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.second = None
+
+    def tearDown(self):
+        if self.second is not None:
+            self.second.engine.dispose()
+        super().tearDown()
+
+    def _through(self, box):
+        """The same database, opened with a different key."""
+        self.second = Store.open(f"sqlite:///{self.database}", secret_box=box)
+        return self.second
+
+    def _delivery_error(self, box):
+        channel = self._channel()
+        store = self._through(box)
+        rule = store.rules.create(channel_id=channel["id"], name="API down",
+                                  kind="monitor_down", threshold=1)
+        runner = AlertRunner(store, self._hub(
+            Monitor(id="m1", name="API", status=DOWN, error="500")))
+        self.assertEqual(runner.evaluate_once(), 0)
+        entry = store.alert_history.recent()[0]
+        self.assertFalse(entry["delivered"])
+        self.assertEqual(entry["rule_id"], rule["id"])
+        return entry["delivery_error"] or ""
+
+    def test_a_rotated_key_says_the_key_changed(self):
+        message = self._delivery_error(SecretBox(SecretBox.generate_key()))
+        self.assertIn("WDASH_ENCRYPTION_KEY", message)
+        self.assertNotIn("no URL", message)
+
+    def test_no_key_at_all_says_that_instead(self):
+        message = self._delivery_error(SecretBox(None))
+        self.assertIn("WDASH_ENCRYPTION_KEY", message)
+        self.assertNotIn("no URL", message)
+
+    def test_the_reason_is_logged_with_the_exception(self):
+        with self.assertLogs("wdash.store.alerting", "ERROR") as caught:
+            self._delivery_error(SecretBox(None))
+        self.assertIn("WDASH_ENCRYPTION_KEY", " ".join(caught.output))
+
+    def test_a_readable_channel_is_unaffected(self):
+        channel = self._channel()
+        self.assertIn("xxTOKENxx",
+                      self.store.channels.credentials(channel["id"])["url"])
+
+    def test_starting_with_no_key_says_alerting_is_among_the_casualties(self):
+        """The startup warning named OIDC and LDAP only, so an operator who
+        has neither read it as "nothing I use" — and then every alert failed
+        with a sentence about a URL."""
+        from wdash.app import create_app
+        from wdash.config import Config
+
+        handle, database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(database)
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "alerts"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = ""
+            ELASTICSEARCH_URL = ""
+            DASHBOARD_STORAGE = "database"
+
+        try:
+            with self.assertLogs("wdash.app", "WARNING") as caught:
+                app = create_app(TestConfig)
+            app.store.engine.dispose()
+            said = " ".join(caught.output)
+            self.assertIn("WDASH_ENCRYPTION_KEY", said)
+            self.assertIn("channel", said)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                if os.path.exists(database + suffix):
+                    os.unlink(database + suffix)
+
+
+class UndeliveredCountTest(AlertingTestCase):
+    """The "never delivered" count has to mean something that can drain.
+
+    It counted every failed row ever written — one row per evaluation while a
+    channel is broken, about 2,880 a day per subject — and no later success
+    ever took one away, while the banner on /alerts says it drains by itself.
+    """
+
+    def _firing(self, **rule):
+        options = dict(name="API down", kind="monitor_down", threshold=1)
+        options.update(rule)
+        self.store.rules.create(channel_id=self._channel()["id"], **options)
+        self.monitor = Monitor(id="m1", name="API", status=DOWN, error="500")
+        return AlertRunner(self.store, self._hub(self.monitor))
+
+    def _undelivered(self):
+        return self.store.alert_history.count(undelivered_only=True)
+
+    def test_a_delivered_alert_clears_the_failed_attempts_before_it(self):
+        self.receiver.status = 500
+        runner = self._firing()
+        for _ in range(5):
+            runner.evaluate_once()
+        self.assertEqual(self._undelivered(), 1,
+                         "one subject is outstanding, not one per attempt")
+        self.assertEqual(self.store.alert_history.count(), 5,
+                         "every attempt is still recorded")
+
+        self.receiver.status = 200
+        self.assertEqual(runner.evaluate_once(), 1)
+        self.assertEqual(self._undelivered(), 0)
+        self.assertEqual(
+            self.store.alert_history.recent(undelivered_only=True), [],
+            "the list and the count disagree")
+
+    def test_another_subject_is_still_counted(self):
+        """Cleared per subject, not wholesale: one channel working for one
+        monitor says nothing about the others."""
+        self.store.alert_history.record("r", "m2", "firing", "500",
+                                        delivered=False, error="500")
+        self.receiver.status = 500
+        runner = self._firing()
+        runner.evaluate_once()
+        self.receiver.status = 200
+        runner.evaluate_once()
+        self.assertEqual(self._undelivered(), 1)
+        self.assertEqual(
+            [e["subject"] for e in
+             self.store.alert_history.recent(undelivered_only=True)], ["m2"])
+
+    def test_a_recovery_that_could_not_be_sent_is_sent_again(self):
+        """The OK state was saved anyway, so the subject was healthy, the
+        machine never transitioned again, and the last thing anybody was told
+        was that it is broken."""
+        runner = self._firing()
+        self.assertEqual(runner.evaluate_once(), 1)
+
+        self.receiver.status = 500
+        self.monitor.status = UP
+        self.assertEqual(runner.evaluate_once(), 0)
+        self.assertEqual(
+            [e["transition"] for e in
+             self.store.alert_history.recent(undelivered_only=True)],
+            ["resolved"])
+
+        self.receiver.status = 200
+        self.assertEqual(runner.evaluate_once(), 1,
+                         "the recovery was never tried again")
+        self.assertEqual(self.receiver.received[-1]["body"]["transition"],
+                         "resolved")
+        self.assertEqual(self._undelivered(), 0)
+        # And then it stops, rather than announcing the recovery for ever.
+        self.assertEqual(runner.evaluate_once(), 0)
+
+    def test_a_recovery_that_was_sent_forgets_a_vanished_subject(self):
+        """The row-per-deleted-monitor cleanup still happens on success."""
+        rule = self.store.rules.create(
+            channel_id=self._channel()["id"], name="API down",
+            kind="monitor_down", threshold=1)
+        AlertRunner(self.store, self._hub(
+            Monitor(id="m1", name="API", status=DOWN))).evaluate_once()
+        AlertRunner(self.store, self._hub()).evaluate_once()
+        self.assertEqual(self.store.alert_state.load(rule["id"]), {})
