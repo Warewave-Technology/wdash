@@ -661,9 +661,12 @@ as a break, because `>=3.8` was never installable: `psycopg` has required
   Advisor's `SEC001` check exists to remind you.
 - **Set a real `SECRET_KEY`** and serve over HTTPS with
   `SESSION_COOKIE_SECURE=true`. WDash refuses to start if those two disagree —
-  the built-in development key is printed in this repository and signs the
-  administrator's session cookie, so an instance served over TLS may not use
-  it. Generate one with
+  the built-in development key, and every placeholder key this repository has
+  ever shipped in `.env.example` or `kubernetes/secrets.yaml`, is printed here
+  and signs the administrator's session cookie, so an instance served over TLS
+  may not use any of them. `.env.example` now ships the key empty; a `.env`
+  copied from an older one still carries the old placeholder and is refused
+  the same way. Generate one with
   `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
 - Enable Elasticsearch security and give WDash a dedicated user.
 - Run the Advisor against your cluster before going live.

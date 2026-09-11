@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from wdash import __version__
 from wdash.config import (
-    Config, DEV_SECRET_KEY, DEFAULT_DASHBOARD_FILE, DEFAULT_TRACE_PATTERNS)
+    Config, DEFAULT_DASHBOARD_FILE, DEFAULT_TRACE_PATTERNS,
+    PUBLISHED_SECRET_KEYS)
 from wdash.auth import auth_bp, load_user_from_session
 from wdash.auth.setup import register_setup_gate, setup_bp
 from wdash.logs import ElasticsearchClient
@@ -72,21 +73,28 @@ def create_app(config_class=Config):
     # development key one line later — so the two are the same deployment, and
     # a check that knew only about the literal would be a check that passes on
     # the exact file being shipped.
+    #
+    # And "the literal" is every literal this repository has printed, not the
+    # one `Config` falls back to. `.env.example` carried its own, the quick
+    # start copies that file into `.env`, and so a deployment built from the
+    # README signed the administrator's cookie with a published string while
+    # this check, which knew one spelling, said nothing at all.
     key = app.config.get('SECRET_KEY')
-    if not key or key == DEV_SECRET_KEY:
+    if not key or key in PUBLISHED_SECRET_KEYS:
         if app.config.get('SESSION_COOKIE_SECURE'):
             raise RuntimeError(
-                "SECRET_KEY is unset or empty, so the built-in development "
-                "key is in use — and SESSION_COOKIE_SECURE says this instance "
-                "is served over TLS to real people. That key is published in "
-                "this repository and signs every session cookie, including "
-                "the administrator's. Set a real one:\n"
+                "SECRET_KEY is unset, empty, or a key printed in this "
+                "repository — and SESSION_COOKIE_SECURE says this instance "
+                "is served over TLS to real people. A published key signs "
+                "every session cookie, including the administrator's, so "
+                "anybody who has read the source can mint one. Set a real "
+                "one:\n"
                 "  python -c \"import secrets; print(secrets.token_urlsafe(48))\"\n"
                 "In Kubernetes it is `secret-key` in kubernetes/secrets.yaml.")
         app.logger.warning(
-            "SECRET_KEY is not set: using the built-in development key. "
+            "SECRET_KEY is unset or a key printed in this repository. "
             "Sessions signed with it can be forged by anyone who has read "
-            "this repository.")
+            "the source.")
 
     # What `?v=` on a static URL is for.
     #

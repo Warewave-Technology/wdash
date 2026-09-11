@@ -294,6 +294,95 @@ class OidcCallbackTest(HeaderTestCase):
                              "a nonce that outlives its use is not a nonce")
 
 
+class PublishedSessionKeyTest(unittest.TestCase):
+    """A session key printed in this repository signs a cookie anybody can
+    forge, the administrator's included.
+
+    The refusal knew one printed key, the development fallback. The quick
+    start copies `.env.example` into `.env`, and `.env.example` carried a
+    different one, so a TLS deployment built from the README signed its
+    administrator's cookie with a published string and started without a
+    word. Measured before the fix: with that `.env` and
+    SESSION_COOKIE_SECURE=true, create_app started, and a cookie signed with
+    the published key from outside the process opened /admin/config.
+    """
+
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def _starts_under_tls(self, environment):
+        """Whether create_app starts, measured in a clean interpreter:
+        `Config` is computed from the environment at import, so the chain
+        from a file to the refusal can only be observed from a fresh one."""
+        import subprocess
+
+        source = (
+            "import os, sys, json;"
+            "os.environ.update(json.loads(sys.argv[1]));"
+            "sys.path.insert(0, 'src');"
+            "from wdash.app import create_app\n"
+            "try:\n"
+            "    create_app()\n"
+            "except RuntimeError as exc:\n"
+            "    print('refused' if 'SECRET_KEY' in str(exc) else exc)\n"
+            "else:\n"
+            "    print('started')")
+        import json
+        environment = dict(environment,
+                           SESSION_COOKIE_SECURE="true",
+                           DATABASE_URL="sqlite:///:memory:",
+                           ELASTICSEARCH_URL="",
+                           WDASH_NO_DOTENV="1")
+        result = subprocess.run(
+            [sys.executable, "-c", source, json.dumps(environment)],
+            cwd=self.ROOT, capture_output=True, text=True)
+        verdict = result.stdout.strip().splitlines()[-1:] or [result.stderr]
+        return verdict[0]
+
+    def test_the_example_environment_ships_no_key(self):
+        """A value here is a value everybody has read. Empty lands on the
+        development key, which says so on a laptop and refuses under TLS."""
+        from dotenv import dotenv_values
+
+        values = dotenv_values(os.path.join(self.ROOT, ".env.example"))
+        self.assertIn("SECRET_KEY", values,
+                      "the example should still show where the key goes")
+        self.assertFalse(values["SECRET_KEY"],
+                         f".env.example ships SECRET_KEY="
+                         f"{values['SECRET_KEY']!r}")
+
+    def test_what_the_quick_start_produces_cannot_serve_tls(self):
+        """The whole chain, as an operator following the README meets it:
+        `.env.example` read as a dotenv file, `Config` computed from it, and
+        create_app asked to start behind TLS."""
+        from dotenv import dotenv_values
+
+        values = {key: value for key, value in dotenv_values(
+            os.path.join(self.ROOT, ".env.example")).items()
+            if value is not None}
+        self.assertEqual(self._starts_under_tls(values), "refused")
+
+    def test_an_env_copied_before_the_fix_still_cannot_serve_tls(self):
+        """Emptying the example changes nothing for the `.env` files already
+        copied from it: they carry the old literal until somebody edits them.
+        So does a Kubernetes Secret filled from the old manifest."""
+        for published in ("your-secret-key-here-change-in-production",
+                          "your-super-secret-key-change-in-production",
+                          "dev-secret-key-change-in-production"):
+            with self.subTest(key=published):
+                self.assertEqual(
+                    self._starts_under_tls({"SECRET_KEY": published}),
+                    "refused")
+
+    def test_a_real_key_still_starts(self):
+        """The refusal is about printed keys, not about TLS: without this the
+        tests above pass on a check that refuses everything."""
+        import secrets
+
+        self.assertEqual(
+            self._starts_under_tls({"SECRET_KEY": secrets.token_urlsafe(48)}),
+            "started")
+
+
 if __name__ == "__main__":
     unittest.main()
 

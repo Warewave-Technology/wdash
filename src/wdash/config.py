@@ -30,6 +30,23 @@ DEFAULT_DASHBOARD_FILE = 'data/dashboards.json'
 #: laptop, and nowhere else.
 DEV_SECRET_KEY = 'dev-secret-key-change-in-production'
 
+#: Every session key this repository has ever printed, and so every key
+#: anybody who has read it can sign a cookie with.
+#:
+#: Knowing only `DEV_SECRET_KEY` was a check with a hole the size of the
+#: quick start: README says `cp .env.example .env`, and `.env.example`
+#: carried a different literal, which therefore arrived in every deployment
+#: built from the README and passed the check without so much as a warning.
+#: Removing a literal from the file does not remove it from the `.env` files
+#: already copied from it, so the old spellings stay on this list for good.
+PUBLISHED_SECRET_KEYS = frozenset({
+    DEV_SECRET_KEY,
+    # .env.example, from the initial import until it shipped empty.
+    'your-secret-key-here-change-in-production',
+    # kubernetes/secrets.yaml, base64-encoded, before it shipped empty.
+    'your-super-secret-key-change-in-production',
+})
+
 #: What holds traces when nobody says otherwise. Named so the log
 #: source can keep excluding spans even when the environment trace
 #: source is switched off — those are different statements.
