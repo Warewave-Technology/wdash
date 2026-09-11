@@ -215,6 +215,18 @@ def config_page():
 # Sources
 # --------------------------------------------------------------------------
 
+def _unusable_ca_file(path):
+    """Why a CA file cannot be used, or None — read the way a sign-in will
+    read it. A mistyped path was saved without a word and surfaced at sign-in
+    as "the directory could not be reached", which it could."""
+    import ssl
+    try:
+        ssl.create_default_context(cafile=path)
+    except (OSError, ssl.SSLError, ValueError) as exc:
+        return getattr(exc, "strerror", None) or str(exc) or type(exc).__name__
+    return None
+
+
 def _where(url):
     """scheme://host:port of a URL — where a secret sent to it goes."""
     from ..store.secrets import destination
@@ -596,6 +608,13 @@ def save_auth():
         }
         secret = request.form.get("bind_password") or None
         key, label = LDAP, "LDAP"
+        unusable = (_unusable_ca_file(value["ca_certs"])
+                    if value["ca_certs"] and value["verify_certs"] else None)
+        if unusable:
+            flash(f"The CA file {value['ca_certs']} cannot be used: {unusable}. "
+                  f"Every ldaps:// sign-in would fail on it. Nothing was "
+                  f"saved.", "error")
+            return redirect(url_for("config.config_page"))
     else:
         flash("Unknown provider.", "error")
         return redirect(url_for("config.config_page"))

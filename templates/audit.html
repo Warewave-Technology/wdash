@@ -218,10 +218,18 @@
             <td><code>{{ attempt.username }}</code></td>
             <td class="text-muted"><small>{{ attempt.address }}</small></td>
             <td>
+              {# Each outcome as itself. Everything that was not a success or a
+                 lockout used to show as "failure": an outage read as a
+                 burst of guesses that never locked, and a provider refused
+                 under a local name as a mistyped password. #}
               {% if attempt.outcome == 'success' %}
               <span class="badge bg-success">success</span>
               {% elif attempt.outcome == 'locked' %}
               <span class="badge bg-danger">locked</span>
+              {% elif attempt.outcome == 'unavailable' %}
+              <span class="badge bg-secondary" title="The directory could not answer; not counted as a guess">directory unavailable</span>
+              {% elif attempt.outcome == 'refused' %}
+              <span class="badge bg-info" title="The provider's name belongs to a local account, or it named nobody; not counted as a guess">refused</span>
               {% else %}
               <span class="badge bg-warning">failure</span>
               {% endif %}

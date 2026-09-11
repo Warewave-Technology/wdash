@@ -164,12 +164,15 @@ class RefusedAttemptsTest(GuardTestCase):
         self.assertLessEqual(after.until, before)
 
     def test_an_outage_or_a_refused_name_counts_against_no_limit(self):
-        """Neither is a guess: the directory could not answer, or a provider
-        asserted a name that belongs to a local account."""
-        for outcome in (UNAVAILABLE, REFUSED):
+        """Neither is a guess: the directory could not answer about a
+        directory account, or a provider asserted a name that belongs to a
+        local account. (A local name is never asked of the directory, so
+        an outage is never recorded against one — see
+        test_identity.DirectoryTest.)"""
+        for username, outcome in (("alice", UNAVAILABLE), ("owner", REFUSED)):
             for index in range(60):
-                self.guard.record("owner", "10.0.0.7", outcome)
-        self.assertIsNone(self.guard.check("owner", "10.0.0.7"))
+                self.guard.record(username, "10.0.0.7", outcome)
+            self.assertIsNone(self.guard.check(username, "10.0.0.7"))
         self.assertIsNone(self.guard.check("someone", "10.0.0.7"))
 
 

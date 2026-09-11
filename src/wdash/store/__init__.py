@@ -21,7 +21,7 @@ from .objects import (
 from .audit import AuditLog
 from .signin import SignInGuard
 from .rbac import RoleResolver
-from .roles import RoleRepository
+from .roles import RoleRepository, import_claims
 from .settings_repo import SettingsRepository
 from .sources import SourceError, SourceRepository, SOURCE_KINDS
 from .secrets import SecretBox, SecretsCorrupt, SecretsUnavailable
@@ -79,6 +79,7 @@ class Store:
         migrate(engine)
         store = cls(engine, secret_box)
         store.roles.seed(rbac_file, store.settings)
+        import_claims(rbac_file, store.settings)
         return store
 
     def describe(self):

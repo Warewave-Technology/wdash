@@ -431,6 +431,23 @@ class IdentityProviderSettingsTest(AuthSettingsTest):
         self.assertFalse(self.app.store.settings.get("auth.oidc")
                          ["trust_unverified_email"])
 
+    def test_a_ca_file_that_cannot_be_read_is_not_saved(self):
+        """It was saved without a word, and every ldaps:// sign-in then
+        failed as "the directory could not be reached"."""
+        import tempfile
+        from tests.test_ldap_auth import _certificate
+        empty = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
+        empty.write(b"not a certificate")
+        empty.close()
+        for path in ("/nonexistent/corp-ca.pem", empty.name):
+            with self.subTest(path=path):
+                page = self.save_ldap(ca_certs=path).get_data(as_text=True)
+                self.assertIn("cannot be used", page)
+                self.assertIsNone(self.app.store.settings.get("auth.ldap"))
+        good, _ = _certificate(tempfile.mkdtemp())
+        self.save_ldap(ca_certs=good)
+        self.assertEqual(self.app.store.settings.get("auth.ldap")["ca_certs"], good)
+
     def test_the_certificate_check_is_on_unless_turned_off(self):
         from wdash.auth.providers import ldap_settings
         # Saved before the switch existed: no key at all.

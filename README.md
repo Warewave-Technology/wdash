@@ -198,7 +198,12 @@ choose, and it is logged on every sign-in. `ldap://` sends passwords in clear
 text, and the page says so. A directory that cannot answer — unreachable, its
 certificate refused, the service account refused, a search that fails — is
 reported as that and answered with a 503. It is not recorded as a wrong
-password, so an outage cannot lock anybody out.
+password, so an outage cannot lock anybody out. A local account's name is never
+asked of the directory, so an outage cannot stop its wrong guesses being
+counted either. The user's own bind refused for the account — locked by a
+password policy, inactivated — is a wrong password, not an outage. An
+`ldaps://` server may be named by address when its certificate carries that
+address, and a CA file that cannot be read is refused when it is saved.
 
 **What a provider may assert about a person.** An OIDC email counts only when
 the provider sends `email_verified: true`: roles can be mapped to an address,
@@ -207,11 +212,18 @@ take somebody else's mapping. A provider that never sends the claim has to be
 trusted explicitly. The username, email and groups claims are chosen on the
 page, in rbac.yaml's `claim_mappings` or with `OIDC_USERNAME_CLAIM`,
 `OIDC_EMAIL_CLAIM` and `OIDC_GROUPS_CLAIM`. A dotted name reaches into an
-object (`realm_access.roles`). Ownership and name mappings trust the username
-claim, so choose one your users cannot edit. Without a username, the fallback is
-the verified email, then `sub`. No provider, OIDC or directory, may sign
-somebody in under the name of a local account: that name owns the break-glass
-administrator's dashboards. Such a sign-in is refused and audited.
+object (`realm_access.roles`). `email_verified` speaks for the `email` claim
+only: another email claim is used only if unverified addresses are trusted.
+Ownership and name mappings trust the username claim, so choose one your users
+cannot edit. Without a username, the fallback is the verified email, then
+`sub` — unless the provider sent an address it did not verify, as ADFS and
+Entra v1 tokens do: that sign-in is refused, with a message naming the setting,
+rather than signing the person in as an opaque id that owns none of their
+dashboards. No provider, OIDC or directory, may sign somebody in under the
+name of a local account: that name owns the break-glass administrator's
+dashboards. Such a sign-in is refused and audited. `claim_mappings` in
+rbac.yaml is imported the first time a start finds none stored, on an existing
+installation as on a new one.
 
 ### The configuration page
 

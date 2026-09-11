@@ -49,14 +49,22 @@ class FakeEntry:
 
 
 class FakeConnection:
-    """One ldap3 connection: what bind and search answer."""
+    """One ldap3 connection: what bind and search answer.
+
+    As ldap3 answers, which the first version did not: its search returned
+    True with nothing found, where ldap3 returns False with result 0, so
+    "an unknown name" never reached the branch that tells an unknown name
+    from a failed search; and "several match" had no entries at all, so the
+    guard against signing in as the first of them was never run.
+    """
 
     def __init__(self, bind=True, bind_code=0, raises=None, search=True,
                  search_code=0, entries=1, search_raises=False):
         self._bind, self._bind_code, self._raises = bind, bind_code, raises
         self._search_raises = search_raises
         self._search, self._search_code = search, search_code
-        self.entries = [FakeEntry("uid=alice,dc=corp")] * entries if search else []
+        self.entries = [FakeEntry(f"uid=alice{i or ''},dc=corp")
+                        for i in range(entries)]
         self.result = {}
 
     def bind(self):
@@ -73,9 +81,11 @@ class FakeConnection:
             from ldap3.core.exceptions import LDAPSessionTerminatedByServerError
             raise LDAPSessionTerminatedByServerError("session terminated")
         self.result = {"result": self._search_code,
-                       "description": "noSuchObject"
-                       if self._search_code == 32 else "success"}
-        return self._search
+                       "description": {32: "noSuchObject", 4: "sizeLimitExceeded"}
+                       .get(self._search_code, "success")}
+        if not self._search:
+            self.entries = []
+        return self._search and bool(self.entries)
 
     def unbind(self):
         pass
@@ -119,10 +129,24 @@ class OutcomeTest(unittest.TestCase):
         with self.assertRaises(DirectoryUnavailable):
             self.authenticate(FakeConnection(search=False, search_code=32))
 
-    def test_a_user_bind_that_fails_for_another_reason_is_not_a_refusal(self):
+    def test_a_user_bind_the_directory_cannot_answer_is_not_a_refusal(self):
+        for code in (52, 51, 1, 80):
+            with self.subTest(code=code), self.assertRaises(DirectoryUnavailable):
+                self.authenticate(FakeConnection(),
+                                  FakeConnection(bind=False, bind_code=code))
+
+    def test_a_user_bind_refused_for_the_account_is_a_refusal(self):
+        """389-ds and FreeIPA answer an inactivated account with 53, a
+        password policy's lockout is 19. Each was a directory outage: a 503
+        saying "try again shortly", and no limit counting it."""
+        for code in (53, 19, 50):
+            with self.subTest(code=code):
+                self.assertIsNone(self.authenticate(
+                    FakeConnection(), FakeConnection(bind=False, bind_code=code)))
+
+    def test_the_service_account_refused_for_any_reason_is_an_outage(self):
         with self.assertRaises(DirectoryUnavailable):
-            self.authenticate(FakeConnection(),
-                              FakeConnection(bind=False, bind_code=52))
+            self.authenticate(FakeConnection(bind=False, bind_code=53))
 
     def test_a_user_bind_that_cannot_reach_the_directory_is_not_a_refusal(self):
         """The directory went away between the search and the check."""
@@ -134,14 +158,17 @@ class OutcomeTest(unittest.TestCase):
             self.authenticate(FakeConnection(search_raises=True))
 
     def test_a_filter_matching_several_is_still_a_refusal(self):
-        """sizeLimitExceeded is what size_limit=2 asks for when two match;
+        """sizeLimitExceeded is what size_limit=2 asks for when more match;
         an ambiguous filter must not pick one, and it is not an outage."""
+        user = FakeConnection()
         self.assertIsNone(self.authenticate(
-            FakeConnection(search=False, search_code=4, entries=2)))
+            FakeConnection(search_code=4, entries=2), user))
+        self.assertIsNone(user.result.get("result"), "the first match was tried")
 
 
-def _certificate(directory):
+def _certificate(directory, names=("localhost",), addresses=()):
     """A self-signed certificate nobody vouches for."""
+    import ipaddress
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -155,7 +182,9 @@ def _certificate(directory):
                    .not_valid_before(now - dt.timedelta(minutes=1))
                    .not_valid_after(now + dt.timedelta(days=1))
                    .add_extension(x509.SubjectAlternativeName(
-                       [x509.DNSName("localhost")]), critical=False)
+                       [x509.DNSName(name) for name in names]
+                       + [x509.IPAddress(ipaddress.ip_address(address))
+                          for address in addresses]), critical=False)
                    .sign(key, hashes.SHA256()))
     cert_path = os.path.join(directory, "impostor.crt")
     key_path = os.path.join(directory, "impostor.key")
@@ -168,15 +197,19 @@ def _certificate(directory):
     return cert_path, key_path
 
 
-class ImpostorTest(unittest.TestCase):
+class ImpostorTestCase(unittest.TestCase):
     """Something that answers in the directory's place, with a certificate
     nobody vouches for, and what it is sent."""
 
     SECRET = "svc-password-6u8"
 
+    NAMES = ("localhost",)
+    ADDRESSES = ()
+
     def setUp(self):
         self.scratch = tempfile.mkdtemp()
-        cert, key = _certificate(self.scratch)
+        cert, key = _certificate(self.scratch, names=self.NAMES,
+                                 addresses=self.ADDRESSES)
         self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.context.load_cert_chain(cert, key)
         self.cert = cert
@@ -196,6 +229,14 @@ class ImpostorTest(unittest.TestCase):
                 raw, _ = self.listener.accept()
             except OSError:
                 return
+            # What arrives before any handshake, too: a bind sent in the
+            # clear to the ldaps port fails the handshake here, and a
+            # listener that only read after one saw nothing of it.
+            try:
+                raw.settimeout(3)
+                self.received.append(raw.recv(4096, socket.MSG_PEEK))
+            except Exception:
+                pass
             try:
                 with self.context.wrap_socket(raw, server_side=True) as tls:
                     tls.settimeout(3)
@@ -203,8 +244,8 @@ class ImpostorTest(unittest.TestCase):
             except Exception:
                 self.received.append(b"")
 
-    def sign_in(self, **overrides):
-        settings = {**SETTINGS, "server": f"ldaps://localhost:{self.port}",
+    def sign_in(self, host="localhost", **overrides):
+        settings = {**SETTINGS, "server": f"ldaps://{host}:{self.port}",
                     "bind_password": self.SECRET, **overrides}
         try:
             ldap_auth.authenticate(settings, "alice", "typed-by-alice")
@@ -215,6 +256,8 @@ class ImpostorTest(unittest.TestCase):
     def leaked(self):
         return any(self.SECRET.encode() in chunk for chunk in self.received)
 
+
+class ImpostorTest(ImpostorTestCase):
     def test_an_impostor_is_refused_before_anything_is_sent(self):
         outcome = self.sign_in()
         self.assertIsInstance(outcome, DirectoryUnavailable)
@@ -229,6 +272,80 @@ class ImpostorTest(unittest.TestCase):
     def test_turning_the_check_off_is_a_choice_and_it_does_what_it_says(self):
         self.sign_in(verify_certs=False)
         self.assertTrue(self.leaked())
+
+    def test_the_name_on_the_certificate_is_checked_too(self):
+        """A certificate from the given CA, for another name: the
+        certificate says `localhost`, the directory was asked for as
+        127.0.0.1."""
+        outcome = self.sign_in(host="127.0.0.1", ca_certs=self.cert)
+        self.assertIsInstance(outcome, DirectoryUnavailable)
+        self.assertFalse(self.leaked(), "the password went to the wrong name")
+
+    def test_a_bind_in_the_clear_would_be_seen(self):
+        """What makes `leaked` able to fail: plain LDAP to the same port."""
+        self.sign_in(server=f"ldap://localhost:{self.port}")
+        self.assertTrue(self.leaked())
+
+
+class OtherNameCertificateTest(ImpostorTestCase):
+    """A certificate from the given CA, made out to another name, dialled
+    by name: the name check is what refuses it."""
+
+    NAMES = ("directory.example",)
+
+    def test_a_name_the_certificate_does_not_carry_is_refused(self):
+        outcome = self.sign_in(ca_certs=self.cert)
+        self.assertIsInstance(outcome, DirectoryUnavailable)
+        self.assertFalse(self.leaked())
+
+
+class AddressCertificateTest(ImpostorTestCase):
+    """ldaps:// by address, with the address in the certificate.
+
+    Refused on Python 3.12 and later with the right CA given: ldap3's
+    fallback hostname check knows no IP addresses."""
+
+    ADDRESSES = ("127.0.0.1",)
+
+    def test_an_address_the_certificate_names_is_accepted(self):
+        self.sign_in(host="127.0.0.1", ca_certs=self.cert)
+        self.assertTrue(self.leaked(), "a certificate naming the address was refused")
+
+
+
+class AddressMatchTest(unittest.TestCase):
+    """The address half of the name check, on its own. Dialled, another
+    address proves nothing here: 127.0.0.2 is not routed on every machine,
+    and a refused connection passes for a refused certificate."""
+
+    CERTIFICATE = {"subjectAltName": (("DNS", "directory.example"),
+                                      ("IP Address", "10.0.0.5"),
+                                      ("IP Address", "0:0:0:0:0:0:0:1\n"))}
+
+    def setUp(self):
+        from ldap3.core import tls
+        ldap_auth._match_addresses()
+        self.match, self.refused = tls.match_hostname, tls.CertificateError
+
+    def test_an_address_it_names_matches(self):
+        self.assertIsNone(self.match(self.CERTIFICATE, "10.0.0.5"))
+        self.assertIsNone(self.match(self.CERTIFICATE, "::1"),
+                          "an address written out in full is the same address")
+
+    def test_an_address_it_does_not_name_is_refused(self):
+        for address in ("10.0.0.6", "127.0.0.1"):
+            with self.subTest(address=address), self.assertRaises(self.refused):
+                self.match(self.CERTIFICATE, address)
+
+    def test_a_name_is_still_ldap3s_to_judge(self):
+        self.assertIsNone(self.match(self.CERTIFICATE, "directory.example"))
+        with self.assertRaises(self.refused):
+            self.match(self.CERTIFICATE, "other.example")
+
+    def test_it_is_installed_once(self):
+        from ldap3.core import tls
+        ldap_auth._match_addresses()
+        self.assertIs(tls.match_hostname, self.match)
 
 
 if __name__ == "__main__":

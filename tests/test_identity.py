@@ -477,18 +477,36 @@ class DirectoryTest(IdentityTestCase):
         response = self.attempt(RuntimeError("socket closed"))
         self.assertEqual(response.status_code, 503)
 
-    def test_a_directory_may_not_sign_in_as_a_local_account(self):
+    def test_a_local_name_is_not_asked_of_the_directory(self):
         """Ownership and name mappings follow the username, so a directory
         entry called `owner` was the break-glass administrator's
-        dashboards."""
-        response = self.attempt({"username": "owner", "email": None, "groups": []},
-                                username="owner")
-        self.assertEqual(response.status_code, 403)
-        self.assertIn(b"name of a local account", response.data)
+        dashboards; and asking about it let a directory that could not
+        answer turn every guess at owner's password into an outage no limit
+        counts. So the directory is not asked, and a wrong password for a
+        local name is a wrong password."""
+        from wdash.auth.ldap_auth import DirectoryUnavailable
+        for answer in ({"username": "owner", "email": None, "groups": []},
+                       DirectoryUnavailable("unreachable")):
+            with self.subTest(answer=answer):
+                response = self.attempt(answer, username="owner")
+                self.assertEqual(response.status_code, 401)
+                self.assertIn(b"Invalid username or password", response.data)
         self.assertEqual(self.client.get("/admin/config").status_code, 302)
-        refused = [row for row in self.app.store.audit.recent()
-                   if row["action"] == "sign-in refused"]
-        self.assertEqual(refused[0]["state"]["method"], "directory")
+        self.assertEqual(
+            [row["outcome"] for row in self.app.store.signin.recent()
+             if row["username"] == "owner"], ["failure", "failure"])
+
+    def test_guesses_at_a_local_account_lock_it_while_the_directory_is_down(self):
+        """The measurement, as a test: 60 wrong guesses at `owner` with the
+        directory unreachable were 60 x 503 and the right password was let
+        in straight after."""
+        from wdash.auth.ldap_auth import DirectoryUnavailable
+        codes = [self.attempt(DirectoryUnavailable("unreachable"),
+                              username="owner", address="6.6.6.6").status_code
+                 for _ in range(8)]
+        self.assertEqual(codes[:5], [401] * 5)
+        self.assertEqual(set(codes[5:]), {429})
+        self.assertIsNotNone(self.app.store.signin.check("owner", "6.6.6.6"))
 
 
 class ProviderIdentityTest(IdentityTestCase):
@@ -557,13 +575,88 @@ class ProviderIdentityTest(IdentityTestCase):
                    if row["action"] == "sign-in refused"]
         self.assertEqual(refused[0]["state"]["method"], "oidc")
 
-    def test_with_no_username_the_fallback_is_not_an_unverified_email(self):
-        """It fell back to the email as sent, which was the same hole."""
+    def test_a_provider_refused_under_a_local_name_does_not_lock_it(self):
+        """Refusals are recorded as refused, which no limit counts. Recorded
+        as failures, anybody whose provider let them call themselves `owner`
+        could lock the break-glass account out by signing in again and
+        again."""
+        for _ in range(12):
+            self.sign_in({"sub": "1", "preferred_username": "owner",
+                          "email": "o@x", "email_verified": True})
+        outcomes = {row["outcome"] for row in self.app.store.signin.recent()
+                    if row["username"] == "owner"}
+        self.assertEqual(outcomes, {"refused"})
+        response = self.client.post("/auth/login", data={
+            "username": "owner", "password": PASSWORD})
+        self.assertEqual(response.status_code, 302)
+
+    def test_with_no_username_an_unverified_email_is_not_the_fallback(self):
+        """It fell back to the email as sent, which was the same hole. Nor
+        is it `sub`: a token shaped like ADFS or Entra v1 — no
+        preferred_username, no email_verified — would have signed its
+        person in as an opaque id, their dashboards and mappings gone
+        without a word. Refused, with what fixes it."""
+        for claims in ({"sub": "subject-42", "email": "boss@corp.example",
+                        "email_verified": False},
+                       {"sub": "subject-42", "email": "boss@corp.example",
+                        "upn": "boss@corp.example", "unique_name": "CORP\\boss"}):
+            with self.subTest(claims=claims):
+                self.sign_in(claims)
+                with self.client.session_transaction() as session:
+                    self.assertNotIn("user_data", session)
+        refused = [row for row in self.app.store.audit.recent()
+                   if row["action"] == "sign-in refused"]
+        self.assertEqual(len(refused), 2)
+        self.assertEqual(refused[0]["subject"], "user:boss@corp.example")
+        self.assertEqual(
+            [row["outcome"] for row in self.app.store.signin.recent()
+             if row["username"] == "boss@corp.example"], ["refused", "refused"])
+
+    def test_naming_the_claim_that_holds_the_name_lets_them_in(self):
         self.sign_in({"sub": "subject-42", "email": "boss@corp.example",
-                      "email_verified": False})
+                      "upn": "boss@corp.example"}, username_claim="upn")
+        with self.client.session_transaction() as session:
+            self.assertEqual(session["user_data"]["username"], "boss@corp.example")
+            self.assertEqual(session["user_data"]["email"], "")
+
+    def test_with_no_name_and_no_address_sub_is_the_name(self):
+        """Nothing was dropped, so nothing changes who they are."""
+        self.sign_in({"sub": "subject-42"})
         with self.client.session_transaction() as session:
             self.assertEqual(session["user_data"]["username"], "subject-42")
+
+    def test_email_verified_speaks_for_the_email_claim_only(self):
+        """Measured: with email_claim `work_email`, a verified `email` of
+        the attacker's own vouched for a `work_email` of boss@corp.example,
+        mapped to admin — and they administered."""
+        self.client.get("/auth/logout")
+        self.sign_in({"sub": "2", "preferred_username": "m",
+                      "email": "m@attacker.example", "email_verified": True,
+                      "work_email": "boss@corp.example"},
+                     email_claim="work_email")
+        self.assertFalse(self.administers())
+        with self.client.session_transaction() as session:
             self.assertEqual(session["user_data"]["email"], "")
+
+    def test_an_address_that_is_not_used_is_said_in_the_log(self):
+        """Every mapping written against an address stops matching when the
+        provider never sends email_verified, and nothing on a page says so."""
+        with self.assertLogs(self.app.logger, level="WARNING") as said:
+            self.sign_in({"sub": "1", "preferred_username": "alice",
+                          "email": "alice@corp.example"})
+        self.assertTrue(any("not mark it verified" in line for line in said.output))
+
+    def test_the_audit_says_what_the_provider_said(self):
+        """`email_verified` was recorded as whether an address was used: with
+        unverified addresses trusted, one the provider called unverified
+        went into the trail as verified."""
+        self.sign_in({"sub": "1", "preferred_username": "boss",
+                      "email": "boss@corp.example", "email_verified": False},
+                     trust_unverified_email=True)
+        row = [r for r in self.app.store.audit.recent()
+               if r["action"] == "sign-in"][0]
+        self.assertIs(row["state"]["email_verified"], False)
+        self.assertIs(row["state"]["unverified_email_trusted"], True)
 
     def test_the_claims_are_the_ones_configured(self):
         """Keycloak puts realm roles at realm_access.roles."""
@@ -613,8 +706,62 @@ class ClaimSettingsTest(IdentityTestCase):
     def test_the_environment_can_name_them(self):
         from wdash.auth.providers import oidc_settings
         self.app.config.update(OIDC_CLIENT_ID="c", OIDC_DISCOVERY_URL="https://i/.w",
-                               OIDC_GROUPS_CLAIM="cognito:groups")
-        self.assertEqual(oidc_settings(self.app)["groups_claim"], "cognito:groups")
+                               OIDC_GROUPS_CLAIM="cognito:groups",
+                               OIDC_USERNAME_CLAIM="sub",
+                               OIDC_EMAIL_CLAIM="mail",
+                               OIDC_TRUST_UNVERIFIED_EMAIL=True)
+        settings = oidc_settings(self.app)
+        self.assertEqual(settings["groups_claim"], "cognito:groups")
+        self.assertEqual(settings["username_claim"], "sub")
+        self.assertEqual(settings["email_claim"], "mail")
+        self.assertIs(settings["trust_unverified_email"], True)
+
+    def test_the_trust_switch_is_read_from_the_environment_as_written(self):
+        """In a process of its own: `Config` reads the environment once, at
+        import, and reloading it here would leave two classes behind."""
+        import subprocess
+        source = os.path.join(os.path.dirname(__file__), "..", "src")
+        for written, meant in (("true", True), ("1", True), ("yes", True),
+                               ("false", False), ("", False)):
+            with self.subTest(written=written):
+                environment = {**os.environ, "WDASH_NO_DOTENV": "1",
+                               "PYTHONPATH": source,
+                               "OIDC_TRUST_UNVERIFIED_EMAIL": written}
+                shown = subprocess.run(
+                    [sys.executable, "-c", "from wdash.config import Config; "
+                     "print(Config.OIDC_TRUST_UNVERIFIED_EMAIL)"],
+                    env=environment, capture_output=True, text=True, check=True)
+                self.assertEqual(shown.stdout.strip(), str(meant))
+
+    def test_an_installation_seeded_before_them_gets_them(self):
+        """`seed` runs on an empty installation only, and one seeded before
+        claim_mappings was read never got it."""
+        from wdash.store import Store
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "rbac.yaml")
+        with open(path, "w") as handle:
+            handle.write("roles:\n  admin:\n    permissions: [system:admin]\n")
+        url = f"sqlite:///{folder}/old.db"
+        Store.open(url, rbac_file=path).engine.dispose()
+        with open(path, "a") as handle:
+            handle.write("claim_mappings:\n  groups_claim: roles\n")
+        store = Store.open(url, rbac_file=path)
+        self.assertEqual(store.settings.get("rbac.claim_mappings"),
+                         {"groups_claim": "roles"})
+
+    def test_what_is_stored_is_not_overwritten_by_the_file(self):
+        from wdash.store import Store
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "rbac.yaml")
+        with open(path, "w") as handle:
+            handle.write("roles:\n  admin:\n    permissions: [system:admin]\n"
+                         "claim_mappings:\n  groups_claim: roles\n")
+        url = f"sqlite:///{folder}/kept.db"
+        store = Store.open(url, rbac_file=path)
+        store.settings.set("rbac.claim_mappings", {"groups_claim": "teams"})
+        store.engine.dispose()
+        self.assertEqual(Store.open(url, rbac_file=path).settings.get(
+            "rbac.claim_mappings"), {"groups_claim": "teams"})
 
 
 class SetupRoleTest(unittest.TestCase):
@@ -649,6 +796,50 @@ class SetupRoleTest(unittest.TestCase):
             "default_role: readers\n")
         self.assertEqual(app.store.users.by_username("owner")["role"], "superusers")
         self.assertEqual(client.get("/admin/config").status_code, 200)
+
+    def test_the_role_it_makes_is_not_one_a_mapping_already_names(self):
+        """`bob: admin`, left from a rename, granted nothing while no role
+        was called that. Setup made `admin` with every permission, and bob
+        was an administrator of every container."""
+        app, client = self.app_with(
+            "roles:\n  readers:\n    permissions: [logs:read]\n"
+            "default_role: readers\n"
+            "user_roles:\n  bob: admin\n  carol: setup-admin\n")
+        role = app.store.users.by_username("owner")["role"]
+        self.assertNotIn(role, ("admin", "setup-admin"))
+        self.assertIsNone(app.store.roles.get("admin"))
+        self.assertEqual(client.get("/admin/config").status_code, 200)
+
+    def test_nor_one_the_default_role_names(self):
+        """A default role that names no role gives nothing; made at setup,
+        it would give everybody everything."""
+        app, _ = self.app_with(
+            "roles:\n  readers:\n    permissions: [logs:read]\n"
+            "default_role: setup-admin\n")
+        role = app.store.users.by_username("owner")["role"]
+        self.assertNotEqual(role, "setup-admin")
+        self.assertIsNone(app.store.roles.get("setup-admin"))
+
+    def test_a_refused_password_makes_no_role(self):
+        path = os.path.join(tempfile.mkdtemp(), "rbac.yaml")
+        with open(path, "w") as handle:
+            handle.write("roles:\n  readers:\n    permissions: [logs:read]\n"
+                         "default_role: readers\n")
+        database = os.path.join(tempfile.mkdtemp(), "setup.db")
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "setup-role"
+            DATABASE_URL = f"sqlite:///{database}"
+            RBAC_CONFIG_FILE = path
+            OIDC_CLIENT_ID = None
+
+        app = create_app(TestConfig)
+        response = app.test_client().post("/setup", data={
+            "username": "owner", "password": "short", "confirm": "short"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(sorted(r["name"] for r in app.store.roles.all()),
+                         ["readers"])
 
     def test_with_no_administering_role_one_is_made(self):
         app, client = self.app_with(

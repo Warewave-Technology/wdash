@@ -25,6 +25,7 @@ a failed guess against every name that tried, and five tries locked people out
 of an account that was fine.
 """
 
+import ipaddress
 import logging
 import re
 
@@ -34,6 +35,12 @@ TIMEOUT = 10
 
 #: LDAP result code for a bind with the wrong password (RFC 4511).
 INVALID_CREDENTIALS = 49
+
+#: Result codes that are the directory failing, not an answer about the
+#: person binding (RFC 4511): operationsError, protocolError,
+#: timeLimitExceeded, authMethodNotSupported, strongerAuthRequired,
+#: adminLimitExceeded, confidentialityRequired, busy, unavailable, other.
+DIRECTORY_FAULTS = frozenset({1, 2, 3, 7, 8, 11, 13, 51, 52, 80})
 
 
 class DirectoryUnavailable(RuntimeError):
@@ -64,6 +71,7 @@ def _tls(settings):
     import ssl
     from ldap3 import Tls
 
+    _match_addresses()
     if settings.get("verify_certs", True) is False:
         logger.warning("LDAP: certificate verification is OFF for "
                        f"{settings.get('server')}; a password can be read by "
@@ -71,6 +79,41 @@ def _tls(settings):
         return Tls(validate=ssl.CERT_NONE)
     return Tls(validate=ssl.CERT_REQUIRED,
                ca_certs_file=settings.get("ca_certs") or None)
+
+
+def _match_addresses():
+    """Let ldap3's name check match an IP address.
+
+    ldap3 checks the name on the certificate itself, and on Python 3.12 and
+    later — where the standard library's match_hostname is gone — with a
+    backport that knows no IP addresses. ldaps://10.0.0.5, with that address
+    in the certificate and its CA given, was refused on every sign-in, and
+    the only way out was to turn the check off. Addresses are matched here,
+    against the certificate's IP entries; names are left to ldap3.
+    """
+    from ldap3.core import tls
+    if getattr(tls.match_hostname, "wdash", False):
+        return
+    by_name = tls.match_hostname
+
+    def match_hostname(certificate, hostname):
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            return by_name(certificate, hostname)
+        for kind, value in (certificate or {}).get("subjectAltName", ()):
+            if kind != "IP Address":
+                continue
+            try:
+                if ipaddress.ip_address(value.strip()) == address:
+                    return None
+            except ValueError:
+                continue
+        raise tls.CertificateError(
+            f"{hostname} is not among the certificate's addresses")
+
+    match_hostname.wdash = True
+    tls.match_hostname = match_hostname
 
 
 def _connection(settings, user=None, password=None, receive_timeout=TIMEOUT):
@@ -84,8 +127,17 @@ def _connection(settings, user=None, password=None, receive_timeout=TIMEOUT):
                       auto_bind=False, receive_timeout=receive_timeout)
 
 
-def _bind(connection, who):
-    """True on success, False on a wrong password, raising otherwise."""
+def _bind(connection, who, the_person=False):
+    """True on success, False on a refusal, raising when the directory failed.
+
+    A wrong password is a refusal for anybody. For the person signing in, so
+    is every other answer about them: an account a password policy has
+    locked (19), one 389-ds or FreeIPA has inactivated (53). Those were
+    reported as the directory being down — a 503 that said "try again
+    shortly", an ERROR in the log that read as an outage, and an attempt
+    no limit counted. For the service account any refusal means the
+    configuration is wrong, which is the directory not being able to answer.
+    """
     from ldap3.core.exceptions import LDAPException
     try:
         if connection.bind():
@@ -93,7 +145,8 @@ def _bind(connection, who):
     except LDAPException as exc:
         raise DirectoryUnavailable(f"{who} could not bind: {exc}") from exc
     code = (connection.result or {}).get("result")
-    if code == INVALID_CREDENTIALS:
+    if code == INVALID_CREDENTIALS or (
+            the_person and code is not None and code not in DIRECTORY_FAULTS):
         return False
     raise DirectoryUnavailable(
         f"{who} could not bind: {(connection.result or {}).get('description')}")
@@ -123,7 +176,7 @@ def authenticate(settings, username, password):
     # THE actual check: bind as that user with the password they typed.
     connection = _connection(settings, user=user_dn, password=password)
     try:
-        if not _bind(connection, "the user"):
+        if not _bind(connection, "the user", the_person=True):
             logger.info(f"LDAP: bind rejected for {username!r}")
             return None
     finally:

@@ -84,6 +84,18 @@ class AccessTest(AuditTestCase):
 
 
 class ContentTest(AuditTestCase):
+    def test_each_sign_in_outcome_is_shown_as_itself(self):
+        """Everything but a success or a lockout showed as "failure": an
+        outage read as a burst of guesses that never locked, and a provider
+        refused under a local name as a mistyped password."""
+        from wdash.store.signin import REFUSED, UNAVAILABLE
+        self.app.store.signin.record("alice", "10.0.0.1", UNAVAILABLE)
+        self.app.store.signin.record("owner", "10.0.0.2", REFUSED)
+        body = self.client.get("/admin/audit").get_data(as_text=True)
+        self.assertIn(">directory unavailable</span>", body)
+        self.assertIn(">refused</span>", body)
+        self.assertNotIn(">failure</span>", body)
+
     def test_a_configuration_change_reaches_the_trail(self):
         self.save_role()
         body = self.client.get("/admin/audit").get_data(as_text=True)

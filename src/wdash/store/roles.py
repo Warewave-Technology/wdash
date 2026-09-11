@@ -179,14 +179,33 @@ class RoleRepository:
                 "rbac.default_role", (parsed or {}).get("default_role", "viewer"))
             settings_repository.set(
                 "rbac.user_roles", (parsed or {}).get("user_roles") or {})
-            if (parsed or {}).get("claim_mappings"):
-                settings_repository.set(
-                    "rbac.claim_mappings", dict(parsed["claim_mappings"]))
 
         logger.info(
             f"Seeded {len(roles_source)} roles from "
             f"{from_file if parsed else 'built-in defaults'}")
         return True
+
+
+def import_claims(from_file, settings_repository):
+    """rbac.yaml's `claim_mappings`, for an installation that has none stored.
+
+    Not part of `seed`, which runs only on an empty installation: an
+    installation seeded before the block was read never got it, so its
+    operator's `groups_claim: roles` was still ignored after the upgrade
+    that said it no longer would be. Imported on its own, the first time a
+    start finds none stored; after that, as with the rest of the file, the
+    file does not overwrite what is stored.
+    """
+    if settings_repository is None or from_file is None:
+        return False
+    if settings_repository.get("rbac.claim_mappings") is not None:
+        return False
+    mappings = (_read_rbac_file(from_file) or {}).get("claim_mappings")
+    if not mappings:
+        return False
+    settings_repository.set("rbac.claim_mappings", dict(mappings))
+    logger.info(f"Imported claim_mappings from {from_file}")
+    return True
 
 
 def _read_rbac_file(path):

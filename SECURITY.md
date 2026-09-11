@@ -125,11 +125,14 @@ So that a report can say what it got past:
 * sign-in throttling per account, per address and per pair, applied before
   the password is checked so a lockout also stops the guessing — the
   account-wide limit counting guesses only, so an address knocking on a
-  locked door cannot lock the owner out everywhere, and a directory outage
-  counting as no guess at all;
-* an OIDC email trusted only when the provider marks it verified, the claims
-  that name a person configurable, and no provider allowed to sign anybody in
-  under a local account's name;
+  locked door cannot lock the owner out everywhere, a directory outage
+  counting as no guess at all, and a local account's name never asked of the
+  directory, so an outage cannot hide guesses at it;
+* an OIDC email trusted only when the provider marks it verified, and only
+  for the claim the mark is about; the claims that name a person
+  configurable; no provider allowed to sign anybody in under a local
+  account's name, nor under an opaque id when the address it sent was not
+  verified;
 * `ldaps://` certificates checked, against the system's CAs or a named CA
   file, with turning the check off an explicit and logged choice;
 * an append-only audit trail, not deletable from the UI, recording refused

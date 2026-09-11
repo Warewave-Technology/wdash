@@ -25,6 +25,7 @@ from flask import (
 
 from ..models import User
 from ..store import SetupClosed, WeakPassword
+from ..store.users import check_password_strength
 from .auth import _start_session
 
 
@@ -45,7 +46,17 @@ def _administering_role(store):
         return "admin"
     if administering:
         return administering[0]
-    name = "admin" if "admin" not in roles else "setup-admin"
+    # Not `admin`, and no name anything already points at. A mapping left
+    # behind by a rename — `bob: admin` with no role called that — grants
+    # nothing; a role created under that name at setup would have made bob
+    # an administrator of every container. The recovery CLI keeps to its
+    # own name for the same reason.
+    mapped = set((store.settings.get("rbac.user_roles") or {}).values())
+    mapped.add(store.settings.get("rbac.default_role") or "")
+    name, suffix = "setup-admin", 1
+    while name in roles or name in mapped:
+        suffix += 1
+        name = f"setup-admin-{suffix}"
     store.roles.upsert(
         name, permissions=list(PERMISSIONS), containers=["*"],
         trace_containers=["*"], services=None,
@@ -123,6 +134,9 @@ def first_run():
         return again('The two passwords do not match.')
 
     try:
+        # Checked before a role is made for the account: a refused password
+        # left the role behind.
+        check_password_strength(password)
         account = store.users.create_first_admin(
             username, password, role=_administering_role(store), email=email)
     except WeakPassword as exc:

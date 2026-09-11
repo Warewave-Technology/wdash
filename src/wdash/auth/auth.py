@@ -149,7 +149,16 @@ def login():
     # trying the account that would have worked.
     account = store.users.verify(username, password)
 
-    if account is None and directory is not None:
+    # A local name is not asked of the directory. Whatever the directory said
+    # about it would be refused below — the name is the local account's —
+    # and asking gave every wrong guess at the break-glass password a way
+    # out of the count: a directory that could not answer made each one an
+    # outage, which no limit counts. Measured: 60 wrong guesses at `owner`
+    # with the directory unreachable were 60 × 503, the right one was let
+    # in, and nothing ever locked; before the directory was asked, the
+    # sixth guess was a 429.
+    if (account is None and directory is not None
+            and store.users.by_username(username) is None):
         try:
             account = _authenticate_directory(directory, username, password)
         except DirectoryUnavailable as exc:
@@ -164,12 +173,6 @@ def login():
             return render_template('login.html', oidc_available=oidc_available,
                                    ldap_available=True, local_available=True,
                                    username=username), 503
-        if account and _local_name_taken(store, account['username'],
-                                         account.get('email'), 'directory',
-                                         address):
-            return render_template('login.html', oidc_available=oidc_available,
-                                   ldap_available=True, local_available=True,
-                                   username=username), 403
 
     if not account:
         # One message for every failure. Saying which half was wrong tells an
@@ -308,10 +311,22 @@ def callback():
         if not user_info:
             user_info = oidc.parse_id_token(token, nonce=nonce)
         
-        email, username, groups = _identity(user_info, settings)
         address = client_address(
             request, current_app.config.get('TRUSTED_PROXY_COUNT', 0))
         store = _store()
+        try:
+            email, username, groups = _identity(user_info, settings)
+        except UnvouchedIdentity as refusal:
+            return _unvouched(store, refusal, address)
+        if not email and _claim(user_info, settings.get("email_claim") or "email"):
+            # Said, because what it changes is silent: a mapping written
+            # against this person's address no longer matches, and they land
+            # on the default role with nothing on any page to say why.
+            current_app.logger.warning(
+                f"OIDC: the address sent for {username!r} was not used — the "
+                f"provider did not mark it verified. A provider that never "
+                f"sends email_verified has to be trusted on the configuration "
+                f"page.")
         if store is not None and _local_name_taken(store, username, email,
                                                    'oidc', address):
             return redirect(url_for('auth.login'))
@@ -328,10 +343,18 @@ def callback():
         # from here on; nothing is frozen into the session.
         _start_session(user)
         if store is not None:
+            # What the provider said, not whether an address was used: with
+            # unverified addresses trusted, `bool(email)` recorded one the
+            # provider had called unverified as verified.
+            said = user_info.get("email_verified")
             store.audit.record(
                 username, "sign-in", subject=f"user:{username}",
                 address=address,
-                state={"method": "oidc", "email_verified": bool(email)})
+                state={"method": "oidc", "email": email or None,
+                       "email_verified": said is True
+                       or str(said).lower() == "true",
+                       "unverified_email_trusted": bool(
+                           email and settings.get("trust_unverified_email"))})
         current_app.logger.info(f"Sign-in: {username} via oidc")
         flash(f'Welcome {username}! Role: {user.role}', 'success')
 
@@ -345,6 +368,14 @@ def callback():
         flash('Sign-in failed. Please try again, or contact your '
               'administrator if this continues.', 'error')
         return redirect(url_for('auth.login'))
+
+class UnvouchedIdentity(Exception):
+    """The provider named nobody this installation can trust by that name."""
+
+    def __init__(self, reason, name):
+        super().__init__(reason)
+        self.name = name
+
 
 def _claim(info, name):
     """A claim by name, a dotted name reaching into an object: Keycloak puts
@@ -373,19 +404,55 @@ def _identity(info, settings):
     """
     verified = info.get("email_verified")
     verified = verified is True or str(verified).lower() == "true"
-    email = _claim(info, settings.get("email_claim") or "email")
+    # And only for the claim it is about. `email_verified` attests `email`:
+    # read against another claim — `work_email`, `upn` — it vouched for an
+    # address the provider never checked, one a user could often edit.
+    claim = settings.get("email_claim") or "email"
+    verified = verified and claim == "email"
+    email = _claim(info, claim)
     email = str(email).strip() if email and (
         verified or settings.get("trust_unverified_email")) else ""
 
-    username = _claim(info, settings.get("username_claim") or "preferred_username")
-    username = (str(username).strip() if username else "") or email \
-        or str(info.get("sub") or "")
+    username_claim = settings.get("username_claim") or "preferred_username"
+    username = _claim(info, username_claim)
+    username = (str(username).strip() if username else "") or email
+    if not username:
+        sent = _claim(info, claim)
+        if sent:
+            # A token shaped like ADFS or Entra v1: no preferred_username,
+            # and an address with no email_verified. The name used to be that
+            # address; falling back to `sub` would sign the person in as an
+            # opaque id, and every dashboard they own and every mapping
+            # written against their name would be gone without a word.
+            raise UnvouchedIdentity(
+                f"the provider sent no '{username_claim}' claim, and the "
+                f"address it sent ({sent}) is not marked verified",
+                name=str(sent).strip())
+        username = str(info.get("sub") or "")
 
     groups = _claim(info, settings.get("groups_claim") or "groups") or []
     if isinstance(groups, str):
         groups = [groups]
     groups = [str(group) for group in groups if group is not None]
     return email, username, groups
+
+
+def _unvouched(store, refusal, address):
+    """Refuse a sign-in the provider did not name anybody for, and say what
+    would fix it — to the person, and to whoever reads the log."""
+    if store is not None:
+        store.signin.record(refusal.name, address, REFUSED)
+        store.audit.record(refusal.name, "sign-in refused",
+                           subject=f"user:{refusal.name}", address=address,
+                           state={"method": "oidc", "reason": str(refusal)})
+    current_app.logger.warning(
+        f"Refused an OIDC sign-in: {refusal}. Name the claim that holds the "
+        f"username (username_claim, for example upn) or trust unverified "
+        f"addresses, on the configuration page.")
+    flash('Your identity provider did not send a name WDash can trust, so '
+          'you were not signed in. Ask an administrator: the provider '
+          'settings need a username claim.', 'error')
+    return redirect(url_for('auth.login'))
 
 
 @auth_bp.route('/logout')
