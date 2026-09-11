@@ -212,13 +212,23 @@ def validate(kind, signals, config):
     return cleaned
 
 
-def _check_name(name):
-    """A name a role's rule can point at.
+#: Means "every source" to `hub.logs()` and in a role's rules, so a source
+#: called this is registered and reachable by nothing.
+EVERY_SOURCE = "*"
+
+
+def _check_name(name, reserved=()):
+    """A name a role's rule can point at, and that reaches this source.
 
     Not blank: a source called "" matches no rule written for it. And no
     colon: a rule's colon separates a source's name from a pattern, so a
     source called `eu:prod` could not be named by one — `-eu:prod:secret-*`
     read as a rule for a source called `eu`.
+
+    And not a name the hub has already: the environment's sources are
+    registered first and keep their names, so a configured source called
+    `elasticsearch-logs` is stored, listed on the page, and answers nothing.
+    Refused here because the form is where somebody can still change it.
     """
     if not name:
         raise SourceError("A name is required.")
@@ -226,12 +236,36 @@ def _check_name(name):
         raise SourceError(
             "A source name cannot contain ':'. In a role's rules the colon "
             "separates a source's name from the pattern for it.")
+    if name == EVERY_SOURCE:
+        raise SourceError(
+            f"A source cannot be called '{EVERY_SOURCE}'. In a query and in a "
+            f"role's rules it already means every source, so nothing could "
+            f"name this one.")
+    if name in reserved:
+        raise SourceError(
+            f"'{name}' is the name of a source WDash registers from its own "
+            f"configuration. That one is registered first and keeps the name, "
+            f"so a source called '{name}' here would be stored and reachable "
+            f"by nothing. Choose another name.")
 
 
 class SourceRepository:
-    def __init__(self, engine, secret_box=None):
+    def __init__(self, engine, secret_box=None, reserved_names=None):
         self._engine = engine
         self._secrets = secret_box
+        #: Names the hub already holds. A callable, because the hub is built
+        #: after the store and its base sources depend on configuration this
+        #: object has never seen. Set by the application factory.
+        self.reserved_names = reserved_names
+
+    def _reserved(self):
+        source = self.reserved_names
+        try:
+            return frozenset(source() if callable(source) else (source or ()))
+        except Exception:
+            # A name check is not a reason to refuse a save. The hub refuses
+            # the collision itself, and says so on the page.
+            return frozenset()
 
     def all(self, signal=None, enabled_only=False):
         with self._engine.connect() as connection:
@@ -316,7 +350,7 @@ class SourceRepository:
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
         }
-        _check_name(record["name"])
+        _check_name(record["name"], self._reserved())
         try:
             with self._engine.begin() as connection:
                 connection.execute(sources.insert().values(**record))
@@ -341,7 +375,13 @@ class SourceRepository:
             # configuration page refuses for any other name went through for
             # this one — a role's exclusions for the source stopped excluding.
             changes["name"] = name.strip()
-            _check_name(changes["name"])
+            # Skipped when the name has not moved, so a row stored before
+            # this check existed can still be edited — disabled, repointed,
+            # its password rotated — instead of being unsavable under a name
+            # only a rename can get it out of.
+            _check_name(changes["name"],
+                        () if changes["name"] == existing["name"]
+                        else self._reserved())
         if signals is not None:
             changes["signals"] = normalise_signals(existing["kind"], signals)
             changes["signal"] = changes["signals"][0]

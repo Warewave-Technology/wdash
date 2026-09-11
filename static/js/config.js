@@ -138,6 +138,12 @@ function fillSource(source) {
     };
     setValue('sourceLogPatterns', perSignal('logs', 'index_patterns'));
     setValue('sourceTracePatterns', perSignal('traces', 'index_patterns'));
+    // Monitors too. Left out, the box kept whatever the DOM last held — the
+    // empty initial value, or text typed into a previous Add — and the save
+    // writes every signal block unconditionally, so an edit made for any
+    // other reason (a rename, a password) stored `monitors.index_patterns:
+    // []` and the source silently fell back to `heartbeat-*, synthetics-*`.
+    setValue('sourceMonitorPatterns', perSignal('monitors', 'index_patterns'));
     setValue('sourceExcludes', perSignal('logs', 'exclude_patterns'));
     setValue('sourceTenant', isNew ? '' : source.config.tenant);
     setValue('sourceStreamLabel', isNew ? '' : source.config.stream_label);
@@ -552,12 +558,23 @@ document.querySelectorAll('.pick-target').forEach(button => {
         const available = await loadAvailableTargets();
 
         if (kind === 'services') {
-            body.innerHTML = available.services.length
-                ? available.services.map(name =>
-                    `<button type="button" class="btn btn-sm btn-outline-secondary me-1 mb-1 insert-target"
-                             data-target="${targetId}" data-value="${escapeHtml(name)}">
-                       ${escapeHtml(name)}</button>`).join('')
-                : '<div class="text-muted">No services seen in the last 24 hours.</div>';
+            // A trace store that did not answer is named, the way an
+            // unlistable log source already is. Dropped, its services were
+            // simply missing from the list, and a shorter list of names
+            // looks exactly like a quiet week.
+            const problems = (available.service_errors || []).map(entry =>
+                `<div class="text-warning mb-2" style="font-size:.8rem">
+                   <i class="fas fa-triangle-exclamation"></i>
+                   <strong>${escapeHtml(entry.source)}</strong> could not be
+                   asked: ${escapeHtml(entry.error)}</div>`).join('');
+            const names = available.services.map(name =>
+                `<button type="button" class="btn btn-sm btn-outline-secondary me-1 mb-1 insert-target"
+                         data-target="${targetId}" data-value="${escapeHtml(name)}">
+                   ${escapeHtml(name)}</button>`).join('');
+            // "No services seen" is a statement about the last 24 hours. It
+            // is only true when every store answered.
+            body.innerHTML = problems + (names || (problems ? ''
+                : '<div class="text-muted">No services seen in the last 24 hours.</div>'));
         } else {
             body.innerHTML = (available[kind] || []).map(entry => {
                 if (entry.error) {
@@ -570,15 +587,35 @@ document.querySelectorAll('.pick-target').forEach(button => {
                             <div class="text-muted" style="font-size:.8rem">nothing here</div></div>`;
                 }
                 const rows = entry.containers.map(name => {
-                    // Strip a trailing rotation suffix to suggest a pattern
+                    // Strip the trailing rotation suffix to suggest a pattern
                     // that survives the next roll-over.
-                    const suggested = name.replace(/[-.]\d{4,}$/, '') + '*';
+                    //
+                    // The whole trailing run of digits, dots and dashes, not
+                    // a single group of four or more digits. `-000001` was
+                    // the only shape the old expression stripped, so every
+                    // DATE-rotated name — Logstash's own `logstash-
+                    // 2026.09.11`, Beats' `filebeat-8.14.0-2026.09.11`, a
+                    // data stream's `.ds-logs-app-default-2026.09.11-000001`
+                    // — was offered back with its date still on it, under a
+                    // button titled "Survives rotation". It did not: the
+                    // role lost access the next day.
+                    //
+                    // The separator is kept, so `app-logs-*` rather than
+                    // `app-logs*` — the wider one also reaches `app-logsomething`.
+                    const stripped = name.replace(/([-.])[\d.-]+$/, '$1');
+                    // Nothing to strip means nothing rotates: `payments` has
+                    // no rotation-proof form, and offering `payments*` as one
+                    // is the same promise broken a different way.
+                    const rotating = stripped !== name;
+                    const suggested = rotating
+                        ? `<button type="button" class="btn btn-sm btn-outline-primary insert-target"
+                                data-target="${targetId}" data-value="${escapeHtml(stripped + '*')}"
+                                title="Survives rotation">${escapeHtml(stripped + '*')}</button>`
+                        : '';
                     return `<tr>
                       <td><code style="font-size:.78rem">${escapeHtml(name)}</code></td>
                       <td class="text-end text-nowrap">
-                        <button type="button" class="btn btn-sm btn-outline-primary insert-target"
-                                data-target="${targetId}" data-value="${escapeHtml(suggested)}"
-                                title="Survives rotation">${escapeHtml(suggested)}</button>
+                        ${suggested}
                         <button type="button" class="btn btn-sm btn-outline-secondary insert-target"
                                 data-target="${targetId}" data-value="${escapeHtml(name)}"
                                 title="Pins the role to this exact container">exact</button>

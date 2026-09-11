@@ -46,8 +46,10 @@ logger = logging.getLogger(__name__)
 config_bp = Blueprint("config", __name__, url_prefix="/admin")
 
 
-def _reloaded():
+def _reloaded(saved=None):
     """Put the change into force here and now, and say what happened.
+
+    Returns (sentence, flash category).
 
     The hub reloads its configured sources by itself within a few seconds, so
     this is not what makes the edit take effect — it is what makes it take
@@ -58,17 +60,57 @@ def _reloaded():
     The sentence is part of the job. "Saved" with nothing after it leaves
     somebody wondering whether they now have to restart something, which is
     exactly the doubt this feature exists to remove.
+
+    And it has to be TRUE. `reload()` does not raise when one row out of
+    several cannot be built — it logs that row and returns a count — so the
+    only branch that said anything but "in use now" was dead, and a source
+    whose credential would not decrypt was reported as in use while every
+    query naming it answered "no log source named it". When `saved` is given,
+    the row is looked for among the sources the hub now holds.
     """
     hub = getattr(current_app, "hub", None)
     if hub is None or not hasattr(hub, "reload"):
-        return "."
+        return ".", "success"
     try:
         hub.reload()
     except Exception:
         current_app.logger.exception("Could not reload sources after a save")
         return (". It could not be put into use straight away — restart "
-                "WDash, and check the log for why.")
-    return " and in use now. Other workers pick it up within a few seconds."
+                "WDash, and check the log for why."), "error"
+
+    if saved is not None and not saved.get("enabled", True):
+        return (". It is disabled, so nothing queries it — tick Enabled to "
+                "put it into use."), "success"
+    missing = _not_live(hub, saved) if saved is not None else None
+    if missing:
+        return (f", but it is NOT in use: {missing} Until that is fixed, "
+                f"every query naming it fails."), "error"
+    return " and in use now. Other workers pick it up within a few seconds.", \
+        "success"
+
+
+def _not_live(hub, saved):
+    """Why a just-saved source is not answering queries, or None."""
+    # A hub that does not rebuild from the store answers 0 to everything, and
+    # "your source could not be built" is not what that means.
+    if not getattr(hub, "rebuilds_from_store", True):
+        return None
+    live = {}
+    for signal in saved.get("signals") or ():
+        try:
+            sources = getattr(hub, {"logs": "log_sources",
+                                    "traces": "trace_sources",
+                                    "monitors": "monitor_sources"}[signal])
+        except KeyError:
+            continue
+        live[signal] = {source.name for source in sources}
+    absent = [signal for signal, names in live.items()
+              if saved["name"] not in names]
+    if not absent:
+        return None
+    reasons = getattr(hub, "source_failures", None) or {}
+    return reasons.get(saved["name"]) or (
+        f"nothing is registered for {', '.join(absent)}. The log says why.")
 
 
 def _duplicate_sources():
@@ -92,6 +134,20 @@ def _duplicate_sources():
 
 def _store():
     return getattr(current_app, "store", None)
+
+
+def _source_failures():
+    """Stored sources the hub is not answering from, as {name: why}.
+
+    Tolerates a hub built by something that has not caught up, the way the
+    duplicate warning does.
+    """
+    hub = getattr(current_app, "hub", None)
+    try:
+        return dict(getattr(hub, "source_failures", None) or {})
+    except Exception:
+        current_app.logger.exception("Could not read the source failures")
+        return {}
 
 
 def _require_admin():
@@ -162,6 +218,11 @@ def config_page():
         "config.html",
         sources=store.sources.all(),
         source_kinds=SOURCE_KINDS,
+        # {name: why} for a row that is stored and answers nothing. The list
+        # used to be the stored rows alone, with no built or live state at
+        # all, so a source whose credential would not decrypt sat in the
+        # table looking exactly like one that works.
+        source_failures=_source_failures(),
         # Two registrations of one system. Detected at startup; shown here
         # because a warning in a log file is a warning nobody reads, and the
         # symptom — a merged total that is quietly too big — never points at
@@ -420,7 +481,8 @@ def save_source():
                 enabled=form.get("enabled") == "on")
             _audit("source created", subject=f"source:{saved['id']}",
                    state=_source_state(saved))
-        flash(f"Source '{saved['name']}' saved{_reloaded()}", "success")
+        note, tone = _reloaded(saved)
+        flash(f"Source '{saved['name']}' saved{note}", tone)
     except SecretsUnavailable as exc:
         flash(str(exc).split("\n")[0], "error")
     except SourceError as exc:
@@ -495,7 +557,7 @@ def delete_source(source_id):
     if source and store.sources.delete(source_id):
         _audit("source deleted", subject=f"source:{source_id}",
                state=_source_state(source))
-        flash(f"Source '{source['name']}' deleted{_reloaded()}", "success")
+        flash(f"Source '{source['name']}' deleted{_reloaded()[0]}", "success")
     else:
         flash("That source no longer exists.", "warning")
     return redirect(url_for("config.config_page"))
@@ -688,19 +750,29 @@ def available_targets():
                             "error": str(exc)[:120]})
         return out
 
-    services = []
+    # A store that could not be asked is NAMED, not skipped. Tempo and Jaeger
+    # raise now instead of answering an empty list, and `except Exception:
+    # continue` turned that into a shorter list of services — which reads as
+    # a quiet week, and the role written against it silently names fewer
+    # services than exist.
+    services, service_errors = [], []
     for source in (hub.trace_sources if hub else []):
         try:
             services.extend(
                 service.name for service
                 in source.services(TimeWindow.of("24h"), unrestricted))
-        except Exception:
-            continue
+        except Exception as exc:
+            logger.warning(
+                "Trace source '%s' could not list its services: %s",
+                source.name, exc)
+            service_errors.append({"source": source.name,
+                                   "error": str(exc)[:120]})
 
     return jsonify({
         "logs": listing(hub.log_sources if hub else []),
         "traces": listing(hub.trace_sources if hub else []),
         "services": sorted(set(services)),
+        "service_errors": service_errors,
     })
 
 

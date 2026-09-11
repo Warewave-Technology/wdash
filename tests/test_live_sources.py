@@ -194,7 +194,11 @@ class EveryWorkerCatchesUpTest(LiveSourceTestCase):
         self.save("loki-old")
         self.save("loki-new", url="http://localhost:3101")
         other = self.worker()
-        self.assertEqual(self.names(other), ["loki-new", "loki-old"])
+        # Oldest first: the hub registers configured sources in the order they
+        # were created, not by name. This line used to read ["loki-new",
+        # "loki-old"] and was pinning the alphabetical order that made the
+        # default query move when a source was added.
+        self.assertEqual(self.names(other), ["loki-old", "loki-new"])
 
         newest = max(s["updated_at"] for s in self.app.store.sources.all())
         self.delete("loki-old")

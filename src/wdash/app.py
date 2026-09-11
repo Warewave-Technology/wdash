@@ -324,6 +324,12 @@ def create_app(config_class=Config):
     # configured. The page used to say so out loud, which made the
     # configuration screen the one screen that could not configure anything.
     if store is not None:
+        # What the base registry already answers to. Asked at save time, so
+        # `elasticsearch-logs` typed into the form is a sentence about the
+        # name rather than a row that is stored, listed, and reachable by
+        # nothing because the environment's source keeps the name.
+        store.sources.reserved_names = hub.base_source_names
+
         hub.reload_with(
             build=lambda: build_configured_sources(store, catalogue),
             # A lambda rather than the bound method: it is looked up on

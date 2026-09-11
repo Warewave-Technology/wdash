@@ -76,6 +76,16 @@
               {% if not source.enabled %}
                 <span class="badge bg-secondary ms-1">disabled</span>
               {% endif %}
+              {# Stored is not the same as in use. A row whose credential will
+                 not decrypt, or whose name the environment's own source
+                 already holds, sat here looking exactly like one that works
+                 while every query naming it failed. #}
+              {% if source.enabled and source_failures.get(source.name) %}
+                <span class="badge bg-danger ms-1">not in use</span>
+                <div class="text-danger" style="font-size:.75rem">
+                  {{ source_failures[source.name] }}
+                </div>
+              {% endif %}
             </td>
             <td>
               {# Every signal, not the first one. `source.signal` is the legacy

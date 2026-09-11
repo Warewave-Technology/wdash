@@ -63,6 +63,8 @@ function build() {
       <button id="addRoleBtn"></button>
       <button class="edit-role" data-role='{"name":"viewer","permissions":["logs:read"],"containers":["app-*"],"trace_containers":[],"services":null,"groups":[]}'></button>
       <button class="pick-target" data-kind="logs" data-target="roleContainers"></button>
+      <button class="pick-target" id="pickServices" data-kind="services"
+              data-target="roleServices"></button>
       <div class="modal fade" id="targetPicker"></div>
       <div id="targetPickerBody"></div><h5 id="targetPickerTitle"></h5>
       <div class="modal fade show" id="roleModal"></div>
@@ -71,6 +73,20 @@ function build() {
       <input id="sourceId"><input id="sourceUrl"><input id="sourceUsername">
       <input id="sourcePassword"><input type="checkbox" id="sourceVerify">
       <button id="testSourceBtn"></button><div id="sourceTestResult"></div>
+
+      <!-- The source editor, as the page renders it. Every field fillSource
+           writes to, because a field it forgets keeps whatever the DOM last
+           held and the save writes that. -->
+      <h5 id="sourceModalTitle"></h5>
+      <button id="addSourceBtn"></button>
+      <input id="sourceName"><input id="sourceLogPatterns">
+      <input id="sourceTracePatterns"><input id="sourceMonitorPatterns">
+      <input id="sourceExcludes"><input id="sourceTenant">
+      <input id="sourceStreamLabel"><input id="sourceStreamField">
+      <input type="checkbox" id="sourceEnabled">
+      <div id="sourcePasswordHint"></div>
+      <button class="edit-source" data-source='{"id":"1","name":"cluster","kind":"elasticsearch","enabled":true,"has_secret":true,"signals":["logs","monitors"],"config":{"url":"http://cluster:9200","logs":{"index_patterns":["app-*"]},"monitors":{"index_patterns":["synthetics-prod-*"]}}}'></button>
+      <button class="edit-source" data-source='{"id":"2","name":"other","kind":"elasticsearch","enabled":true,"has_secret":false,"signals":["logs","monitors"],"config":{"url":"http://other:9200","logs":{"index_patterns":["infra-*"]},"monitors":{"index_patterns":["uptime-*"]}}}'></button>
       <form id="deleteForm" data-confirm="Delete lab-&lt;b&gt;es&lt;/b&gt;?"></form>
       <div class="form-check" data-signal="logs">
         <input type="checkbox" name="signals" value="logs" id="sourceSignalLogs">
@@ -105,8 +121,14 @@ function build() {
         if (url.includes('/available')) {
             return Promise.resolve({ json: () => Promise.resolve({
                 logs: [{ source: 'es',
-                         containers: ['app-logs-000001', 'infra-logs-000001'] }],
-                traces: [], services: ['api-gateway'] }) });
+                         // Three shapes a real cluster holds: an ILM
+                         // sequence, Logstash's own date roll-over, and a
+                         // name that does not rotate at all.
+                         containers: ['app-logs-000001', 'logstash-2026.09.11',
+                                      'payments'] }],
+                traces: [], services: ['api-gateway'],
+                service_errors: [{ source: 'tempo-down',
+                                   error: 'Connection refused' }] }) });
         }
         const containers = JSON.parse(options.body).containers || [];
         const matched = containers.includes('*') ? 2
@@ -213,10 +235,47 @@ function type(w, id, value) {
     w.document.querySelector('.pick-target').dispatchEvent(new w.Event('click'));
     await new Promise(resolve => setTimeout(resolve, 150));
     const picker = w.document.getElementById('targetPickerBody').innerHTML;
+    // The separator is kept: `app-logs*` also reaches `app-logsomething`.
     check('the picker offers a rotation-proof pattern first',
-          picker.includes('app-logs*'));
+          picker.includes('app-logs-*') && !picker.includes('>app-logs*<'),
+          picker);
     check('and an exact name as the deliberate alternative',
           picker.includes('>exact<'));
+
+    // A DATE roll-over is the common one — Logstash's own default, legacy
+    // Beats indices, a data stream's backing indices — and the old
+    // expression stripped only a trailing run of four or more digits, so it
+    // handed back `logstash-2026.09.11*` under a button titled "Survives
+    // rotation". It did not: the role lost access the next day.
+    check('a date-rotated name is stripped back to its stem too',
+          picker.includes('logstash-*')
+          && !picker.includes('logstash-2026.09.11*'), picker);
+
+    // And a name with nothing to strip has no rotation-proof form. Offering
+    // `payments*` as one is the same promise broken the other way: it grants
+    // `payments-secrets` as well.
+    const rows = Array.from(w.document.querySelectorAll('#targetPickerBody tr'));
+    const plain = rows.find(row => row.querySelector('code').textContent === 'payments');
+    check('a name that does not rotate is offered only as itself',
+          plain && plain.querySelectorAll('.insert-target').length === 1
+          && plain.querySelector('.insert-target').textContent.trim() === 'exact',
+          plain ? plain.innerHTML : 'no row for payments');
+
+    // The services side. A trace store that could not be asked used to be
+    // dropped with `except Exception: continue`, so a shorter list of names
+    // read as a quiet week.
+    const services = build().w;
+    services.document.getElementById('pickServices')
+            .dispatchEvent(new services.Event('click'));
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const servicesBody = services.document.getElementById('targetPickerBody');
+    check('a trace store that could not be asked is named in the picker',
+          servicesBody.textContent.includes('tempo-down')
+          && servicesBody.textContent.includes('Connection refused'),
+          servicesBody.innerHTML);
+    check('and the services the others did see are still offered',
+          servicesBody.textContent.includes('api-gateway'),
+          servicesBody.innerHTML);
 
     // --- the picker opens on top of the editor, not behind it ---
 
@@ -357,6 +416,51 @@ function type(w, id, value) {
     check('ticking monitors reveals its index-pattern field',
           !monitorFields.document.getElementById('monitorPatternField')
                         .classList.contains('d-none'));
+
+    // --- the editor has to FILL the fields it offers ---------------------
+    //
+    // The save writes every signal block whatever the form says, so a field
+    // the editor does not fill is a field that is saved empty. `monitors`
+    // was the one it did not fill, and empty means `heartbeat-*,
+    // synthetics-*`: an edit made to rename the source, or to rotate its
+    // password, silently moved its monitors to Heartbeat's own indices.
+    const editing = build().w;
+    const sourceButton = (win, name) => Array.from(
+        win.document.querySelectorAll('.edit-source'))
+        .find(button => JSON.parse(button.dataset.source).name === name);
+
+    sourceButton(editing, 'cluster').dispatchEvent(new editing.Event('click'));
+    check('editing a source fills every pattern field it stores',
+          editing.document.getElementById('sourceMonitorPatterns').value
+              === 'synthetics-prod-*'
+          && editing.document.getElementById('sourceLogPatterns').value
+              === 'app-*',
+          `monitors=${JSON.stringify(
+              editing.document.getElementById('sourceMonitorPatterns').value)}`);
+
+    // The modal is one form, reused. Text typed into it and abandoned is
+    // still there when the next source is opened, and the save takes it.
+    const stale = build().w;
+    stale.document.getElementById('addSourceBtn')
+         .dispatchEvent(new stale.Event('click'));
+    stale.document.getElementById('sourceMonitorPatterns').value = 'typed-in-add-*';
+    sourceButton(stale, 'other').dispatchEvent(new stale.Event('click'));
+    check('and replaces what the last visit left in them',
+          stale.document.getElementById('sourceMonitorPatterns').value
+              === 'uptime-*',
+          `monitors=${JSON.stringify(
+              stale.document.getElementById('sourceMonitorPatterns').value)}`);
+
+    // Add clears it, rather than offering the previous source's patterns as
+    // if they were this one's.
+    const adding = build().w;
+    sourceButton(adding, 'cluster').dispatchEvent(new adding.Event('click'));
+    adding.document.getElementById('addSourceBtn')
+          .dispatchEvent(new adding.Event('click'));
+    check('a new source starts with an empty monitor field',
+          adding.document.getElementById('sourceMonitorPatterns').value === '',
+          `monitors=${JSON.stringify(
+              adding.document.getElementById('sourceMonitorPatterns').value)}`);
 
     // Who gets which role. A select with nothing selected submits its FIRST
     // option, and the first role is `admin`: a mapping whose role had been

@@ -132,6 +132,29 @@ def build_source(record, credential, catalogue=None, signal=None):
     raise ValueError(f"Unknown source type: {kind}")
 
 
+#: The keys of a build that hold sources. `failures` is the fourth key and
+#: holds words, so every caller counting or iterating asks for these by name.
+SIGNALS = ("logs", "traces", "monitors")
+
+
+def _oldest_first(records):
+    """Stored sources in the order they were created.
+
+    The repository lists by name, for the page that reads them. The HUB's
+    order is the interface — `hub.logs()` with no name answers from the first
+    registered source — so with no environment source the alphabetically
+    first row was the default, and adding `archive-es` to a deployment that
+    had always answered from `loki-prod` moved every unnamed query onto it
+    without a word. Creation order does not move when a source is added.
+
+    `created_at` is compared as text: SQLite hands back a naive datetime and
+    Postgres an aware one, and this only ever compares rows from one store.
+    """
+    return sorted(records,
+                  key=lambda record: (str(record.get("created_at") or ""),
+                                      record["name"]))
+
+
 def build_configured_sources(store, catalogue=None):
     """Every enabled stored source, built, grouped by signal.
 
@@ -139,13 +162,25 @@ def build_configured_sources(store, catalogue=None):
     restart: it needs the sources in hand before it swaps them in, so that a
     store it cannot read leaves the previous ones running rather than taking
     them all away.
+
+    The fourth key, `failures`, is {name: why} for a row that is stored and
+    NOT built. It used to be a line in the log and nothing else, so the page
+    that had just accepted the source said "saved and in use now" about a
+    source no query could reach.
     """
-    built = {"logs": [], "traces": [], "monitors": []}
-    for record in store.sources.all(enabled_only=True):
+    built = {signal: [] for signal in SIGNALS}
+    failures = {}
+
+    def failed(name, reason):
+        failures[name] = (f"{failures[name]}; {reason}" if name in failures
+                          else reason)
+
+    for record in _oldest_first(store.sources.all(enabled_only=True)):
         try:
             credential = store.sources.credential(record["id"])
         except Exception as exc:
             logger.error(f"Source '{record['name']}': {exc}")
+            failed(record["name"], str(exc).split("\n")[0])
             continue
 
         # One row, one adapter per signal it serves. An Elasticsearch cluster
@@ -157,6 +192,7 @@ def build_configured_sources(store, catalogue=None):
             except NotImplementedError as exc:
                 logger.warning(
                     f"Source '{record['name']}' cannot serve {signal}: {exc}")
+                failed(record["name"], f"cannot serve {signal}: {exc}")
                 continue
             except Exception as exc:
                 # Never fatal, and per signal: a broken trace pattern must not
@@ -164,6 +200,8 @@ def build_configured_sources(store, catalogue=None):
                 logger.error(
                     f"Source '{record['name']}' ({signal}) could not be "
                     f"built: {exc}")
+                failed(record["name"],
+                       f"its {signal} side could not be built: {exc}")
                 continue
 
             built["logs" if signal == "logs"
@@ -173,6 +211,7 @@ def build_configured_sources(store, catalogue=None):
                 f"Built {signal} source '{record['name']}' "
                 f"({record['kind']})")
 
+    built["failures"] = failures
     return built
 
 
@@ -190,4 +229,4 @@ def register_configured_sources(hub, store, catalogue=None):
         hub.add_traces(source)
     for source in built["monitors"]:
         hub.add_monitors(source)
-    return sum(len(group) for group in built.values())
+    return sum(len(built[signal]) for signal in SIGNALS)

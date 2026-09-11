@@ -92,6 +92,12 @@ class Hub:
         self._monitors = {}
         # The configured layer, kept apart from the three above.
         self._configured = {"logs": {}, "traces": {}, "monitors": {}}
+        # {name: why} for a stored source that is NOT live — it could not be
+        # built, or its name is one of the base ones. Kept because the page
+        # that saved it has to be able to say so; a source that silently does
+        # not exist looks exactly like a source with no data.
+        self._failures = {}
+        self._shadowed = {}
         self._build = None
         self._stamp_of = None
         self._stamp = None
@@ -149,6 +155,7 @@ class Hub:
         swapped = {signal: {source.name: source
                             for source in built.get(signal, ())}
                    for signal in ("logs", "traces", "monitors")}
+        failures = dict(built.get("failures") or {})
         with self._lock:
             # Swapped whole, never mutated in place: a search that is reading
             # `log_sources` while this runs gets the old set or the new one,
@@ -159,6 +166,11 @@ class Hub:
             # flight turns somebody else's configuration edit into a failed
             # search. They are released when the last reference goes.
             self._configured = swapped
+            self._failures = failures
+            # Recomputed by the next read against the base names as they
+            # stand then, so a stale entry cannot outlive the row it was
+            # about.
+            self._shadowed = {}
             self._stamp = stamp
             self._checked_at = time.monotonic()
         return sum(len(group) for group in swapped.values())
@@ -168,6 +180,35 @@ class Hub:
         """How many sources came from the configuration page."""
         with self._lock:
             return sum(len(group) for group in self._configured.values())
+
+    @property
+    def rebuilds_from_store(self):
+        """Whether this hub knows how to rebuild its configured sources.
+
+        False for a hub assembled by hand — every test that calls
+        `replace_all`, and any caller that has not used `reload_with`. For
+        one of those `reload()` is a no-op that returns 0, which is not the
+        same statement as "the source you just saved could not be built", and
+        anything reporting on a save has to tell the two apart.
+        """
+        return self._build is not None
+
+    @property
+    def source_failures(self):
+        """{name: why} for every stored source that is not answering queries.
+
+        Two ways to be on this list: the row could not be built at all (a
+        credential that will not decrypt, a URL the adapter refuses), or its
+        name is one the environment already registered, so the base source
+        keeps it and this one is unreachable. Both used to be a line in the
+        log, under a screen that said the source was in use.
+        """
+        # Touched so a name that collides is noticed even when nothing has
+        # read that signal's registry yet.
+        for kind in ("logs", "traces", "monitors"):
+            self._registry(kind)
+        with self._lock:
+            return {**self._failures, **self._shadowed}
 
     def _fresh(self):
         """Reload if the store says the configured sources have changed.
@@ -201,12 +242,43 @@ class Hub:
         deployment that has always used `ELASTICSEARCH_URL` keeps answering
         from it, and an operator adding a source on the configuration page
         does not silently take over every query that names no source.
+
+        A configured source whose NAME is a base one does not replace it.
+        `{**base, **configured}` kept the key's position and swapped the
+        value, so a Loki source called `elasticsearch-logs` took the
+        environment's cluster out of the registry entirely and answered every
+        query that named it — the guarantee this method's first paragraph
+        makes, broken by the one thing it does not look at. The base source
+        stays; the configured one is recorded as shadowed, which is how the
+        configuration page comes to say so.
         """
         with self._lock:
             configured = self._configured[kind]
         base = {"logs": self._logs, "traces": self._traces,
                 "monitors": self._monitors}[kind]
-        return {**base, **configured}
+        collisions = [name for name in configured if name in base]
+        if not collisions:
+            return {**base, **configured}
+        self._note_shadowed(kind, collisions)
+        return {**base, **{name: source for name, source in configured.items()
+                           if name not in base}}
+
+    def _note_shadowed(self, kind, names):
+        """Record — and say once — that a configured name is already taken."""
+        fresh = []
+        with self._lock:
+            for name in names:
+                if name not in self._shadowed:
+                    self._shadowed[name] = (
+                        f"'{name}' is the name of the {kind} source WDash "
+                        f"registers from its environment configuration. That "
+                        f"one is still answering; this row is not. Rename it.")
+                    fresh.append(name)
+        for name in fresh:
+            logger.warning(
+                "Configured source '%s' is shadowed by the %s source of the "
+                "same name from the environment, and is not in use.",
+                name, kind)
 
     def replace_all(self, logs=(), traces=(), monitors=()):
         """Swap every registered source out.
@@ -227,12 +299,26 @@ class Hub:
         # whatever the machine it runs on happens to have configured.
         with self._lock:
             self._configured = {"logs": {}, "traces": {}, "monitors": {}}
+            self._failures = {}
+            self._shadowed = {}
             self._build = None
             self._stamp_of = None
 
     #: Reserved name for "search everything". Not a registered source, so it
     #: cannot collide with one an operator configures.
     ALL_SOURCES = "*"
+
+    def base_source_names(self):
+        """Names the environment and the store's own agents already hold.
+
+        For the repository, which refuses them: a configured source called
+        one of these is stored, shown on the page and reachable by nothing,
+        because the base source keeps the name. Told at the form, that is a
+        sentence about what to type; found later, it is a source that exists
+        and answers nothing.
+        """
+        return frozenset(self._logs) | frozenset(self._traces) \
+            | frozenset(self._monitors)
 
     def logs(self, name=None):
         """One log source, or the fan-out over all of them.
