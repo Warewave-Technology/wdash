@@ -518,3 +518,84 @@ class TheTwoSetsOfDefaultsAgreeTest(unittest.TestCase):
         a mapping a stranger inherits. It used to carry a maintainer's own
         username, which granted admin to anyone signing in with that name."""
         self.assertEqual(self.file.get("user_roles") or {}, {})
+
+
+class DatabaseAddressTest(unittest.TestCase):
+    """`postgresql://` names no driver, and SQLAlchemy then reaches for
+    psycopg2, which is not installed — psycopg 3 is. It was the form the
+    README, .env.example and the store's own error message gave. Measured
+    against the lab's Postgres: "No module named 'psycopg2'"."""
+
+    def test_an_address_that_names_no_driver_gets_the_one_installed(self):
+        from wdash.store.database import build_engine
+        for written in ("postgresql://u:p@db.invalid/wdash",
+                        "postgres://u:p@db.invalid/wdash"):
+            with self.subTest(written=written):
+                engine = build_engine(written)
+                self.assertEqual(engine.url.drivername, "postgresql+psycopg")
+                self.assertEqual(engine.url.database, "wdash")
+                engine.dispose()
+
+    def test_one_that_names_it_is_left_alone(self):
+        from wdash.store.database import build_engine
+        engine = build_engine("postgresql+psycopg://u:p@db.invalid/wdash")
+        self.assertEqual(engine.url.drivername, "postgresql+psycopg")
+        engine.dispose()
+
+
+class SimultaneousWriteTest(unittest.TestCase):
+    """Two writers of the same new key, with the second deciding while the
+    first has written and not yet committed.
+
+    A select and then an insert decided before writing: the second writer
+    saw no row, inserted, and died on the key when the first committed.
+    That is what four workers seeding one new installation did, one start in
+    six. A single statement has no decision to get wrong. Deterministic
+    rather than a race: the first write is held open while the second runs.
+    """
+
+    def setUp(self):
+        folder = tempfile.mkdtemp()
+        self.store = Store.open(f"sqlite:///{folder}/w.db")
+
+    def _while_another_holds(self, insert, write):
+        from datetime import datetime, timezone
+        failures = []
+        holder = self.store.engine.connect()
+        transaction = holder.begin()
+        holder.execute(insert)
+
+        def second():
+            try:
+                write()
+            except Exception as exc:
+                failures.append(exc)
+        thread = threading.Thread(target=second)
+        thread.start()
+        thread.join(0.5)                 # it has decided, and is waiting
+        transaction.commit()
+        holder.close()
+        thread.join(20)
+        return failures
+
+    def test_a_role_written_twice_at_once(self):
+        from datetime import datetime, timezone
+        from wdash.store.schema import roles
+        failures = self._while_another_holds(
+            roles.insert().values(name="ops", permissions=[], containers=[],
+                                  trace_containers=[], groups=[],
+                                  updated_at=datetime.now(timezone.utc)),
+            lambda: self.store.roles.upsert("ops", permissions=["logs:read"],
+                                            containers=["app-*"], trace_containers=[]))
+        self.assertEqual(failures, [])
+        self.assertEqual(self.store.roles.get("ops")["permissions"], ["logs:read"])
+
+    def test_a_setting_written_twice_at_once(self):
+        from datetime import datetime, timezone
+        from wdash.store.schema import settings
+        failures = self._while_another_holds(
+            settings.insert().values(key="auth.ldap", value={"enabled": False},
+                                     updated_at=datetime.now(timezone.utc)),
+            lambda: self.store.settings.set("auth.ldap", {"enabled": True}))
+        self.assertEqual(failures, [])
+        self.assertEqual(self.store.settings.get("auth.ldap"), {"enabled": True})

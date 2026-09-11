@@ -597,6 +597,7 @@ different things depending on what is installed beside it:
 | `suite` | Python 3.11–3.14, node | the whole suite, on every supported version, from a clean checkout |
 | `browser` | Playwright and Chromium | the journey and rendered-page tests that otherwise skip |
 | `live-schema` | a seeded Elasticsearch | the tests that read both trace schemas |
+| `postgres` | Postgres | the whole suite again, every store a Postgres schema, and a SQLite file moved into Postgres |
 | `image` | Docker | that the Dockerfile still builds |
 
 The last two refuse to pass by skipping — `WDASH_REQUIRE_LAB=1` turns "no
@@ -613,6 +614,15 @@ Elasticsearch service against the lab's version.
 ```bash
 cd lab && ./lab.sh up && ./lab.sh seed     # sample cluster
 python -m unittest discover -s tests -t .  # no cluster required
+```
+
+The same suite on Postgres, with every store it opens a schema of its own in
+a database made for the run and dropped after it:
+
+```bash
+cd lab && ./lab.sh up postgres
+WDASH_TEST_POSTGRES=postgresql://wdash:wdash-lab@localhost:55432/wdash \
+    python -m unittest discover -s tests -t .
 ```
 
 Tests never talk to Elasticsearch. The hub and advisor operate on plain data,

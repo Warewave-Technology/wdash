@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from .database import upsert
 from .schema import roles
 
 logger = logging.getLogger(__name__)
@@ -123,13 +124,7 @@ class RoleRepository:
             "updated_at": datetime.now(timezone.utc),
         }
         with self._engine.begin() as connection:
-            existing = connection.execute(
-                select(roles.c.name).where(roles.c.name == name)).first()
-            if existing:
-                connection.execute(
-                    roles.update().where(roles.c.name == name).values(**record))
-            else:
-                connection.execute(roles.insert().values(name=name, **record))
+            upsert(connection, roles, {"name": name}, record)
         return dict(record, name=name)
 
     def delete(self, name):

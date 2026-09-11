@@ -29,6 +29,12 @@ npm ci                                    # for the front-end suites
 npm test
 ```
 
+On Postgres as well, for anything that touches the store: `./lab.sh up
+postgres`, then the same command with
+`WDASH_TEST_POSTGRES=postgresql://wdash:wdash-lab@localhost:55432/wdash`.
+A test about SQLite itself says so with `sqlite_only` from
+`tests/postgres_store.py`, and skips there.
+
 Python 3.11 or newer. Node is needed because part of the Python suite shells
 out to it — without node those checks skip themselves and say nothing.
 

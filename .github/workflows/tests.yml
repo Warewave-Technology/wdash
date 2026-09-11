@@ -14,6 +14,8 @@
 #                 and say so
 #   browser       + Playwright and Chromium — the journeys and rendered pages
 #   live-schema   + a seeded Elasticsearch — the two trace schemas
+#   postgres      + Postgres — the whole suite again, every store it opens a
+#                 Postgres schema, and the move from SQLite actually made
 #   image         the Dockerfile, which no test touches
 #   manifests     the Kubernetes objects, against the real API schemas
 #
@@ -178,6 +180,59 @@ jobs:
 
       - name: The parts that need a cluster
         run: python -m unittest tests.test_hub -v
+
+  postgres:
+    name: the suite on postgres
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # The version the lab runs.
+        image: postgres:16.4-alpine
+        env:
+          POSTGRES_USER: wdash
+          POSTGRES_PASSWORD: wdash-ci
+          POSTGRES_DB: wdash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wdash -d wdash"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # tests/postgres_store.py: every SQLite store the suite opens becomes a
+      # schema of its own in a database made for the run. Nothing had ever
+      # started WDash on Postgres, and the first migration aborted its own
+      # transaction there — no installation could get past its first start.
+      WDASH_TEST_POSTGRES: postgresql://wdash:wdash-ci@localhost:5432/wdash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: The suite, on Postgres
+        run: python -m unittest discover -s tests -t .
+
+      - name: And the move from SQLite was made, not skipped
+        run: |
+          python - <<'PY'
+          import io, unittest
+          from unittest import TextTestRunner
+          suite = unittest.defaultTestLoader.loadTestsFromName(
+              "tests.test_store_copy.SqliteToPostgresTest")
+          result = TextTestRunner(stream=io.StringIO()).run(suite)
+          print(f"{result.testsRun} run, {len(result.skipped)} skipped")
+          raise SystemExit(1 if result.skipped or not result.testsRun
+                           or not result.wasSuccessful() else 0)
+          PY
 
   image:
     name: docker build

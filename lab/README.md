@@ -261,6 +261,18 @@ The two sets of defaults — `config/rbac.yaml` and `store/roles.py` — used to
 disagree about this, and about whether the middle role was called `developer`
 or `editor`. `tests/test_store.py` fails if they drift again.
 
+## Postgres
+
+`./lab.sh up postgres` starts the metadata store the way a deployment with
+more than one replica runs it, at
+`postgresql+psycopg://wdash:wdash-lab@localhost:55432/wdash` — not 5432, so a
+Postgres already on the machine is left alone.
+
+Nothing had ever started WDash against one: the first migration aborted its
+own transaction on an empty database, so no installation could get past its
+first start. `WDASH_TEST_POSTGRES` with that URL runs the whole suite on it
+(tests/postgres_store.py).
+
 ## Port conflicts
 
 The project-root `docker-compose.yml` also contains Elasticsearch and

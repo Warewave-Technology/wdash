@@ -139,8 +139,22 @@ which reads as a storage fault.
 
 To scale out:
 
-1. point `DATABASE_URL` at Postgres — `postgresql+psycopg://user:pass@host/wdash`;
-2. migrate what is on the volume, then drop the PVC and its mounts;
+1. create an empty Postgres database, and copy what is on the volume into it
+   from the pod that has the volume — accounts, roles, sources, dashboards,
+   the audit trail, monitors and their history, alerting, all of it:
+
+   ```bash
+   kubectl -n wdash exec deploy/wdash -c wdash -- python -m wdash.store.copy \
+       --from sqlite:////data/wdash.db \
+       --to 'postgresql+psycopg://user:pass@host/wdash'
+   ```
+
+   It refuses a target that holds anything, counts both sides afterwards,
+   and copies the sealed credentials as they are — so keep the same
+   `encryption-key` in the Secret;
+2. point `DATABASE_URL` at Postgres (`postgresql+psycopg://user:pass@host/wdash`
+   — `postgresql://` works too), check that it starts and you can sign in,
+   then drop the PVC and its mounts;
 3. move the `alerts` container into a Deployment of its own with `replicas: 1`
    — run exactly one, or the same rule pages twice;
 4. `strategy: RollingUpdate` and as many replicas as you like.

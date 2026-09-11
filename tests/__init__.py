@@ -127,3 +127,9 @@ for _variable, _value in FORCED.items():
 # does. Set here, before anything from the package is imported, because this
 # module is the first thing the discovery loader touches.
 os.environ["WDASH_NO_DOTENV"] = "1"
+
+# On Postgres, when asked. Last, because it imports the store, and nothing
+# from the package may be imported before the environment above is settled.
+if os.environ.get("WDASH_TEST_POSTGRES"):
+    from tests import postgres_store
+    postgres_store.install()

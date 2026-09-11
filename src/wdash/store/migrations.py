@@ -16,7 +16,7 @@ missing for a while, which is why it is written down.
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import inspect, select, text
 
 from .schema import metadata, schema_version
 
@@ -133,8 +133,14 @@ def _grant_monitors_to_admins(connection):
     rows = connection.execute(text(
         "SELECT name, permissions FROM wdash_roles")).mappings().all()
     for row in rows:
+        # Text on SQLite, already a list on Postgres, where psycopg reads a
+        # JSON column for itself. Only the text was expected: json.loads on
+        # a list raised TypeError, which was caught as "not a list of
+        # permissions" — so on Postgres every administrator was skipped, and
+        # the Monitors screen opened for nobody.
+        value = row["permissions"]
         try:
-            permissions = json.loads(row["permissions"] or "[]")
+            permissions = value if isinstance(value, list) else json.loads(value or "[]")
         except (TypeError, ValueError):
             continue
         if not isinstance(permissions, list):
@@ -272,14 +278,22 @@ MIGRATIONS = [
 
 
 def current_version(connection):
-    try:
-        result = connection.execute(
-            select(schema_version.c.version)
-            .order_by(schema_version.c.version.desc()).limit(1)).scalar()
-        return result or 0
-    except Exception:
-        # The version table itself does not exist yet.
+    """The newest migration applied, 0 on a database that has none.
+
+    Asked whether the version table exists, not told by an error. It used
+    to query the table and read a failure as "version 0" — which on SQLite
+    is true and on Postgres is fatal: a failed statement aborts the whole
+    transaction, and this runs inside the one every migration then needs.
+    Measured against an empty Postgres 16: every start ended in "current
+    transaction is aborted, commands ignored until end of transaction
+    block", so no Postgres installation could get past its first start.
+    """
+    if not inspect(connection).has_table(schema_version.name):
         return 0
+    result = connection.execute(
+        select(schema_version.c.version)
+        .order_by(schema_version.c.version.desc()).limit(1)).scalar()
+    return result or 0
 
 
 #: Written to only so that writing to it takes SQLite's write lock. It holds

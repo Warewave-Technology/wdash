@@ -464,3 +464,36 @@ class NoCountIsWrittenDownTest(unittest.TestCase):
                 found = self.COUNT.findall(handle.read())
             with self.subTest(path=os.path.basename(path)):
                 self.assertEqual(found, [])
+
+
+class ThePostgresJobTest(unittest.TestCase):
+    """The metadata store on the dialect a deployment with more than one
+    replica runs, which nothing had ever run: the first migration aborted
+    its own transaction on an empty Postgres."""
+
+    def setUp(self):
+        self.job = _workflow()["jobs"]["postgres"]
+
+    def test_it_has_a_postgres_to_run_on(self):
+        self.assertIn("postgres", self.job["services"])
+        self.assertTrue(self.job["services"]["postgres"]["image"].startswith("postgres:"))
+
+    def test_it_points_the_suite_at_it(self):
+        self.assertIn("WDASH_TEST_POSTGRES", self.job["env"])
+        steps = " ".join(step.get("run", "") for step in self.job["steps"])
+        self.assertIn("unittest discover", steps)
+
+    def test_it_refuses_to_pass_by_skipping_the_move(self):
+        """SqliteToPostgresTest skips without WDASH_TEST_POSTGRES; a job that
+        lost the variable would go green having moved nothing."""
+        steps = " ".join(step.get("run", "") for step in self.job["steps"])
+        self.assertIn("SqliteToPostgresTest", steps)
+        exit_on = re.search(r"SystemExit\(1 if (.*?) else 0\)", steps, re.S)
+        self.assertIsNotNone(exit_on, "the step does not fail on anything")
+        self.assertIn("result.skipped", exit_on.group(1))
+        self.assertIn("not result.testsRun", exit_on.group(1))
+
+    def test_it_runs_the_version_the_lab_runs(self):
+        with open(os.path.join(ROOT, "lab", ".env")) as handle:
+            lab = re.search(r"^POSTGRES_VERSION=(\S+)", handle.read(), re.M).group(1)
+        self.assertEqual(self.job["services"]["postgres"]["image"], f"postgres:{lab}")

@@ -6,6 +6,7 @@
 #                             profiles: kibana, cluster, otel, loki, victorialogs,
 #                                       synthetics (Heartbeat + probe targets),
 #                                       identity (OpenLDAP + Dex),
+#                                       postgres (the metadata store),
 #                                       jaeger, tempo
 #   ./lab.sh seed [args...]    load sample data into every running backend
 #                             (args go to seed.py; Loki and VictoriaLogs are
@@ -93,6 +94,7 @@ cmd_up() {
         [ "$p" = "victorialogs" ] && echo "  VictoriaLogs   http://localhost:${VICTORIALOGS_PORT:-9428}"
         [ "$p" = "jaeger" ] && echo "  Jaeger         http://localhost:${JAEGER_PORT:-16686}"
         [ "$p" = "tempo" ] && echo "  Tempo          http://localhost:${TEMPO_PORT:-3200}"
+        [ "$p" = "postgres" ] && echo "  Postgres       postgresql+psycopg://wdash:wdash-lab@localhost:${POSTGRES_PORT:-55432}/wdash"
     done
     echo
     echo "Load sample data with:  ./lab.sh seed"

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests.postgres_store import sqlite_only  # noqa: E402
 from wdash.hub.models import DOWN, UNKNOWN, UP  # noqa: E402
 from wdash.hub.query import TimeWindow  # noqa: E402
 from wdash.hub.scope import Scope  # noqa: E402
@@ -909,6 +910,7 @@ class StorageWarningTest(StoreTestCase):
         from wdash.hub.adapters.store_monitors import StoreMonitorSource
         self.assertEqual(StoreMonitorSource(self.store).storage_warning(), "")
 
+    @sqlite_only("the advice is to move to Postgres")
     def test_past_the_measured_threshold_it_says_so(self):
         """Measured, not guessed: 2.2 million rows is 508 ms for this page on
         SQLite and 8.6 million is 2.3 seconds. A page that is slow without
@@ -980,12 +982,10 @@ class RequestConfigurationTest(StoreTestCase):
         self.assertTrue(monitor["has_credentials"])
 
     def test_it_is_encrypted_on_disk(self):
-        import sqlite3
         monitor = self._monitor(request={
             "auth": {"type": "basic", "username": "svc", "password": "p@ss"}})
-        self.store.engine.dispose()
-        with sqlite3.connect(self.database) as connection:
-            stored = connection.execute(
+        with self.store.engine.connect() as connection:
+            stored = connection.exec_driver_sql(
                 "SELECT secrets FROM wdash_monitors").fetchone()[0]
         self.assertNotIn("p@ss", stored or "")
 

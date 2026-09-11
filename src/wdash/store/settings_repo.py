@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from .database import upsert
 from .schema import settings
 
 #: Keys WDash itself uses. Not a whitelist — an operator may store anything —
@@ -96,13 +97,7 @@ class SettingsRepository:
             record["secret_value"] = None
 
         with self._engine.begin() as connection:
-            existing = connection.execute(
-                select(settings.c.key).where(settings.c.key == key)).first()
-            if existing:
-                connection.execute(
-                    settings.update().where(settings.c.key == key).values(**record))
-            else:
-                connection.execute(settings.insert().values(key=key, **record))
+            upsert(connection, settings, {"key": key}, record)
 
     def delete(self, key):
         with self._engine.begin() as connection:

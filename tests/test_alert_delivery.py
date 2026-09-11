@@ -124,11 +124,11 @@ class ChannelSecrecyTest(AlertingTestCase):
         the plain `config` JSON beside it — which is on every screen that
         renders a channel and in every backup of the metadata database.
         """
-        import sqlite3
         self._channel()
-        self.store.engine.dispose()
-        with sqlite3.connect(self.database) as connection:
-            row = connection.execute(
+        # The row as the database holds it, through a connection of its own
+        # rather than the repository — on either dialect.
+        with self.store.engine.connect() as connection:
+            row = connection.exec_driver_sql(
                 "SELECT * FROM wdash_alert_channels").fetchone()
         self.assertNotIn("xxTOKENxx", " ".join(str(v) for v in row))
 

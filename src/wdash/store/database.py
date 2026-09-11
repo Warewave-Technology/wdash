@@ -35,6 +35,16 @@ def build_engine(url=None, echo=False):
     except Exception as exc:
         raise DatabaseError(f"DATABASE_URL is not a valid URL: {exc}") from exc
 
+    # `postgresql://` names no driver, and SQLAlchemy then reaches for
+    # psycopg2 — which is not installed; psycopg 3 is. That is the form the
+    # README, .env.example and this module's own error gave, and it failed
+    # with "No module named 'psycopg2'". So a URL that names no driver gets
+    # the one that is here. `postgres://`, which SQLAlchemy stopped taking
+    # and some hosting platforms still hand out, is read the same way.
+    if parsed.drivername in ("postgresql", "postgres"):
+        parsed = parsed.set(drivername="postgresql+psycopg")
+        url = parsed
+
     if parsed.drivername.startswith("sqlite"):
         in_memory = parsed.database in (None, "", ":memory:")
         if in_memory:
@@ -99,6 +109,30 @@ def build_engine(url=None, echo=False):
     raise DatabaseError(
         f"Unsupported database: {parsed.drivername}. "
         "WDash supports postgresql:// and sqlite://.")
+
+
+def upsert(connection, table, keys, values):
+    """Insert the row with these keys, or update it where it exists — as one
+    statement.
+
+    Select-then-insert decides between the two before writing, so two
+    writers at once can both decide to insert, and the second dies on the
+    key. That is what four gunicorn workers seeding a new installation
+    together did: measured on SQLite, 17 starts in 100 ended in "UNIQUE
+    constraint failed: wdash_roles.name", and gunicorn stopped the whole
+    server over one worker that failed to boot. Both dialects this store
+    runs on say it in one statement.
+    """
+    dialect = connection.dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+    else:
+        raise DatabaseError(f"no single-statement upsert for {dialect}")
+    statement = insert(table).values(**keys, **values)
+    connection.execute(statement.on_conflict_do_update(
+        index_elements=list(keys), set_=values))
 
 
 def is_sqlite(engine):

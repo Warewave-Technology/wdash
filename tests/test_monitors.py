@@ -427,7 +427,10 @@ class RoleUpgradeTest(unittest.TestCase):
     def _permissions(self, engine):
         from sqlalchemy import text
         with engine.connect() as connection:
-            return {row["name"]: json.loads(row["permissions"])
+            # A list already on Postgres, text on SQLite.
+            return {row["name"]: (row["permissions"]
+                                  if isinstance(row["permissions"], list)
+                                  else json.loads(row["permissions"]))
                     for row in connection.execute(text(
                         "SELECT name, permissions FROM wdash_roles")).mappings()}
 

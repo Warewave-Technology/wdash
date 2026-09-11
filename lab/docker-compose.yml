@@ -300,7 +300,36 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------
+  # Postgres:  ./lab.sh up postgres
+  #
+  # The metadata store the way a deployment with more than one replica runs
+  # it. Nothing had ever started WDash against one — not a lab service, not
+  # a test, not CI — and the first migration aborted its own transaction on
+  # an empty database, so no Postgres installation could get past its first
+  # start. tests/test_postgres.py runs against this one.
+  # ---------------------------------------------------------------------
+  postgres:
+    image: postgres:${POSTGRES_VERSION}
+    container_name: wdash-lab-postgres
+    profiles: ["postgres"]
+    environment:
+      - POSTGRES_USER=wdash
+      - POSTGRES_PASSWORD=wdash-lab
+      - POSTGRES_DB=wdash
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wdash -d wdash"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
 volumes:
+  postgres_data:
   ldap_data:
   ldap_config:
   tempo_data:

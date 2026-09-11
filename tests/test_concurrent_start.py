@@ -30,6 +30,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests.postgres_store import sqlite_only  # noqa: E402
 from wdash.store.database import build_engine  # noqa: E402
 
 WORKERS = 4
@@ -57,6 +58,7 @@ def _open_and_count(url, barrier=None, results=None):
     return outcome
 
 
+@sqlite_only("its journal mode and its lock")
 class ConcurrentStartTest(unittest.TestCase):
     def setUp(self):
         handle, self.path = tempfile.mkstemp(suffix=".db")
@@ -228,10 +230,12 @@ class ConcurrentMigrationTest(unittest.TestCase):
     def test_the_schema_is_actually_complete_afterwards(self):
         """Serialising must not mean one worker quietly doing nothing."""
         self._run()
+        from sqlalchemy import inspect
+        from wdash.store.database import build_engine
         from wdash.store.schema import metadata
-        with sqlite3.connect(self.path) as connection:
-            present = {row[0] for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'")}
+        engine = build_engine(self.url)
+        present = set(inspect(engine).get_table_names())
+        engine.dispose()
         missing = sorted(set(metadata.tables) - present)
         self.assertEqual(missing, [], f"tables never created: {missing}")
 
@@ -241,3 +245,70 @@ class ConcurrentMigrationTest(unittest.TestCase):
         first = _migrate_once(self.url)
         second = _migrate_once(self.url)
         self.assertEqual(first, second)
+
+
+def _open_store(url, barrier=None, results=None):
+    """What a worker does on boot after migrating: open the store, which
+    seeds a fresh one. Top level, for `spawn`."""
+    from wdash.store import Store
+    try:
+        if barrier is not None:
+            barrier.wait(timeout=20)
+        store = Store.open(url, rbac_file="config/rbac.yaml")
+        store.engine.dispose()
+        outcome = "ok"
+    except Exception as exc:
+        outcome = f"{type(exc).__name__}: {exc}"
+    if results is not None:
+        results.put(outcome)
+    return outcome
+
+
+class ConcurrentSeedTest(unittest.TestCase):
+    """Four workers opening one fresh store at the same time — the whole of
+    it, seeding included, which the migration tests above stop short of.
+
+    The migration ran under a lock; the seed after it did not. It read the
+    roles table, found it empty, and wrote each role with a select and then
+    an insert, and so did the worker beside it. Measured on SQLite: 17 of
+    100 starts ended in "UNIQUE constraint failed: wdash_roles.name", and
+    gunicorn stopped the whole server over the one worker that failed to
+    boot. On Postgres the same, on wdash_settings.
+    """
+
+    ROUNDS = 6
+
+    def _round(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(path)
+        url = f"sqlite:///{path}"
+        context = multiprocessing.get_context("spawn")
+        barrier = context.Barrier(WORKERS)
+        results = context.Queue()
+        processes = [context.Process(target=_open_store, args=(url, barrier, results))
+                     for _ in range(WORKERS)]
+        for process in processes:
+            process.start()
+        outcomes = [results.get(timeout=90) for _ in processes]
+        for process in processes:
+            process.join(timeout=60)
+        from wdash.store import Store
+        store = Store.open(url, rbac_file="config/rbac.yaml")
+        roles = sorted(role["name"] for role in store.roles.all())
+        mapped = store.settings.get("rbac.default_role")
+        store.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(path + suffix):
+                os.unlink(path + suffix)
+        return outcomes, roles, mapped
+
+    def test_every_worker_starts_and_the_seed_is_whole(self):
+        from wdash.store.roles import _read_rbac_file
+        expected = sorted(_read_rbac_file("config/rbac.yaml")["roles"])
+        for _ in range(self.ROUNDS):
+            outcomes, roles, default = self._round()
+            failed = [o for o in outcomes if o != "ok"]
+            self.assertEqual(failed, [], f"workers died: {failed}")
+            self.assertEqual(roles, expected)
+            self.assertIsNotNone(default)
