@@ -120,6 +120,31 @@ function build() {
     return { w, calls };
 }
 
+/** The mapping form alone, with the roles and mappings the page embeds. */
+function buildMappings(roleNames, mappings, defaultRole) {
+    const dom = new JSDOM(`<!doctype html><body>
+      <form id="mappingForm">
+        <select name="default_role" id="defaultRole"></select>
+        <div id="mappingRows"></div>
+        <button type="button" id="addMappingRow"></button>
+        <input type="hidden" name="user_roles" id="mappingField">
+      </form>
+      <script type="application/json" id="mappingData">${
+          JSON.stringify(mappings)}</script>
+      <script type="application/json" id="roleNames">${
+          JSON.stringify(roleNames)}</script>
+      </body>`,
+      { runScripts: 'outside-only', url: 'http://localhost/admin/config' });
+    const w = dom.window;
+    global.window = w;
+    global.document = w.document;
+    w.bootstrap = { Modal: class { constructor() {} show() {}
+                                   static getInstance() { return null; } } };
+    w.fetch = () => Promise.resolve({ json: () => Promise.resolve({}) });
+    w.eval(fs.readFileSync(path.join(ROOT, 'static/js/config.js'), 'utf8'));
+    return w;
+}
+
 const settle = () => new Promise(resolve => setTimeout(resolve, 450));
 const verdict = (w, id) => w.document
     .querySelector(`.boundary-verdict[data-for="${id}"]`).textContent.trim();
@@ -328,6 +353,71 @@ function type(w, id, value) {
     check('ticking monitors reveals its index-pattern field',
           !monitorFields.document.getElementById('monitorPatternField')
                         .classList.contains('d-none'));
+
+    // Who gets which role. A select with nothing selected submits its FIRST
+    // option, and the first role is `admin`: a mapping whose role had been
+    // deleted came back as `admin`, and so did a new row nobody chose for.
+    // The next "Save mappings", for any reason, made those people
+    // administrators.
+    console.log('role mappings');
+    const ROLES = ['admin', 'developer', 'viewer'];
+    const mapped = buildMappings(ROLES, {
+        'alice@example.com': 'auditor', 'carol': 'viewer' });
+    const sent = mapped.document.getElementById('mappingField').value;
+    check('a mapping whose role is gone is not sent as admin',
+          sent.includes('alice@example.com = auditor')
+          && !sent.includes('alice@example.com = admin'), sent);
+    check('and the row says the role no longer exists',
+          mapped.document.querySelector('.mapping-role.is-invalid') !== null
+          && mapped.document.querySelector('.mapping-role').textContent
+                   .includes('no longer exists'));
+    check('a mapping to a role that exists is sent unchanged',
+          sent.includes('carol = viewer'), sent);
+
+    const fresh = buildMappings(ROLES, {});
+    fresh.document.getElementById('addMappingRow').click();
+    const who = fresh.document.querySelector('.mapping-who');
+    who.value = 'bob';
+    who.dispatchEvent(new fresh.Event('input'));
+    const freshSent = fresh.document.getElementById('mappingField').value;
+    check('a new row nobody chose a role for is not sent as admin',
+          freshSent.trim() === 'bob =', JSON.stringify(freshSent));
+
+    // Inside a <select> the parser drops most tags on its own, so a bare
+    // `<img>` proves nothing: the way out of an option is to close the
+    // select. Both paths — a role that exists and one that does not.
+    const hostile = buildMappings(['x</select><img src=x>'],
+                                  { 'dave': 'y</select><b>gone</b>' });
+    check('role names are text, not markup',
+          hostile.document.querySelector('#mappingRows img') === null
+          && hostile.document.querySelector('#mappingRows b') === null,
+          hostile.document.getElementById('mappingRows').innerHTML);
+
+    // What a change does, including the two things it used to leave out.
+    console.log('role change');
+    const edited = build().w;
+    let previewBody = null;
+    edited.fetch = (url, options) => {
+        if (url.includes('/preview')) previewBody = JSON.parse(options.body);
+        return Promise.resolve({ json: () => Promise.resolve({
+            logs: [], traces: [], services: 'every service', permissions: [],
+            warnings: [], reaches_nothing: false,
+            reaches_everything: { logs: false, traces: false, services: true },
+            change: { logs_added: [], logs_removed: [], traces_added: [],
+                      traces_removed: [], permissions_added: [],
+                      permissions_removed: [], groups_added: [],
+                      groups_removed: [], services_added: ['every service'],
+                      services_removed: [], widens: true } }) });
+    };
+    type(edited, 'roleGroups', 'wdash-developers');
+    await settle();
+    check('the preview is told the groups the role will have',
+          previewBody && JSON.stringify(previewBody.groups)
+                         === JSON.stringify(['wdash-developers']),
+          JSON.stringify(previewBody && previewBody.groups));
+    const said = edited.document.getElementById('rolePreview').textContent;
+    check('clearing the services box shows as a change that widens',
+          said.includes('widens') && said.includes('every service'), said);
 
     console.log(failures.length ? `\n${failures.length} failure(s)`
                                 : '\nall role editor checks passed');

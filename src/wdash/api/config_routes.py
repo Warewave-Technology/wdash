@@ -104,6 +104,21 @@ def _require_admin():
     return None
 
 
+def _actor():
+    """Who is asking, in the shape the invariants resolve.
+
+    Identity, not the resolved role: the invariants ask the resolver's own
+    rule where this person would land AFTER a change, so they need what the
+    resolver needs — email, username, the groups the identity provider
+    asserted, and the role stored on a local account.
+    """
+    data = session.get("user_data") or {}
+    return {"email": getattr(current_user, "email", None),
+            "username": getattr(current_user, "username", None),
+            "groups": list(getattr(current_user, "groups", None) or ()),
+            "local_role": data.get("local_role")}
+
+
 def _audit(action, subject=None, state=None, **details):
     """Every configuration change, with who made it.
 
@@ -471,8 +486,33 @@ def _reachable(scope, sources, trace_side=False):
     return out
 
 
-def _describe_change(previous, scope, logs, traces):
-    """What this edit adds and removes, in containers and in permissions."""
+#: How the change block names the unrestricted side of a services boundary.
+EVERY_SERVICE = "every service"
+
+
+def _service_change(before, after):
+    """Services added and removed, where None on either side is EVERY one.
+
+    Blank is the widest thing the services box can hold, so clearing it is
+    the widest edit a role can take — and the diff used to leave services out
+    entirely, so that edit produced no change block and `widens: false`.
+    """
+    if before is None and after is None:
+        return [], []
+    if after is None:
+        return [EVERY_SERVICE], []
+    if before is None:
+        return [], [EVERY_SERVICE]
+    return sorted(set(after) - set(before)), sorted(set(before) - set(after))
+
+
+def _describe_change(previous, scope, logs, traces, groups=None):
+    """What this edit adds and removes: containers, services, permissions,
+    and the groups that hand the role out.
+
+    `groups` is the role's group list after the edit; None leaves groups out
+    of the comparison, for a caller that does not send them.
+    """
     hub = getattr(current_app, "hub", None)
 
     before_scope = Scope(
@@ -491,19 +531,35 @@ def _describe_change(previous, scope, logs, traces):
 
     before_permissions = set(previous.get("permissions") or ())
 
+    services_added, services_removed = _service_change(
+        previous.get("services"),
+        list(scope.services) if scope.services is not None else None)
+
+    # A group is who gets the role, not what the role reaches — but adding
+    # one hands everything the role reaches to a whole directory group, which
+    # is a widening in every sense an access review cares about.
+    before_groups = set(previous.get("groups") or ())
+    after_groups = before_groups if groups is None else set(groups)
+
     return {
         "logs_added": sorted(after_logs - before_logs),
         "logs_removed": sorted(before_logs - after_logs),
         "traces_added": sorted(after_traces - before_traces),
         "traces_removed": sorted(before_traces - after_traces),
+        "services_added": services_added,
+        "services_removed": services_removed,
         "permissions_added": sorted(scope.permissions - before_permissions),
         "permissions_removed": sorted(before_permissions - scope.permissions),
+        "groups_added": sorted(after_groups - before_groups),
+        "groups_removed": sorted(before_groups - after_groups),
         # Widening is the direction worth pointing at. Narrowing is usually
         # deliberate; widening is usually a pattern that did not do what the
         # person meant.
         "widens": bool((after_logs - before_logs)
                        or (after_traces - before_traces)
-                       or (scope.permissions - before_permissions)),
+                       or services_added
+                       or (scope.permissions - before_permissions)
+                       or (after_groups - before_groups)),
     }
 
 
@@ -585,7 +641,10 @@ def preview_role():
     if editing and store is not None:
         previous = store.roles.get(editing)
         if previous is not None:
-            change = _describe_change(previous, scope, logs, traces)
+            groups = payload.get("groups")
+            change = _describe_change(
+                previous, scope, logs, traces,
+                groups=None if groups is None else list(groups))
 
     return jsonify({
         "change": change,
@@ -642,8 +701,11 @@ def save_role():
     # System invariants, checked before anything is written. These are not
     # permission checks — an administrator with every permission still must
     # not be able to leave the installation with nobody able to administer it.
-    refusal = refuses_role_save(store.roles.all(), name, permissions,
-                                getattr(current_user, "role", None))
+    refusal = refuses_role_save(
+        store.roles.all(), name, permissions, _actor(),
+        groups=_lines(request.form.get("groups")),
+        user_roles=store.settings.get("rbac.user_roles", {}) or {},
+        default_role=store.settings.get("rbac.default_role", "viewer"))
     if refusal:
         # Recorded too: an attempt to remove the last administrator is more
         # worth knowing about than a change that went through.
@@ -689,9 +751,16 @@ def delete_role(name):
 
     store = _store()
 
-    refusal = refuses_role_delete(store.roles.all(), name,
-                                  getattr(current_user, "role", None))
+    refusal = refuses_role_delete(
+        store.roles.all(), name, _actor(),
+        default_role=store.settings.get("rbac.default_role", "viewer"),
+        user_roles=store.settings.get("rbac.user_roles", {}) or {},
+        local_accounts=store.users.all())
     if refusal:
+        # Recorded like a refused save: README and SECURITY both say refused
+        # attempts sit beside the successful ones, and this one did not.
+        _audit("role delete refused", subject=f"role:{name}",
+               state={"reason": refusal})
         flash(refusal, "error")
         return redirect(url_for("config.config_page"))
 
@@ -715,9 +784,18 @@ def save_mappings():
     store = _store()
     known = {role["name"] for role in store.roles.all()}
 
+    # Never substituted. A blank default used to be saved as "viewer" —
+    # whether or not a role of that name existed — and an unknown one is what
+    # the form sends when the role it pointed at has gone. Both are refused,
+    # so the default only ever changes to something somebody chose.
     default_role = (request.form.get("default_role") or "").strip()
-    if default_role and default_role not in known:
-        flash(f"'{default_role}' is not a role.", "error")
+    if not default_role:
+        flash("Choose a default role: it is what everybody no mapping names "
+              "gets. Nothing was saved.", "error")
+        return redirect(url_for("config.config_page"))
+    if default_role not in known:
+        flash(f"The default role '{default_role}' no longer exists. Choose one "
+              f"of the roles that do. Nothing was saved.", "error")
         return redirect(url_for("config.config_page"))
 
     mappings, rejected = {}, []
@@ -737,23 +815,22 @@ def save_mappings():
         flash(f"These mappings were not understood and have been ignored: "
               f"{', '.join(rejected)}", "warning")
 
-    refusal = refuses_mapping_save(
-        store.roles.all(), default_role, mappings,
-        getattr(current_user, "role", None),
-        actor_identifiers=(current_user.username, current_user.email),
-        actor_local_role=session.get("user_data", {}).get("local_role"))
+    refusal = refuses_mapping_save(store.roles.all(), default_role, mappings,
+                                   _actor())
     if refusal:
+        _audit("mappings save refused", subject="rbac:mappings",
+               state={"reason": refusal, "default_role": default_role,
+                      "user_roles": mappings})
         flash(refusal, "error")
         return redirect(url_for("config.config_page"))
 
-    store.settings.set("rbac.default_role", default_role or "viewer",
+    store.settings.set("rbac.default_role", default_role,
                        updated_by=current_user.username)
     store.settings.set("rbac.user_roles", mappings,
                        updated_by=current_user.username)
     store.rbac.invalidate()
     _audit("mappings updated", subject="rbac:mappings",
-           state={"default_role": default_role or "viewer",
-                  "user_roles": mappings})
+           state={"default_role": default_role, "user_roles": mappings})
     flash("Role mappings saved.", "success")
     return redirect(url_for("config.config_page"))
 

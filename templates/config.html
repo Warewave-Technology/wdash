@@ -634,7 +634,16 @@
           <form method="POST" action="{{ url_for('config.save_mappings') }}">
             <div class="mb-3">
               <label class="form-label small">Default role</label>
-              <select class="form-select form-select-sm" name="default_role">
+              {# A default that names no existing role must say so. With no
+                 option selected the browser selects the FIRST one, which is
+                 `admin`, and the next save made everybody unmapped an
+                 administrator. The server refuses the missing name. #}
+              {% set default_exists = roles | selectattr('name', 'equalto', default_role) | list %}
+              <select class="form-select form-select-sm{% if not default_exists %} is-invalid{% endif %}"
+                      name="default_role" id="defaultRole">
+                {% if not default_exists %}
+                  <option value="{{ default_role }}" selected>{{ default_role }} — no longer exists; choose a role</option>
+                {% endif %}
                 {% for role in roles %}
                   <option value="{{ role.name }}"
                     {% if role.name == default_role %}selected{% endif %}>{{ role.name }}</option>

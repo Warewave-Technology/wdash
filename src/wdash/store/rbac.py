@@ -33,6 +33,40 @@ import time
 
 logger = logging.getLogger(__name__)
 
+
+def choose_role(roles, user_roles, default_role, email=None, username=None,
+                groups=(), explicit=None):
+    """Which role a principal gets, as a pure function of the definitions.
+
+    The one statement of the order: a local account's own role, then a direct
+    mapping by email, then by username, then the first group (sorted) that a
+    role (sorted) lists, then the default. `roles` maps a name to its
+    definition.
+
+    Pure so that the invariants can ask it about a store that does not exist
+    yet — "what would I be after this edit?" — instead of carrying a second,
+    shorter copy of the rule. They had one: it read the username before the
+    email and never looked at groups, so it refused edits that were harmless
+    and allowed ones that were not.
+    """
+    if explicit and explicit in roles:
+        return explicit
+
+    for identifier in (email, username):
+        if identifier and identifier in user_roles:
+            candidate = user_roles[identifier]
+            if candidate in roles:
+                return candidate
+
+    # Sorted so two groups matching two roles resolve the same way every time
+    # rather than depending on assertion order.
+    for group in sorted(groups or ()):
+        for name, definition in sorted(roles.items()):
+            if group in (definition.get("groups") or []):
+                return name
+
+    return default_role
+
 DEFAULT_TTL = 10.0
 
 #: Used when the store cannot be read at all. Narrow on purpose: a resolver
@@ -100,33 +134,20 @@ class RoleResolver:
         if snapshot is None:
             return FALLBACK["role"]
 
-        if explicit:
-            if explicit in snapshot["roles"]:
-                return explicit
-            # The role was deleted after the account was created. Falling back
-            # keeps the person able to sign in and fix it; granting nothing
-            # would lock the break-glass account out of the very screen that
-            # repairs roles. It is a quiet privilege change either way, so it
-            # is logged rather than left to be discovered.
+        if explicit and explicit not in snapshot["roles"]:
+            # The role was deleted after the account was created. The account
+            # falls through to the mappings like anybody else. It is a quiet
+            # privilege change, so it is logged rather than left to be
+            # discovered — and the configuration page now refuses to delete a
+            # role a local account holds, so this is the out-of-band case.
             logger.warning(
                 f"Account is assigned role '{explicit}', which no longer "
-                f"exists; falling back to the default role")
+                f"exists; falling back to the mappings and the default role")
 
-        mapped = snapshot["user_roles"]
-        for identifier in (email, username):
-            if identifier and identifier in mapped:
-                candidate = mapped[identifier]
-                if candidate in snapshot["roles"]:
-                    return candidate
-
-        # Group mapping. Sorted so two groups matching two roles resolve the
-        # same way every time rather than depending on assertion order.
-        for group in sorted(groups or ()):
-            for name, definition in sorted(snapshot["roles"].items()):
-                if group in (definition.get("groups") or []):
-                    return name
-
-        return snapshot["default_role"]
+        return choose_role(snapshot["roles"], snapshot["user_roles"],
+                           snapshot["default_role"], email=email,
+                           username=username, groups=groups,
+                           explicit=explicit)
 
     def resolve(self, email=None, username=None, groups=(), explicit=None):
         """Role plus every boundary, ready to put on a User.

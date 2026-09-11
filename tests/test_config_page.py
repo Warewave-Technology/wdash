@@ -365,6 +365,30 @@ class ChangePreviewTest(ConfigTestCase):
         self.assertEqual(change["permissions_removed"], ["logs:read"])
         self.assertFalse(change["widens"])
 
+    def test_clearing_the_services_box_widens(self):
+        """Blank is every service — the widest value that box holds — and the
+        diff left services out, so this edit showed no change at all."""
+        self.client.post("/admin/roles", data={
+            "name": "auditor", "permissions": "logs:read",
+            "containers": "app-*", "trace_containers": "",
+            "services": "payment-service", "groups": ""}, follow_redirects=True)
+        change = self.preview(services=[])
+        self.assertEqual(change["services_added"], ["every service"])
+        self.assertTrue(change["widens"])
+
+    def test_restricting_services_narrows(self):
+        change = self.preview(services=["payment-service"])
+        self.assertEqual(change["services_removed"], ["every service"])
+        self.assertEqual(change["services_added"], [])
+        self.assertFalse(change["widens"])
+
+    def test_adding_a_group_widens(self):
+        """A group is who gets the role: adding one hands everything it
+        reaches to a whole directory group."""
+        change = self.preview(groups=["contractors"])
+        self.assertEqual(change["groups_added"], ["contractors"])
+        self.assertTrue(change["widens"])
+
 
 class MappingTest(ConfigTestCase):
     def test_mappings_are_parsed_and_stored(self):
@@ -394,7 +418,90 @@ class MappingTest(ConfigTestCase):
         response = self.client.post("/admin/mappings", data={
             "default_role": "nonexistent", "user_roles": ""},
             follow_redirects=True)
-        self.assertIn(b"is not a role", response.data)
+        self.assertIn(b"no longer exists", response.data)
+        self.assertEqual(self.app.store.settings.get("rbac.default_role"),
+                         "viewer")
+
+    def test_a_blank_default_is_refused_rather_than_replaced(self):
+        """It used to be saved as "viewer" — whether or not a role of that
+        name existed. The default only ever changes to something chosen."""
+        self.app.store.settings.set("rbac.default_role", "developer")
+        response = self.client.post("/admin/mappings", data={
+            "default_role": "", "user_roles": ""}, follow_redirects=True)
+        self.assertIn(b"Choose a default role", response.data)
+        self.assertEqual(self.app.store.settings.get("rbac.default_role"),
+                         "developer")
+
+    def test_a_default_that_no_longer_exists_is_not_shown_as_the_first_role(
+            self):
+        """With no option selected the browser selects the FIRST one — `admin`
+        — and the next "Save mappings" made everybody unmapped an
+        administrator. Measured on the rendered page, where the browser
+        decides."""
+        self.app.store.settings.set("rbac.default_role", "auditor")
+        page = self.client.get("/admin/config").get_data(as_text=True)
+        select = page.split('id="defaultRole"', 1)[1].split("</select>", 1)[0]
+        selected = [option for option in select.split("<option")[1:]
+                    if " selected" in option.split(">", 1)[0]]
+        self.assertEqual(len(selected), 1, select)
+        self.assertIn('value="auditor"', selected[0])
+        self.assertIn("no longer exists", selected[0])
+
+        # And what the browser would therefore submit is refused, by name.
+        response = self.client.post("/admin/mappings", data={
+            "default_role": "auditor", "user_roles": ""}, follow_redirects=True)
+        self.assertIn(b"no longer exists", response.data)
+        self.assertEqual(self.app.store.settings.get("rbac.default_role"),
+                         "auditor")
+
+
+class RoleDependentsTest(ConfigTestCase):
+    """A role something still points at stays until it points elsewhere.
+
+    Deleting a role never asked who depended on it. The page then offered
+    its first role — `admin` — in every select that had pointed at the one
+    deleted, so the next "Save mappings" handed out administration: to the
+    people mapped to it, or, for the default role, to everybody unmapped.
+    """
+
+    def test_the_default_role_cannot_be_deleted(self):
+        response = self.client.post("/admin/roles/viewer/delete",
+                                    follow_redirects=True)
+        self.assertIsNotNone(self.app.store.roles.get("viewer"))
+        self.assertIn(b"is the default role", response.data)
+
+    def test_a_role_a_mapping_names_cannot_be_deleted(self):
+        self.app.store.settings.set("rbac.user_roles",
+                                    {"alice@example.com": "developer"})
+        response = self.client.post("/admin/roles/developer/delete",
+                                    follow_redirects=True)
+        self.assertIsNotNone(self.app.store.roles.get("developer"))
+        self.assertIn(b"alice@example.com", response.data)
+
+    def test_a_role_a_local_account_holds_cannot_be_deleted(self):
+        """Its stored role is what makes a local account the way back in."""
+        self.app.store.roles.upsert(
+            "co-admin", permissions=["system:admin"], containers=["*"],
+            trace_containers=["*"])
+        self.app.store.users.create("breakglass", PASSWORD, role="co-admin")
+        self.app.store.rbac.invalidate()
+        response = self.client.post("/admin/roles/co-admin/delete",
+                                    follow_redirects=True)
+        self.assertIsNotNone(self.app.store.roles.get("co-admin"))
+        self.assertIn(b"breakglass", response.data)
+
+    def test_a_role_nothing_points_at_can_go(self):
+        response = self.client.post("/admin/roles/developer/delete",
+                                    follow_redirects=True)
+        self.assertIsNone(self.app.store.roles.get("developer"))
+        self.assertIn(b"deleted", response.data)
+
+    def test_a_refused_deletion_is_recorded(self):
+        """README and SECURITY both say refused attempts sit beside the
+        successful ones; for deletions they did not."""
+        self.client.post("/admin/roles/viewer/delete")
+        actions = [row["action"] for row in self.app.store.audit.recent()]
+        self.assertIn("role delete refused", actions)
 
 
 class SecretsUnavailableTest(unittest.TestCase):

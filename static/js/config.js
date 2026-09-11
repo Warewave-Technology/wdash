@@ -365,6 +365,9 @@ async function runPreview() {
                 containers: boundaryLines('roleContainers'),
                 trace_containers: boundaryLines('roleTraceContainers'),
                 services,
+                // Who gets the role is part of what a change does: adding a
+                // directory group hands the role to everybody in it.
+                groups: boundaryLines('roleGroups'),
                 // Editing, so the server can say what CHANGES rather than
                 // only what the result is.
                 name: document.getElementById('roleMode')?.value === 'edit'
@@ -394,10 +397,7 @@ async function runPreview() {
     }
 
     const change = result.change;
-    if (change && (change.logs_added.length || change.logs_removed.length ||
-                   change.traces_added.length || change.traces_removed.length ||
-                   change.permissions_added.length ||
-                   change.permissions_removed.length)) {
+    if (change && CHANGE_KEYS.some(key => (change[key] || []).length)) {
         parts.push(renderChange(change));
     }
 
@@ -412,8 +412,20 @@ async function runPreview() {
  * completely different set — "grants 3 containers it did not have" is the
  * sentence that catches it.
  */
+/**
+ * Every list the server's change block can carry. Services and groups were
+ * missing, so clearing a role's services box — every service, the widest
+ * value that box holds — showed no change at all.
+ */
+const CHANGE_KEYS = [
+    'logs_added', 'logs_removed', 'traces_added', 'traces_removed',
+    'services_added', 'services_removed',
+    'permissions_added', 'permissions_removed',
+    'groups_added', 'groups_removed',
+];
+
 function renderChange(change) {
-    const list = (label, items, tone) => items.length
+    const list = (label, items, tone) => (items || []).length
         ? `<div class="${tone}"><strong>${label}</strong> ` +
           items.slice(0, 6).map(escapeHtml).map(v => `<code>${v}</code>`).join(' ') +
           (items.length > 6 ? ` +${items.length - 6} more` : '') + '</div>'
@@ -427,14 +439,20 @@ function renderChange(change) {
         list('removes logs:', change.logs_removed, 'text-muted') +
         list('grants traces:', change.traces_added, 'text-warning') +
         list('removes traces:', change.traces_removed, 'text-muted') +
+        list('grants services:', change.services_added, 'text-warning') +
+        list('removes services:', change.services_removed, 'text-muted') +
         list('grants permissions:', change.permissions_added, 'text-warning') +
         list('removes permissions:', change.permissions_removed, 'text-muted') +
+        list('hands the role to groups:', change.groups_added, 'text-warning') +
+        list('takes it from groups:', change.groups_removed, 'text-muted') +
         '</div>';
 }
 
 document.querySelectorAll('.boundary-field').forEach(field => {
     field.addEventListener('input', schedulePreview);
 });
+document.getElementById('roleGroups')
+    ?.addEventListener('input', schedulePreview);
 document.getElementById('rolePermissions')
     ?.addEventListener('change', schedulePreview);
 
@@ -587,19 +605,35 @@ document.querySelectorAll('.pick-target').forEach(button => {
         document.getElementById('mappingField').value = lines.join('\n');
     }
 
+    // A select with nothing selected shows, and SUBMITS, its first option —
+    // and the first role is `admin`. A mapping whose role had been deleted
+    // therefore came back as `admin`, and so did every new row nobody got
+    // round to choosing for. Both now carry an option of their own: the
+    // missing name, which the server refuses by name, or no role at all,
+    // which it refuses as not understood. Neither is ever somebody's role.
+    function roleOptions(role) {
+        const known = roleNames.includes(role);
+        const lead = !role
+            ? '<option value="" selected>choose a role…</option>'
+            : known ? ''
+            : `<option value="${escapeHtml(role)}" selected>${
+                  escapeHtml(role)} — no longer exists</option>`;
+        return lead + roleNames.map(name =>
+            `<option value="${escapeHtml(name)}"${
+                name === role ? ' selected' : ''}>${escapeHtml(name)}</option>`
+        ).join('');
+    }
+
     function addRow(who = '', role = '') {
         const row = document.createElement('div');
         row.className = 'input-group input-group-sm mb-1 mapping-row';
         row.innerHTML =
             `<input type="text" class="form-control mapping-who"
-                    placeholder="alice@example.com" value="${
-                        String(who).replace(/"/g, '&quot;')}">
+                    placeholder="alice@example.com" value="${escapeHtml(who)}">
              <span class="input-group-text">is</span>
-             <select class="form-select mapping-role" style="max-width:11rem">
-               ${roleNames.map(name =>
-                   `<option value="${name}"${name === role ? ' selected' : ''}>${
-                       name}</option>`).join('')}
-             </select>
+             <select class="form-select mapping-role${
+                 role && !roleNames.includes(role) ? ' is-invalid' : ''}"
+                     style="max-width:11rem">${roleOptions(role)}</select>
              <button type="button" class="btn btn-outline-danger mapping-remove"
                      title="Remove">&times;</button>`;
         rows.appendChild(row);

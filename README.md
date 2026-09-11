@@ -264,9 +264,15 @@ rejected.
 **`system:admin` is not a superuser.** It grants no access to logs or traces on
 its own. That has a consequence worth knowing: nothing else can recover from
 losing it, so three invariants refuse any change that would leave nobody able
-to administer — editing a role's permissions, deleting a role, and reassigning
-yourself through the mappings table. A refused attempt is recorded alongside
-the successful ones.
+to administer — editing a role's permissions or its groups, deleting a role,
+and reassigning yourself through the mappings table. "Would this lock me out?"
+is answered by the resolver's own rule, groups and all, applied to the picture
+after the change. A refused attempt is recorded alongside the successful ones.
+
+A role something still points at cannot be deleted: the default role, a role a
+mapping names, or one a local account holds. Deleting the default role used to
+succeed, and the page then showed its first role — `admin` — as the default,
+so the next "Save mappings" made everybody unmapped an administrator.
 
 If it happens anyway, `python -m wdash.store.recover --status` says who can
 administer and `--grant-admin <username>` puts one account back. The recovery
