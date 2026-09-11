@@ -799,6 +799,16 @@ class LogSearch {
                 data.failed_sources.map(esc).join(', ') +
                 ', whose statistics could not be read.</div>';
         }
+        // What the counts are short of. A backend answers a search from the
+        // shards that replied and says so in the answer; the numbers here are
+        // real, and what they cover is not what the page asked for. Said
+        // above them rather than instead of them.
+        (data.warnings || []).forEach(warning => {
+            html += '<div class="px-2 py-2 border-bottom text-warning" ' +
+                'style="font-size:.7rem">' +
+                '<i class="fas fa-triangle-exclamation"></i> ' +
+                esc(warning) + '</div>';
+        });
 
         (data.fields || []).forEach(stat => {
             if (!stat.values || !stat.values.length) return;

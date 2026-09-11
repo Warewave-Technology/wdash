@@ -550,6 +550,15 @@ def api_field_stats():
         payload["partial"] = True
         payload["failed_sources"] = failed
 
+    # What the counts themselves are short of. Elasticsearch answers 200 when
+    # only some shards fail, so these were numbers from a fraction of the
+    # window drawn as the window: on the lab, 2789 per field from one shard of
+    # six, beside a result list that reported the failure.
+    warnings = list(getattr(stats, "warnings", ()) or ())
+    if warnings:
+        payload["partial"] = True
+        payload["warnings"] = warnings
+
     # Which members of a merged view could not contribute. An answer from a
     # subset is fine; an answer from a subset that does not say so is the
     # thing the intersection rule was avoiding, and removing the feature

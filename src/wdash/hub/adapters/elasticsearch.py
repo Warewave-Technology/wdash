@@ -11,8 +11,9 @@ import time
 
 from ...utils import timerange
 from ..models import (
-    FieldStat, FieldValue, LogContext, LogPage, LogRecord, Service, SourceRef,
-    Span, Trace, TraceSummary, UNKNOWN_SEVERITY, normalise_severity,
+    FieldStat, FieldValue, LogContext, LogPage, LogRecord, PartialCounts,
+    Service, SourceRef, Span, Trace, TraceSummary, UNKNOWN_SEVERITY,
+    normalise_severity,
 )
 from ..aggregation import AggregationResult, Bucket, DateHistogram, Terms
 from ..query import DEFAULT_LOG_FIELDS, SORT_SLOWEST
@@ -553,11 +554,11 @@ class ElasticsearchLogSource(LogSource):
     def field_stats(self, query, scope, fields=None, top=10):
         targets = self._targets(query, scope)
         if not targets:
-            return []
+            return PartialCounts()
 
         discovered = fields or self._aggregatable_fields(targets)
         if not discovered:
-            return []
+            return PartialCounts()
 
         aggs = {name: {"terms": {"field": path, "size": top}}
                 for name, path in discovered.items()}
@@ -569,6 +570,11 @@ class ElasticsearchLogSource(LogSource):
         # full of results.
         response = _search(self._es, targets, body,
                            timeout="10s", request_cache=True)
+        # An answer can be short without being a failure, and this read the
+        # short one as the whole: measured on the lab with five of six shards
+        # failing, the sidebar showed level, service and host at 2789 each —
+        # one shard's worth — beside a result list that reported the failure.
+        shards = _shard_failure(response)
         stats = []
         for name in discovered:
             buckets = ((response.get("aggregations") or {}).get(name, {})
@@ -580,7 +586,7 @@ class ElasticsearchLogSource(LogSource):
                                        count=_count(b["doc_count"]))
                             for b in buckets],
                 ))
-        return stats
+        return PartialCounts(stats, warnings=(shards,) if shards else ())
 
     def aggregate(self, query, aggregations, scope):
         """Run the given aggregations in a SINGLE Elasticsearch request.
@@ -765,7 +771,7 @@ class ElasticsearchLogSource(LogSource):
     def histogram(self, query, scope):
         targets = self._targets(query, scope)
         if not targets:
-            return []
+            return PartialCounts()
         body = {
             "size": 0,
             "query": self._build_query(query),
@@ -778,13 +784,21 @@ class ElasticsearchLogSource(LogSource):
         try:
             response = _search(self._es, targets, body,
                                timeout="15s", request_cache=True)
-        except Exception:
-            return []
+        except Exception as exc:
+            return PartialCounts(
+                warnings=(f"the histogram could not be read: {exc}",))
         try:
-            return [{"timestamp": b["key_as_string"], "count": _count(b["doc_count"])}
-                    for b in response["aggregations"]["timeline"]["buckets"]]
-        except MalformedResponse:
-            return []
+            # The same partial answer `search` reports: counts from the shards
+            # that answered, drawn as a whole series by everything that reads
+            # a bare list of buckets.
+            shards = _shard_failure(response)
+            buckets = [{"timestamp": b["key_as_string"],
+                        "count": _count(b["doc_count"])}
+                       for b in response["aggregations"]["timeline"]["buckets"]]
+        except MalformedResponse as exc:
+            return PartialCounts(
+                warnings=(f"the cluster's answer could not be read: {exc}",))
+        return PartialCounts(buckets, warnings=(shards,) if shards else ())
 
     # ---------- internals ----------
 

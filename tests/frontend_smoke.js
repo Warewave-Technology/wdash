@@ -842,6 +842,22 @@ check('Clear takes away the chart, the sources, the warnings and the stats', () 
         assert(text.includes('es-b') && text.includes('INFO'), `said: ${text}`);
     });
 
+    // Counts computed from the shards that answered. The numbers are real and
+    // the window they cover is not the one on screen, so they are shown with
+    // the reason above them rather than instead of them.
+    check('counts drawn from part of the data say so', () => {
+        const w = makeWindow();
+        Object.create(w.__LogSearch.prototype).renderFieldStats({
+            fields: [{ field: 'level', values: [{ value: 'INFO', count: 3 }] }],
+            partial: true,
+            warnings: ['5 of 6 shards failed: <img src=x> For input string'] });
+        const el = w.document.getElementById('fieldStatsContent');
+        assert(el.textContent.includes('5 of 6 shards failed'),
+               `said: ${el.textContent}`);
+        assert(el.textContent.includes('INFO'), 'the counts were thrown away');
+        assert(!el.querySelector('img'), 'the backend closed the attribute');
+    });
+
     console.log(failures.length
         ? `\n${failures.length} failure(s)`
         : '\nall front-end smoke checks passed');

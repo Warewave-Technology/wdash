@@ -215,6 +215,30 @@ class FieldStat:
                 "values": [{"value": v.value, "count": v.count} for v in self.values]}
 
 
+class PartialCounts(list):
+    """Counts, and what is missing from them.
+
+    `field_stats` and `histogram` answer with a list, and a list has nowhere
+    to say that the counts in it were computed from a sixth of the shards.
+    Elasticsearch fails a search outright only when EVERY shard fails; when
+    some do it answers 200 with what the rest found, so the sidebar drew
+    2789 records per field beside a result list reporting that five shards of
+    six had failed.
+
+    It is a list, so every caller that only reads the rows is unchanged; the
+    route reads `warnings` and says so above the numbers.
+    """
+
+    def __init__(self, items=(), warnings=()):
+        super().__init__(items)
+        self.warnings = tuple(warnings)
+
+    @property
+    def partial(self):
+        """Whether these counts cover less than they were asked to."""
+        return bool(self.warnings)
+
+
 # --------------------------------------------------------------------------
 # Trace side
 # --------------------------------------------------------------------------

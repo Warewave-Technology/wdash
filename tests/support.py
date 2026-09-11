@@ -334,6 +334,31 @@ def _words(value):
     return re.findall(r"\w+", str(value).lower())
 
 
+def _mapped_type(mapping, field):
+    """The type a mapping gives `field`, or None when it maps nothing.
+
+    Walks `properties` the way a mapping is written: a property can hold a
+    dotted name of its own (`deployment.environment`), and a multi-field
+    hangs its keyword off `fields`.
+    """
+    def walk(properties, parts):
+        for count in range(len(parts), 0, -1):
+            node = properties.get(".".join(parts[:count]))
+            if not isinstance(node, dict):
+                continue
+            rest = parts[count:]
+            if not rest:
+                return node.get("type")
+            found = walk(node.get("properties") or {}, rest)
+            if found is None and len(rest) == 1:
+                found = ((node.get("fields") or {}).get(rest[0]) or {}).get("type")
+            if found is not None:
+                return found
+        return None
+
+    return walk(mapping or {}, str(field).split("."))
+
+
 def _projected(source, includes, prefix=""):
     """`_source` as Elasticsearch returns it for a list of `includes`: those
     paths and nothing else, whether a document nests its keys or dots them."""
@@ -350,8 +375,13 @@ def _projected(source, includes, prefix=""):
     return out
 
 
-def es_query_matches(query, source, doc_id=None):
-    """Whether Elasticsearch would keep a document with this `_source`."""
+def es_query_matches(query, source, doc_id=None, mapping=None):
+    """Whether Elasticsearch would keep a document with this `_source`.
+
+    `mapping` is the index's `properties`, and what it is for is `match`:
+    without it every field is analysed, which is more permissive than the
+    cluster and lets a test pass over a query that answers nothing.
+    """
     if not query or "match_all" in query:
         return True
     if "match_none" in query:
@@ -365,6 +395,22 @@ def es_query_matches(query, source, doc_id=None):
         (field, wanted), = query[kind].items()
         if isinstance(wanted, dict):
             wanted = wanted.get("query")
+        # Elasticsearch does not analyse a keyword field: on one, both of
+        # these build a term query on the whole input. Measured on the lab's
+        # app-logs-000001, where `service` is a keyword holding
+        # 'search-service': match_phrase "search" answers 0 hits and
+        # "search-service" 5140. A field the mapping does not know is analysed
+        # here, which is what dynamic mapping would make of it.
+        if _mapped_type(mapping, field) not in (None, "text", "match_only_text"):
+            values = _values(source, field)
+            if not values and "." in field:
+                # A multi-field (`severity_text.keyword`) is indexed from its
+                # parent's value and is not in `_source` at all. Only a parent
+                # that HAS a type is one: an object has properties instead.
+                parent = field.rpartition(".")[0]
+                if _mapped_type(mapping, parent) is not None:
+                    values = _values(source, parent)
+            return any(str(value) == str(wanted) for value in values)
         words = _words(wanted)
 
         def holds(value):
@@ -410,15 +456,17 @@ def es_query_matches(query, source, doc_id=None):
             return value if isinstance(value, list) else [value]
 
         required = listed("must") + listed("filter")
-        if not all(es_query_matches(q, source, doc_id) for q in required):
+        if not all(es_query_matches(q, source, doc_id, mapping)
+                   for q in required):
             return False
-        if any(es_query_matches(q, source, doc_id) for q in listed("must_not")):
+        if any(es_query_matches(q, source, doc_id, mapping)
+               for q in listed("must_not")):
             return False
         should = listed("should")
         minimum = clause.get("minimum_should_match")
         if minimum is None:
             minimum = 0 if required else (1 if should else 0)
-        return sum(es_query_matches(q, source, doc_id)
+        return sum(es_query_matches(q, source, doc_id, mapping)
                    for q in should) >= int(minimum)
     raise NotImplementedError(f"the model does not know {list(query)}")
 
@@ -487,11 +535,18 @@ class ModelledES:
         return [hit for name in names if name in self._indices
                 for hit in self._indices[name][1]]
 
+    def _mapping_of(self, hit):
+        """The mapping of the index a hit came from: what says whether a
+        field is analysed."""
+        entry = self._indices.get(hit.get("_index"))
+        return entry[0] if entry else None
+
     def search(self, index=None, **kwargs):
         body = search_body(kwargs)
         self.requests.append({"index": index, "body": body})
         hits = [hit for hit in self._docs(index)
-                if es_query_matches(body.get("query"), hit["_source"], hit["_id"])]
+                if es_query_matches(body.get("query"), hit["_source"],
+                                    hit["_id"], self._mapping_of(hit))]
         ordered = _sorted_hits(hits, body.get("sort"))
 
         collapse = body.get("collapse")
@@ -535,7 +590,8 @@ class ModelledES:
         if "filter" in spec:
             return {"doc_count": sum(1 for hit in hits
                                      if es_query_matches(spec["filter"], hit["_source"],
-                                                         hit["_id"]))}
+                                                         hit["_id"],
+                                                         self._mapping_of(hit)))}
         terms = spec["terms"]
         buckets = {}
         for hit in hits:

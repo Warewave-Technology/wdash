@@ -177,11 +177,13 @@ class Cluster(ModelledES):
             for key, members in sorted(groups.items())]}
 
 
-def _app(*sources, indices=("*",), permissions=("logs:read",)):
+def _app(*sources, indices=("*",), permissions=("logs:read",), traces=()):
     app = create_app(TestConfig)
     hub = Hub()
     for source in sources:
         hub.add_logs(source)
+    for source in traces:
+        hub.add_traces(source)
     app.hub = hub
     client = app.test_client()
     grant(app, "u", list(permissions), list(indices))
@@ -727,6 +729,47 @@ class FailedShardsAreSaidTest(unittest.TestCase):
                 [(self.query(), [Terms("lv", "severity")])] * 2, EVERY):
             self.assertIn("5 of 6 shards failed", " ".join(result.warnings))
 
+    def test_the_field_statistics_say_it_too(self):
+        """The review found the other two read paths in this file still
+        reading a partial answer as a whole one: on the lab, with 5 of 6
+        shards failing, the sidebar drew level/service/host counts of 2789
+        beside a result list that said the shards had failed."""
+        stats = self.source(SHARDS_FAILED).field_stats(self.query(), EVERY)
+        self.assertIn("level", [stat.field for stat in stats])
+        self.assertTrue(stats.partial)
+        self.assertIn("5 of 6 shards failed", " ".join(stats.warnings))
+
+    def test_and_so_does_the_histogram(self):
+        buckets = self.source(SHARDS_FAILED).histogram(self.query(), EVERY)
+        self.assertTrue(buckets, "the histogram lost its buckets")
+        self.assertTrue(buckets.partial)
+        self.assertIn("5 of 6 shards failed", " ".join(buckets.warnings))
+
+    def test_the_sidebar_is_told_the_counts_are_short(self):
+        app, client = _app(self.source(SHARDS_FAILED))
+        payload = client.get(f"/api/field-stats?q=*&start_time={START}"
+                             f"&end_time={END}").get_json()
+        self.assertIn("level", [f["field"] for f in payload["fields"]])
+        self.assertTrue(payload.get("partial"), payload)
+        self.assertIn("5 of 6 shards failed", " ".join(payload.get("warnings", ())))
+
+    def test_a_merged_sidebar_names_whose_shards_failed(self):
+        clean = dict(SHARDS_FAILED, successful=6, failed=0, failures=[])
+        app, client = _app(
+            ElasticsearchLogSource(Cluster({"app-logs-000001": (
+                dict(FLAT), [flat("doc-1", "09:30:12.142", "one",
+                                  level="ERROR")])}, shards=clean), name="es-a"),
+            ElasticsearchLogSource(Cluster({"team-b-logs-000001": (
+                dict(FLAT), [flat("doc-2", "09:30:12.142", "two",
+                                  level="ERROR")])},
+                shards=SHARDS_FAILED), name="es-b"))
+        payload = client.get(f"/api/field-stats?q=*&source=*&start_time={START}"
+                             f"&end_time={END}").get_json()
+        said = " ".join(payload.get("warnings", ()))
+        self.assertTrue(payload.get("partial"), payload)
+        self.assertIn("es-b", said)
+        self.assertIn("5 of 6 shards failed", said)
+
     def test_a_clean_answer_says_nothing(self):
         clean = dict(SHARDS_FAILED, successful=6, failed=0, failures=[])
         source = self.source(clean)
@@ -734,6 +777,13 @@ class FailedShardsAreSaidTest(unittest.TestCase):
         self.assertEqual((page.partial, page.warnings), (False, ()))
         self.assertEqual(source.aggregate(self.query(), [Terms("lv", "severity")],
                                           EVERY).warnings, ())
+        self.assertEqual(source.field_stats(self.query(), EVERY).warnings, ())
+        self.assertEqual(source.histogram(self.query(), EVERY).warnings, ())
+        app, client = _app(self.source(clean))
+        payload = client.get(f"/api/field-stats?q=*&start_time={START}"
+                             f"&end_time={END}").get_json()
+        self.assertNotIn("partial", payload)
+        self.assertNotIn("warnings", payload)
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +858,32 @@ class FieldStatisticsThatFailedAreSaidTest(unittest.TestCase):
         self.es.mapping_fails = None
         self.assertIn("level", [s.field for s in self.source.field_stats(
             self.query, EVERY)])
+
+    def test_a_histogram_that_could_not_be_read_is_not_an_empty_series(self):
+        """The same rule, in the method beside it: `[]` is what a quiet
+        window looks like, and a search that never answered is not one."""
+        self.es.stats_fail = ConnectionError("read timed out")
+        buckets = self.source.histogram(self.query, EVERY)
+        self.assertEqual(list(buckets), [])
+        self.assertIn("read timed out", " ".join(buckets.warnings))
+
+    def test_nor_is_an_answer_that_could_not_be_read(self):
+        class Garbled(_FieldStatsFail):
+            """A doc_count that is not a number — markup, as measured."""
+
+            def search(self, index=None, **kwargs):
+                response = super().search(index=index, **kwargs)
+                timeline = (response.get("aggregations") or {}).get("timeline")
+                if timeline:
+                    timeline["buckets"] = [{"key_as_string": "x",
+                                            "doc_count": "<img src=x>"}]
+                return response
+
+        source = ElasticsearchLogSource(Garbled({"app-logs-000001": (
+            dict(FLAT), [flat("doc-1", "09:30:12.142", "one")])}))
+        buckets = source.histogram(self.query, EVERY)
+        self.assertEqual(list(buckets), [])
+        self.assertIn("not a number", " ".join(buckets.warnings))
 
     def ask(self, *sources):
         app, client = _app(*sources)
@@ -979,6 +1055,171 @@ class TheDocumentationSaysWhatTheClientSendsTest(unittest.TestCase):
             with self.subTest(place=place):
                 self.assertRegex(text, r"container and (the )?id")
                 self.assertIn("source=", text)
+
+
+# ---------------------------------------------------------------------------
+# The review of the commit above: what making the catalogue raise did to the
+# routes that did not expect it, and what the model got wrong
+# ---------------------------------------------------------------------------
+
+class ATraceStoreThatCannotBeReadIsNotAMissingTraceTest(unittest.TestCase):
+    """The correlated-log panel looks a trace up before it searches for its
+    records, and it did so outside any try. While the catalogue answered []
+    that was a 404; now that it raises, a cluster that was down when a worker
+    started turned the panel into an unhandled 500 — an HTML error page to a
+    client that reads JSON. Measured with `cat.indices` refusing the
+    connection: /api/traces/<id>/logs 500 text/html."""
+
+    TRACE_ID = "a" * 32
+
+    def client(self, cat_fails=None):
+        es = Cluster({OTEL_TRACES_1: (dict(SPAN), [_span("s1", "checkout")])},
+                     streams={OTEL_TRACES: {"indices": [OTEL_TRACES_1]}})
+        es.cat_fails = cat_fails
+        app, client = _app(ElasticsearchLogSource(es, exclude=("*traces*",)),
+                           permissions=("logs:read", "traces:read"),
+                           traces=(ElasticsearchTraceSource(es),))
+        # As a deployment answers: a route that raises is a 500 and an HTML
+        # page, rather than the exception the test client re-raises.
+        app.config["PROPAGATE_EXCEPTIONS"] = False
+        return client
+
+    def ask(self, client):
+        return client.get(f"/api/traces/{self.TRACE_ID}/logs")
+
+    def test_the_panel_is_told_the_store_could_not_be_read(self):
+        response = self.ask(self.client(ConnectionError("connection refused")))
+        self.assertEqual(response.status_code, 503,
+                         response.get_data(as_text=True)[:200])
+        payload = response.get_json()
+        self.assertEqual(payload["error_type"], "trace_source_error")
+        self.assertIn("connection refused", payload.get("details", ""))
+
+    def test_a_trace_that_is_really_absent_is_still_not_found(self):
+        """The failure branch must not swallow the honest answer."""
+        response = self.ask(self.client())
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["error_type"], "trace_not_found")
+
+
+class EverySourceBeingDownIsNotAnEmptyDeploymentTest(unittest.TestCase):
+    """"A cluster that was down looked empty" was only made true for a
+    deployment with ONE source. The page asks every source now, and the
+    fan-out swallowed each member's failure: with two Elasticsearch sources
+    both refusing connections the page said "No log indices found in
+    Elasticsearch" and /api/search?source=* answered 404 no_indices — a
+    failure drawn as emptiness, which is the thing this was about."""
+
+    def sources(self, down):
+        out = []
+        for at in ("a", "b"):
+            es = Cluster({f"app-logs-{at}": (dict(FLAT), [
+                flat(f"doc-{at}", "09:10:00.000", "one")])})
+            out.append(ElasticsearchLogSource(es, name=f"es-{at}"))
+            if len(out) <= down:
+                es.cat_fails = ConnectionError("connection refused")
+        return out
+
+    def client(self, down):
+        return _app(*self.sources(down))[1]
+
+    def test_the_page_says_it_cannot_connect(self):
+        page = self.client(down=2).get("/logs").get_data(as_text=True)
+        self.assertIn("Unable to connect", page)
+        self.assertNotIn("No log indices found", page)
+
+    def test_the_search_says_so_rather_than_no_indices(self):
+        response = self.client(down=2).get(
+            f"/api/search?q=*&source=*&start_time={START}&end_time={END}")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["error_type"],
+                         "elasticsearch_connection")
+
+    def test_and_so_does_the_index_list(self):
+        response = self.client(down=2).get("/api/indices?source=*")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["error_type"],
+                         "elasticsearch_connection")
+
+    def test_one_source_still_answering_is_still_answered_from(self):
+        """Partial failure stays partial: the healthy member still lists."""
+        payload = self.client(down=1).get("/api/indices?source=*").get_json()
+        self.assertEqual(payload["containers"], ["app-logs-b"])
+
+
+class TheCommentsSayWhatTheCatalogueDoesTest(unittest.TestCase):
+    """The same fault as C122 and C221, left behind by their own commit:
+    `_reaches_no_store` still said the Elasticsearch catalogue "answers []
+    then rather than raising", which is what was changed. A comment that
+    describes the opposite of the code is how the next reader decides the
+    except branch below it is dead."""
+
+    def test_the_trace_route_does_not_say_the_catalogue_answers_empty(self):
+        with open(os.path.join(ROOT, "src/wdash/api/trace_routes.py")) as handle:
+            text = " ".join(handle.read().split())
+        self.assertNotIn("answers [] then rather than raising", text)
+        self.assertRegex(text, r"(?i)catalogue raises")
+
+    def test_and_an_outage_is_not_reported_as_the_role_s_doing(self):
+        from wdash.api.trace_routes import _reaches_no_store
+        es = Cluster({OTEL_TRACES_1: (dict(SPAN), [_span("s1", "checkout")])})
+        es.cat_fails = ConnectionError("connection refused")
+        self.assertFalse(_reaches_no_store(ElasticsearchTraceSource(es), EVERY))
+
+
+class TheModelAnalysesWhatTheClusterAnalysesTest(unittest.TestCase):
+    """`ModelledES` evaluates the query it is sent, which is why it is
+    preferred to a fake that ignores it — so where it is more permissive than
+    Elasticsearch, a test can pass over a product that answers nothing. It
+    analysed every field, keyword fields included, and Elasticsearch does not
+    analyse those. Measured on the lab's app-logs-000001, where `service` is
+    a keyword holding 'search-service': {"match_phrase": {"service":
+    "search"}} answers 0 hits and {"match_phrase": {"service":
+    "search-service"}} 5140; the model said True to both."""
+
+    def hits(self, text):
+        source = ElasticsearchLogSource(Cluster({"app-logs-000001": (
+            dict(FLAT), [flat("doc-1", "09:30:12.142",
+                              "disk usage above threshold",
+                              service="payment-service",
+                              note="disk failure imminent")])}))
+        return source.search(LogQuery(window=WINDOW, text=text), EVERY).total
+
+    def test_a_word_of_a_keyword_value_is_not_a_match(self):
+        for text in ('service:"payment"', "service:payment"):
+            with self.subTest(text=text):
+                self.assertEqual(self.hits(text), 0)
+
+    def test_the_whole_value_is(self):
+        self.assertEqual(self.hits('service:"payment-service"'), 1)
+
+    def test_a_text_field_is_still_analysed(self):
+        self.assertEqual(self.hits('message:"disk usage"'), 1)
+
+    def test_and_so_is_one_the_mapping_does_not_know(self):
+        """Elasticsearch maps a new string field as text with a keyword
+        sub-field, so a word of it matches. Analysed is the right default."""
+        self.assertEqual(self.hits('note:"disk failure"'), 1)
+
+    def test_the_model_reads_the_mapping_it_is_given(self):
+        from tests.support import es_query_matches
+        doc = {"service": "payment-service", "severity_text": "ERROR"}
+        keyword = {"service": {"type": "keyword"}}
+        text = {"service": {"type": "text"}}
+        multi = {"severity_text": {"type": "text", "fields": {
+            "keyword": {"type": "keyword"}}}}
+        for clause, mapping, expected in (
+                ({"match_phrase": {"service": "payment"}}, keyword, False),
+                ({"match": {"service": {"query": "payment"}}}, keyword, False),
+                ({"match_phrase": {"service": "payment-service"}}, keyword, True),
+                ({"match_phrase": {"service": "payment"}}, text, True),
+                ({"match_phrase": {"service": "payment"}}, None, True),
+                # A multi-field: the sub-field is the keyword, the field is not.
+                ({"match": {"severity_text.keyword": "ERRO"}}, multi, False),
+                ({"match": {"severity_text.keyword": "ERROR"}}, multi, True)):
+            with self.subTest(clause=clause, mapping=mapping):
+                self.assertEqual(
+                    es_query_matches(clause, doc, mapping=mapping), expected)
 
 
 if __name__ == "__main__":

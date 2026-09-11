@@ -36,8 +36,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .aggregation import AggregationResult, Bucket
 from .models import (
-    DOWN, FieldStat, FieldValue, LogPage, MonitorPage, MonitorPoint, Service,
-    Trace,
+    DOWN, FieldStat, FieldValue, LogPage, MonitorPage, MonitorPoint,
+    PartialCounts, Service, Trace,
 )
 from .source import Capability, LogSource, MonitorSource, TraceSource
 
@@ -152,13 +152,25 @@ class FanOutLogSource(LogSource):
         """
         if scope.is_empty:
             return []
-        seen, ordered = set(), []
-        for source, containers, _ in self._parallel(
+        seen, ordered, failed = set(), [], []
+        for source, containers, error in self._parallel(
                 lambda source: source.containers(scope)):
+            if error is not None:
+                failed.append((source.name, error))
+                continue
             for name in containers or []:
                 if name not in seen:
                     seen.add(name)
                     ordered.append(name)
+        # Every member failing is a failure, and it left here as an empty
+        # list: with two Elasticsearch sources both refusing connections the
+        # page said "No log indices found in Elasticsearch" and the search API
+        # answered 404 no_indices — the same fault the adapter's own catalogue
+        # was fixed for, one level up. Some members failing is still an
+        # answer, as it is for a search.
+        if failed and len(failed) == len(self._sources):
+            raise RuntimeError("; ".join(f"{name}: {error}"
+                                         for name, error in failed))
         return ordered
 
     # ---------- search ----------
@@ -291,7 +303,7 @@ class FanOutLogSource(LogSource):
                 f"{self.name} cannot serve field statistics: no configured "
                 f"source provides them")
 
-        totals, failed = {}, []
+        totals, failed, warnings = {}, [], []
         for source, stats, error in self._parallel(
                 lambda source: (source.field_stats(query, scope)
                                 if Capability.FIELD_STATS in source.capabilities
@@ -300,6 +312,12 @@ class FanOutLogSource(LogSource):
                 logger.warning(f"{source.name} field statistics failed: {error}")
                 failed.append((source.name, error))
                 continue
+            # A member that answered from part of its data says so, and the
+            # merge is where that would otherwise be dropped: a sum of one
+            # source's real counts and another's sixth of one is a number
+            # nobody can read.
+            for warning in getattr(stats, "warnings", ()) or ():
+                warnings.append(f"{source.name}: {warning}")
             for stat in stats or ():
                 bucket = totals.setdefault(stat.field, {})
                 for value in stat.values:
@@ -322,7 +340,8 @@ class FanOutLogSource(LogSource):
         asked = [s for s in self._sources if Capability.FIELD_STATS in s.capabilities]
         if failed and len(failed) == len(asked):
             raise RuntimeError("; ".join(f"{name}: {error}" for name, error in failed))
-        return _FieldStats(out, failed=[name for name, _ in failed])
+        return _FieldStats(out, failed=[name for name, _ in failed],
+                           warnings=warnings)
 
     def aggregate(self, query, aggregations, scope):
         if Capability.AGGREGATION not in self.capabilities:
@@ -366,9 +385,11 @@ class FanOutLogSource(LogSource):
             raise NotImplementedError(
                 f"{self.name} cannot serve histograms: not every source can")
         from .aggregation import DateHistogram
-        return self.aggregate(
-            query, [DateHistogram(name="timeline", min_count=0)],
-            scope).get("timeline")
+        result = self.aggregate(
+            query, [DateHistogram(name="timeline", min_count=0)], scope)
+        # The aggregation says what it could not reach; a bare list of buckets
+        # does not, and that is what this used to hand back.
+        return PartialCounts(result.get("timeline"), warnings=result.warnings)
 
     def context(self, ref, scope, before=10, after=10, correlate_by=None):
         """Surrounding records come from the record's own source.
@@ -390,16 +411,21 @@ def _cannot_count(page):
     return not page.counted
 
 
-class _FieldStats(list):
+class _FieldStats(PartialCounts):
     """Merged field statistics, and the members whose statistics failed.
 
     A list, so every caller of `field_stats` keeps the type it handles; the
-    route reads `failed` to say whose counts are missing.
+    route reads `failed` to say whose counts are missing, and `warnings` for
+    a member that answered from part of its own data.
     """
 
-    def __init__(self, stats, failed=()):
-        super().__init__(stats)
+    def __init__(self, stats, failed=(), warnings=()):
+        super().__init__(stats, warnings=warnings)
         self.failed = tuple(failed)
+
+    @property
+    def partial(self):
+        return bool(self.warnings or self.failed)
 
 
 def _merge_bucket(target, bucket):

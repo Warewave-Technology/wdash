@@ -78,10 +78,11 @@ def _reaches_no_store(source, scope):
     """An empty answer that is the role's doing, not the time range's.
 
     Only when the source HAS stores and this role reaches none of them. A
-    source with no trace index yet, or one whose index list could not be
-    read — the Elasticsearch catalogue answers [] then rather than raising —
-    told an administrator their role was the problem, and sent them to edit
-    roles during an outage.
+    source with no trace index yet told an administrator their role was the
+    problem, and sent them to edit roles during an outage. A store list that
+    could not be read is the other half: the Elasticsearch catalogue raises
+    then, and the except branch below is what keeps an outage from being
+    reported as the role's doing.
 
     Asked only after an empty answer, so a source whose store list costs a
     round trip pays it when there is something to explain.
@@ -248,7 +249,17 @@ def api_trace_logs(trace_id):
 
     scope = _scope()
     window = TimeWindow.of(request.args.get("time_range", DEFAULT_RANGE))
-    trace = trace_source.trace(trace_id, window, scope)
+    # A trace that cannot be looked for is not a trace that is not there. This
+    # call sat outside any try while the Elasticsearch catalogue answered []
+    # for a cluster it could not reach; now that it raises, an outage made
+    # this panel answer 500 and an HTML error page to a client reading JSON.
+    try:
+        trace = trace_source.trace(trace_id, window, scope)
+    except Exception as exc:
+        current_app.logger.error(f"Trace lookup for correlated logs failed: {exc}")
+        return jsonify({"records": [], "error": "Unable to load the trace.",
+                        "error_type": "trace_source_error",
+                        "details": str(exc)}), 503
     if trace is None or not trace.spans:
         return jsonify({"records": [], "error_type": "trace_not_found"}), 404
 
