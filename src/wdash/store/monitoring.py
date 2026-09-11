@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, insert, select, update
 
+from .secrets import may_follow
 from .schema import (
     agents, journey_screenshots, monitor_agents, monitor_results, monitors,
 )
@@ -212,11 +213,39 @@ class AgentRepository:
                 .values(enabled=bool(enabled)))
 
     def delete(self, agent_id):
+        """Remove an agent. Returns the names of the monitors it alone ran,
+        which are switched off in the same transaction.
+
+        A monitor assigned to nobody runs on every agent, so removing the one
+        agent a monitor was kept on handed it — decrypted credentials and
+        all — to every other agent, including the ones it was kept away
+        from, and a journey landed on agents with no browser. Measured: a
+        check assigned only to `dmz-browser` was in `branch-office`'s
+        configuration, token and all, the moment `dmz-browser` was removed.
+
+        Refusing the removal is not the answer: an agent is removed because
+        it is lost or compromised, and that has to work at once. So the
+        monitor stops instead of spreading, and the caller says which.
+        """
         with self._engine.begin() as connection:
+            holders = {}
+            for monitor_id, holder in connection.execute(select(
+                    monitor_agents.c.monitor_id, monitor_agents.c.agent_id)):
+                holders.setdefault(monitor_id, set()).add(holder)
+            alone = sorted(m for m, held in holders.items() if held == {agent_id})
+            names = []
+            if alone:
+                connection.execute(
+                    update(monitors).where(monitors.c.id.in_(alone))
+                    .values(enabled=False, updated_at=_now()))
+                names = sorted(connection.execute(
+                    select(monitors.c.name).where(monitors.c.id.in_(alone)))
+                    .scalars())
             connection.execute(
                 delete(monitor_agents).where(
                     monitor_agents.c.agent_id == agent_id))
             connection.execute(delete(agents).where(agents.c.id == agent_id))
+        return names
 
     # ---------- reading ----------
 
@@ -528,6 +557,14 @@ class MonitorRepository:
                 values.get("timeout_seconds", current["timeout_seconds"]))
             values.update(kind=kind, target=target,
                           interval_seconds=interval, timeout_seconds=timeout)
+            if (steps is None and "secrets" not in values
+                    and current["has_credentials"]
+                    and not may_follow(current["target"], target)):
+                # Not carried to a new destination: a blank box means "keep
+                # it", and keeping it meant retargeting a check at a listener
+                # collected its sealed headers, cookies and password without
+                # any of them ever being shown. Rule 4 in store/secrets.py.
+                values["secrets"] = None
         values["updated_at"] = _now()
 
         with self._engine.begin() as connection:

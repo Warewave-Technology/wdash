@@ -101,7 +101,12 @@ def config():
 def _request_for(store, monitor):
     """The public request configuration with its credentials filled back in."""
     request = dict(monitor.get("request") or {})
-    if not monitor.get("has_credentials"):
+    # A journey's secrets are a journey's, and go with its steps (see
+    # `_journey_for`). Read as request secrets, one named `headers` was
+    # merged as a header dictionary: the configuration answered 500 to every
+    # agent that ran the journey — every agent, if it was unassigned — so
+    # none of them picked up anything, http checks included.
+    if monitor.get("kind") == "browser" or not monitor.get("has_credentials"):
         return request
 
     secrets = store.monitors.credentials(monitor["id"])

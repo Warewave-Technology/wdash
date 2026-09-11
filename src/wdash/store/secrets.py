@@ -18,6 +18,12 @@ Design rules, in order of importance:
    who reaches an admin session.
 3. **Key rotation must be possible.** Ciphertext carries the key id it was
    sealed with, so a rotation can decrypt old values while writing new ones.
+4. **A secret goes where it was stored for.** Rule 2 is not kept by a page
+   that never shows a password if the same page can point it somewhere else:
+   repointing a source's URL, the LDAP server or a monitor's target at a
+   listener, and leaving the password box blank to keep the password, sent
+   it there. So a stored secret stays only while its destination does (see
+   `may_follow`); moving it needs the secret typed again.
 
 Fernet (AES-128-CBC + HMAC) from `cryptography`: authenticated, versioned, and
 not something to hand-roll.
@@ -26,6 +32,7 @@ not something to hand-roll.
 import base64
 import hashlib
 import os
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -36,6 +43,41 @@ KEY_VARIABLE = "WDASH_ENCRYPTION_KEY"
 #: Prefix on stored ciphertext, so a value's format is self-describing and a
 #: future algorithm change is detectable rather than a decryption failure.
 PREFIX = "wdash:v1:"
+
+
+#: The port each scheme implies, for comparing destinations.
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ldap": 389, "ldaps": 636}
+
+#: A scheme and the encrypted one it may move to on the same host.
+_UPGRADES = {"http": "https", "ldap": "ldaps"}
+
+
+def destination(url):
+    """(scheme, host, port) of a URL, with the port its scheme implies."""
+    parts = urlsplit((url or "").strip())
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return scheme, (parts.hostname or "").lower(), (
+        port or _DEFAULT_PORTS.get(scheme))
+
+
+def may_follow(stored_for, new_url):
+    """Whether a secret stored for `stored_for` may be sent to `new_url`.
+
+    The same destination, or the same host with encryption turned on: on
+    the same port, or from one scheme's default port to the other's. A path
+    is not a destination — the same server gets the secret either way.
+    """
+    old, new = destination(stored_for), destination(new_url)
+    if old == new:
+        return True
+    if old[1] != new[1] or _UPGRADES.get(old[0]) != new[0]:
+        return False
+    return old[2] == new[2] or (old[2] == _DEFAULT_PORTS[old[0]]
+                                and new[2] == _DEFAULT_PORTS[new[0]])
 
 
 class SecretsUnavailable(RuntimeError):

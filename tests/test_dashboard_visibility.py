@@ -147,6 +147,70 @@ class ListingTest(unittest.TestCase):
         return [name for name in ("AppBoard", "SecretBoard", "InfraBoard")
                 if name.encode() in page]
 
+    def test_recent_logs_has_the_gates_every_other_panel_has(self):
+        """Measured: for alice's PRIVATE dashboard, a viewer who was not its
+        author got 404 from data, log-levels, patterns and stats, and 200
+        from recent-logs, with the dashboard's query run for them."""
+        manager = self.app.dashboard_manager
+        manager.create_dashboard("Fraud", "", 'service:"fraud"', "alice",
+                                 ["app-*"], visibility=PRIVATE)
+        fraud = next(d.id for d in manager.get_all_dashboards()
+                     if d.name == "Fraud")
+        es = self.app.hub.logs()._es
+        client = self.client_for("u", ["app-*"])
+        before = len(es.searches)
+        for suffix in ("data", "log-levels", "recent-logs"):
+            with self.subTest(suffix=suffix):
+                reply = client.get(f"/api/dashboard/{fraud}/{suffix}")
+                self.assertEqual(reply.status_code, 404)
+        self.assertEqual(len(es.searches), before, "the private query was run")
+
+    def test_recent_logs_says_when_there_is_no_such_dashboard(self):
+        """Not an empty list: that is the answer for a dashboard with nothing
+        recent in it, and the two were indistinguishable."""
+        client = self.client_for("u", ["app-*"])
+        for dashboard in ("does-not-exist", self.ids["SecretBoard"]):
+            with self.subTest(dashboard=dashboard):
+                reply = client.get(f"/api/dashboard/{dashboard}/recent-logs")
+                self.assertEqual(reply.status_code, 404)
+
+    def test_recent_logs_for_its_author_still_works(self):
+        client = self.client_for("alice", ["app-*"])
+        reply = client.get(f"/api/dashboard/{self.ids['AppBoard']}/recent-logs")
+        self.assertEqual(reply.status_code, 200)
+        self.assertIn("records", reply.get_json())
+
+    def test_recent_logs_with_a_query_that_does_not_parse_is_a_400(self):
+        manager = self.app.dashboard_manager
+        manager.create_dashboard("Bad", "", "service:(", "alice", ["app-*"])
+        bad = next(d.id for d in manager.get_all_dashboards() if d.name == "Bad")
+        client = self.client_for("alice", ["app-*"])
+        reply = client.get(f"/api/dashboard/{bad}/recent-logs")
+        self.assertEqual(reply.status_code, 400)
+        self.assertEqual(reply.get_json()["error_type"], "invalid_query")
+
+    def test_recent_logs_when_the_source_cannot_answer_is_a_503(self):
+        client = self.client_for("alice", ["app-*"])
+        from wdash.api import dashboard_routes
+        original = dashboard_routes._targets
+        calls = []
+
+        def failing(dashboard, scope):
+            calls.append(dashboard.id)
+            # The visibility check asks first; it treats a failure as
+            # unreachable, so the endpoint's own call is the second.
+            if len(calls) > 1:
+                raise ConnectionError("cluster down")
+            return original(dashboard, scope)
+        dashboard_routes._targets = failing
+        try:
+            reply = client.get(
+                f"/api/dashboard/{self.ids['AppBoard']}/recent-logs")
+        finally:
+            dashboard_routes._targets = original
+        self.assertEqual(reply.status_code, 503)
+        self.assertNotIn("records", reply.get_json())
+
     def test_a_reader_sees_only_dashboards_over_data_they_can_reach(self):
         client = self.client_for("bob", ["app-*"])
         self.assertEqual(self.names_seen(client), ["AppBoard"])

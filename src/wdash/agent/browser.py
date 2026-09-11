@@ -22,7 +22,7 @@ import logging
 import time
 
 from ..hub.models import STEP_FAILED, STEP_PASSED, STEP_SKIPPED
-from ..journeys import StepError, describe, parse, resolve
+from ..journeys import SECRET_PATTERN, StepError, describe, parse, resolve
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,13 @@ SCREENSHOT_QUALITY = 60
 #:
 #: Two seconds. A picture is worth having and not worth waiting for.
 SCREENSHOT_TIMEOUT_MS = 2_000
+
+#: Shortest secret looked for in what a page shows. Anything shorter matches
+#: ordinary text; such a secret is still covered where the journey typed it.
+MIN_SECRET_SEEN = 4
+
+#: The fields a page could be holding a secret in.
+FIELDS = "input, textarea"
 
 
 def run_journey(monitor, secrets=None, launcher=None, now=None):
@@ -141,7 +148,7 @@ def _walk(page, steps, plan, secrets, hidden, budget, clock):
             row["status"] = STEP_FAILED
             row["error"] = "the journey ran out of time before this step"
             return (f"step {row['index']} ({row['description']}): the journey "
-                    f"ran out of time"), _capture(page)
+                    f"ran out of time"), _capture(page, steps, hidden)
 
         timeout = min(step.timeout, int(left * 1000))
         step_clock = time.monotonic()
@@ -152,7 +159,7 @@ def _walk(page, steps, plan, secrets, hidden, budget, clock):
             row["duration_us"] = _since(step_clock)
             row["error"] = _clean(exc, hidden, step.kind)
             return (f"step {row['index']} ({row['description']}): "
-                    f"{row['error']}"), _capture(page)
+                    f"{row['error']}"), _capture(page, steps, hidden)
         row["status"] = STEP_PASSED
         row["duration_us"] = _since(step_clock)
     return None, None
@@ -243,25 +250,61 @@ def _text(page):
         return ""
 
 
-def _capture(page):
-    """A picture of the failure, if one can still be taken.
+def _capture(page, steps=(), hidden=()):
+    """A picture of the failure, if one can still be taken — with nothing in
+    it a journey secret was typed into.
+
+    Password boxes draw dots, but a secret goes wherever a journey types it:
+    an API key, an account number or a user name in a plain text field was
+    photographed as typed and served to anybody who may read monitors, while
+    the secret itself is sealed and admin-only. So every field the journey
+    typed a secret into is painted over, and so is any field holding one now.
+    A page that shows one as text — "signed in with key …" — gets no picture
+    at all: a secret in the text could be anywhere on it.
 
     Best effort by design: the browser may have crashed, which is exactly when
-    a screenshot is impossible and least worth failing the result over.
+    a screenshot is impossible and least worth failing the result over. And
+    when what to cover cannot be worked out, there is no picture: a
+    photograph is worth having and not worth leaking.
     """
+    looked = [h for h in hidden if len(h) >= MIN_SECRET_SEEN]
     try:
         import base64
+        if looked:
+            shown = page.inner_text("body", timeout=SCREENSHOT_TIMEOUT_MS)
+            if any(secret in shown for secret in looked):
+                logger.info("no screenshot: a journey secret is on the page")
+                return None
         raw = page.screenshot(type="jpeg", quality=SCREENSHOT_QUALITY,
                               full_page=False,
                               timeout=SCREENSHOT_TIMEOUT_MS,
                               # A page mid-animation is one more thing the
                               # capture would wait for.
-                              animations="disabled")
+                              animations="disabled",
+                              mask=_masks(page, steps, looked))
     except Exception as exc:
         logger.debug(f"no screenshot: {exc}")
         return None
     return {"base64": base64.b64encode(raw).decode("ascii"),
             "content_type": "image/jpeg"}
+
+
+def _masks(page, steps, looked):
+    """The fields to paint over.
+
+    Values are read out and compared here, not searched for in the page: a
+    secret handed to the page's JavaScript is a secret handed to the page,
+    and one used on another site in the same journey was never its to see.
+    """
+    typed = sorted({step.selector for step in steps if step.selector
+                    and SECRET_PATTERN.search(step.value or "")})
+    masks = [page.locator(selector) for selector in typed]
+    if looked:
+        fields = page.locator(FIELDS)
+        values = fields.evaluate_all("all => all.map(f => String(f.value || ''))")
+        masks += [fields.nth(index) for index, value in enumerate(values)
+                  if any(secret in value for secret in looked)]
+    return masks
 
 
 def _clean(exception, hidden, kind=""):

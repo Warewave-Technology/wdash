@@ -204,6 +204,76 @@ class DeliveryTest(AlertingTestCase):
         # The reason survives; only the credential goes.
         self.assertIn("400", message)
 
+    def _refusal(self, url):
+        channel = self.store.channels.create("dead", url=url)
+        with self.assertRaises(DeliveryError) as caught:
+            send(channel, self.store.channels.credentials(channel["id"]), {})
+        return str(caught.exception)
+
+    def test_a_url_ending_in_a_slash_keeps_its_credential(self):
+        """Zapier's catch hooks end in '/'. The last segment was then empty,
+        and the token before it went into the history as sent — measured,
+        the whole path was in the message."""
+        message = self._refusal(
+            "http://127.0.0.1:59997/hooks/catch/1234567/XXSECRETXX1/")
+        self.assertNotIn("XXSECRETXX1", message)
+        self.assertIn("127.0.0.1", message, "the reason lost its host")
+
+    def test_every_long_segment_is_a_credential(self):
+        """Slack's is three segments, not one."""
+        message = self._refusal(
+            "http://127.0.0.1:59997/services/T0SECRET01/B0SECRET02/last-part-x")
+        for secret in ("T0SECRET01", "B0SECRET02", "last-part-x"):
+            self.assertNotIn(secret, message)
+
+    def test_a_token_in_the_query_or_the_user_part_is_redacted(self):
+        """Quoted back by a receiver, the way the whole-URL case is."""
+        port = self.receiver._server.server_port
+        url = f"http://hook:PASSWORD9876@127.0.0.1:{port}/h?token=QUERYSECRET1&x=1"
+        channel = self.store.channels.create("quoting", url=url)
+        self.receiver.status = 400
+        self.receiver.body = f"rejected {url}".encode()
+        with self.assertRaises(DeliveryError) as caught:
+            send(channel, self.store.channels.credentials(channel["id"]), {})
+        message = str(caught.exception)
+        self.assertNotIn("QUERYSECRET1", message)
+        self.assertNotIn("PASSWORD9876", message)
+        self.assertIn("400", message)
+
+    def test_a_credential_is_redacted_as_requests_writes_it(self):
+        """`requests` puts the path into a connection error percent-encoded,
+        and a token with a character it encodes was left in that form."""
+        message = self._refusal("http://127.0.0.1:59997/hooks/s\u00e9cret-tok\u00e9n-1")
+        self.assertNotIn("s%C3%A9cret-tok%C3%A9n-1", message)
+        self.assertNotIn("s\u00e9cret-tok\u00e9n-1", message)
+
+    def test_a_short_path_is_not_taken_for_a_credential(self):
+        """`/hook` is a word; blanking it would take the reason with it."""
+        port = self.receiver._server.server_port
+        channel = self.store.channels.create(
+            "short", url=f"http://127.0.0.1:{port}/hook")
+        self.receiver.status = 410
+        self.receiver.body = b"this webhook is disabled"
+        with self.assertRaises(DeliveryError) as caught:
+            send(channel, self.store.channels.credentials(channel["id"]), {})
+        self.assertIn("this webhook is disabled", str(caught.exception))
+
+    def test_a_sealed_header_of_any_name_is_redacted(self):
+        """Any header can be sealed; only three names were redacted.
+        A receiver that quoted a custom token put it in the history."""
+        channel = self.store.channels.create(
+            "hook", url=self.receiver.url,
+            secret_headers={"X-Auth-Token": "SEALED-TOKEN-VALUE"})
+        self.receiver.status = 401
+        self.receiver.body = b"bad X-Auth-Token: SEALED-TOKEN-VALUE"
+        with self.assertRaises(DeliveryError) as caught:
+            send(channel, self.store.channels.credentials(channel["id"]), {})
+        message = str(caught.exception)
+        self.assertNotIn("SEALED-TOKEN-VALUE", message)
+        self.assertIn("401", message)
+        self.assertEqual(self.receiver.received[0]["headers"]["X-Auth-Token"],
+                         "SEALED-TOKEN-VALUE", "the header was not sent")
+
     def test_an_unreachable_receiver_is_a_delivery_error(self):
         channel = self.store.channels.create(
             "dead", url="http://127.0.0.1:59997/hook")

@@ -215,6 +215,58 @@ def config_page():
 # Sources
 # --------------------------------------------------------------------------
 
+def _where(url):
+    """scheme://host:port of a URL — where a secret sent to it goes."""
+    from ..store.secrets import destination
+    scheme, host, port = destination(url)
+    return f"{scheme}://{host}:{port}" if port else f"{scheme}://{host}"
+
+
+def _moves_secret(stored, submitted, url_key, verify_key=None):
+    """What a change does to where a stored secret is sent, in words.
+
+    Empty when nothing, and the secret may stay. Otherwise it may not: a
+    blank password box means "keep it", and keeping it for a new destination
+    is how a stored password is collected without ever being shown — see
+    rule 4 in store/secrets.py. Turning certificate checks off counts: the
+    destination is then whoever answers for it.
+
+    The account is not part of it. A new username or client id sends the
+    secret to the server it was saved for, which already has it.
+    """
+    from ..store.secrets import may_follow
+    moved = []
+    if not may_follow(stored.get(url_key), submitted.get(url_key)):
+        moved.append(f"points it at {_where(submitted.get(url_key))} instead "
+                     f"of {_where(stored.get(url_key))}")
+    if (verify_key and stored.get(verify_key, True) is not False
+            and not submitted.get(verify_key)):
+        moved.append("turns certificate checks off")
+    return moved
+
+
+def _without_password(url):
+    """A URL with any password in it replaced, for a row people read."""
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(url or "")
+    if parts.password is None:
+        return url
+    netloc = parts.netloc.rsplit("@", 1)
+    return urlunsplit(parts._replace(
+        netloc=f"{parts.username}:***@{netloc[-1]}"))
+
+
+def _source_state(source, **extra):
+    """What a source is after a change, for the audit row: all of it but
+    the password, which is recorded as there or not."""
+    config = dict(source.get("config") or {})
+    if config.get("url"):
+        config["url"] = _without_password(config["url"])
+    return {"name": source["name"], "kind": source["kind"],
+            "signals": source.get("signals"), "enabled": source.get("enabled"),
+            "config": config, "has_secret": source.get("has_secret"), **extra}
+
+
 def _pairs(text):
     """`Name: value` a line at a time.
 
@@ -295,6 +347,19 @@ def save_source():
     if source_id:
         existing = store.sources.get(source_id)
         new_name = (form.get("name") or "").strip()
+        moved = (_moves_secret(existing["config"], config, "url",
+                               "verify_certs")
+                 if existing and existing["has_secret"] and not password
+                 else [])
+        if moved:
+            flash(f"The stored password is only sent where it was saved for, "
+                  f"and this change {' and '.join(moved)}. Type the password "
+                  f"again to save it. Nothing was saved.", "error")
+            _audit("source update refused", subject=f"source:{source_id}",
+                   state={"name": existing["name"],
+                          "url": _without_password(config.get("url")),
+                          "reason": moved})
+            return redirect(url_for("config.config_page"))
         if existing and new_name != existing["name"]:
             naming = _roles_naming_source(store, existing["name"], new_name,
                                           existing.get("kind"))
@@ -319,7 +384,9 @@ def save_source():
             if saved is None:
                 flash("That source no longer exists.", "error")
                 return redirect(url_for("config.config_page"))
-            _audit("source updated", name=saved["name"], id=source_id)
+            _audit("source updated", subject=f"source:{source_id}",
+                   state=_source_state(saved, previous_name=existing["name"],
+                                       secret_replaced=bool(password)))
         else:
             new_name = (form.get("name") or "").strip()
             naming = _roles_naming_source(store, new_name) if new_name else []
@@ -339,7 +406,8 @@ def save_source():
                 name=form.get("name"), signal=signals,
                 kind=form.get("kind"), config=config, secret=password,
                 enabled=form.get("enabled") == "on")
-            _audit("source created", name=saved["name"], kind=saved["kind"])
+            _audit("source created", subject=f"source:{saved['id']}",
+                   state=_source_state(saved))
         flash(f"Source '{saved['name']}' saved{_reloaded()}", "success")
     except SecretsUnavailable as exc:
         flash(str(exc).split("\n")[0], "error")
@@ -413,7 +481,8 @@ def delete_source(source_id):
     store = _store()
     source = store.sources.get(source_id)
     if source and store.sources.delete(source_id):
-        _audit("source deleted", name=source["name"], id=source_id)
+        _audit("source deleted", subject=f"source:{source_id}",
+               state=_source_state(source))
         flash(f"Source '{source['name']}' deleted{_reloaded()}", "success")
     else:
         flash("That source no longer exists.", "warning")
@@ -443,10 +512,29 @@ def test_source():
         return jsonify({"ok": False, "error": str(exc)}), 200
 
     password = payload.get("password")
-    if not password and payload.get("id"):
-        # Testing a saved source without retyping its password.
+    stored = store.sources.get(payload["id"]) if payload.get("id") else None
+    reused = False
+    if not password and stored and stored["has_secret"]:
+        # Testing a saved source without retyping its password — the
+        # connection it was saved for, and no other. The form's values used
+        # to be taken as they came: any URL, the stored password, and a
+        # listener of an administrator's choosing received it, with nothing
+        # written down.
+        moved = _moves_secret(stored["config"], {**payload, "url": url},
+                              "url", "verify_certs")
+        if payload.get("kind") != stored["kind"]:
+            moved.append("changes the type")
+        if moved:
+            _audit("source test refused", subject=f"source:{stored['id']}",
+                   state={"target": _where(url), "reason": moved})
+            return jsonify({
+                "ok": False,
+                "message": f"The stored password is only sent where it was "
+                           f"saved for, and this test {' and '.join(moved)}. "
+                           f"Type the password to test it."}), 200
         try:
-            password = store.sources.credential(payload["id"])
+            password = store.sources.credential(stored["id"])
+            reused = password is not None
         except Exception:
             password = None
 
@@ -455,6 +543,13 @@ def test_source():
                           username=payload.get("username"),
                           password=password,
                           verify_certs=bool(payload.get("verify_certs")))
+    # Every test, not only the ones that use a stored password: it is the
+    # server making a request to a host an administrator named.
+    _audit("source tested",
+           subject=f"source:{stored['id']}" if stored else None,
+           state={"kind": payload.get("kind"), "target": _where(url),
+                  "username": payload.get("username") or "",
+                  "stored_password": reused, "ok": bool(result.get("ok"))})
     return jsonify(result), 200
 
 
@@ -505,6 +600,20 @@ def save_auth():
         flash("Unknown provider.", "error")
         return redirect(url_for("config.config_page"))
 
+    held = store.settings.all(prefix=key).get(key) or {}
+    url_key, verify_key, what = (
+        ("discovery_url", None, "client secret") if key == OIDC
+        else ("server", "verify_certs", "bind password"))
+    moved = (_moves_secret(held.get("value") or {}, value, url_key, verify_key)
+             if held.get("has_secret") and secret is None else [])
+    if moved:
+        flash(f"The stored {what} is only sent where it was saved for, and "
+              f"this change {' and '.join(moved)}. Type the {what} again to "
+              f"save it. Nothing was saved.", "error")
+        _audit(f"{label} settings refused", subject=f"auth:{which}",
+               state={**value, "reason": moved})
+        return redirect(url_for("config.config_page"))
+
     try:
         store.settings.set(key, value, secret=secret,
                            updated_by=current_user.username)
@@ -512,7 +621,10 @@ def save_auth():
         flash(str(exc).split("\n")[0], "error")
         return redirect(url_for("config.config_page"))
 
-    _audit(f"{label} settings updated", enabled=value.get("enabled"))
+    # The resulting state, as for roles and mappings: which provider this
+    # installation trusted, and from when, is what an investigation asks.
+    _audit(f"{label} settings updated", subject=f"auth:{which}",
+           state={**value, "secret_replaced": secret is not None})
     flash(f"{label} settings saved and in force now — no restart needed.",
           "success")
     return redirect(url_for("config.config_page"))
@@ -1311,14 +1423,22 @@ def delete_agent(agent_id):
     if agent is None:
         flash("No such agent.", "error")
     else:
-        store.agents.delete(agent_id)
-        _audit("agent removed", subject=agent["name"])
+        stopped = store.agents.delete(agent_id)
+        _audit("agent removed", subject=agent["name"],
+               monitors_switched_off=stopped)
         # Results are NOT deleted with it. They are measurements of a target,
         # not property of the agent, and throwing away history because the
         # thing that collected it was retired is how an investigation loses
         # the week before the incident.
-        flash(f"Agent '{agent['name']}' removed. Its past results are kept.",
-              "success")
+        if stopped:
+            flash(f"Agent '{agent['name']}' removed. Its past results are "
+                  f"kept. These checks ran only on it and are now switched "
+                  f"off: {', '.join(stopped)}. A check assigned to no agent "
+                  f"runs on every one, so give them an agent before switching "
+                  f"them back on.", "warning")
+        else:
+            flash(f"Agent '{agent['name']}' removed. Its past results are "
+                  f"kept.", "success")
     return redirect(url_for("config.config_page") + "#tab-monitors")
 
 
@@ -1398,14 +1518,25 @@ def save_monitor():
             for key, value in form.items()
             if key.startswith("journey_secret_")}
 
+    dropped = ""
     try:
         if monitor_id:
+            before = store.monitors.get(monitor_id)
             saved = store.monitors.update(
                 monitor_id, enabled=form.get("enabled") == "on", **fields)
             if saved is None:
                 flash("No such monitor.", "error")
                 return redirect(url_for("config.config_page") + "#tab-monitors")
-            _audit("monitor updated", subject=saved["name"])
+            if (before and before["has_credentials"]
+                    and not saved["has_credentials"] and saved["kind"] != "browser"):
+                dropped = (f" Its stored credentials were for "
+                           f"{_where(before['target'])} and were not carried "
+                           f"to {_where(saved['target'])}: type them again if "
+                           f"that needs them.")
+            _audit("monitor updated", subject=saved["name"],
+                   target=_without_password(saved["target"]),
+                   has_credentials=saved["has_credentials"],
+                   credentials_dropped=bool(dropped))
         else:
             saved = store.monitors.create(
                 created_by=getattr(current_user, "username", None), **fields)
@@ -1416,7 +1547,8 @@ def save_monitor():
 
     flash(f"Monitor '{saved['name']}' saved. Agents pick it up within a "
           f"minute — they poll for configuration rather than being pushed to, "
-          f"which is what lets them run behind NAT.", "success")
+          f"which is what lets them run behind NAT.{dropped}",
+          "warning" if dropped else "success")
     return redirect(url_for("config.config_page") + "#tab-monitors")
 
 

@@ -70,7 +70,8 @@ def send(channel, secrets, body, session=None):
     headers = {"Content-Type": "application/json",
                "User-Agent": "wdash-alerts"}
     headers.update(config.get("headers") or {})
-    headers.update((secrets or {}).get("headers") or {})
+    sealed = (secrets or {}).get("headers") or {}
+    headers.update(sealed)
 
     import requests
     client = session or requests
@@ -78,7 +79,7 @@ def send(channel, secrets, body, session=None):
         response = client.post(url, timeout=TIMEOUT, headers=headers,
                                data=json.dumps(body))
     except Exception as exc:
-        raise DeliveryError(_redact(str(exc), url, headers)) from exc
+        raise DeliveryError(_redact(str(exc), url, headers, sealed)) from exc
 
     if response.status_code >= 400:
         # The body, trimmed. A webhook that refuses usually says why — "no
@@ -87,37 +88,60 @@ def send(channel, secrets, body, session=None):
         detail = (response.text or "")[:300].strip()
         raise DeliveryError(
             _redact(f"the receiver answered {response.status_code}"
-                    f"{': ' + detail if detail else ''}", url, headers))
+                    f"{': ' + detail if detail else ''}", url, headers,
+                    sealed))
     return response.status_code
 
 
-def _redact(text, url, headers):
+#: Header names that carry a credential wherever they are written.
+_SECRET_HEADERS = ("authorization", "x-api-key", "cookie")
+
+#: Shorter than this, a part of a URL is a word, not a credential: `/hook`
+#: and `/alerts` must not blank out ordinary words in the message.
+_URL_PART_MIN = 9
+
+
+def _redact(text, url, headers, sealed=None):
     """Keep the credential out of the stored error.
 
     The failure is written to the alert history and shown on a screen. A
     webhook URL is itself a secret for Slack and Teams — the path IS the
-    credential — so it never appears in a message.
+    credential — so it never appears in a message. Nor does any header that
+    was sealed, whatever it is called.
     """
     text = str(text)
-    if url:
-        # The last path segment, wherever it appears — in a whole URL echoed
-        # back by the receiver, or in the host-and-path form `requests`
-        # renders into a connection error. That is where the credential lives
-        # for Slack, Teams and every webhook shaped like them.
-        #
-        # There WAS a second line replacing the whole URL as well. It could
-        # not be made to fail: every message that contains the URL contains
-        # the tail, so this rule had already redacted it. Untestable
-        # redundancy is the thing somebody edits next while believing it does
-        # something.
-        #
-        # The length guard keeps a short path — `/hook`, `/alerts` — from
-        # blanking out ordinary words in the message. A path that short is not
-        # a credential.
-        tail = url.rsplit("/", 1)[-1]
-        if len(tail) > 8:
-            text = text.replace(tail, "***")
-    for name, value in (headers or {}).items():
-        if name.lower() in ("authorization", "x-api-key", "cookie") and value:
-            text = text.replace(str(value), "***")
+    values = _url_secrets(url) if url else []
+    values += [str(value) for value in (sealed or {}).values() if value]
+    values += [str(value) for name, value in (headers or {}).items()
+               if name.lower() in _SECRET_HEADERS and value]
+    # Longest first, so a value that contains another is not left in part.
+    for value in sorted(set(values), key=len, reverse=True):
+        if len(value) > 3:
+            text = text.replace(value, "***")
     return text
+
+
+def _url_secrets(url):
+    """Every part of a webhook URL that could be its credential.
+
+    Not only the last segment. Slack keeps it in the last three, Zapier's
+    catch hooks end in a slash — after which the last segment is empty and
+    the one before it went into the history as sent — and others put it in
+    the query string or the user part. The host stays: "could not connect
+    to hooks.example" is the reason, and the host is on the screen already.
+
+    Each part both as written and percent-encoded, which is how `requests`
+    renders a URL into a connection error.
+    """
+    from urllib.parse import parse_qsl, quote, unquote, urlsplit
+    parts = urlsplit(url)
+    pieces = [unquote(segment) for segment in parts.path.split("/")]
+    pieces += [value for _, value in parse_qsl(parts.query,
+                                               keep_blank_values=True)]
+    pieces += [parts.username or "", parts.password or "",
+               unquote(parts.fragment)]
+    found = []
+    for piece in pieces:
+        if len(piece) >= _URL_PART_MIN:
+            found += [piece, quote(piece, safe=""), quote(piece)]
+    return found

@@ -31,6 +31,7 @@ from urllib.parse import parse_qs
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from wdash.agent import browser  # noqa: E402
 from wdash.agent.browser import _clean, run_journey
 from wdash.hub.models import (
     JourneyRun, STEP_FAILED, STEP_PASSED, STEP_SKIPPED, StepResult,
@@ -143,12 +144,16 @@ class StepLanguageTest(unittest.TestCase):
 class _FakePage:
     """A page that fails where the test says and records what it was asked."""
 
-    def __init__(self, fail_at=None, error=None, url="https://x.example/"):
+    def __init__(self, fail_at=None, error=None, url="https://x.example/",
+                 text="hello", field_values=()):
         self.fail_at = fail_at
         self.error = error or RuntimeError("boom")
         self.url = url
+        self.text = text
+        self.field_values = list(field_values)
         self.calls = []
         self.screenshots = 0
+        self.masked = None
 
     def _step(self, name, *args):
         self.calls.append((name, args))
@@ -165,16 +170,36 @@ class _FakePage:
     def fill(self, selector, value, **kw):
         self._step("fill", selector, value)
 
-    def inner_text(self, selector):
-        self._step("inner_text", selector)
-        return "hello"
+    def inner_text(self, selector, timeout=None):
+        # With a timeout it is the photograph's look at the page, which is
+        # not a step and must not count as one.
+        if timeout is None:
+            self._step("inner_text", selector)
+        return self.text
 
     def wait_for_timeout(self, ms):
         pass
 
-    def screenshot(self, **kw):
+    def locator(self, selector):
+        return _FakeLocator(self, selector)
+
+    def screenshot(self, mask=(), **kw):
         self.screenshots += 1
+        self.masked = [m.selector for m in mask]
         return b"\xff\xd8\xff" + b"jpeg-bytes"
+
+
+class _FakeLocator:
+    """Enough of a Playwright locator to say what would be painted over."""
+
+    def __init__(self, page, selector):
+        self.page, self.selector = page, selector
+
+    def evaluate_all(self, script):
+        return list(self.page.field_values)
+
+    def nth(self, index):
+        return _FakeLocator(self.page, f"{self.selector} >> nth={index}")
 
 
 class _Launcher:
@@ -251,6 +276,54 @@ class StepBlameTest(unittest.TestCase):
                                 secrets={"password": PASSWORD})
         self.assertEqual(page.screenshots, 1)
         self.assertIn("screenshot", result)
+
+    def test_the_fields_a_secret_was_typed_into_are_painted_over(self):
+        _, page = _journey(SIGN_IN, fail_at=4, secrets={"password": PASSWORD})
+        self.assertEqual(page.masked, ["#password"])
+
+    def test_a_field_holding_a_secret_now_is_painted_over(self):
+        """A page that copies a key into a second box, or one the browser
+        filled from the first: the journey never typed there."""
+        page = _FakePage(fail_at=4,
+                         field_values=["ops@x.example", f"Bearer {PASSWORD}", ""])
+        run_journey({"id": "m1", "timeout_seconds": 30, "steps": SIGN_IN},
+                    secrets={"password": PASSWORD}, launcher=_Launcher(page))
+        self.assertIn(f"{browser.FIELDS} >> nth=1", page.masked)
+        self.assertEqual(len(page.masked), 2, page.masked)
+
+    def test_a_page_showing_a_secret_is_not_photographed(self):
+        """In the text it could be anywhere, so nothing is painted over —
+        there is no picture."""
+        page = _FakePage(fail_at=4, text=f"signed in with {PASSWORD}")
+        result = run_journey({"id": "m1", "timeout_seconds": 30,
+                              "steps": SIGN_IN},
+                             secrets={"password": PASSWORD},
+                             launcher=_Launcher(page))
+        self.assertEqual(page.screenshots, 0)
+        self.assertNotIn("screenshot", result)
+        self.assertEqual(result["status"], "down")
+
+    def test_a_short_secret_is_not_looked_for_in_the_text(self):
+        """"db" is in most sentences; a journey with it would never be
+        photographed. Where it was typed is still painted over."""
+        page = _FakePage(fail_at=4, text="the db is down")
+        run_journey({"id": "m1", "timeout_seconds": 30, "steps": SIGN_IN},
+                    secrets={"password": "db"}, launcher=_Launcher(page))
+        self.assertEqual(page.screenshots, 1)
+        self.assertEqual(page.masked, ["#password"])
+
+    def test_no_picture_when_what_to_cover_cannot_be_worked_out(self):
+        page = _FakePage(fail_at=4)
+
+        def broken(selector):
+            raise RuntimeError("the page went away")
+        page.locator = broken
+        result = run_journey({"id": "m1", "timeout_seconds": 30,
+                              "steps": SIGN_IN},
+                             secrets={"password": PASSWORD},
+                             launcher=_Launcher(page))
+        self.assertEqual(page.screenshots, 0)
+        self.assertNotIn("screenshot", result)
 
     def test_a_pass_is_not_photographed(self):
         """A picture a minute of a page that is fine, kept for a week."""
@@ -367,8 +440,21 @@ DASHBOARD = """<html><body><h1>Dashboard</h1>
 '1 item in your basket'">Add to basket</button><div id=b></div></body></html>"""
 
 
+#: A key typed into a plain text field, and a page that copies it into a
+#: second box and, on request, prints it.
+KEY_PAGE = """<html><body><h1>API settings</h1>
+<input id=key name=key style="width:30em"
+ oninput="document.getElementById('copy').value=this.value">
+<input id=copy style="width:30em">
+<button id=show onclick="document.getElementById('out').innerText=
+document.getElementById('key').value">Show</button><div id=out></div>
+</body></html>"""
+
+
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.startswith("/key"):
+            return self._send(KEY_PAGE)
         if self.path.startswith("/dashboard"):
             return self._send(DASHBOARD)
         if self.path.startswith("/slow"):
@@ -505,6 +591,44 @@ class RealBrowserTest(unittest.TestCase):
         self.assertEqual(image[:3], b"\xff\xd8\xff")
         self.assertGreater(len(image), 1000)
         self.assertEqual(result["screenshot"]["content_type"], "image/jpeg")
+
+    def _key_journey(self, typed, then=()):
+        """Type into the plain field, then fail: the picture is taken with
+        the value still on screen."""
+        steps = [{"kind": "goto", "value": self.base + "/key"},
+                 {"kind": "fill", "selector": "#key", "value": typed},
+                 *then,
+                 {"kind": "expect_selector", "selector": "#missing",
+                  "timeout_ms": 300}]
+        return run_journey({"id": "m1", "timeout_seconds": 10, "steps": steps},
+                           secrets={"api_key": "K3Y-AAAAAAAAAAAAAAAA",
+                                    "other": "K3Y-BBBBBBBBBBBBBBBB"})
+
+    def _picture(self, result):
+        self.assertEqual(result["status"], "down")
+        self.assertIn("screenshot", result, "no picture was taken")
+        return base64.b64decode(result["screenshot"]["base64"])
+
+    def test_a_key_in_a_plain_field_is_not_in_the_picture(self):
+        """Two runs typing two different keys produce the same picture: the
+        field and its copy are painted over. Two values that are no secret,
+        typed the same way, produce different pictures, which is what makes
+        the comparison able to see a key at all."""
+        masked = [self._picture(self._key_journey(f"{{{{ secret.{name} }}}}"))
+                  for name in ("api_key", "other")]
+        self.assertEqual(masked[0], masked[1],
+                         "a typed secret is visible in the screenshot")
+        shown = [self._picture(self._key_journey(value))
+                 for value in ("K3Y-CCCCCCCCCCCCCCCC", "K3Y-DDDDDDDDDDDDDDDD")]
+        self.assertNotEqual(shown[0], shown[1],
+                            "the comparison cannot see typed text")
+
+    def test_a_page_that_prints_a_key_is_not_photographed(self):
+        result = self._key_journey(
+            "{{ secret.api_key }}",
+            then=[{"kind": "click", "selector": "#show"}])
+        self.assertEqual(result["status"], "down")
+        self.assertNotIn("screenshot", result)
 
     def test_expect_text_fails_when_the_text_is_not_there(self):
         """The assertion has to be able to FAIL. Without this, deleting the
@@ -658,6 +782,27 @@ class JourneyPageTest(unittest.TestCase):
         return self.app.store.monitors.all()[0]
 
     # ---------- defining ----------
+
+    def test_a_secret_called_headers_leaves_the_agents_configuration_alone(self):
+        """Read as request secrets, a journey secret named `headers` was
+        merged as a header dictionary, and /api/agent/config answered 500 to
+        every agent that ran the journey — every agent, unassigned — so none
+        picked up anything, their http checks included."""
+        steps = [{"kind": "goto", "value": "https://shop.example/login"},
+                 {"kind": "fill", "selector": "#key",
+                  "value": "{{ secret.headers }}"},
+                 {"kind": "expect_url", "value": "/dashboard"}]
+        self._save(steps=steps, journey_secret_headers="hunter2")
+        self.app.store.monitors.create("health", "http",
+                                       "https://shop.example/health")
+        _, token = self.app.store.agents.create("probe")
+        reply = self.client.get("/api/agent/config",
+                                headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(reply.status_code, 200)
+        monitors = {m["name"]: m for m in reply.get_json()["monitors"]}
+        self.assertEqual(sorted(monitors), ["Sign in", "health"])
+        self.assertEqual(monitors["Sign in"]["request"], {})
+        self.assertEqual(monitors["Sign in"]["secrets"], {"headers": "hunter2"})
 
     def test_the_address_comes_from_the_first_step(self):
         """Not asked for twice. A form with a URL box and a `goto` step has

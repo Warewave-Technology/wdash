@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 #: assertion, not fill the agent's memory.
 MAX_BODY = 512 * 1024
 
+USER_AGENT = "wdash-agent"
+
 
 def _now():
     return datetime.now(timezone.utc)
@@ -70,14 +72,22 @@ def run_check(monitor, session=None):
 def _http(monitor, session=None):
     import requests
 
+    if session is not None:
+        return _http_with(session, monitor)
+    # A session of its own for the one check, as `requests.get` would have
+    # made: it is what keeps a cookie set during a redirect for the next hop.
+    with requests.Session() as client:
+        return _http_with(client, monitor)
+
+
+def _http_with(client, monitor):
     started = _now()
     clock = time.monotonic()
     timeout = monitor.get("timeout_seconds") or 10
     assertions = monitor.get("assertions") or {}
-    client = session or requests
 
     request = monitor.get("request") or {}
-    headers = {"User-Agent": "wdash-agent"}
+    headers = {"User-Agent": USER_AGENT}
     headers.update(request.get("headers") or {})
 
     auth = request.get("auth") or {}
@@ -88,13 +98,8 @@ def _http(monitor, session=None):
         headers["Authorization"] = f"Bearer {auth['token']}"
 
     try:
-        response = client.get(
-            monitor["target"], timeout=timeout, stream=True,
-            # Redirects followed, because a monitor that reports 301 as a
-            # failure reports every site that moved to https as down.
-            allow_redirects=True,
-            headers=headers, auth=credentials,
-            cookies=request.get("cookies") or None)
+        response = _get_following(client, monitor["target"], timeout, headers,
+                                  credentials, request.get("cookies") or None)
     except Exception as exc:
         elapsed = int((time.monotonic() - clock) * 1_000_000)
         # The certificate is read even though the request failed, and
@@ -136,6 +141,69 @@ def _http(monitor, session=None):
     return _result(monitor, started, "down" if failure else "up", failure,
                    duration_us=elapsed, http_status=response.status_code,
                    tls=certificate)
+
+
+#: Hops a check follows before it calls the target down.
+MAX_REDIRECTS = 10
+_REDIRECTS = (301, 302, 303, 307, 308)
+
+
+def _origin(url):
+    """(scheme, host, port), with the port a scheme implies filled in."""
+    from urllib.parse import urlsplit
+    parts = urlsplit(url)
+    scheme = (parts.scheme or "").lower()
+    return scheme, (parts.hostname or "").lower(), (
+        parts.port or {"http": 80, "https": 443}.get(scheme))
+
+
+def _at_home(home, url):
+    """Whether a hop to `url` may carry what the monitor was given to send.
+
+    Its own origin may, and so may the one hop nearly every site makes: from
+    http:// to https:// on the same host, where the secrets go on encrypted.
+    The other way, or to any other host or port, they may not.
+    """
+    here = _origin(url)
+    if here == home:
+        return True
+    return (home[0], home[2]) == ("http", 80) and here == ("https", home[1], 443)
+
+
+def _get_following(client, url, timeout, headers, credentials, cookies):
+    """GET `url`, following redirects by hand.
+
+    Redirects are followed, because a monitor that reports 301 as a failure
+    reports every site that moved to https as down. But `requests` follows
+    them with the request's own headers and cookies, and on a change of host
+    strips only `Authorization`: a target that redirected elsewhere — a
+    sign-in page on another domain, a CDN, an open redirect — was handed the
+    monitor's sealed X-Api-Key, X-Auth-Token and cookie.
+
+    So what the monitor was given to send goes to its own origin and nowhere
+    else (see `_at_home`); a hop anywhere else is asked for as a stranger
+    would ask. Cookies a site sets on the way are kept by the session, which
+    scopes them to the host that set them.
+    """
+    import requests
+    from urllib.parse import urljoin
+
+    home = _origin(url)
+    current = url
+    for _ in range(MAX_REDIRECTS + 1):
+        own = _at_home(home, current)
+        response = client.get(
+            current, timeout=timeout, stream=True, allow_redirects=False,
+            headers=headers if own else {"User-Agent": USER_AGENT},
+            auth=credentials if own else None,
+            cookies=cookies if own else None)
+        location = response.headers.get("location")
+        if response.status_code not in _REDIRECTS or not location:
+            return response
+        response.close()
+        current = urljoin(current, location)
+    raise requests.exceptions.TooManyRedirects(
+        f"more than {MAX_REDIRECTS} redirects")
 
 
 def _assert_http(response, body, elapsed_us, assertions):

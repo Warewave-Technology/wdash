@@ -940,29 +940,47 @@ def api_dashboard_heatmap(dashboard_id):
 @dashboard_bp.route("/api/dashboard/<dashboard_id>/recent-logs")
 @login_required
 def api_dashboard_recent_logs(dashboard_id):
+    """The newest records a dashboard reaches, behind the same gates as every
+    other panel.
+
+    It had none of them. Measured: a viewer who was not the author got 404
+    from data, log-levels, patterns and stats for somebody's PRIVATE
+    dashboard, and 200 from here, with its query run for them. A dashboard
+    that did not exist and one out of reach answered alike, with no records,
+    and a stored query that did not parse was a 500.
+    """
     if not current_user.has_permission("dashboard:view"):
         return jsonify({"error": "Access denied",
                         "error_type": "permission_denied"}), 403
 
     dashboard = _load(dashboard_id)
-    if not dashboard:
-        return jsonify({"records": []})
+    if not dashboard or not _may_view(dashboard):
+        return jsonify({"error": "Dashboard not found",
+                        "error_type": "dashboard_not_found"}), 404
 
     scope = _scope()
     try:
         _, _, allowed = _targets(dashboard, scope)
-    except Exception:
-        return jsonify({"records": []})
+    except SourceMissing as exc:
+        return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
+    except Exception as exc:
+        # Not "no records": the source could not say what the dashboard
+        # reaches, which is a different answer and needs a different look.
+        return jsonify({"error": str(exc),
+                        "error_type": "elasticsearch_connection"}), 503
     if not allowed:
         return jsonify({"records": []})
 
     # The previous version had NO time range here and scanned every index in
     # full. Fixed deliberately: the panel shows "recent records", so there is no
     # reason for an unbounded scan.
-    page = _logs(dashboard).search(
-        LogQuery(window=TimeWindow.of(request.args.get("time_range", "1h")),
-                 text=dashboard.query or "*",
-                 containers=tuple(allowed), limit=10,
-                 fields=DEFAULT_LOG_FIELDS),
-        scope)
+    try:
+        query = LogQuery(window=TimeWindow.of(request.args.get("time_range", "1h")),
+                         text=_effective_query(dashboard),
+                         containers=tuple(allowed), limit=10,
+                         fields=DEFAULT_LOG_FIELDS)
+    except QueryError as exc:
+        return jsonify({"error": f"Invalid dashboard query: {exc}",
+                        "error_type": "invalid_query"}), 400
+    page = _logs(dashboard).search(query, scope)
     return jsonify({"records": [r.to_dict() for r in page.records]})

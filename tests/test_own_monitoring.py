@@ -668,6 +668,101 @@ class ManagementPageTest(unittest.TestCase):
         self.assertEqual(self.app.store.agents.all(), [])
         self.assertEqual(self.app.store.results.count(), 1)
 
+    def _kept_on(self, *agents, name="internal-admin"):
+        return self.app.store.monitors.create(
+            name=name, kind="http", target="https://admin.internal/health",
+            agent_ids=[a["id"] for a in agents],
+            request={"auth": {"type": "bearer", "token": "s3cret-token"}})
+
+    def _sent_to(self, token):
+        return self.client.get(
+            "/api/agent/config",
+            headers={"Authorization": f"Bearer {token}"}).get_json()["monitors"]
+
+    def test_removing_the_one_agent_a_check_was_kept_on_stops_it(self):
+        """A check assigned to nobody runs on every agent. Removing the one
+        it was kept on handed it, token and all, to every other agent —
+        measured: `branch-office` was sent it, bearer token included, the
+        moment `dmz-browser` was removed."""
+        store = self.app.store
+        dmz, _ = store.agents.create("dmz-browser")
+        _, branch_token = store.agents.create("branch-office")
+        monitor = self._kept_on(dmz)
+        self.assertEqual(self._sent_to(branch_token), [])
+
+        self.client.post(f"/admin/agents/{dmz['id']}/delete")
+        # The flash itself: the page lists the check by name whatever the
+        # message says.
+        with self.client.session_transaction() as session:
+            said = " ".join(text for _, text in session.get("_flashes", []))
+        self.assertEqual(self._sent_to(branch_token), [],
+                         "the check spread to another agent")
+        self.assertFalse(store.monitors.get(monitor["id"])["enabled"])
+        self.assertIn("switched off: internal-admin", said)
+        row = [r for r in store.audit.recent() if r["action"] == "agent removed"][0]
+        self.assertEqual(row["state"]["monitors_switched_off"], ["internal-admin"])
+
+    def test_a_check_with_another_agent_left_keeps_running_there(self):
+        store = self.app.store
+        dmz, _ = store.agents.create("dmz-browser")
+        spare, spare_token = store.agents.create("dmz-spare")
+        _, branch_token = store.agents.create("branch-office")
+        monitor = self._kept_on(dmz, spare)
+        self.client.post(f"/admin/agents/{dmz['id']}/delete")
+        self.assertTrue(store.monitors.get(monitor["id"])["enabled"])
+        self.assertEqual([m["name"] for m in self._sent_to(spare_token)],
+                         ["internal-admin"])
+        self.assertEqual(self._sent_to(branch_token), [])
+
+    def test_a_check_assigned_to_nobody_is_left_alone(self):
+        """It already runs everywhere; removing an agent narrows that."""
+        store = self.app.store
+        dmz, _ = store.agents.create("dmz-browser")
+        _, branch_token = store.agents.create("branch-office")
+        monitor = self._kept_on()
+        self.assertEqual(store.agents.delete(dmz["id"]), [])
+        self.assertTrue(store.monitors.get(monitor["id"])["enabled"])
+        self.assertEqual(len(self._sent_to(branch_token)), 1)
+
+    def _billing(self):
+        return self.app.store.monitors.create(
+            name="billing-api", kind="http",
+            target="https://billing.internal/health",
+            request={"secret_headers": {"X-Api-Key": "SEALED-KEY"}})
+
+    def _retarget(self, monitor, target, **extra):
+        return self.client.post("/admin/monitors", data={
+            "id": monitor["id"], "name": monitor["name"], "kind": "http",
+            "target": target, "interval_seconds": "60",
+            "timeout_seconds": "10", "enabled": "on", **extra},
+            follow_redirects=True).get_data(as_text=True)
+
+    def test_a_check_pointed_elsewhere_does_not_take_its_credentials(self):
+        """Measured: retargeted at a listener with the boxes left blank,
+        the sealed X-Api-Key went with it to the next agent poll."""
+        monitor = self._billing()
+        body = self._retarget(monitor, "https://listener.example/health")
+        self.assertEqual(self.app.store.monitors.credentials(monitor["id"]), {})
+        self.assertFalse(self.app.store.monitors.get(monitor["id"])["has_credentials"])
+        self.assertIn("were not carried", body)
+        self.assertIn("https://listener.example:443", body)
+
+    def test_another_path_on_the_same_host_keeps_them(self):
+        monitor = self._billing()
+        body = self._retarget(monitor, "https://billing.internal/healthz")
+        self.assertEqual(
+            self.app.store.monitors.credentials(monitor["id"])["headers"],
+            {"X-Api-Key": "SEALED-KEY"})
+        self.assertNotIn("were not carried", body)
+
+    def test_credentials_typed_again_go_to_the_new_target(self):
+        monitor = self._billing()
+        self._retarget(monitor, "https://billing2.internal/health",
+                       request_headers="X-Api-Key: NEW-KEY")
+        self.assertEqual(
+            self.app.store.monitors.credentials(monitor["id"])["headers"],
+            {"X-Api-Key": "NEW-KEY"})
+
     def test_a_check_is_saved_with_its_assertions(self):
         self.client.post("/admin/monitors", data={
             "name": "Checkout", "kind": "http",
@@ -1055,6 +1150,154 @@ class CredentialRedactionTest(unittest.TestCase):
         from wdash.agent.checks import _redact
         message = "could not connect to db"
         self.assertEqual(_redact(message, {"cookies": {"s": "db"}}), message)
+
+
+class RedirectTest(unittest.TestCase):
+    """What a redirect target is sent.
+
+    `requests` followed a redirect with the request's own headers and
+    cookies, and on a change of host stripped only `Authorization`. Measured
+    with two local servers: a 302 from the monitor's host to another handed
+    the other host the sealed X-Api-Key, X-Auth-Token and cookie, whether the
+    monitor used a bearer token or basic auth.
+    """
+
+    SECRETS = ("SEALED-KEY", "SEALED-TOK", "SEALED-COOKIE", "SEALED-BEARER",
+               "c3ZjOnNlYWxlZC1wYXNz")  # base64 of svc:sealed-pass
+
+    @classmethod
+    def setUpClass(cls):
+        cls.seen = []
+        cls.other = cls._server(lambda handler: (200, []))
+        cls.origin = cls._server(cls._answer)
+
+    @classmethod
+    def tearDownClass(cls):
+        for server in (cls.other, cls.origin):
+            server.shutdown()
+            server.server_close()
+
+    @classmethod
+    def _server(cls, answer):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        seen = cls.seen
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append((self.server.server_port, self.path, dict(self.headers)))
+                status, headers = answer(self)
+                self.send_response(status)
+                for name, value in headers:
+                    self.send_header(name, value)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    @classmethod
+    def _answer(cls, handler):
+        path = handler.path
+        if path == "/away":
+            return 302, [("Location", f"http://localhost:{cls.other.server_port}/x")]
+        if path == "/port":
+            return 302, [("Location", f"http://127.0.0.1:{cls.other.server_port}/x")]
+        if path == "/old":
+            return 301, [("Location", "/new")]
+        if path == "/new":
+            return (200 if handler.headers.get("X-Api-Key") == "SEALED-KEY"
+                    else 401), []
+        if path == "/set":
+            return 302, [("Set-Cookie", "flow=abc; Path=/"), ("Location", "/need")]
+        if path == "/need":
+            return (200 if "flow=abc" in (handler.headers.get("Cookie") or "")
+                    else 403), []
+        if path == "/loop":
+            return 302, [("Location", "/loop")]
+        return 404, []
+
+    def check(self, path, auth=None):
+        from wdash.agent import checks
+        self.seen.clear()
+        monitor = {"id": "m", "name": "t", "kind": "http",
+                   "target": f"http://127.0.0.1:{self.origin.server_port}{path}",
+                   "timeout_seconds": 3, "assertions": {},
+                   "request": {"headers": {"X-Api-Key": "SEALED-KEY",
+                                           "X-Auth-Token": "SEALED-TOK"},
+                               "cookies": {"session": "SEALED-COOKIE"},
+                               "auth": auth or {}}}
+        original = checks._certificate
+        checks._certificate = lambda *args, **kwargs: None
+        try:
+            return checks.run_check(monitor)
+        finally:
+            checks._certificate = original
+
+    def sent_to_the_other_host(self):
+        return sorted({secret for port, _, headers in self.seen
+                       if port == self.other.server_port
+                       for secret in self.SECRETS
+                       if secret in " ".join(headers.values())})
+
+    def test_another_host_is_sent_nothing_the_monitor_was_given(self):
+        for auth in ({"type": "bearer", "token": "SEALED-BEARER"},
+                     {"type": "basic", "username": "svc", "password": "sealed-pass"}):
+            with self.subTest(auth=auth["type"]):
+                result = self.check("/away", auth)
+                self.assertEqual(result["status"], "up", result["error"])
+                self.assertTrue(any(port == self.other.server_port
+                                    for port, _, _ in self.seen),
+                                "the redirect was not followed")
+                self.assertEqual(self.sent_to_the_other_host(), [])
+
+    def test_another_port_on_the_same_host_is_another_origin(self):
+        result = self.check("/port", {"type": "bearer", "token": "SEALED-BEARER"})
+        self.assertEqual(result["status"], "up", result["error"])
+        self.assertEqual(self.sent_to_the_other_host(), [])
+
+    def test_a_redirect_on_its_own_origin_keeps_what_it_was_given(self):
+        """/new answers 401 without the key: a check that dropped its
+        headers on every hop would call a moved page down."""
+        result = self.check("/old")
+        self.assertEqual((result["status"], result["http_status"]), ("up", 200))
+
+    def test_a_cookie_set_on_the_way_is_sent_on(self):
+        """What `requests.get` did, and a check of its own must still do:
+        sites set a cookie in the redirect and ask for it on the next page."""
+        result = self.check("/set")
+        self.assertEqual((result["status"], result["http_status"]), ("up", 200))
+
+    def test_a_loop_ends_and_says_why(self):
+        from wdash.agent.checks import MAX_REDIRECTS
+        result = self.check("/loop")
+        self.assertEqual(result["status"], "down")
+        self.assertEqual(result["error"], "too many redirects")
+        self.assertEqual(len(self.seen), MAX_REDIRECTS + 1)
+
+    def test_what_counts_as_the_monitors_own_origin(self):
+        """http:// to https:// on the same host is the one hop nearly every
+        site makes, and the secrets go on encrypted; nothing else outside the
+        origin qualifies. Decided here, because no local server speaks both
+        on the default ports."""
+        from wdash.agent.checks import _at_home, _origin
+        home = _origin("http://site.example/health")
+        self.assertTrue(_at_home(home, "http://site.example:80/login"))
+        self.assertTrue(_at_home(home, "https://site.example/health"))
+        self.assertTrue(_at_home(home, "https://SITE.example:443/"))
+        self.assertFalse(_at_home(home, "https://site.example:8443/"))
+        self.assertFalse(_at_home(home, "http://www.site.example/"))
+        self.assertFalse(_at_home(_origin("http://site.example:8080/"),
+                                  "https://site.example/"))
+        self.assertFalse(_at_home(_origin("https://site.example/"),
+                                  "http://site.example/"),
+                         "a downgrade would send the secrets in the clear")
 
 
 class WhereTheCheckRanTest(StoreTestCase):
