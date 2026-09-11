@@ -185,6 +185,19 @@ def for_source(patterns, source_name):
     return applicable
 
 
+def narrows(patterns, source_name):
+    """Whether these rules hide anything in this source. None hides nothing.
+
+    A `*` that applies here grants everything, so only an exclusion beside
+    it narrows. Asking whether `*` was in the list, or whether the list was
+    anything but `*`, got one of those two cases wrong each time.
+    """
+    if patterns is None:
+        return False
+    allow, deny = partition(for_source(patterns, source_name))
+    return bool(deny) or "*" not in allow
+
+
 def matches_for_source(patterns, name, source_name=None):
     """Does `name` satisfy the rules, given which source it came from?
 

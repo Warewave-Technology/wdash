@@ -54,6 +54,10 @@ DEFAULT_TIMEOUT = 30
 #: OpenTelemetry spelling; `service.name` is what Tempo's v1 tag API uses.
 SERVICE_ATTRIBUTE = "resource.service.name"
 
+#: Matched spans returned per trace. They time a row whose root is hidden, so
+#: the default of three would time a service by three of its spans.
+SPANS_PER_SET = 100
+
 _STATUS_BY_CODE = {
     "STATUS_CODE_OK": STATUS_OK,
     "STATUS_CODE_ERROR": STATUS_ERROR,
@@ -104,6 +108,28 @@ def _nanoseconds_to_datetime(value):
                                       tz=timezone.utc)
     except (TypeError, ValueError):
         return None
+
+
+def _extent(entry):
+    """(start, duration in µs) of the spans Tempo matched in one trace.
+
+    `spanSets` since Tempo 2.2, `spanSet` before; a span carries its start
+    in nanoseconds and its duration in nanoseconds, both as strings.
+    """
+    sets = entry.get("spanSets") or [entry.get("spanSet") or {}]
+    starts, ends = [], []
+    for spanset in sets:
+        for span in spanset.get("spans") or ():
+            try:
+                begin = int(span.get("startTimeUnixNano"))
+                ends.append(begin + int(span.get("durationNanos") or 0))
+                starts.append(begin)
+            except (TypeError, ValueError):
+                continue
+    if not starts:
+        return None, 0
+    return (_nanoseconds_to_datetime(min(starts)),
+            (max(ends) - min(starts)) // 1000)
 
 
 def _attributes(raw):
@@ -273,12 +299,14 @@ class TempoTraceSource(TraceSource):
         if not body:
             return None
 
-        spans = []
+        spans, hidden = [], 0
         for batch in body.get("batches") or ():
             resource = _attributes((batch.get("resource") or {})
                                    .get("attributes"))
             service = str(resource.get("service.name") or "")
             if not scope.allows_service(service, source=self.name):
+                hidden += sum(len(group.get("spans") or ())
+                              for group in batch.get("scopeSpans") or ())
                 continue
             for scope_spans in batch.get("scopeSpans") or ():
                 for raw in scope_spans.get("spans") or ():
@@ -291,7 +319,7 @@ class TempoTraceSource(TraceSource):
             # Reported as absence rather than an empty trace: an empty
             # waterfall reads as "this request did nothing".
             return None
-        return Trace(trace_id=trace_id, spans=spans)
+        return Trace(trace_id=trace_id, spans=spans, hidden=hidden)
 
     def _to_span(self, raw, service, resource):
         span_id = _hex_id(raw.get("spanId"))
@@ -328,8 +356,42 @@ class TempoTraceSource(TraceSource):
 
     # ---------- search ----------
 
-    def _traceql(self, query, scope):
-        """The neutral query as TraceQL.
+    def _selectable(self, query, scope):
+        """The services a search may choose traces by, or None for all.
+
+        TraceQL evaluates every condition inside one `{ }` on ONE span. So
+        the service names have to sit beside the other conditions: `status =
+        error` alone matched the error of a service the role cannot see, and
+        the trace came back — listed as error-free, because its counts are
+        of the visible services — in exactly the errors-only list. The same
+        went for a duration and an operation name.
+
+        A service asked for by name is checked here, against this source's
+        rules. It was pushed as it came, and the route allows it when ANY
+        source does, so a merged view listed the Tempo traces a service ran
+        in where a rule excluded it in Tempo alone.
+
+        Patterns are resolved to names through Tempo's own list rather than
+        translated into a regular expression, which would be a second
+        pattern language. Loki does the same with label values.
+        """
+        wanted = getattr(query, "service", None)
+        if wanted:
+            allowed = scope.allows_service(wanted, source=self.name)
+            return [wanted] if allowed else []
+        if not patterns.narrows(scope.services, self.name):
+            return None
+        allow, _ = patterns.partition(
+            patterns.for_source(scope.services, self.name))
+        if not any("*" in name for name in allow):
+            # Exact grants: nothing else can be allowed, and the check
+            # applies every exclusion.
+            return sorted({name for name in allow
+                           if scope.allows_service(name, source=self.name)})
+        return self._service_names(scope, getattr(query, "window", None))
+
+    def _traceql(self, query, names):
+        """The neutral query as TraceQL, choosing only by `names` (None: any).
 
         Every clause is pushed into the query rather than applied afterwards.
         A limit applied by Tempo has already chosen its traces, so filtering
@@ -338,25 +400,10 @@ class TempoTraceSource(TraceSource):
         """
         clauses = []
 
-        wanted = getattr(query, "service", None)
-        if wanted:
-            clauses.append(f"{SERVICE_ATTRIBUTE} = {_quote(wanted)}")
-        elif scope.services is not None:
-            # An exact service list can be pushed down. Patterns cannot:
-            # TraceQL has `=~` for regular expressions, and translating a
-            # glob into one is a second pattern language — the thing this
-            # codebase already unified once. Those are filtered on the way
-            # out instead, which is correct but reads fewer traces per page.
-            # Only the patterns that apply to THIS source count. Exclusions
-            # are left to the filter on the way out: pushing the exact names
-            # a role is granted reads a superset of what it may see, which
-            # the filter narrows — the other way round would be the boundary.
-            allow, _ = patterns.partition(
-                patterns.for_source(scope.services, self.name))
-            if allow and not any("*" in name for name in allow):
-                rendered = " || ".join(
-                    f"{SERVICE_ATTRIBUTE} = {_quote(name)}" for name in allow)
-                clauses.append(f"({rendered})")
+        if names is not None:
+            rendered = " || ".join(
+                f"{SERVICE_ATTRIBUTE} = {_quote(name)}" for name in names)
+            clauses.append(f"({rendered})" if len(names) > 1 else rendered)
 
         if getattr(query, "name", None):
             clauses.append(f"name = {_quote(query.name)}")
@@ -373,9 +420,20 @@ class TempoTraceSource(TraceSource):
         # trace-only role — got an empty page from Tempo and no error.
         if not self._granted(scope) or scope.services == ():
             return []
+        try:
+            names = self._selectable(query, scope)
+        except Exception as exc:
+            logger.error(f"Tempo service list failed: {exc}")
+            return []
+        if names == []:
+            return []
 
-        params = {"q": self._traceql(query, scope),
-                  "limit": getattr(query, "limit", 20) or 20}
+        params = {"q": self._traceql(query, names),
+                  "limit": getattr(query, "limit", 20) or 20,
+                  # The matched spans are how a row whose root is hidden is
+                  # timed; three, the default, is a guess at a service's
+                  # extent rather than a measurement of it.
+                  "spss": SPANS_PER_SET}
         window = getattr(query, "window", None)
         if window is not None:
             # Seconds. Nanoseconds here are silently accepted and match
@@ -394,9 +452,12 @@ class TempoTraceSource(TraceSource):
             return []
 
         summaries = []
+        only_errors = getattr(query, "only_errors", False)
         for entry in body.get("traces") or ():
             summary = self._to_summary(entry, scope)
-            if summary is not None:
+            # The query already chooses by visible errors; this holds if
+            # Tempo ever answers with a trace whose only error is hidden.
+            if summary is not None and not (only_errors and not summary.has_error):
                 summaries.append(summary)
 
         from ..query import SORT_SLOWEST
@@ -436,14 +497,24 @@ class TempoTraceSource(TraceSource):
         has_error = any(int(row.get("errorCount") or 0) > 0
                         for row in stats.values())
 
+        # The trace's own start and `durationMs` are the root's, which is
+        # the hidden service's timing when the root is hidden: the list said
+        # 120 ms for a trace whose visible part took 80, and ranked
+        # "slowest" by it. The spans Tempo matched are the visible ones —
+        # the query chose by visible services only — so they are timed.
+        start = _nanoseconds_to_datetime(entry.get("startTimeUnixNano"))
+        # `durationMs` is the whole trace, and the neutral model is in
+        # microseconds.
+        duration_us = int(entry.get("durationMs") or 0) * 1000
+        if not root_allowed:
+            start, duration_us = _extent(entry)
+
         return TraceSummary(
             trace_id=entry.get("traceID") or "",
             service=service,
             name=(entry.get("rootTraceName") or "") if root_allowed else "",
-            start=_nanoseconds_to_datetime(entry.get("startTimeUnixNano")),
-            # `durationMs` is the whole trace, and the neutral model is in
-            # microseconds.
-            duration_us=int(entry.get("durationMs") or 0) * 1000,
+            start=start,
+            duration_us=duration_us,
             has_error=has_error,
             span_count=span_count,
             source=self.name,

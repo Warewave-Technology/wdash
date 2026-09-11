@@ -151,10 +151,8 @@ def logs_page():
             flash("No log indices found in Elasticsearch. Please check if logs "
                   "are being ingested.", "warning")
         else:
-            preview = ", ".join(all_indices[:5])
-            more = "..." if len(all_indices) > 5 else ""
             flash(f'Access denied: Your role "{current_user.role}" does not have '
-                  f"access to any log indices. Available indices: {preview}{more}",
+                  f"access to any log indices. {_unreadable_named(all_indices)}",
                   "error")
         return render_template("logs.html", indices=[], user_role=current_user.role,
                                no_access=True)
@@ -162,6 +160,29 @@ def logs_page():
     return render_template("logs.html", indices=allowed,
                            user_role=current_user.role, no_access=False,
                            source_choices=_source_choices())
+
+
+def _unreadable(names):
+    """What a role that reads nothing here is told about what is here.
+
+    Names only for an administrator. They are what a boundary holds back —
+    `payment-fraud-investigation` says something whether or not it can be
+    opened — and the dashboards stopped naming them for that reason while
+    this page and the search API went on listing another source's indices
+    to any role that reached none of them. Everybody else gets a count.
+    """
+    if current_user.has_permission("system:admin"):
+        return {"available_indices": list(names[:10]),
+                "total_containers": len(names)}
+    return {"total_containers": len(names)}
+
+
+def _unreadable_named(names):
+    shown = _unreadable(names)
+    if "available_indices" not in shown:
+        return f"{shown['total_containers']} exist that it cannot read."
+    more = "..." if len(names) > 5 else ""
+    return f"Available indices: {', '.join(names[:5])}{more}"
 
 
 @log_bp.route("/api/search")
@@ -230,7 +251,7 @@ def api_search():
         return jsonify({"error": f'Your role "{current_user.role}" does not have '
                                  "access to any indices.",
                         "error_type": "no_accessible_containers",
-                        "available_indices": all_indices[:10],
+                        **_unreadable(all_indices),
                         "suggestion": "Please contact your administrator to grant "
                                       "access to log indices."}), 403
 

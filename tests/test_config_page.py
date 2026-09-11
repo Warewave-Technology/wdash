@@ -116,7 +116,10 @@ class SourceTest(ConfigTestCase):
         source = self.app.store.sources.all()[0]
 
         response = self.rename(source, "lab-es-2")
-        self.assertIn(b"readers", response.data)
+        # The roles table lists "readers" whatever happens; the refusal is
+        # what has to say it, or the admin sees the old name and no reason.
+        self.assertIn(b"would change what these roles reach: readers",
+                      response.data)
         self.assertEqual([s["name"] for s in self.app.store.sources.all()],
                          ["lab-es"])
         refused = [row for row in self.app.store.audit.recent()
@@ -132,6 +135,49 @@ class SourceTest(ConfigTestCase):
         self.rename(source, "lab-es-2")
         self.assertEqual([s["name"] for s in self.app.store.sources.all()],
                          ["lab-es"])
+
+    def test_a_rename_to_a_name_a_role_already_names_is_refused(self):
+        """`staging:*`, left from a deleted source or written ahead of one,
+        reaches nothing until a source is called `staging`. The guard asked
+        only about the OLD name, so renaming a source to `staging` handed
+        the role every index in it."""
+        self.add_source(name="lab-es")
+        self.app.store.roles.upsert(
+            "contractor", permissions=["logs:read"],
+            containers=["staging:*"], trace_containers=[])
+        self.rename(self.app.store.sources.all()[0], "staging")
+        self.assertEqual([s["name"] for s in self.app.store.sources.all()],
+                         ["lab-es"])
+
+    def test_a_blank_name_is_not_a_way_around_the_guard(self):
+        """A name of spaces passes the input's `required`, stripped to "",
+        skipped the guard, and was stored: a source called "" matches no
+        rule, so `-lab-es:secret-*` stopped excluding."""
+        self.add_source(name="lab-es")
+        self.app.store.roles.upsert(
+            "readers", permissions=["logs:read"],
+            containers=["*", "-lab-es:secret-*"], trace_containers=[])
+        self.rename(self.app.store.sources.all()[0], "   ")
+        self.assertEqual([s["name"] for s in self.app.store.sources.all()],
+                         ["lab-es"])
+
+    def test_a_blank_name_is_refused_even_when_no_role_names_the_source(self):
+        self.add_source(name="lab-es")
+        response = self.rename(self.app.store.sources.all()[0], "   ")
+        self.assertIn(b"A name is required", response.data)
+        self.assertEqual([s["name"] for s in self.app.store.sources.all()],
+                         ["lab-es"])
+
+    def test_a_rename_onto_another_source_s_name_is_refused_not_a_crash(self):
+        """Create checked for a duplicate name; update did not, and the
+        database's refusal came out as a server error."""
+        self.add_source(name="lab-es")
+        self.add_source(name="lab-es-2")
+        first = next(s for s in self.app.store.sources.all()
+                     if s["name"] == "lab-es")
+        response = self.rename(first, "lab-es-2")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"already exists", response.data)
 
     def test_a_rename_nothing_depends_on_goes_through(self):
         self.add_source(name="lab-es")
@@ -468,6 +514,37 @@ class ChangePreviewTest(ConfigTestCase):
         self.assertEqual(change["services_removed"], ["every service"])
         self.assertEqual(change["services_added"], [])
         self.assertFalse(change["widens"])
+
+    def _with_services(self, services):
+        self.client.post("/admin/roles", data={
+            "name": "auditor", "permissions": "logs:read",
+            "containers": "app-*", "trace_containers": "",
+            "services": "\n".join(services), "groups": ""},
+            follow_redirects=True)
+
+    def test_taking_an_exclusion_off_widens(self):
+        """As strings, `-payments` leaving a role of `*` was "removes
+        services" and "narrows access" — on the edit that makes payments
+        visible."""
+        self._with_services(["*", "-payments"])
+        change = self.preview(services=["*"])
+        self.assertEqual(change["exclusions_removed"], ["-payments"])
+        self.assertEqual(change["services_removed"], [])
+        self.assertTrue(change["widens"])
+
+    def test_putting_an_exclusion_on_narrows(self):
+        """…and adding it was "grants services" and "widens"."""
+        self._with_services(["*"])
+        change = self.preview(services=["*", "-payments"])
+        self.assertEqual(change["exclusions_added"], ["-payments"])
+        self.assertEqual(change["services_added"], [])
+        self.assertFalse(change["widens"])
+
+    def test_an_exclusion_is_one_with_the_marker_after_the_qualifier_too(self):
+        self._with_services(["*", "lab:-payments"])
+        change = self.preview(services=["*"])
+        self.assertEqual(change["exclusions_removed"], ["lab:-payments"])
+        self.assertTrue(change["widens"])
 
     def test_adding_a_group_widens(self):
         """A group is who gets the role: adding one hands everything it

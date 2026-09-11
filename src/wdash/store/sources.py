@@ -321,7 +321,13 @@ class SourceRepository:
 
         changes = {"updated_at": datetime.now(timezone.utc)}
         if name is not None:
+            # Create refused a blank name and update stored one. A source
+            # called "" matches no rule written for it, so the rename that the
+            # configuration page refuses for any other name went through for
+            # this one — a role's exclusions for the source stopped excluding.
             changes["name"] = name.strip()
+            if not changes["name"]:
+                raise SourceError("A name is required.")
         if signals is not None:
             changes["signals"] = normalise_signals(existing["kind"], signals)
             changes["signal"] = changes["signals"][0]
@@ -340,9 +346,17 @@ class SourceRepository:
         elif clear_secret:
             changes["secrets"] = None
 
-        with self._engine.begin() as connection:
-            connection.execute(
-                sources.update().where(sources.c.id == source_id).values(**changes))
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(
+                    sources.update().where(sources.c.id == source_id)
+                    .values(**changes))
+        except Exception as exc:
+            if "UNIQUE" in str(exc) or "duplicate" in str(exc).lower():
+                raise SourceError(
+                    f"A source called '{changes.get('name')}' already exists."
+                ) from exc
+            raise
         return self.get(source_id)
 
     def delete(self, source_id):

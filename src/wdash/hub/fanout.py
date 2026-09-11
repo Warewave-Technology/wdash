@@ -476,7 +476,7 @@ class FanOutTraceSource(TraceSource):
 
     def trace(self, trace_id, window, scope):
         """One trace, assembled from every backend that has part of it."""
-        spans, partial, found = [], False, False
+        spans, partial, found, hidden = [], False, False, 0
         seen_spans = set()
 
         for source, trace, error in self._parallel(
@@ -489,6 +489,7 @@ class FanOutTraceSource(TraceSource):
                 continue
             found = True
             partial = partial or trace.partial
+            hidden += getattr(trace, "hidden", 0)
             for span in trace.spans:
                 # Dedup by span id: a span exported to two backends is one
                 # span, and drawing it twice reads as a retry.
@@ -499,7 +500,8 @@ class FanOutTraceSource(TraceSource):
 
         if not found and not spans:
             return None
-        return Trace(trace_id=trace_id, spans=spans, partial=partial)
+        return Trace(trace_id=trace_id, spans=spans, partial=partial,
+                     hidden=hidden)
 
     def services(self, window, scope):
         totals, errors = {}, {}

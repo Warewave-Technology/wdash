@@ -402,6 +402,13 @@ class JaegerSpecificTest(unittest.TestCase):
                      service="payments")
         self.assertEqual(self._sent(), [])
 
+    def test_a_trace_says_how_many_spans_the_scope_hid(self):
+        hidden = self.source.trace(TRACE["traceID"], self.window,
+                                   self._role(services=("*", "-billing-api")))
+        self.assertEqual(hidden.hidden, 1)
+        self.assertEqual(self.source.trace(TRACE["traceID"], self.window,
+                                           self._role()).hidden, 0)
+
     def test_a_named_service_granted_for_this_source_is_asked_for(self):
         self._search(scope=self._role(services=("jaeger:payments",)),
                      service="payments")

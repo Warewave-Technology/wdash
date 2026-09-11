@@ -27,13 +27,11 @@
     </div>
 </div>
 
-{# Any rule but `*` narrows what is shown. Asking whether `*` was in the list
-   hid this for `*` beside `-payments`, which hides every payments span. #}
-{% if allowed_services and allowed_services|reject("equalto", "*")|list %}
+{% if services_narrowed %}
 <div class="alert alert-info py-2 px-3" style="font-size:0.85rem">
     <i class="fas fa-filter"></i>
     Your role can see spans from:
-    {% for pattern in allowed_services %}<code class="ms-1">{{ pattern }}</code>{% endfor %}.
+    {% for pattern in allowed_services %}<code class="ms-1">{{ pattern }}</code>{% else %}no service{% endfor %}.
     Spans from other services are hidden and their timings are not included.
 </div>
 {% endif %}

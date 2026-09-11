@@ -272,6 +272,9 @@ class Trace:
     trace_id: str
     spans: list = field(default_factory=list)
     partial: bool = False        # some spans may be missing
+    #: Spans the scope removed. Counted where they were dropped, so "some
+    #: spans are hidden" is said when some were — not guessed from the rules.
+    hidden: int = 0
 
     @property
     def root(self):

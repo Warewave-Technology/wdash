@@ -209,25 +209,27 @@ class JaegerTraceSource(TraceSource):
         if not entries:
             return None
 
-        spans = self._to_spans(entries[0], scope)
+        spans, hidden = self._to_spans(entries[0], scope)
         if not spans:
             # Every span filtered out by the scope. Reported as "no trace"
             # rather than an empty one: an empty waterfall reads as "this
             # request did nothing", which is a different claim.
             return None
-        return Trace(trace_id=trace_id, spans=spans)
+        return Trace(trace_id=trace_id, spans=spans, hidden=hidden)
 
     def _to_spans(self, entry, scope):
+        """(the spans this scope may see, how many it may not)."""
         processes = entry.get("processes") or {}
-        spans = []
+        spans, hidden = [], 0
         for raw in entry.get("spans") or ():
             span = self._to_span(raw, processes)
             if span is None:
                 continue
             if not scope.allows_service(span.service, source=self.name):
+                hidden += 1
                 continue
             spans.append(span)
-        return spans
+        return spans, hidden
 
     def _to_span(self, raw, processes):
         trace_id, span_id = raw.get("traceID"), raw.get("spanID")
@@ -347,7 +349,7 @@ class JaegerTraceSource(TraceSource):
 
         out = []
         for entry in body.get("data") or ():
-            spans = self._to_spans(entry, scope)
+            spans, _ = self._to_spans(entry, scope)
             if not spans:
                 continue
             trace = Trace(trace_id=entry.get("traceID") or "", spans=spans)

@@ -467,6 +467,30 @@ function type(w, id, value) {
           clearSaid.includes('grants services') && clearSaid.includes('every service')
           && clearSaid.includes('widens'), clearSaid);
 
+    // An exclusion taken off widens, and has to be shown as such: the
+    // server tells exclusions from grants, and a page that dropped the new
+    // lists would say "narrows access" with nothing under it.
+    const unexcluded = build().w;
+    unexcluded.fetch = (url) => Promise.resolve({ json: () => Promise.resolve(
+        url.includes('/preview')
+            ? { logs: [], traces: [], services: ['*'], permissions: [],
+                warnings: [], reaches_nothing: false,
+                reaches_everything: { logs: false, traces: false, services: false },
+                change: { logs_added: [], logs_removed: [], traces_added: [],
+                          traces_removed: [], permissions_added: [],
+                          permissions_removed: [], groups_added: [],
+                          groups_removed: [], services_added: [],
+                          services_removed: [], exclusions_added: [],
+                          exclusions_removed: ['-payments'], widens: true } }
+            : { logs: [], traces: [], services: [] }) });
+    type(unexcluded, 'roleServices', '*');
+    await settle();
+    const unexcludedSaid = unexcluded.document.getElementById('rolePreview').textContent;
+    check('an exclusion taken off is shown, and shown as widening',
+          unexcludedSaid.includes('stops excluding services')
+          && unexcludedSaid.includes('-payments')
+          && unexcludedSaid.includes('widens'), unexcludedSaid);
+
     console.log(failures.length ? `\n${failures.length} failure(s)`
                                 : '\nall role editor checks passed');
     process.exit(failures.length ? 1 : 0);

@@ -70,7 +70,9 @@ class StubTraceSource(TraceSource):
     def trace(self, trace_id, window, scope):
         self._guard()
         spans = [s for s in self._spans if s.trace_id == trace_id]
-        return Trace(trace_id=trace_id, spans=spans) if spans else None
+        shown = [s for s in spans if scope.allows_service(s.service, self.name)]
+        return (Trace(trace_id=trace_id, spans=shown,
+                      hidden=len(spans) - len(shown)) if shown else None)
 
     def services(self, window, scope):
         self._guard()
@@ -110,6 +112,18 @@ class FanOutTestCase(unittest.TestCase):
 
     def trace(self, trace_id="trace-1"):
         return self.source.trace(trace_id, self.window, Scope.unrestricted())
+
+
+class HiddenSpanTest(FanOutTestCase):
+    def test_a_merged_trace_counts_what_every_member_hid(self):
+        """Each member says how many spans the scope removed from its half;
+        the merged trace says so for the whole, or a span hidden in one
+        store reads as a trace nothing was taken from."""
+        scope = Scope(principal="p", containers=("*",), trace_containers=("*",),
+                      services=("*", "-postgres", "-auth-service"))
+        merged = self.source.trace("trace-1", self.window, scope)
+        self.assertEqual(merged.hidden, 2)
+        self.assertEqual(self.trace().hidden, 0)
 
 
 class SplitTraceTest(FanOutTestCase):

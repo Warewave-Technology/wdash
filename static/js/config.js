@@ -419,7 +419,7 @@ async function runPreview() {
  */
 const CHANGE_KEYS = [
     'logs_added', 'logs_removed', 'traces_added', 'traces_removed',
-    'services_added', 'services_removed',
+    'services_added', 'services_removed', 'exclusions_added', 'exclusions_removed',
     'permissions_added', 'permissions_removed',
     'groups_added', 'groups_removed',
 ];
@@ -441,6 +441,8 @@ function renderChange(change) {
         list('removes traces:', change.traces_removed, 'text-muted') +
         list('grants services:', change.services_added, 'text-warning') +
         list('removes services:', change.services_removed, 'text-muted') +
+        list('stops excluding services:', change.exclusions_removed, 'text-warning') +
+        list('excludes services:', change.exclusions_added, 'text-muted') +
         list('grants permissions:', change.permissions_added, 'text-warning') +
         list('removes permissions:', change.permissions_removed, 'text-muted') +
         list('hands the role to groups:', change.groups_added, 'text-warning') +

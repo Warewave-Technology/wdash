@@ -545,10 +545,75 @@ class TraceLookupAcrossSourcesTest(TraceRouteTest):
         self.assertEqual(len(payload["spans"]), 2)
 
 
-class ServiceRuleTest(unittest.TestCase):
-    """Service rules in the pattern language, as the routes apply them."""
+APM_PROPERTIES = {
+    "trace": {"properties": {"id": {"type": "keyword"}}},
+    "parent": {"properties": {"id": {"type": "keyword"}}},
+    "processor": {"properties": {"event": {"type": "keyword"}}},
+    "service": {"properties": {"name": {"type": "keyword"}}},
+    "transaction": {"properties": {"id": {"type": "keyword"}}},
+}
 
-    setUp = TraceRouteTest.setUp
+
+def _apm(trace, span_id, service, parent=None, entry=True, failed=False,
+         seconds_ago=60, duration_us=1000):
+    """One APM document, in the shape the lab's cluster holds. A transaction
+    is a request a service handled; a span is a call it made."""
+    import datetime as dt
+    stamp = (dt.datetime.now(dt.timezone.utc)
+             - dt.timedelta(seconds=seconds_ago)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    kind = "transaction" if entry else "span"
+    doc = {"_id": span_id, "@timestamp": stamp, "trace": {"id": trace},
+           "service": {"name": service},
+           "event": {"outcome": "failure" if failed else "success"},
+           "processor": {"event": kind},
+           kind: {"id": span_id, "name": f"{service} op",
+                  "duration": {"us": duration_us}}}
+    if parent:
+        doc["parent"] = {"id": parent}
+    return doc
+
+
+def _apm_cluster():
+    """trace-1 enters through the gateway, which calls auth and payments;
+    payments calls postgres and redis. trace-2 is the same request with the
+    payments transaction failing and the gateway not."""
+    docs = []
+    for trace, age, payments_failed in (("trace-1", 120, False),
+                                        ("trace-2", 60, True)):
+        root = f"{trace}-gw"
+        docs += [
+            _apm(trace, root, "api-gateway", seconds_ago=age, duration_us=9000),
+            _apm(trace, f"{trace}-auth", "auth-service", root, seconds_ago=age - 1),
+            _apm(trace, f"{trace}-pay", "payment-service", root,
+                 failed=payments_failed, seconds_ago=age - 2, duration_us=4000),
+            _apm(trace, f"{trace}-pg", "postgres", f"{trace}-pay", entry=False,
+                 seconds_ago=age - 3),
+            _apm(trace, f"{trace}-redis", "redis", f"{trace}-pay", entry=False,
+                 seconds_ago=age - 3),
+        ]
+    from tests.support import ModelledES
+    return ModelledES({"apm-traces-000001": (APM_PROPERTIES, docs)})
+
+
+class ServiceRuleTest(unittest.TestCase):
+    """Service rules in the pattern language, as the routes apply them.
+
+    Against a fake cluster that ANSWERS THE QUERY. The one the rest of this
+    file uses returns every span whatever it is asked, and a test here
+    asserted rows for a role allowed only a downstream service — rows a real
+    cluster did not return, because the search required the root span beside
+    the service rule.
+    """
+
+    def setUp(self):
+        self.app = create_app(TestConfig)
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        self.es = _apm_cluster()
+        hub = Hub()
+        hub.add_traces(ElasticsearchTraceSource(self.es))
+        self.app.hub = hub
+        self.client = self.app.test_client()
 
     def as_role(self, **boundaries):
         grant(self.app, "developer", permissions=["traces:read", "logs:read"],
@@ -557,6 +622,15 @@ class ServiceRuleTest(unittest.TestCase):
         with self.client.session_transaction() as session:
             session["user_data"] = data
             session["_user_id"] = data["id"]
+
+    def listed(self):
+        return {s["name"] for s in
+                self.client.get("/api/traces/services").get_json()["services"]}
+
+    def rows(self, query=""):
+        return self.client.get("/api/traces" + query).get_json()["traces"]
+
+    # --- the service rules ---
 
     def test_a_service_the_role_excludes_is_refused(self):
         self.as_role(services=["*", "-postgres"])
@@ -573,23 +647,50 @@ class ServiceRuleTest(unittest.TestCase):
         self.assertEqual(
             self.client.get("/api/traces?service=postgres").status_code, 403)
 
-    def test_a_service_rule_held_to_this_source_applies_in_every_answer(self):
-        self.as_role(services=["elasticsearch-traces:postgres"])
-        names = {s["name"] for s in
-                 self.client.get("/api/traces/services").get_json()["services"]}
-        self.assertEqual(names, {"postgres"})
-        spans = self.client.get("/api/traces/trace-1").get_json()["spans"]
-        self.assertEqual({s["service"] for s in spans}, {"postgres"})
-        traces = self.client.get("/api/traces").get_json()["traces"]
-        self.assertTrue(traces)
-        self.assertEqual({t["service"] for t in traces}, {"postgres"})
-
     def test_an_excluded_service_is_not_listed(self):
         self.as_role(services=["*", "-postgres"])
-        names = {s["name"] for s in
-                 self.client.get("/api/traces/services").get_json()["services"]}
+        names = self.listed()
         self.assertNotIn("postgres", names)
         self.assertIn("redis", names)
+
+    def test_a_service_rule_held_to_this_source_applies_in_every_answer(self):
+        self.as_role(services=["elasticsearch-traces:payment-service"])
+        self.assertEqual(self.listed(), {"payment-service"})
+        spans = self.client.get("/api/traces/trace-1").get_json()["spans"]
+        self.assertEqual({s["service"] for s in spans}, {"payment-service"})
+        rows = self.rows()
+        self.assertEqual({t["trace_id"] for t in rows}, {"trace-1", "trace-2"})
+        self.assertEqual({t["service"] for t in rows}, {"payment-service"})
+
+    # --- a trace whose root the role cannot see ---
+
+    def test_a_trace_entering_through_a_hidden_service_is_listed(self):
+        """The search required the ROOT span beside the service rule, so a
+        role that may not see the gateway got no trace at all — every
+        request enters through it. Measured on the lab cluster: 0 rows for
+        `payment-service` before, 50 after."""
+        self.as_role(services=["*", "-api-gateway"])
+        rows = self.rows()
+        self.assertEqual({t["trace_id"] for t in rows}, {"trace-1", "trace-2"})
+        self.assertNotIn("api-gateway", {t["service"] for t in rows})
+
+    def test_such_a_trace_is_described_by_its_earliest_visible_entry(self):
+        self.as_role(services=["payment-service", "auth-service"])
+        rows = {t["trace_id"]: t for t in self.rows()}
+        # auth-service starts a second before payment-service in both.
+        self.assertEqual(rows["trace-1"]["service"], "auth-service")
+
+    def test_the_root_still_describes_a_trace_when_it_is_visible(self):
+        self.as_role(services=["api-gateway", "payment-service"])
+        self.assertEqual({t["service"] for t in self.rows()}, {"api-gateway"})
+
+    def test_errors_only_finds_a_visible_failure_below_a_hidden_root(self):
+        self.as_role(services=["payment-service"])
+        rows = self.rows("?errors=1")
+        self.assertEqual([t["trace_id"] for t in rows], ["trace-2"])
+        self.assertTrue(rows[0]["has_error"])
+
+    # --- saying what was hidden ---
 
     def test_a_trace_an_exclusion_narrowed_says_so(self):
         """It asked whether `*` was in the list, so a role of `*` beside
@@ -600,15 +701,42 @@ class ServiceRuleTest(unittest.TestCase):
         self.assertNotIn("postgres", {s["service"] for s in payload["spans"]})
         self.assertTrue(payload["scoped"])
 
+    def test_a_rule_that_hid_nothing_here_does_not_say_so(self):
+        """A rule that could hide something is not a trace that lost
+        spans: the flag guessed from the rules, so `-mongo` on a trace
+        without mongo said spans were hidden."""
+        self.as_role(services=["*", "-mongo"])
+        self.assertFalse(
+            self.client.get("/api/traces/trace-1").get_json()["scoped"])
+
     def test_a_trace_nothing_narrowed_does_not_say_so(self):
         self.as_role(services=["*"])
         self.assertFalse(
             self.client.get("/api/traces/trace-1").get_json()["scoped"])
 
+    def test_the_page_says_an_exclusion_narrows_it(self):
+        self.as_role(services=["*", "-postgres"])
+        page = self.client.get("/traces").data
+        self.assertIn(b"Your role can see spans from", page)
+        self.assertIn(b"-postgres", page)
+
+    def test_the_page_says_so_when_the_role_sees_no_service(self):
+        self.as_role(services=[])
+        self.assertIn(b"can see spans from:\n    no service",
+                      self.client.get("/traces").data)
+
+    def test_the_page_does_not_call_every_service_narrowed(self):
+        for services in (["*"], ["*", "api-*"]):
+            self.as_role(services=services)
+            self.assertNotIn(b"Your role can see spans from",
+                             self.client.get("/traces").data, services)
+
+    # --- empty answers ---
+
     def test_a_store_the_role_cannot_reach_is_explained(self):
         """A role whose trace stores match nothing here got an empty list,
         which reads as a quiet time range."""
-        self.as_role(trace_indices=["apm-*"])
+        self.as_role(trace_indices=["otel-*"])
         for path, key in (("/api/traces/services", "services"),
                           ("/api/traces", "traces")):
             payload = self.client.get(path).get_json()
@@ -617,18 +745,24 @@ class ServiceRuleTest(unittest.TestCase):
                              "no_accessible_trace_stores", path)
             self.assertIn("elasticsearch-traces", payload["suggestion"], path)
 
+    def test_a_source_with_no_store_at_all_is_not_blamed_on_the_role(self):
+        """A cluster with no trace index yet, or whose index list could not
+        be read, answers an empty store list too. That told an administrator
+        to go and fix a role that was fine."""
+        self.es._indices.clear()
+        self.as_role(trace_indices=["*"])
+        for path in ("/api/traces/services", "/api/traces"):
+            self.assertNotIn("error_type", self.client.get(path).get_json(), path)
+
     def test_an_empty_answer_from_a_reachable_store_is_not_blamed_on_the_role(self):
         self.as_role(services=["nothing-*"])
         for path in ("/api/traces/services", "/api/traces"):
             self.assertNotIn("error_type", self.client.get(path).get_json(), path)
 
-    def test_the_page_says_an_exclusion_narrows_it(self):
-        self.as_role(services=["*", "-postgres"])
-        page = self.client.get("/traces").data
-        self.assertIn(b"Your role can see spans from", page)
-        self.assertIn(b"-postgres", page)
-
-    def test_the_page_does_not_call_every_service_narrowed(self):
-        self.as_role(services=["*"])
-        self.assertNotIn(b"Your role can see spans from",
-                         self.client.get("/traces").data)
+    def test_a_role_with_no_trace_store_is_told_so_by_the_trace_list_too(self):
+        """That branch sent no suggestion, so the list said "No traces
+        match." beside a service list that explained itself."""
+        self.as_role(trace_indices=[])
+        payload = self.client.get("/api/traces").get_json()
+        self.assertEqual(payload["error_type"], "no_accessible_trace_stores")
+        self.assertIn("no trace stores", payload["suggestion"])

@@ -70,6 +70,12 @@ SEARCH = {
         "durationMs": 120,
         "serviceStats": {"billing-api": {"spanCount": 1, "errorCount": 1},
                          "edge-router": {"spanCount": 1}},
+        # The spans the query matched, as Tempo 2.6 returns them: here the
+        # billing-api call, 20 ms into the trace and 80 ms long.
+        "spanSets": [{"spans": [{"spanID": "b36502ca8950f78d",
+                                 "startTimeUnixNano": "1785961664104674048",
+                                 "durationNanos": "80000000"}],
+                      "matched": 1}],
     }],
     "metrics": {},
 }
@@ -302,14 +308,16 @@ class TempoSpecificTest(unittest.TestCase):
         self.assertIn("billing-api", rendered)
         self.assertIn("payments", rendered)
 
-    def test_a_pattern_scope_is_not_translated_into_a_regex(self):
+    def test_a_pattern_scope_is_resolved_to_names_not_a_regex(self):
         """TraceQL has `=~`, and turning a glob into a regular expression
         would be a second pattern language — the thing this codebase already
-        unified once. Filtered on the way out instead."""
+        unified once. The pattern is matched against the names Tempo lists,
+        by the one pattern language, and those names are pushed."""
         self._search(scope=Scope(principal="p", containers=("*",),
-                                 trace_containers=("*",), services=("bill-*",),
+                                 trace_containers=("*",), services=("billing-*",),
                                  permissions=frozenset({"traces:read"})))
-        self.assertNotIn("=~", self._traceql())
+        self.assertEqual(self._traceql(),
+                         '{ resource.service.name = "billing-api" }')
 
     def test_a_pattern_scope_still_filters(self):
         """Not pushing it down must not mean not applying it."""
@@ -470,6 +478,79 @@ class TempoSpecificTest(unittest.TestCase):
         summary = self._search(scope=role)[0]
         self.assertFalse(summary.has_error)
         self.assertEqual(summary.span_count, 1)
+
+    # --- choosing traces only by what the role may see ---
+
+    def test_a_named_service_this_source_excludes_is_not_asked_for(self):
+        """The route lets a service through when ANY source allows it, and
+        Tempo pushed it as it came: a merged view listed the Tempo traces a
+        service ran in where a rule excluded it in Tempo alone."""
+        found = self._search(scope=self._role(services=("*", "-tempo:payments")),
+                             service="payments")
+        self.assertEqual(found, [])
+        self.assertFalse([r for r in self.harness._requests
+                          if r["path"].endswith("/api/search")])
+
+    def test_every_condition_is_evaluated_on_a_visible_span(self):
+        """TraceQL evaluates a `{ }` on one span. `status = error` alone
+        matched an error in a service the role cannot see, and that trace was
+        listed — as error-free — in the errors-only list."""
+        self._search(scope=self._role(services=("*", "-billing-api")),
+                     only_errors=True)
+        self.assertEqual(
+            self._traceql(),
+            '{ (resource.service.name = "edge-router" || '
+            'resource.service.name = "payments") && status = error }')
+
+    def test_an_errors_only_row_needs_a_visible_error(self):
+        """If Tempo ever answers with a trace whose only error is hidden,
+        it is not listed as an error-free row of the errors-only list."""
+        found = self._search(scope=self._role(services=("*", "-billing-api")),
+                             only_errors=True)
+        self.assertEqual(found, [])
+        self.assertEqual(
+            len(self._search(scope=self._role(), only_errors=True)), 1)
+
+    def test_exact_grants_are_pushed_without_asking_tempo_for_names(self):
+        self._search(scope=self._role(
+            services=("billing-api", "payments", "-payments")))
+        self.assertEqual(self._traceql(),
+                         '{ resource.service.name = "billing-api" }')
+        self.assertFalse([r for r in self.harness._requests
+                          if "/search/tag/" in r["path"]])
+
+    def test_the_matched_spans_are_asked_for(self):
+        self._search()
+        search = next(r for r in self.harness._requests
+                      if r["path"].endswith("/api/search"))
+        self.assertEqual(search["params"]["spss"], 100)
+
+    def test_a_row_whose_root_is_hidden_is_timed_by_what_it_shows(self):
+        """The trace's own start and duration are the root's: the list said
+        120 ms for a trace whose visible part took 80, and ranked
+        "slowest" by the hidden service's time."""
+        summary = self._search(scope=self._role(services=("billing-api",)))[0]
+        self.assertEqual(summary.duration_us, 80_000)
+        self.assertEqual(summary.start,
+                         dt.datetime.fromtimestamp(1785961664104674048 / 1e9,
+                                                   tz=dt.timezone.utc))
+        visible_root = self._search(scope=self._role())[0]
+        self.assertEqual(visible_root.duration_us, 120_000)
+
+    def test_an_older_tempo_s_single_spanset_times_it_too(self):
+        from wdash.hub.adapters.tempo import _extent
+        start, duration = _extent({"spanSet": {"spans": [
+            {"startTimeUnixNano": "1000000000", "durationNanos": "5000000"},
+            {"startTimeUnixNano": "1002000000", "durationNanos": "9000000"}]}})
+        self.assertEqual(duration, 11_000)
+        self.assertEqual(start.timestamp(), 1.0)
+
+    def test_a_trace_says_how_many_spans_the_scope_hid(self):
+        hidden = self.source.trace(TRACE_ID, self.window,
+                                   self._role(services=("*", "-billing-api")))
+        self.assertEqual(hidden.hidden, 1)
+        self.assertEqual(self.source.trace(TRACE_ID, self.window,
+                                           self._role()).hidden, 0)
 
     def test_a_service_rule_held_to_this_source_applies_in_every_answer(self):
         role = self._role(services=("tempo:billing-api",))

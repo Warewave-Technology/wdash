@@ -235,3 +235,248 @@ def with_stub_logs(app, **kwargs):
                         traces=list(app.hub._traces.values()),
                         monitors=list(app.hub._monitors.values()))
     return source
+
+
+# ---------------------------------------------------------------------------
+# An Elasticsearch that answers the query it is sent
+# ---------------------------------------------------------------------------
+#
+# The fakes above return the same hits whatever the body says. That is enough
+# to test what the adapter does with an answer, and it is how a test asserted
+# rows a real cluster would never return: the adapter asked for root spans
+# only, beside the service rule, and the fake answered with every span. This
+# one evaluates the parts of the query DSL the adapters use — bool, term,
+# terms, exists, wildcard, range, match_all/none, sort, collapse with
+# inner_hits and terms aggregations with filter sub-aggregations — so a
+# search that could not match anything returns nothing.
+
+_MISSING = object()
+
+
+def es_field(source, path):
+    """A dotted path, read the way Elasticsearch indexes an object: nested
+    keys and dotted keys alike (`{"service": {"name": x}}` and
+    `{"service.name": x}` are the same field)."""
+    def walk(node, parts):
+        if not parts:
+            return node
+        if not isinstance(node, dict):
+            return _MISSING
+        for cut in range(len(parts), 0, -1):
+            key = ".".join(parts[:cut])
+            if key in node:
+                found = walk(node[key], parts[cut:])
+                if found is not _MISSING:
+                    return found
+        return _MISSING
+    return walk(source, path.split("."))
+
+
+def lucene_wildcard(value):
+    """Lucene's wildcard syntax: `*`, `?`, and `\\` escaping the next one."""
+    import re
+    out, index = [], 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value):
+            out.append(re.escape(value[index + 1]))
+            index += 2
+            continue
+        out.append(".*" if char == "*" else "." if char == "?" else re.escape(char))
+        index += 1
+    return re.compile("".join(out), re.DOTALL)
+
+
+def _comparable(value):
+    from datetime import datetime
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value)
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def _values(source, field):
+    found = es_field(source, field)
+    if found is _MISSING or found is None:
+        return []
+    return list(found) if isinstance(found, list) else [found]
+
+
+def es_query_matches(query, source):
+    """Whether Elasticsearch would keep a document with this `_source`."""
+    if not query or "match_all" in query:
+        return True
+    if "match_none" in query:
+        return False
+    if "term" in query:
+        (field, wanted), = query["term"].items()
+        if isinstance(wanted, dict):
+            wanted = wanted.get("value")
+        return wanted in _values(source, field)
+    if "terms" in query:
+        (field, wanted), = query["terms"].items()
+        return any(v in wanted for v in _values(source, field))
+    if "exists" in query:
+        return bool(_values(source, query["exists"]["field"]))
+    if "wildcard" in query:
+        (field, wanted), = query["wildcard"].items()
+        if isinstance(wanted, dict):
+            wanted = wanted.get("value")
+        pattern = lucene_wildcard(wanted)
+        return any(pattern.fullmatch(str(v)) for v in _values(source, field))
+    if "range" in query:
+        (field, bounds), = query["range"].items()
+        checks = {"gte": lambda a, b: a >= b, "gt": lambda a, b: a > b,
+                  "lte": lambda a, b: a <= b, "lt": lambda a, b: a < b}
+        return any(all(checks[op](_comparable(v), _comparable(bound))
+                       for op, bound in bounds.items() if op in checks)
+                   for v in _values(source, field))
+    if "bool" in query:
+        clause = query["bool"]
+
+        def listed(key):
+            value = clause.get(key) or []
+            return value if isinstance(value, list) else [value]
+
+        required = listed("must") + listed("filter")
+        if not all(es_query_matches(q, source) for q in required):
+            return False
+        if any(es_query_matches(q, source) for q in listed("must_not")):
+            return False
+        should = listed("should")
+        minimum = clause.get("minimum_should_match")
+        if minimum is None:
+            minimum = 0 if required else (1 if should else 0)
+        return sum(es_query_matches(q, source) for q in should) >= int(minimum)
+    raise NotImplementedError(f"the model does not know {list(query)}")
+
+
+def _sorted_hits(hits, sort):
+    """Hits in `sort` order: a list of {field: {order, missing}}."""
+    ordered = list(hits)
+    for spec in reversed(sort or []):
+        (field, options), = spec.items()
+        if isinstance(options, str):
+            options = {"order": options}
+        descending = options.get("order") == "desc"
+        missing_first = options.get("missing") == "_first"
+
+        def key(hit, field=field):
+            values = _values(hit["_source"], field)
+            return None if not values else _comparable(values[0])
+
+        present = [h for h in ordered if key(h) is not None]
+        absent = [h for h in ordered if key(h) is None]
+        present.sort(key=key, reverse=descending)
+        ordered = absent + present if missing_first else present + absent
+    return ordered
+
+
+class ModelledES:
+    """A cluster of one or more indices that answers what it is asked.
+
+    `indices` maps an index name to (mapping properties, documents), each
+    document a `_source` dict carrying its own `_id` under "_id".
+    """
+
+    def __init__(self, indices):
+        self._indices = {
+            name: (properties, [{"_index": name, "_id": doc.pop("_id"),
+                                 "_source": doc} for doc in docs])
+            for name, (properties, docs) in indices.items()}
+        self.requests = []
+
+    def ping(self):
+        return True
+
+    @property
+    def cat(self):
+        outer = self
+
+        class Cat:
+            def indices(self, **kw):
+                return [{"index": name, "creation.date": "0"}
+                        for name in outer._indices]
+        return Cat()
+
+    @property
+    def indices(self):
+        outer = self
+
+        class Indices:
+            def get_mapping(self, index=None, **kw):
+                names = str(index or "").split(",")
+                return {name: {"mappings": {"properties": outer._indices[name][0]}}
+                        for name in names if name in outer._indices}
+        return Indices()
+
+    def _docs(self, index):
+        names = str(index or "").split(",")
+        return [hit for name in names if name in self._indices
+                for hit in self._indices[name][1]]
+
+    def search(self, index=None, **kwargs):
+        body = search_body(kwargs)
+        self.requests.append({"index": index, "body": body})
+        hits = [hit for hit in self._docs(index)
+                if es_query_matches(body.get("query"), hit["_source"])]
+        ordered = _sorted_hits(hits, body.get("sort"))
+
+        collapse = body.get("collapse")
+        if collapse:
+            groups, order = {}, []
+            for hit in ordered:
+                values = _values(hit["_source"], collapse["field"])
+                group = values[0] if values else None
+                if group not in groups:
+                    groups[group] = []
+                    order.append(group)
+                groups[group].append(hit)
+            collapsed = []
+            for group in order:
+                top = dict(groups[group][0])
+                inner = collapse.get("inner_hits")
+                if inner:
+                    chosen = _sorted_hits(groups[group], inner.get("sort"))
+                    top["inner_hits"] = {inner["name"]: {"hits": {
+                        "hits": chosen[:inner.get("size", 3)]}}}
+                collapsed.append(top)
+            ordered = collapsed
+
+        response = {"took": 1,
+                    "hits": {"total": {"value": len(hits)},
+                             "hits": ordered[:body.get("size", 10)]}}
+        if body.get("aggs"):
+            response["aggregations"] = {
+                name: self._aggregate(spec, hits)
+                for name, spec in body["aggs"].items()}
+        return response
+
+    def _aggregate(self, spec, hits):
+        if "filter" in spec:
+            return {"doc_count": sum(1 for hit in hits
+                                     if es_query_matches(spec["filter"], hit["_source"]))}
+        terms = spec["terms"]
+        buckets = {}
+        for hit in hits:
+            for value in _values(hit["_source"], terms["field"]):
+                buckets.setdefault(value, []).append(hit)
+        out = []
+        for key, members in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
+            bucket = {"key": key, "doc_count": len(members)}
+            for name, sub in (spec.get("aggs") or {}).items():
+                bucket[name] = self._aggregate(sub, members)
+            out.append(bucket)
+        return {"buckets": out[:terms.get("size", 10)]}
+
+    def msearch(self, searches=None, **kw):
+        pairs = zip(searches[0::2], searches[1::2])
+        return {"responses": [self.search(index=header.get("index"), **body)
+                              for header, body in pairs]}

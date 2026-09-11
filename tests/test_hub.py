@@ -279,6 +279,56 @@ class FakeES:
         return True
 
 
+class RolledOverIndexTest(unittest.TestCase):
+    """A record in an index created after this worker last listed them.
+
+    Every worker holds its own 30-second index list. The record views read
+    only a name that list holds, so a record the search had just shown —
+    listed through another worker — was "not found" through this one.
+    """
+
+    class Rolling(FakeES):
+        def __init__(self):
+            super().__init__()
+            self.names = ["app-logs-000001"]
+            self.listings = 0
+
+        def cat_indices(self, **kw):
+            self.listings += 1
+            return [{"index": name} for name in self.names]
+
+        def get(self, index=None, id=None, **kw):
+            return {"_index": index, "_id": id, "found": True,
+                    "_source": {"@timestamp": TS, "message": "m"}}
+
+    def setUp(self):
+        self.es = self.Rolling()
+        self.source = ElasticsearchLogSource(self.es)
+        self.scope = Scope(principal="dev", containers=("app-*",))
+        self.source.containers(self.scope)
+
+    def fetch(self, container):
+        return self.source.fetch(SourceRef("elasticsearch", container, "d1"),
+                                 self.scope)
+
+    def test_a_record_in_a_newer_index_is_found(self):
+        self.es.names.append("app-logs-000002")
+        self.source._catalogue._fetched_at -= 5     # a few seconds later
+        self.assertIsNotNone(self.fetch("app-logs-000002"))
+
+    def test_a_name_that_does_not_exist_is_still_refused(self):
+        self.source._catalogue._fetched_at -= 5
+        self.assertIsNone(self.fetch("app-logs-000009"))
+
+    def test_asking_for_missing_names_does_not_list_the_cluster_each_time(self):
+        self.source._catalogue._fetched_at -= 5
+        self.fetch("app-logs-000009")
+        listed = self.es.listings
+        for _ in range(5):
+            self.fetch("app-logs-000009")
+        self.assertEqual(self.es.listings, listed)
+
+
 class ScopeEnforcementTest(unittest.TestCase):
     """Prove that an empty scope issues no query.
 
@@ -707,38 +757,17 @@ class TraceScopeTest(unittest.TestCase):
         self.assertTrue(scope.has("traces:read"))
 
 
-def _wildcard_regex(value):
-    """Lucene's wildcard syntax: `*`, `?`, and `\\` escaping the next one."""
-    import re
-    out, index = [], 0
-    while index < len(value):
-        char = value[index]
-        if char == "\\" and index + 1 < len(value):
-            out.append(re.escape(value[index + 1]))
-            index += 2
-            continue
-        out.append(".*" if char == "*" else "." if char == "?" else re.escape(char))
-        index += 1
-    return re.compile("".join(out), re.DOTALL)
-
-
-def _es_selects(clause, field, value):
-    """Whether Elasticsearch keeps a document whose keyword `field` is `value`."""
-    if clause is None or "exists" in clause:
-        return True
-    if "match_none" in clause:
-        return False
-    if "term" in clause:
-        return clause["term"][field] == value
-    if "wildcard" in clause:
-        return bool(_wildcard_regex(
-            clause["wildcard"][field]["value"]).fullmatch(value))
-    query = clause["bool"]
-    should = query.get("should") or []
-    if should and not any(_es_selects(c, field, value) for c in should):
-        return False
-    return not any(_es_selects(c, field, value)
-                   for c in query.get("must_not") or ())
+def _service_doc(field, name):
+    """A span document whose service is `name`, or one with no service
+    field at all when `name` is None."""
+    doc = {}
+    if name is not None:
+        node = doc
+        parts = field.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = name
+    return doc
 
 
 class ServiceFilterPushDownTest(unittest.TestCase):
@@ -758,21 +787,25 @@ class ServiceFilterPushDownTest(unittest.TestCase):
             self.SOURCE)
 
     def test_the_query_and_the_check_agree(self):
+        """None is a span with no service field: the reader calls its
+        service "", the check lets `*` have it, and the query must too."""
+        from tests.support import es_query_matches
         field = OtelSpanSchema().service_field
         lists = [(), ("*",), ("*", "-payments"), ("-payments",),
                  ("*", "-*pay?*"), ("pay*", "-pay*s"), ("p*y*",),
                  ("a\\b*",), ("es-traces:payments",),
                  ("other:payments", "billing-api"), ("*", "-other:payments"),
-                 ("*", "-es-traces:payments"), ("*", "es-traces:-payments")]
+                 ("*", "-es-traces:payments"), ("*", "es-traces:-payments"),
+                 ("*", "api-*"), ("-*",), ("*", "-*")]
         names = ["payments", "pay?ments", "billing-api", "p*yroll",
-                 "pxyroll", "a\\bc", "abc"]
+                 "pxyroll", "a\\bc", "abc", None]
         for services in lists:
             scope = Scope(containers=("*",), services=services)
             clause = self.clause(services)
             for name in names:
                 self.assertEqual(
-                    _es_selects(clause, field, name),
-                    scope.allows_service(name, source=self.SOURCE),
+                    es_query_matches(clause, _service_doc(field, name)),
+                    scope.allows_service(name or "", source=self.SOURCE),
                     f"{services} {name}: {clause}")
 
     def test_an_exclusion_beside_the_wildcard_is_in_the_query(self):

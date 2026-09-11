@@ -249,15 +249,22 @@ appear. Exclusions can be source-qualified too, with the `-` on either side
 (`-primary:secret-*` and `primary:-secret-*` are the same rule). An exclusion
 on its own grants nothing: `-secret-*` is a role with no access, not a role
 with all of it. The same holds for services: `*` with `-payments` hides every
-payments span, in every trace store, and a trace narrowed that way says so.
+payments span, in every trace store, and a trace that lost spans that way says
+so. A trace list chooses traces only by what the role may see: "errors only"
+means an error in a visible service, and a trace whose entry point is hidden is
+still listed, told through its visible services and timed by them.
 
 A check made without knowing the source fails closed both ways: a qualified
 grant does not apply, and a qualified exclusion does. And because a qualifier
-is a source's name, a source that some role's patterns name cannot be renamed
-until those patterns change — renaming `primary` would otherwise turn
-`-primary:secret-*` into an exclusion of nothing. The same goes for a Tempo or
-Jaeger source whose name a role's trace stores match differently than they
+is a source's name, a source cannot be renamed while some role's patterns
+name either the old name or the new one — renaming `primary` would otherwise
+turn `-primary:secret-*` into an exclusion of nothing, and renaming a source
+to `staging` would hand `staging:*` everything in it. The same goes for a Tempo
+or Jaeger source whose name a role's trace stores match differently than they
 would match the new one.
+
+A role that reaches nothing in a source is told how many containers exist
+there, not their names; only an administrator is shown the names.
 
 When a role is edited, the configuration page reports what the change *does* —
 which containers it starts and stops reaching, which permissions it adds and

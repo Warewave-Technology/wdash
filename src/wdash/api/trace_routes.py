@@ -54,17 +54,19 @@ def _members(source):
     return getattr(source, "sources", None) or [source]
 
 
-def _services_narrowed(scope, source):
-    """Whether the service rules can have removed spans from this trace.
+def _services_narrowed(scope, sources):
+    """Whether the service rules hide anything in any of these sources.
 
-    It asked whether `*` was in the list, so `*` beside `-payments` — a role
-    that drops every payments span — said nothing was hidden.
+    For the page, before a trace is open. A trace says for itself whether
+    spans were hidden (`Trace.hidden`), because a rule that could hide some
+    and did are different claims.
     """
-    if scope.services is None:
-        return False
-    return any(set(patterns.for_source(scope.services, member.name)) != {"*"}
-               for member in _members(source))
+    return any(patterns.narrows(scope.services, source.name)
+               for source in sources)
 
+
+NO_STORES_ASSIGNED = ("Your role has no trace stores assigned. Ask an "
+                      "administrator to give the role trace stores.")
 
 NO_STORE_SUGGESTION = ("Your role reaches no trace store in {source}. Trace stores "
                        "are matched against index names in Elasticsearch and "
@@ -74,12 +76,18 @@ NO_STORE_SUGGESTION = ("Your role reaches no trace store in {source}. Trace stor
 def _reaches_no_store(source, scope):
     """An empty answer that is the role's doing, not the time range's.
 
+    Only when the source HAS stores and this role reaches none of them. A
+    source with no trace index yet, or one whose index list could not be
+    read — the Elasticsearch catalogue answers [] then rather than raising —
+    told an administrator their role was the problem, and sent them to edit
+    roles during an outage.
+
     Asked only after an empty answer, so a source whose store list costs a
-    round trip pays it when there is something to explain. A failure to list
-    them is not reported as a missing grant.
+    round trip pays it when there is something to explain.
     """
     try:
-        return not source.containers(scope)
+        return (not source.containers(scope)
+                and bool(source.containers(Scope.unrestricted())))
     except Exception:
         return False
 
@@ -133,12 +141,18 @@ def traces_page():
         flash("Access denied: you do not have permission to view traces.", "error")
         return redirect(url_for("index"))
 
+    hub = getattr(current_app, "hub", None)
     return render_template(
         "traces.html",
         user_role=current_user.role,
         # Showing the scope in the UI explains why some services are missing —
         # silent filtering is confusing.
         allowed_services=list(getattr(current_user, "allowed_services", []) or []),
+        # Whether to say so. The template asked whether any rule was other
+        # than `*`, so `*` beside `api-*` said spans were hidden when none
+        # could be.
+        services_narrowed=_services_narrowed(
+            _scope(), hub.trace_sources if hub else []),
         default_range=DEFAULT_RANGE,
         source_choices=_trace_source_choices(),
     )
@@ -164,8 +178,7 @@ def api_services():
         return jsonify({
             "services": [],
             "error_type": "no_accessible_trace_stores",
-            "suggestion": "Your role has no trace stores assigned. "
-                          "Ask an administrator to set trace_indices in the RBAC config.",
+            "suggestion": NO_STORES_ASSIGNED,
         })
 
     window = TimeWindow.of(request.args.get("time_range", DEFAULT_RANGE))
@@ -288,7 +301,11 @@ def api_search_traces():
 
     scope = _scope()
     if scope.trace_is_empty:
-        return jsonify({"traces": [], "error_type": "no_accessible_trace_stores"})
+        return jsonify({
+            "traces": [], "error_type": "no_accessible_trace_stores",
+            # The trace list said "No traces match." here, beside a service
+            # list that explained itself.
+            "suggestion": NO_STORES_ASSIGNED})
 
     service = request.args.get("service") or None
     if service and not _may_see_service(scope, source, service):
@@ -394,7 +411,7 @@ def api_trace(trace_id):
     ]
     payload["service_breakdown"] = trace.service_breakdown()
     # Spans may have been dropped by the scope — tell the user.
-    payload["scoped"] = _services_narrowed(scope, source)
+    payload["scoped"] = trace.hidden > 0
     return jsonify(payload)
 
 

@@ -294,14 +294,15 @@ def save_source():
     if source_id:
         existing = store.sources.get(source_id)
         new_name = (form.get("name") or "").strip()
-        if existing and new_name and new_name != existing["name"]:
+        if existing and new_name != existing["name"]:
             naming = _roles_naming_source(store, existing["name"], new_name,
                                           existing.get("kind"))
             if naming:
-                flash(f"Roles name the source '{existing['name']}' in their "
-                      f"patterns: {', '.join(naming)}. Renaming it would "
-                      f"change what they reach — their exclusions for it "
-                      f"would stop excluding. Change those patterns first. "
+                flash(f"Renaming '{existing['name']}' to '{new_name}' would "
+                      f"change what these roles reach: {', '.join(naming)}. "
+                      f"Their patterns name one of the two — rules for the "
+                      f"old name would stop applying, rules for the new one "
+                      f"would start. Change those patterns first. "
                       f"Nothing was saved.", "error")
                 _audit("source rename refused", subject=f"source:{source_id}",
                        state={"name": existing["name"], "to": new_name,
@@ -341,19 +342,23 @@ def _roles_naming_source(store, name, new_name=None, kind=None):
     """Roles whose patterns would mean something else after a rename.
 
     Any pattern qualified by `name` — log store, trace store or service,
-    granting or excluding. And for Tempo or Jaeger, whose trace store is
-    matched by the source's name, any trace-store pattern that answers
-    differently for the new one: `-lab-tempo` beside `*` stops excluding
-    once the source is called anything else.
+    granting or excluding — or by the NEW name: `staging:*`, left from a
+    deleted source or written ahead of one, reaches nothing until a source
+    is called `staging`, and renaming one to that handed the role all of it.
+    And for Tempo or Jaeger, whose trace store is matched by the source's
+    name, any trace-store pattern that answers differently for the new one:
+    `-lab-tempo` beside `*` stops excluding once the source is called
+    anything else.
     """
     from ..hub.patterns import matches_for_source, parse
 
+    names = {name} | ({new_name} if new_name else set())
     naming = []
     for role in store.roles.all():
         stores = role.get("trace_containers") or []
         rules = ((role.get("containers") or []) + stores
                  + (role.get("services") or []))
-        qualified = any(parse(pattern)[1] == name for pattern in rules)
+        qualified = any(parse(pattern)[1] in names for pattern in rules)
         renamed_store = (
             kind in NAMED_STORE_KINDS and new_name is not None
             and matches_for_source(stores, name, name)
@@ -544,19 +549,39 @@ EVERY_SERVICE = "every service"
 
 
 def _service_change(before, after):
-    """Services added and removed, where None on either side is EVERY one.
+    """(grants added, grants removed, exclusions added, exclusions removed),
+    where None on either side is EVERY service.
 
     Blank is the widest thing the services box can hold, so clearing it is
     the widest edit a role can take — and the diff used to leave services out
     entirely, so that edit produced no change block and `widens: false`.
+
+    Exclusions are told apart from grants because they point the other way:
+    as plain strings, taking `-payments` off a role of `*` was "removes
+    services: -payments" and "narrows access", on the edit that made
+    payments visible; putting it on was "grants services" and "widens".
     """
     if before is None and after is None:
-        return [], []
+        return [], [], [], []
     if after is None:
-        return [EVERY_SERVICE], []
+        return [EVERY_SERVICE], [], [], []
     if before is None:
-        return [], [EVERY_SERVICE]
-    return sorted(set(after) - set(before)), sorted(set(before) - set(after))
+        return [], [EVERY_SERVICE], [], []
+
+    from ..hub.patterns import parse
+
+    def split(rules):
+        grants, exclusions = set(), set()
+        for rule in rules:
+            (exclusions if parse(rule)[0] else grants).add(rule)
+        return grants, exclusions
+
+    grants_before, exclusions_before = split(before)
+    grants_after, exclusions_after = split(after)
+    return (sorted(grants_after - grants_before),
+            sorted(grants_before - grants_after),
+            sorted(exclusions_after - exclusions_before),
+            sorted(exclusions_before - exclusions_after))
 
 
 def _describe_change(previous, scope, logs, traces, groups=None):
@@ -584,7 +609,8 @@ def _describe_change(previous, scope, logs, traces, groups=None):
 
     before_permissions = set(previous.get("permissions") or ())
 
-    services_added, services_removed = _service_change(
+    (services_added, services_removed,
+     exclusions_added, exclusions_removed) = _service_change(
         previous.get("services"),
         list(scope.services) if scope.services is not None else None)
 
@@ -601,6 +627,8 @@ def _describe_change(previous, scope, logs, traces, groups=None):
         "traces_removed": sorted(before_traces - after_traces),
         "services_added": services_added,
         "services_removed": services_removed,
+        "exclusions_added": exclusions_added,
+        "exclusions_removed": exclusions_removed,
         "permissions_added": sorted(scope.permissions - before_permissions),
         "permissions_removed": sorted(before_permissions - scope.permissions),
         "groups_added": sorted(after_groups - before_groups),
@@ -610,7 +638,7 @@ def _describe_change(previous, scope, logs, traces, groups=None):
         # person meant.
         "widens": bool((after_logs - before_logs)
                        or (after_traces - before_traces)
-                       or services_added
+                       or services_added or exclusions_removed
                        or (scope.permissions - before_permissions)
                        or (after_groups - before_groups)),
     }

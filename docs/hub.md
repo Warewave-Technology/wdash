@@ -308,9 +308,14 @@ Which span represents a trace depends on the question:
 |---|---|---|
 | Filtered by service | That service's entry span | The user asked about that service's work |
 | Unfiltered | The trace root | A plain trace list should show where each request came in |
+| Unfiltered, services narrowed | The root if visible, else the earliest visible entry span | The root may be a service the role cannot see |
 
 Without the root restriction, `collapse` picks whichever span sorts first —
-usually some downstream service, which reads as noise in a trace list.
+usually some downstream service, which reads as noise in a trace list. When the
+role's services are narrowed the root cannot be required: every request enters
+through the gateway, so a role that may not see it got no trace at all. Every
+visible entry span competes instead, and `collapse.inner_hits` picks the one
+that describes the trace.
 
 The scope's service allowlist is pushed **into** the query rather than applied
 afterwards. That is not an optimisation: `collapse` returns the top N by sort

@@ -268,12 +268,27 @@ class LogContractTest(unittest.TestCase):
         self.assertEqual(response.get_json()["error_type"], "permission_denied")
 
     def test_no_accessible_indices(self):
+        """The names of what a role cannot read are what the boundary holds
+        back. They went to any role that reached nothing here; the
+        dashboards had already stopped naming them."""
         self.login(["logs:read"], indices=["nothing-*"])
         response = self.search()
         self.assertEqual(response.status_code, 403)
         payload = response.get_json()
         self.assertEqual(payload["error_type"], "no_accessible_containers")
-        self.assertIn("available_indices", payload)
+        self.assertNotIn("available_indices", payload)
+        self.assertGreater(payload["total_containers"], 0)
+
+    def test_the_logs_page_does_not_name_them_either(self):
+        self.login(["logs:read"], indices=["nothing-*"])
+        page = self.client.get("/logs", follow_redirects=True).data
+        self.assertIn(b"exist that it cannot read", page)
+        self.assertNotIn(b"app-logs-000001", page)
+
+    def test_an_administrator_is_told_the_names(self):
+        self.login(["logs:read", "system:admin"], indices=["nothing-*"])
+        payload = self.search().get_json()
+        self.assertTrue(payload["available_indices"])
 
     def test_scope_narrows_the_queried_indices(self):
         self.login(["logs:read"], indices=["app-*"])

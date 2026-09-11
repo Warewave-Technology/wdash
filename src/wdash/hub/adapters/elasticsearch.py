@@ -138,6 +138,26 @@ class _IndexCatalogue:
     def invalidate(self):
         self._entries = None
 
+    def refresh(self, min_age=2.0):
+        """Fetch the list again now, unless it is younger than `min_age`.
+
+        For a name that is not in the list yet. An index created a few
+        seconds ago is in another worker's list and not this one's, and a
+        record read from it through this worker was "not found". Bounded by
+        `min_age` so that asking for names that do not exist cannot turn
+        every request into a cluster-level call. A failed fetch keeps the
+        list there was.
+        """
+        now = time.monotonic()
+        if self._entries is not None and now - self._fetched_at < min_age:
+            return
+        try:
+            fetched = self._es.cat.indices(format="json", h="index,creation.date")
+        except Exception:
+            return
+        self._entries = [dict(e) for e in fetched]
+        self._fetched_at = now
+
 
 class ElasticsearchLogSource(LogSource):
     """Exposes Elasticsearch indices as a neutral log source."""
@@ -290,6 +310,9 @@ class ElasticsearchLogSource(LogSource):
         source is what makes source-qualified rules count here at all.
         """
         allowed = set(self.containers(scope))
+        if container not in allowed:
+            self._catalogue.refresh()
+            allowed = set(self.containers(scope))
         return allowed if container in allowed else None
 
     def _get(self, ref, scope):
@@ -880,7 +903,7 @@ class ElasticsearchTraceSource(TraceSource):
         # the same trace. Left unmerged it would double the waterfall and, worse,
         # break self-time: children would be counted twice and every parent
         # would report zero time of its own.
-        seen_spans = set()
+        seen_spans, hidden = set(), set()
 
         for (schema, _), response in zip(groups, _multi_search(self._es, requests)):
             if response is None:
@@ -893,6 +916,7 @@ class ElasticsearchTraceSource(TraceSource):
                 if not span or span.span_id in seen_spans:
                     continue
                 if not scope.allows_service(span.service, source=self.name):
+                    hidden.add(span.span_id)
                     continue
                 seen_spans.add(span.span_id)
                 spans.append(span)
@@ -901,7 +925,8 @@ class ElasticsearchTraceSource(TraceSource):
             return None
 
         spans.sort(key=lambda s: (s.start is None, s.start))
-        return Trace(trace_id=trace_id, spans=spans, partial=partial)
+        return Trace(trace_id=trace_id, spans=spans, partial=partial,
+                     hidden=len(hidden))
 
     def search(self, query, scope):
         """Find traces matching the query.
@@ -940,11 +965,6 @@ class ElasticsearchTraceSource(TraceSource):
             # want one row per trace, describing work the service handled.
             must.append(self._server_span_filter(schema))
 
-            if not query.service:
-                # No service asked for, so show where each request entered.
-                must.append({"bool": {"must_not": [
-                    {"exists": {"field": self._parent_field(schema)}}]}})
-
             # Push the scope's service restriction INTO the query. Filtering
             # after the fact is wrong here: `collapse` returns the top N by
             # sort order, so a restricted role would get a page full of spans
@@ -953,6 +973,27 @@ class ElasticsearchTraceSource(TraceSource):
             scope_filter = self._scope_service_filter(schema, scope, self.name)
             if scope_filter is not None:
                 must.append(scope_filter)
+
+            collapse = {"field": schema.trace_id_field}
+            if not query.service and scope_filter is None:
+                # No service asked for, so show where each request entered.
+                must.append({"bool": {"must_not": [
+                    {"exists": {"field": self._parent_field(schema)}}]}})
+            elif not query.service:
+                # The root may be a span this role cannot see. Requiring it
+                # beside the service rule kept only the traces whose ROOT was
+                # visible: a role allowed `postgres` saw no trace at all,
+                # because no request enters through the database. So every
+                # visible entry span competes, and each trace is described
+                # by its root when the root is among them, otherwise by the
+                # earliest of them.
+                collapse["inner_hits"] = {
+                    "name": "entry", "size": 1,
+                    "sort": [
+                        {self._parent_field(schema): {
+                            "order": "asc", "missing": "_first",
+                            "unmapped_type": "keyword"}},
+                        {schema.timestamp_field: {"order": "asc"}}]}
 
             if query.only_errors:
                 must.append(self._error_filter(schema))
@@ -964,7 +1005,7 @@ class ElasticsearchTraceSource(TraceSource):
                 "query": {"bool": {"must": must}},
                 "size": min(query.limit, 200),
                 # One row per trace without a terms aggregation.
-                "collapse": {"field": schema.trace_id_field},
+                "collapse": collapse,
                 "sort": self._trace_sort(schema, query.sort),
             }))
 
@@ -972,7 +1013,9 @@ class ElasticsearchTraceSource(TraceSource):
             if response is None:
                 continue
             for hit in response["hits"]["hits"]:
-                span = schema.to_span(hit)
+                chosen = (((hit.get("inner_hits") or {}).get("entry") or {})
+                          .get("hits") or {}).get("hits") or ()
+                span = schema.to_span(chosen[0] if chosen else hit)
                 if span is not None:
                     span.source = self.name
                 if not span or span.trace_id in seen:
@@ -1011,15 +1054,13 @@ class ElasticsearchTraceSource(TraceSource):
         used to return early here and leave `-payments` to a post-filter,
         which is a short page rather than a boundary in the query.
         """
-        if scope.services is None:
+        from ...hub.patterns import for_source, narrows
+        if not narrows(scope.services, source_name):
             return None
-        from ...hub.patterns import for_source
         applicable = for_source(scope.services, source_name)
         if not applicable:
             # An empty allowlist means nothing is visible.
             return {"match_none": {}}
-        if applicable == ["*"]:
-            return None
 
         # The filter pushed into the query has to mean the same thing as
         # Scope.allows_service, or the boundary and the query disagree. This
@@ -1039,7 +1080,10 @@ class ElasticsearchTraceSource(TraceSource):
             field = schema.service_field
             kind = shape(pattern)
             if kind == patterns_module.ANY:
-                return {"exists": {"field": field}}
+                # Everything, a span with no service field included: the
+                # check calls its service "" and `*` matches that. `exists`
+                # dropped such spans from the query alone.
+                return {"match_all": {}}
             if kind == patterns_module.EXACT:
                 return {"term": {field: pattern}}
             # `wildcard` covers prefix, suffix and contains alike. Special-
@@ -1048,8 +1092,10 @@ class ElasticsearchTraceSource(TraceSource):
             return {"wildcard": {field: {
                 "value": patterns_module.glob(pattern, _wildcard_literal)}}}
 
-        query = {"bool": {"should": [clause(p) for p in allow],
-                          "minimum_should_match": 1}}
+        query = {"bool": {}}
+        if "*" not in allow:
+            query["bool"]["should"] = [clause(p) for p in allow]
+            query["bool"]["minimum_should_match"] = 1
         if deny:
             query["bool"]["must_not"] = [clause(p) for p in deny]
         return query
