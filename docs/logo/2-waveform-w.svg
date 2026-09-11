@@ -21,5 +21,5 @@
   <path d="M4 7.5l5.4 17 6.6-11 6.6 11 4.2-13.5"
         stroke="currentColor" stroke-width="2.9" stroke-linecap="round"
         stroke-linejoin="round"/>
-  <circle cx="26.8" cy="11" r="3.1" fill="var(--wdash-accent, #39c5cf)"/>
+  <circle cx="26.8" cy="11" r="3.1" fill="var(--wdash-accent, #fe8019)"/>
 </svg>

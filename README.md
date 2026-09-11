@@ -44,10 +44,12 @@ issues carries an explicit authorization scope.
 - **Access control** — three independent boundaries per role (log containers,
   trace stores, services), resolved on every request so a change takes effect
   without anyone signing out. Fails closed throughout.
-- **Dark, light, or follow the system** — chosen from the navbar and kept in
-  the browser, because a theme belongs to the screen somebody is sitting at
-  rather than to the account they sign in with. Dark is what you get if you
-  never choose.
+- **Gruvbox dark, Gruvbox light, or follow the system** — chosen from the
+  navbar and kept in the browser, because a theme belongs to the screen
+  somebody is sitting at rather than to the account they sign in with. Dark
+  is what you get if you never choose. Where Gruvbox's own colours fall short
+  of AA they are moved the least distance that clears it, and
+  [docs/themes](docs/themes/) lists every one.
 - **Configuration in the browser** — sources, identity providers and roles, with
   a connection test before you save a source and an "what would this reach?"
   preview before you save a role. **One source serves every signal it holds**:

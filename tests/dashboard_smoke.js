@@ -298,6 +298,38 @@ async function main() {
                `axis used ${axis.grid.color} / ${axis.ticks.color}`);
     });
 
+    // A theme switch re-resolves every token in the stylesheet and nothing
+    // on a canvas: the charts stayed in the colours they were first drawn
+    // in until the page was reloaded. They are drawn again from the answer
+    // already on the page, with the palette as it is now.
+    const themed = await loadWith({
+        total_hits: 12,
+        panels: [{ ...PANEL, buckets: [{ key: 'ERROR', count: 12 }] }],
+    });
+    const root = themed.document.documentElement;
+    root.style.setProperty('--text-primary', '#010101');
+    root.style.setProperty('--fill-red', '#0a0a0a');
+    const before = themed.dashboard.charts.p1;
+    const fetched = { count: 0 };
+    global.fetch = themed.fetch = async () => {
+        fetched.count += 1;
+        return { ok: true, status: 200, json: async () => ({ panels: [] }) };
+    };
+    themed.document.dispatchEvent(new themed.CustomEvent(
+        'wdash:theme', { detail: { theme: 'light' } }));
+    await settle(themed.dashboard);
+    const after = themed.dashboard.charts.p1;
+    check('a theme switch draws the charts again, in the new colours', () => {
+        assert(after && after !== before, 'the chart was not rebuilt');
+        assert(themed.Chart.defaults.color === '#010101',
+               `Chart.defaults.color is ${themed.Chart.defaults.color}`);
+        const colours = JSON.stringify(after.config.data.datasets);
+        assert(colours.includes('#0a0a0a'),
+               `the bars kept their old colour: ${colours}`);
+    });
+    check('and without asking the backend for a colour change', () =>
+        assert(fetched.count === 0, `it fetched ${fetched.count} time(s)`));
+
     console.log('');
     if (failures.length) {
         console.log(`${failures.length} dashboard check(s) failed\n`);

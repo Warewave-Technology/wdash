@@ -448,6 +448,68 @@ check('highlighting never changes the text it colours', () => {
                     'dark', 'an unknown value should fall back to the default');
     });
 
+    // What a canvas is told when the theme changes: once per change, with the
+    // theme it changed TO, and not at all when nothing changed — a redraw of
+    // every chart for a click on the item already chosen is a flicker.
+    check('a theme change is announced, once, with the new theme', () => {
+        const w = themeWindow({ stored: 'dark', systemPrefersLight: false });
+        const heard = [];
+        w.document.addEventListener('wdash:theme',
+                                    event => heard.push(event.detail.theme));
+        w.wdashTheme.set('light');
+        w.wdashTheme.set('light');
+        w.wdashTheme.set('system');          // resolves to dark here
+        assertEqual(JSON.stringify(heard), JSON.stringify(['light', 'dark']),
+                    'announcements did not follow the changes');
+    });
+
+    // -----------------------------------------------------------------
+    // The log histogram's colours
+    // -----------------------------------------------------------------
+    //
+    // Its axis and legend text were left to Chart.js, which paints them its
+    // built-in #666 — 2.2:1 on the dark page, and on a canvas, where the
+    // contrast suite cannot see. And a theme switch left every bar in the
+    // colours it was first drawn in.
+    check('the histogram takes its text and bars from the palette, and ' +
+          'draws again when the theme changes', () => {
+        const w = makeWindow();
+        w.document.body.insertAdjacentHTML('beforeend',
+            '<div class="d-none" id="histogramCard"><canvas id="logHistogram">' +
+            '</canvas><div id="histogramSummary"></div></div>');
+        const built = [];
+        w.Chart = class { constructor(canvas, config) { built.push(config); }
+                          destroy() {} };
+        const root = w.document.documentElement;
+        root.style.setProperty('--text-muted', '#111111');
+        root.style.setProperty('--text-primary', '#222222');
+        root.style.setProperty('--fill-red', '#333333');
+        const search = new w.__LogSearch();
+        search.renderHistogram({ histogram: [
+            { timestamp: '2026-09-11T10:00:00Z', count: 4,
+              by_severity: { ERROR: 4 } }] });
+        assertEqual(built.length, 1, 'no chart was built');
+        const first = built[0];
+        assertEqual(first.options.scales.x.ticks.color, '#111111',
+                    'the x axis is not palette ink');
+        assertEqual(first.options.scales.y.ticks.color, '#111111',
+                    'the y axis is not palette ink');
+        assertEqual(first.options.plugins.legend.labels.color, '#222222',
+                    'the legend is not palette ink');
+        assertEqual(first.data.datasets[0].backgroundColor, '#333333',
+                    'ERROR is not the palette red');
+
+        root.style.setProperty('--text-muted', '#444444');
+        root.style.setProperty('--fill-red', '#555555');
+        w.document.dispatchEvent(new w.CustomEvent('wdash:theme',
+                                                   { detail: { theme: 'light' } }));
+        assertEqual(built.length, 2, 'a theme change did not draw it again');
+        assertEqual(built[1].options.scales.x.ticks.color, '#444444',
+                    'redrawn in the old colours');
+        assertEqual(built[1].data.datasets[0].backgroundColor, '#555555',
+                    'the bars kept the old red');
+    });
+
     console.log(failures.length
         ? `\n${failures.length} failure(s)`
         : '\nall front-end smoke checks passed');

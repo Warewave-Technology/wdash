@@ -99,11 +99,20 @@
         return us + ' µs';
     }
 
-    // Same hashing as the trace list, so a service keeps its colour across pages.
+    // A service's colour is a stable pick from the palette's chart ramp, by
+    // a hash of its name. It was an `hsla()` at a fixed 55% lightness in
+    // every theme — outside the palette, so no contrast test could see it,
+    // and the same pale bar on the dark page and the light one.
+    // A translucent one is the same colour mixed into transparency.
+    const RAMP = getComputedStyle(document.documentElement)
+        .getPropertyValue('--chart-series').split(',').map(v => v.trim())
+        .filter(Boolean);
     function serviceColour(name, alpha) {
         let hash = 0;
         for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
-        return 'hsla(' + (Math.abs(hash) % 360) + ', 62%, 55%, ' + (alpha || 1) + ')';
+        const colour = RAMP[Math.abs(hash) % RAMP.length];
+        return alpha ? 'color-mix(in srgb, ' + colour + ' ' +
+                       Math.round(alpha * 100) + '%, transparent)' : colour;
     }
 
     let trace = null;

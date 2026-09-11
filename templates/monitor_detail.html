@@ -535,27 +535,67 @@
     if (!holder || !canvas || typeof Chart === 'undefined') { return; }
 
     const data = JSON.parse(holder.textContent);
-    const style = getComputedStyle(document.documentElement);
-    // No fallbacks. A fallback colour is a literal of the theme it was
-    // written for, so the one case it covers — the token missing — is the
-    // one case where it paints the wrong theme.
-    const teal = style.getPropertyValue('--accent').trim();
-    const red = style.getPropertyValue('--hue-red').trim();
-    const muted = style.getPropertyValue('--text-secondary').trim();
-    const grid = style.getPropertyValue('--border').trim();
-
     const times = data.labels.map(v => v ? new Date(v) : null);
     const label = i => times[i] ? times[i].toLocaleTimeString() : '';
 
-    new Chart(canvas.getContext('2d'), {
+    // Failures as vertical marks behind the lines. Chart.js has no built-in
+    // annotation without a plugin, and a plugin from a CDN is a dependency
+    // this needs less than it needs twelve lines.
+    //
+    // Handed to the chart in its own config. It used to be registered
+    // globally AFTER the chart was built, and Chart.js 3 resolves a chart's
+    // plugins when it draws — measured on 3.9.1 in Chromium: the first paint
+    // had no marks at all, and they appeared only once something redrew the
+    // chart, a hover or a resize. An outage that shows up when you move the
+    // mouse is an outage somebody glancing at the page does not see.
+    let red = '';
+    const failureMarks = {
+        id: 'failureMarks',
+        beforeDatasetsDraw(chart) {
+            const context = chart.ctx;
+            const area = chart.chartArea;
+            const axis = chart.scales.x;
+            context.save();
+            context.strokeStyle = red;
+            context.globalAlpha = .35;
+            context.lineWidth = 1;
+            data.failures.forEach((failed, index) => {
+                if (!failed) { return; }
+                const x = axis.getPixelForValue(index);
+                context.beginPath();
+                context.moveTo(x, area.top);
+                context.lineTo(x, area.bottom);
+                context.stroke();
+            });
+            context.restore();
+        },
+    };
+
+    let chart = null;
+
+    // Drawn again on a theme switch: a canvas keeps the colours it was
+    // painted with, whatever the stylesheet says afterwards.
+    function draw() {
+        const style = getComputedStyle(document.documentElement);
+        // No fallbacks. A fallback colour is a literal of the theme it was
+        // written for, so the one case it covers — the token missing — is the
+        // one case where it paints the wrong theme.
+        const accent = style.getPropertyValue('--accent').trim();
+        red = style.getPropertyValue('--hue-red').trim();
+        const muted = style.getPropertyValue('--text-secondary').trim();
+        const grid = style.getPropertyValue('--border').trim();
+
+        if (chart) { chart.destroy(); }
+        chart = new Chart(canvas.getContext('2d'), {
         type: 'line',
+        plugins: [failureMarks],
         data: {
             labels: data.labels.map((_, i) => label(i)),
             datasets: [
                 {
                     label: 'slowest in bucket',
                     data: data.worst,
-                    borderColor: teal,
+                    borderColor: accent,
                     borderDash: [3, 3],
                     borderWidth: 1,
                     pointRadius: 0,
@@ -568,7 +608,7 @@
                 {
                     label: 'average',
                     data: data.average,
-                    borderColor: teal,
+                    borderColor: accent,
                     borderWidth: 2,
                     pointRadius: 0,
                     pointHoverRadius: 4,
@@ -609,32 +649,11 @@
                 },
             },
         },
-    });
+        });
+    }
 
-    // Failures as vertical marks behind the lines. Chart.js has no built-in
-    // annotation without a plugin, and a plugin from a CDN is a dependency
-    // this needs less than it needs twelve lines.
-    Chart.register({
-        id: 'failureMarks',
-        beforeDatasetsDraw(chart) {
-            const context = chart.ctx;
-            const area = chart.chartArea;
-            const axis = chart.scales.x;
-            context.save();
-            context.strokeStyle = red;
-            context.globalAlpha = .35;
-            context.lineWidth = 1;
-            data.failures.forEach((failed, index) => {
-                if (!failed) { return; }
-                const x = axis.getPixelForValue(index);
-                context.beginPath();
-                context.moveTo(x, area.top);
-                context.lineTo(x, area.bottom);
-                context.stroke();
-            });
-            context.restore();
-        },
-    });
+    draw();
+    document.addEventListener('wdash:theme', draw);
 })();
 
 document.getElementById('monitorWindow')?.addEventListener('change', function () {

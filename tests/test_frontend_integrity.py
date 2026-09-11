@@ -202,6 +202,36 @@ class StackingContextTest(unittest.TestCase):
             f"page content outranks the navbar: {offenders}")
 
 
+class ChartPluginsTest(unittest.TestCase):
+    """A chart's plugins go in its own config, never `Chart.register`.
+
+    The monitor page drew its failure marks with a plugin registered
+    globally AFTER the chart was built. Measured on Chart.js 3.9.1 in
+    Chromium: a chart resolves its plugins as it draws, so the first paint
+    had no marks at all, and they appeared once something redrew the chart —
+    a hover, a resize. A global registration also reaches every other chart
+    on the page. Read from every template and script that builds a chart.
+    """
+
+    def test_nothing_registers_a_plugin_globally(self):
+        offenders = []
+        folders = ((os.path.join(ROOT, "templates"), ".html"),
+                   (os.path.join(ROOT, "static", "js"), ".js"))
+        for folder, suffix in folders:
+            for name in sorted(os.listdir(folder)):
+                if not name.endswith(suffix) or name.endswith(".min.js"):
+                    continue
+                text = re.sub(r"^\s*//.*$", "", _read(os.path.join(folder, name)),
+                              flags=re.M)
+                if "Chart.register(" in text:
+                    offenders.append(name)
+        self.assertEqual(offenders, [], f"global chart plugins in {offenders}")
+
+    def test_the_failure_marks_are_the_charts_own(self):
+        page = _read(os.path.join(ROOT, "templates", "monitor_detail.html"))
+        self.assertIn("plugins: [failureMarks]", page)
+
+
 class FrontendSmokeTest(unittest.TestCase):
     """Run the jsdom suites if the toolchain is there; skip if it is not."""
 

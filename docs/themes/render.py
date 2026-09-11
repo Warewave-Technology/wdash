@@ -51,9 +51,9 @@ PAGES = [
 ]
 
 THEMES = [
-    ("1-karanlik", "Karanlık", "dark",
+    ("1-karanlik", "Gruvbox karanlık", "dark",
      "The default. What every installation shows until somebody chooses."),
-    ("2-acik", "Açık", "light",
+    ("2-acik", "Gruvbox açık", "light",
      "A palette and nothing else — no rule outside it knows which theme it "
      "is in."),
 ]
@@ -95,10 +95,12 @@ def sheet(page, slug, title, sub, files, light):
         f'<img src="file://{path}"></figure>' for name, path in files)
     html = SHEET.format(
         title=title, sub=sub, figures=figures,
-        sheet_bg="#ffffff" if light else "#0d1117",
-        ink="#1f2328" if light else "#f0f6fc",
-        muted="#5a636c" if light else "#8b949e",
-        edge="#d0d7de" if light else "#30363d")
+        # The sheet around the screenshots, in the theme it is showing:
+        # Gruvbox's page, fg1, fg3 and bg2 for each.
+        sheet_bg="#fbf1c7" if light else "#282828",
+        ink="#3c3836" if light else "#ebdbb2",
+        muted="#665c54" if light else "#bdae93",
+        edge="#d5c4a1" if light else "#504945")
     path = SHOTS / f"{slug}-sheet.html"
     path.write_text(html)
     page.goto(f"file://{path}", wait_until="load")

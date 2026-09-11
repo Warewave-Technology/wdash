@@ -59,6 +59,18 @@ class AsyncDashboard {
         this.initializeCharts();
         this.setupStatCards();
 
+        // Every chart is painted with the colours of the moment it was drawn.
+        // On a theme switch they are thrown away and drawn again from the
+        // answer already on the page: Chart.js restyling in place keeps the
+        // old defaults, and asking the backend again would be a query for a
+        // colour change.
+        document.addEventListener('wdash:theme', () => {
+            this.initializeCharts();
+            Object.values(this.charts).forEach(chart => chart.destroy());
+            this.charts = {};
+            if (this.lastData) this.render(this.lastData);
+        });
+
         // Start progressive loading immediately
         this.load();
     }

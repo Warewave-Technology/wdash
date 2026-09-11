@@ -675,7 +675,14 @@ class ThePaletteIsTheOnlyPlaceTest(unittest.TestCase):
                     # glass, and its digits are all valid hex.
                     r"(?<!&)#[0-9a-fA-F]{6}\b|(?<!&)#[0-9a-fA-F]{3}\b"
                     r"(?![0-9a-fA-F;])"
-                    r"|rgba?\(\s*\d+[^)]*\)|hsla?\(\s*\d+[^)]*\)", line):
+                    r"|rgba?\(\s*\d+[^)]*\)|hsla?\(\s*\d+[^)]*\)"
+                    # And one BUILT in a script — `'hsla(' + hue + ...` or
+                    # `hsl(${hue}, ...)`. The trace page coloured every
+                    # service that way, at a fixed lightness in every theme,
+                    # and the patterns above never saw it because the
+                    # character after the bracket is a quote, not a digit.
+                    r"|(?:rgb|hsl)a?\(['\"`]\s*\+|(?:rgb|hsl)a?\(\$\{",
+                    line):
                 if literal.lower() in NOT_THEME_COLOURS:
                     continue
                 found.append(f"line {number}: {literal}")
@@ -1030,6 +1037,87 @@ class EveryBootstrapVariantIsRestyledTest(unittest.TestCase):
         missing = [name for name in self._used() if name not in restyled]
         self.assertEqual(missing, [], "\n".join(
             ["these are Bootstrap's colours, not the palette's:"] + missing))
+
+
+class EveryColourUtilityIsRestyledTest(unittest.TestCase):
+    """`text-*` and `bg-*-subtle`, the way the button variants are held above.
+
+    The text utilities had been given the palette's inks; the `bg-*-subtle`
+    grounds under them had not, so a source's signal badges, the "yours"
+    badge beside a role and the dashboard's error rate painted palette ink on
+    Bootstrap's own ground — a dark teal on the dark theme, a sky-blue on the
+    light one. It was found by looking at the rendered Gruvbox screens: the
+    rendered-pages test knows Bootstrap's main palette and not its subtle one.
+    """
+
+    VARIANTS = ("primary", "secondary", "success", "info", "warning", "danger")
+    INK = {"primary": "--accent", "secondary": "--text-secondary",
+           "success": "--hue-green", "info": "--hue-blue",
+           "warning": "--hue-yellow", "danger": "--hue-red"}
+
+    def _used(self):
+        """Every colour utility a template or a script writes."""
+        markup = ""
+        templates = os.path.join(ROOT, "templates")
+        for name in sorted(os.listdir(templates)):
+            if name.endswith(".html"):
+                with open(os.path.join(templates, name)) as handle:
+                    markup += handle.read()
+        for script in ("wdash.js", "async-dashboard.js", "config.js"):
+            with open(os.path.join(ROOT, "static", "js", script)) as handle:
+                markup += handle.read()
+        pattern = (r"(?<![\w-])((?:text|bg)-(?:" + "|".join(self.VARIANTS)
+                   + r")(?:-subtle)?)(?![\w-])")
+        return sorted(set(re.findall(pattern, markup)))
+
+    def _block(self, name):
+        """The resting rule that names `.name`, alone or in a group."""
+        for selectors, block in re.findall(r"([^{}]+)\{([^}]*)\}",
+                                           stylesheet()):
+            for selector in selectors.split(","):
+                if re.fullmatch(rf"\s*\.{re.escape(name)}\s*", selector):
+                    return block
+        return None
+
+    def test_the_templates_use_some(self):
+        used = self._used()
+        self.assertIn("bg-info-subtle", used)
+        self.assertIn("text-danger", used)
+
+    def test_every_colour_utility_used_is_the_palettes(self):
+        missing = []
+        for name in self._used():
+            if name.startswith("bg-") and not name.endswith("-subtle"):
+                continue          # `.badge.bg-*`, held by the badge tests
+            block = self._block(name)
+            property_name = "color" if name.startswith("text-") \
+                else "background-color"
+            value = _declaration(block, property_name) or ""
+            if "var(--" not in value:
+                missing.append(f"{name}: {value or 'not restyled'}")
+        self.assertEqual(missing, [], "\n".join(
+            ["these are Bootstrap's colours, not the palette's:"] + missing))
+
+    def test_a_quiet_badge_reads_in_every_theme(self):
+        """Each ink on the ground a subtle badge now has, in every theme."""
+        checked = 0
+        for name in self._used():
+            if not name.endswith("-subtle"):
+                continue
+            variant = name.split("-")[1]
+            ground_token = _declaration(self._block(name), "background-color")
+            for theme, palette in palettes().items():
+                with self.subTest(badge=name, theme=theme):
+                    ink = _resolve(f"var({self.INK[variant]})", palette)
+                    ground = _resolve(ground_token, palette)
+                    self.assertIsNotNone(ground, f"{name} has no ground")
+                    ratio = contrast(ink, ground)
+                    checked += 1
+                    self.assertGreaterEqual(
+                        round(ratio, 2), AA_NORMAL,
+                        f"{theme}: text-{variant} {ink} on {name} {ground} "
+                        f"is {ratio:.2f}:1")
+        self.assertGreater(checked, 0, "no subtle badge was measured")
 
 
 class MutedInkIsReadableOnEverySurfaceTest(unittest.TestCase):

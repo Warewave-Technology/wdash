@@ -41,10 +41,14 @@ uptime checks. Elastic's own browser monitors are read down to the step too,
 onto the same screen — measured against a running Heartbeat rather than
 transcribed from the reference.
 
-**Themes.** Dark, light, or follow the system, chosen from the navbar and
-remembered by the browser rather than by the account — the same operator on a
-bright wall display and a dark laptop wants two different answers. Dark stays
-the default, so an upgrade changes nothing for anybody who does not ask.
+**Themes.** Gruvbox dark, Gruvbox light, or follow the system, chosen from
+the navbar and remembered by the browser rather than by the account — the same
+operator on a bright wall display and a dark laptop wants two different
+answers. Dark stays the default. Both are Gruvbox at its medium contrast with
+orange as the accent; where one of its colours falls short of AA on a surface
+it lands on, it is moved the least distance that clears it, and
+[docs/themes](docs/themes/) lists each move. The charts follow a switch too,
+rather than keeping the colours they were first drawn in.
 
 Underneath it, every colour in the product now comes from one palette, and
 `tests/test_contrast.py` measures every theme rather than whichever one was

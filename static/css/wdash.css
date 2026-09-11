@@ -14,34 +14,44 @@
  *
  * This block is what a theme overrides, and it is meant to be the only place
  * a colour is written down.
+ *
+ * The palette is Gruvbox — dark here, light below, both at its MEDIUM
+ * contrast — with orange as the one accent. Gruvbox's own values are used
+ * wherever they clear the 4.5:1 normal text needs on every surface they land
+ * on; where one does not, it is moved the least distance that does, keeping
+ * its hue and saturation, and the comment beside it says by how much. A
+ * palette nobody may adjust is a palette that fails the contrast suite, and
+ * one adjusted by eye is a palette nobody can check.
  */
 :root {
-    /* Surfaces, from the page up through the things that sit on it. */
-    --surface-page: #0d1117;
-    --surface-sunken: #161b22;
-    --surface-raised: #21262d;
-    --surface-card: #1c2128;
-    --surface-navbar: #010409;
-    --surface-input: #21262d;
-    --surface-hover: #30363d;
+    /* Surfaces, from the page up through the things that sit on it.
+       Gruvbox names: bg0_h #1d2021, bg0 #282828, bg0_s #32302f,
+       bg1 #3c3836, bg2 #504945. The sunken wells go DARKER than the page,
+       the way Gruvbox's own editor gutters do. */
+    --surface-page: #282828;
+    --surface-sunken: #1d2021;
+    --surface-raised: #3c3836;
+    --surface-card: #32302f;
+    --surface-navbar: #1d2021;
+    --surface-input: #3c3836;
+    --surface-hover: #504945;
 
-    /* Text.
+    /* Text: fg1 for prose, fg3 for what is muted.
      *
-     * `--text-secondary` was #7d8590, which reads at 5.07:1 on the page and
-     * 4.08:1 two rules up on `--surface-raised` — under the 4.5:1 normal text
-     * needs, on every card footer and table cell in the product. Every test
-     * here measured it against the page, where it passed.
-     *
-     * #868f99 is the dimmest value that clears 4.5:1 on all four surfaces
-     * (4.64 at worst) while staying a visible step below `--text-muted`. */
-    --text-primary: #f0f6fc;
-    --text-muted: #8b949e;
-    --text-secondary: #868f99;
+     * `--text-secondary` is one step dimmer, and Gruvbox's step, fg4
+     * #a89984, reads at 4.17:1 on `--surface-raised` — under 4.5:1 on every
+     * card footer and table cell that sits there. #afa089 is fg4 moved 31%
+     * of the way to fg3: the dimmest value on that line that clears all four
+     * surfaces (4.53:1 at worst), still a visible step below fg3. */
+    --text-primary: #ebdbb2;
+    --text-muted: #bdae93;
+    --text-secondary: #afa089;
 
-    /* Lines, and the one accent the product is built around. */
-    --border: #30363d;
-    --border-strong: #3d444d;
-    --accent: #39c5cf;
+    /* Lines, and the one accent the product is built around: Gruvbox's
+       orange, 5.84:1 on the page and 4.59:1 on a raised surface. */
+    --border: #504945;
+    --border-strong: #665c54;
+    --accent: #fe8019;
 
     /* What a shadow is made of, and what a hover overlay is made of. Both
        have to flip: a shadow on a light page is far weaker than black at
@@ -50,56 +60,72 @@
        stays where it is used — `color-mix(... 4%, transparent)` reads as
        "a 4% wash" wherever it appears. */
     --shadow: #000000;
-    --wash: #ffffff;
+    --wash: #fbf1c7;
     /* Ink for text sitting ON a bright fill — a warning badge, an info chip.
        It was `--surface-page`, which is right by coincidence on a dark theme
        and wrong on a light one: white lettering on a yellow badge. What it
        has to be is dark in EVERY theme, because the fill it sits on is
-       bright in every theme. */
-    --text-on-fill: #0d1117;
+       bright in every theme.
+
+       bg0_h rather than bg0: under bg0 #282828, Gruvbox's red fill measures
+       4.29:1; under #1d2021 it is 4.77:1. */
+    --text-on-fill: #1d2021;
     /* The faintest line on a chart — barely there on purpose, and the one
-       value a script cannot compute for itself because `color-mix` inside a
-       Chart.js option string is not CSS. */
+       value a script cannot compute for itself. A script hands the canvas
+       this `color-mix()` string as it is; measured in Chromium, the canvas
+       resolves it (to `color(srgb … / 0.06)`) and paints the mix. */
     --grid-faint: color-mix(in srgb, var(--wash) 6%, transparent);
 
     /* INK. The hues that carry meaning when they are TEXT — an error
        message, a failed step, a tint behind a row. These are the ones a
-       theme has to change: `#7ee787` is 12:1 on a dark page and 1.5:1 on a
-       white one. */
-    --hue-blue: #79c0ff;
-    --hue-green: #7ee787;
-    --hue-yellow: #f2cc60;
-    --hue-red: #ff7b72;
-    --hue-purple: #d2a8ff;
-    --hue-cyan: #39c5cf;
-    --hue-orange: #ffa657;
+       theme has to change: Gruvbox's bright green is 7:1 on this page and
+       1.9:1 on the light one.
+
+       Gruvbox's bright hues, three of them lifted — same hue and saturation,
+       lightness up just far enough to clear 4.5:1 where they land: blue
+       #83a598 and purple #d3869b by under 2% each, on a raised surface; red
+       #fb4934 by 13.5%, because it read 3.37:1 on a raised surface and
+       4.24:1 on its own 12% tint inside an expiry chip, which is where a red
+       has to survive being watered down. */
+    --hue-blue: #88a99c;
+    --hue-green: #b8bb26;
+    --hue-yellow: #fabd2f;
+    --hue-red: #fc8678;
+    --hue-purple: #d58da1;
+    --hue-cyan: #8ec07c;
+    --hue-orange: #fe8019;
 
     /* FILL. The same meanings as a chip somebody reads dark text ON — a log
        level, a monitor state, a badge, a primary button. Split from the ink
        above because the two want opposite things from a light theme: the ink
-       has to go dark against a white page, and the fill has to stay bright
+       has to go dark against a light page, and the fill has to stay bright
        or `--text-on-fill` stops working.
 
        So these are the same in every theme, and that is the point rather
-       than an oversight. `-vivid` is the far end of the gradient. */
-    --fill-accent: #39c5cf;
-    --fill-accent-vivid: #2dd4bf;
-    --fill-blue: #79c0ff;
-    --fill-blue-vivid: #4dabf7;
-    --fill-green: #7ee787;
-    --fill-green-vivid: #51cf66;
-    --fill-yellow: #f2cc60;
-    --fill-yellow-vivid: #ffd93d;
-    --fill-red: #ff7b72;
-    --fill-red-vivid: #ff6b6b;
+       than an oversight. `-vivid` is the far end of the gradient: Gruvbox's
+       NEUTRAL shade of the same hue, which is darker — and where that shade
+       fails 4.5:1 under `--text-on-fill` (orange 4.24, blue 3.88, purple
+       3.87), lifted just far enough that it does not. */
+    --fill-accent: #fe8019;
+    --fill-accent-vivid: #de600f;
+    --fill-blue: #83a598;
+    --fill-blue-vivid: #4b9194;
+    --fill-green: #b8bb26;
+    --fill-green-vivid: #98971a;
+    --fill-yellow: #fabd2f;
+    --fill-yellow-vivid: #d79921;
+    /* ERROR is the red INK, a fill too: one red for a failure wherever it
+       appears. Its gradient runs to Gruvbox's own red. */
+    --fill-red: #fc8678;
+    --fill-red-vivid: #fb4934;
     /* FATAL and CRITICAL, which have to be louder than ERROR or the chart
-       says the two are the same kind of night. */
-    --fill-red-strong: #ff4444;
-    --fill-purple: #d2a8ff;
-    --fill-purple-vivid: #be4bdb;
-    --fill-cyan: #39c5cf;
-    --fill-cyan-vivid: #2dd4bf;
-    --fill-orange: #ffa657;
+       says the two are the same kind of night. Gruvbox's bright red, the
+       loudest red that still carries `--text-on-fill` (4.77:1). */
+    --fill-red-strong: #fb4934;
+    --fill-purple: #d3869b;
+    --fill-purple-vivid: #b87091;
+    --fill-cyan: #8ec07c;
+    --fill-orange: #fe8019;
 
     /* The categorical ramp a chart walks when its series are services or
        hosts rather than severities — one token instead of ten, because a
@@ -107,11 +133,13 @@
        would be ten chances to change nine.
 
        Fills, because a chart bar is a shape somebody reads a label against,
-       not a piece of text. */
+       not a piece of text. Gruvbox's seven bright hues, orange first because
+       it is the accent, then three of the neutral shades. */
     --chart-series:
-        var(--fill-accent), var(--fill-green), var(--fill-purple),
-        var(--fill-orange), var(--fill-blue), var(--fill-yellow),
-        var(--fill-red), #a5d6ff, #56d364, #e3b341;
+        var(--fill-accent), var(--fill-cyan), var(--fill-purple),
+        var(--fill-yellow), var(--fill-blue), var(--fill-green),
+        var(--fill-red-strong), var(--fill-blue-vivid),
+        var(--fill-green-vivid), var(--fill-yellow-vivid);
 }
 
 
@@ -132,44 +160,56 @@
  *   * `--text-on-fill` itself, for the same reason.
  *
  * The ink hues had to move a long way, and that is the part a light theme
- * cannot borrow from a dark one: `#7ee787` is 12:1 on this product's dark
- * page and 1.5:1 on a white one. Every value below is measured in
+ * cannot borrow from a dark one: Gruvbox's bright green is 7:1 on the dark
+ * page and 1.9:1 on this one. Every value below is measured in
  * `tests/test_contrast.py` against the surface it lands on.
+ *
+ * Gruvbox light, MEDIUM contrast: bg0 #fbf1c7 is the page, the cards are
+ * bg0_h #f9f5d7 — a shade lighter, so they lift off it — and the inks are
+ * Gruvbox's FADED hues, which are the ones it writes for a light
+ * background.
  */
 :root[data-theme="light"] {
-    --surface-page: #ffffff;
-    --surface-sunken: #f6f8fa;
-    --surface-raised: #eaeef2;
-    --surface-card: #ffffff;
-    --surface-navbar: #ffffff;
-    --surface-input: #ffffff;
-    --surface-hover: #eaeef2;
+    --surface-page: #fbf1c7;
+    --surface-sunken: #f2e5bc;
+    --surface-raised: #ebdbb2;
+    --surface-card: #f9f5d7;
+    --surface-navbar: #f2e5bc;
+    --surface-input: #f9f5d7;
+    --surface-hover: #ebdbb2;
 
-    --text-primary: #1f2328;
-    --text-muted: #5a636c;
-    --text-secondary: #636c76;
+    /* fg1, fg2 and fg3 — Gruvbox's own steps, all three clearing 4.5:1 on
+       every surface here (fg3 4.75:1 on a raised one, at worst). */
+    --text-primary: #3c3836;
+    --text-muted: #504945;
+    --text-secondary: #665c54;
 
-    --border: #d0d7de;
-    --border-strong: #afb8c1;
-    --accent: #0e7490;
+    --border: #d5c4a1;
+    --border-strong: #bdae93;
+    /* Faded orange, #af3a03, darkened by 0.3% of lightness: it read 4.46:1
+       on a raised surface, and a link there is a link somebody reads. */
+    --accent: #ad3a03;
 
-    /* Not black at 40%, which is a bruise on a white page. A mid grey at the
-       same alpha is the shadow somebody expects to see. */
-    --shadow: #8c959f;
+    /* Not black at 40%, which is a bruise on a light page. Gruvbox's grey at
+       the same alpha is the shadow somebody expects to see. */
+    --shadow: #928374;
     /* The overlay has to DARKEN here. Same 4% wash at the call site, opposite
        direction — which is why it is a colour rather than a finished value. */
-    --wash: #0d1117;
+    --wash: #282828;
 
-    --hue-blue: #0969da;
-    --hue-green: #116329;
-    --hue-yellow: #7d4e00;
-    /* Darker than the obvious `#cf222e`, which measures 4.40:1 against its
-       own 12% tint on a white card — the expiry chip and the row wash are
-       where a red has to survive being watered down. */
-    --hue-red: #b42318;
-    --hue-purple: #8250df;
-    --hue-cyan: #0e7490;
-    --hue-orange: #a04100;
+    /* Faded blue, red and purple as Gruvbox writes them. Faded green, yellow
+       and aqua do not clear 4.5:1 on a raised surface (3.55, 2.75, 3.64),
+       so each is darkened — same hue and saturation — just far enough:
+       green by 4% of lightness, aqua by 5%, yellow by 10%. Yellow is the
+       one that moved furthest; a yellow a reader can read on cream is
+       nearer to brown than to yellow, and there is no way round that. */
+    --hue-blue: #076678;
+    --hue-green: #68630c;
+    --hue-yellow: #86570f;
+    --hue-red: #9d0006;
+    --hue-purple: #8f3f71;
+    --hue-cyan: #3a6b4d;
+    --hue-orange: #ad3a03;
 }
 
 /* Base Dark Theme */
@@ -413,7 +453,7 @@ a:not([class]):hover {
 
 /* Buttons - Warp Style */
 .btn-primary {
-    background: linear-gradient(135deg, var(--fill-accent) 0%, var(--fill-cyan-vivid) 100%);
+    background: linear-gradient(135deg, var(--fill-accent) 0%, var(--fill-accent-vivid) 100%);
     border: none;
     border-radius: 8px;
     color: var(--text-on-fill);
@@ -423,7 +463,7 @@ a:not([class]):hover {
 }
 
 .btn-primary:hover {
-    background: linear-gradient(135deg, var(--fill-cyan-vivid) 0%, var(--fill-accent) 100%);
+    background: linear-gradient(135deg, var(--fill-accent-vivid) 0%, var(--fill-accent) 100%);
     transform: translateY(-2px);
     box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 40%, transparent);
 }
@@ -691,7 +731,7 @@ a:not([class]):hover {
 }
 
 .log-level.NOTICE {
-    background: linear-gradient(135deg, var(--fill-accent) 0%, var(--fill-cyan-vivid) 100%);
+    background: linear-gradient(135deg, var(--fill-accent) 0%, var(--fill-accent-vivid) 100%);
     color: var(--text-on-fill);
 }
 
@@ -779,7 +819,7 @@ a:not([class]):hover {
 }
 
 .pagination .page-item.active .page-link {
-    background: linear-gradient(135deg, var(--fill-accent) 0%, var(--fill-cyan-vivid) 100%);
+    background: linear-gradient(135deg, var(--fill-accent) 0%, var(--fill-accent-vivid) 100%);
     border-color: var(--accent);
     color: var(--text-on-fill);
 }
@@ -1148,10 +1188,10 @@ tr.monitor-row-warning {
     text-decoration: underline;
 }
 
-/* What a finding is ABOUT — index names, source names. Teal because that is
-   already this theme's colour for an identifier (links, code, focus rings),
-   so these read as names rather than as another grey category chip. 7.29:1 on
-   the chip background. */
+/* What a finding is ABOUT — index names, source names. The accent because
+   that is already this theme's colour for an identifier (links, code, focus
+   rings), so these read as names rather than as another grey category chip.
+   4.59:1 on the chip background dark, 4.52:1 light. */
 .badge.target-chip {
     background: var(--surface-raised) !important;
     color: var(--accent) !important;
@@ -1200,6 +1240,26 @@ tr.monitor-row-warning {
 
 .text-info {
     color: var(--hue-blue) !important;
+}
+
+.text-secondary {
+    color: var(--text-secondary) !important;
+}
+
+/* Bootstrap's quiet badges — `bg-*-subtle` with a `text-*` on it: the
+ * source's signals, "yours" beside a role, the dashboard's error rate and
+ * threshold state. The ink above was the palette's; the ground under it was
+ * still Bootstrap's own, a dark teal on the dark theme and a pale sky-blue on
+ * the light one, which no theme of this product has ever been.
+ *
+ * A NEUTRAL ground, the way `.badge.target-chip` is built, rather than a tint
+ * of each hue: every ink in the palette is measured to clear 4.5:1 on
+ * `--surface-raised`, and a 12% tint of the ink behind it takes all but two
+ * of them under that on both themes. The hue stays in the ink and the edge. */
+.bg-primary-subtle, .bg-secondary-subtle, .bg-success-subtle,
+.bg-info-subtle, .bg-warning-subtle, .bg-danger-subtle {
+    background-color: var(--surface-raised) !important;
+    border: 1px solid var(--border);
 }
 
 /* Pre and Code - Terminal Style */
@@ -1708,7 +1768,9 @@ code {
  * `--text-on-fill` on top of them. Clipped to text on a white page they gave
  * the product's name a measured 2.07:1 — under the 3:1 that large text
  * needs, and the one word on the page nobody can afford to squint at. The
- * hues are per-theme and are meant to be read: 4.6:1 light, 9.5:1 dark.
+ * hues are per-theme and are meant to be read. Orange into yellow, which is
+ * Gruvbox's own warm pair: 5.84 and 8.69:1 on the dark page, 5.47 and
+ * 5.47:1 on the light one.
  *
  * No stylesheet check can catch this one. `-webkit-text-fill-color:
  * transparent` means the colour a reader sees is the background's, so the
@@ -1718,7 +1780,7 @@ code {
     font-size: 3.5rem;
     font-weight: 700;
     margin: 0;
-    background: linear-gradient(135deg, var(--accent), var(--hue-blue));
+    background: linear-gradient(135deg, var(--accent), var(--hue-yellow));
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -1851,7 +1913,7 @@ code {
 .landing-cta {
     display: inline-block;
     padding: 14px 36px;
-    background: linear-gradient(135deg, var(--fill-accent), var(--fill-cyan-vivid));
+    background: linear-gradient(135deg, var(--fill-accent), var(--fill-accent-vivid));
     color: var(--text-on-fill);
     font-weight: 700;
     font-size: 1rem;

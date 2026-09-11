@@ -23,8 +23,9 @@ in — navbar, tab strip, a filled accent button where the ink is the page
 background.
 
 The one element that is not — the pulse, the live point, the sparkline — is
-`var(--wdash-accent, #39c5cf)`. Inline the file and the palette decides it;
-leave the variable unset and it falls back to the dark theme's cyan.
+`var(--wdash-accent, #fe8019)`. Inline the file and the palette decides it;
+leave the variable unset and it falls back to Gruvbox's orange, the dark
+theme's accent.
 
 Each file also carries an id-scoped `<style>` giving `color` a value under
 `prefers-color-scheme`, which only does anything when the file is opened on
@@ -56,10 +57,13 @@ Three copies of one drawing drift, and the only symptom is a tab icon that
 has quietly stopped being the logo. `tests/test_frontend_integrity.py`
 compares the path data in all three.
 
-The PNG is one colour, `#0f8b96`, and that number was measured rather than
-picked: 4.07:1 against a white tab strip and 3.95:1 against a dark one. The
-palette's own cyan is 2.09:1 on white — invisible where half the world reads.
+The PNG is one colour, `#c35d1a`, and that number was measured rather than
+picked: 4.28:1 against a white tab strip, 3.76:1 against a dark one and
+3.27:1 against a light-grey one — a shade of Gruvbox's orange, because the
+accent itself cannot do it: bright orange is 2.53:1 on white, the faded one
+2.63:1 on dark chrome. `render_png.py` beside this file draws it from the SVG
+favicon, so the two cannot disagree about the shape.
 
 `.navbar-brand` is accent-coloured, so `currentColor` inside it *is* the
 accent: without `.navbar-brand .wdash-mark { color: var(--text-primary) }`
-the whole drawing comes out cyan and the pulse disappears into it.
+the whole drawing comes out orange and the pulse disappears into it.

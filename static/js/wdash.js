@@ -268,6 +268,12 @@ class LogSearch {
 
         console.log('Setting up LogSearch event listeners...');
 
+        // A theme switch re-resolves every token on the page and nothing on
+        // a canvas: the histogram is drawn again from the bars it already has.
+        document.addEventListener('wdash:theme', () => {
+            if (this.histogramData) this.renderHistogram(this.histogramData);
+        });
+
         // Set up form submit handler
         this.searchForm.addEventListener('submit', (e) => {
             e.preventDefault();
@@ -968,6 +974,8 @@ class LogSearch {
             return;
         }
         card.classList.remove('d-none');
+        // Kept so a theme switch can draw the same bars in the new colours.
+        this.histogramData = data;
 
         // Fixed order and colour so a severity always looks the same, and the
         // eye can compare two searches without re-reading the legend.
@@ -1005,14 +1013,22 @@ class LogSearch {
                 responsive: true,
                 maintainAspectRatio: false,
                 animation: false,
+                // The axis and legend text from the palette too. Left to
+                // Chart.js they were its built-in #666, which the contrast
+                // suite cannot see on a canvas: 2.2:1 on the dark page.
                 scales: {
-                    x: { stacked: true, ticks: { maxTicksLimit: 8, font: { size: 9 } },
+                    x: { stacked: true,
+                         ticks: { maxTicksLimit: 8, font: { size: 9 },
+                                  color: paletteColour('--text-muted') },
                          grid: { display: false } },
-                    y: { stacked: true, ticks: { maxTicksLimit: 4, font: { size: 9 } },
+                    y: { stacked: true,
+                         ticks: { maxTicksLimit: 4, font: { size: 9 },
+                                  color: paletteColour('--text-muted') },
                          grid: { color: paletteColour('--grid-faint') } },
                 },
                 plugins: {
-                    legend: { labels: { boxWidth: 10, font: { size: 10 } } },
+                    legend: { labels: { boxWidth: 10, font: { size: 10 },
+                                        color: paletteColour('--text-primary') } },
                     tooltip: { mode: 'index', intersect: false },
                 },
                 onClick: (evt, items) => {

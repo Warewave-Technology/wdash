@@ -20,9 +20,9 @@
     {# The mark, twice. The SVG carries its own `prefers-color-scheme` rule,
        so it is legible on a light tab strip and on a dark one; the PNG is
        for browsers that do not take SVG here, and it is one colour, measured
-       to hold against both (4.07:1 on white, 3.95:1 on dark chrome). The
-       palette's own cyan is 2.09:1 on white — invisible where half the
-       world reads. #}
+       to hold against both (4.28:1 on white, 3.76:1 on dark chrome) —
+       docs/logo/render_png.py draws it. The accent itself cannot be that
+       colour: Gruvbox's bright orange is 2.53:1 on white. #}
     <link rel="icon" type="image/svg+xml"
           href="{{ url_for('static', filename='img/wdash-mark.svg') }}?v={{ asset_version }}">
     <link rel="alternate icon" type="image/png" sizes="32x32"
@@ -75,9 +75,18 @@
 
         function apply(choice) {
             var theme = resolve(choice);
+            var before = root.getAttribute('data-theme');
             root.setAttribute('data-theme', theme);
             root.setAttribute('data-bs-theme', theme);
             root.setAttribute('data-theme-choice', choice);
+            // Canvas charts are painted once, with the colours of the moment
+            // they were drawn in: the stylesheet re-resolves every token on
+            // a switch, and a chart does not. Everything that draws on a
+            // canvas listens for this and draws again.
+            if (before && before !== theme) {
+                document.dispatchEvent(new CustomEvent('wdash:theme',
+                                                       {detail: {theme: theme}}));
+            }
         }
 
         window.wdashTheme = {
@@ -226,11 +235,11 @@
                             <li><h6 class="dropdown-header">Theme</h6></li>
                             <li><a class="dropdown-item" href="#"
                                    data-theme-option="dark">
-                                <i class="fas fa-moon fa-fw"></i> Dark
+                                <i class="fas fa-moon fa-fw"></i> Gruvbox dark
                             </a></li>
                             <li><a class="dropdown-item" href="#"
                                    data-theme-option="light">
-                                <i class="fas fa-sun fa-fw"></i> Light
+                                <i class="fas fa-sun fa-fw"></i> Gruvbox light
                             </a></li>
                             <li><a class="dropdown-item" href="#"
                                    data-theme-option="system">
