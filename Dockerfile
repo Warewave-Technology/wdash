@@ -21,6 +21,16 @@ FROM python:3.11-slim AS base
 
 WORKDIR /app
 
+# The package lives at /app/src/wdash and nothing installs it, so without
+# this `wdash` is importable only by main.py, which puts src on the path
+# itself — that is, only by gunicorn. Everything else this image and the
+# manifests start is `python -m wdash.<something>`: the alert evaluator in
+# the Kubernetes pod, the agent, the browser image's entry point. Each one
+# died at start with "No module named wdash", and the pod with it, while the
+# CI image job passed — because it put src on the path by hand before it
+# imported anything.
+ENV PYTHONPATH=/app/src
+
 # No gcc. Every pinned dependency ships a manylinux wheel — measured with
 # `pip install --only-binary=:all:` against this exact base image — so the
 # compiler was only ever adding weight and attack surface to a published

@@ -193,12 +193,17 @@ jobs:
       - name: Build the server image
         run: docker build -t wdash:ci .
 
-      - name: It starts, and says what it is
+      # Every process the image and the manifests start, started the way they
+      # start it. This step used to put src on the path by hand before
+      # importing, so it passed on an image where `python -m wdash.alerts` —
+      # the evaluator in the Kubernetes pod — could not import `wdash` at all.
+      # Nothing here edits the path.
+      - name: Every entry point imports, the way it is started
         run: |
-          docker run --rm --entrypoint python wdash:ci -c "
-          import sys; sys.path.insert(0, 'src')
-          from wdash.app import create_app
-          print('imports and builds an app:', bool(create_app))"
+          docker run --rm wdash:ci python -m wdash.alerts --help
+          docker run --rm wdash:ci python -m wdash.agent --help
+          docker run --rm wdash:ci python -m wdash.store.recover --help
+          docker run --rm wdash:ci python -c "import main; print('gunicorn target:', main.app)"
 
   manifests:
     name: kubernetes manifests

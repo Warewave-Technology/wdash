@@ -241,6 +241,99 @@ class JobsStillDoWhatTheyAreForTest(unittest.TestCase):
                         f"CI runs {image}, the lab runs {version}")
 
 
+def _dockerfile():
+    with open(os.path.join(ROOT, "Dockerfile")) as handle:
+        return handle.read()
+
+
+def _module_entry_points():
+    """Every `python -m <module>` the image or the manifests start.
+
+    Read from the files that start them — the Dockerfile's exec-form
+    ENTRYPOINT/CMD and every container `command` in kubernetes/ — so a new
+    process is covered the day it is written down, not the day somebody
+    remembers this test.
+    """
+    found = set()
+    for array in re.findall(r'^(?:ENTRYPOINT|CMD)\s+(\[.*\])', _dockerfile(),
+                            re.MULTILINE):
+        parts = yaml.safe_load(array)
+        if parts[:2] == ["python", "-m"]:
+            found.add(parts[2])
+    manifests = os.path.join(ROOT, "kubernetes")
+    for name in sorted(os.listdir(manifests)):
+        if not name.endswith(".yaml"):
+            continue
+        with open(os.path.join(manifests, name)) as handle:
+            for document in yaml.safe_load_all(handle):
+                spec = (((document or {}).get("spec") or {})
+                        .get("template") or {}).get("spec") or {}
+                for container in (spec.get("containers") or []) + (
+                        spec.get("initContainers") or []):
+                    command = container.get("command") or []
+                    if command[:2] == ["python", "-m"]:
+                        found.add(command[2])
+    return found
+
+
+class EveryEntryPointImportsTest(unittest.TestCase):
+    """The package lives at /app/src/wdash and nothing installs it.
+
+    So `wdash` was importable in the image only by main.py, which puts src on
+    the path itself — that is, only by gunicorn. The alert evaluator in the
+    Kubernetes pod and the agent, the browser image's entry point, are
+    `python -m wdash.<something>`, and each died at start with "No module
+    named wdash", taking the pod's readiness with it. The CI image job passed
+    throughout: it put src on the path by hand before importing anything.
+
+    Measured here without Docker, from the repository root — the image's
+    WORKDIR holds the same tree — with the environment the Dockerfile sets
+    and none of this process's own.
+    """
+
+    def _image_environment(self):
+        environment = {key: value for key, value in os.environ.items()
+                       if key != "PYTHONPATH"}
+        workdir = re.findall(r"^WORKDIR\s+(\S+)", _dockerfile(), re.MULTILINE)
+        self.assertEqual(workdir[:1], ["/app"], "the image's tree moved")
+        for value in re.findall(r"^ENV\s+PYTHONPATH=(\S+)", _dockerfile(),
+                                re.MULTILINE):
+            environment["PYTHONPATH"] = os.pathsep.join(
+                os.path.abspath(os.path.join(ROOT, os.path.relpath(
+                    part, workdir[0]))) for part in value.split(":"))
+        environment["WDASH_NO_DOTENV"] = "1"
+        return environment
+
+    def test_the_processes_that_start_this_way_were_found(self):
+        """Otherwise the test below passes by finding nothing to start."""
+        self.assertLessEqual({"wdash.alerts", "wdash.agent"},
+                             _module_entry_points())
+
+    def test_each_one_imports_with_the_image_environment(self):
+        import subprocess
+        import sys
+
+        environment = self._image_environment()
+        for module in sorted(_module_entry_points()):
+            with self.subTest(module=module):
+                result = subprocess.run(
+                    [sys.executable, "-m", module, "--help"], cwd=ROOT,
+                    env=environment, capture_output=True, text=True,
+                    timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr[-500:])
+                self.assertIn("usage:", result.stdout)
+
+    def test_the_image_job_starts_them_without_editing_the_path(self):
+        """A check that fixes the path before it looks cannot see the path
+        being wrong."""
+        steps = "\n".join(step.get("run", "")
+                          for step in _workflow()["jobs"]["image"]["steps"])
+        self.assertNotIn("sys.path", steps)
+        for module in sorted(_module_entry_points()):
+            with self.subTest(module=module):
+                self.assertIn(f"python -m {module}", steps)
+
+
 if __name__ == "__main__":
     unittest.main()
 
