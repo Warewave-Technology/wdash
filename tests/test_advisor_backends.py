@@ -466,6 +466,38 @@ class JaegerRuleTest(unittest.TestCase):
         report = self.report(metrics_status=200)
         self.assertIn("JAEGER003", _findings(report))
 
+    def test_a_refusal_is_not_a_working_metrics_api(self):
+        """401, 403 or 503 is an auth proxy or a dead upstream answering,
+        not Jaeger saying its metrics backend is wired up.
+
+        Any status but 501 counted as "it works", so a Jaeger that refused
+        every call reported a HIGHER score than one that answered: 100, with
+        JAEGER002 under "1 rules passed", because JAEGER003's honest
+        coverage finding had moved into not_evaluated.
+        """
+        for status in (401, 403, 500, 503):
+            with self.subTest(status=status):
+                report = self.report(metrics_status=status)
+                self.assertNotIn("JAEGER002", _passed(report))
+                self.assertIn("JAEGER002", _not_evaluated(report))
+                self.assertNotIn("JAEGER002", _findings(report))
+
+    def test_a_refused_metrics_call_is_recorded_as_a_failed_call(self):
+        snapshot = collect_jaeger("http://jaeger:16686", "lab-jaeger",
+                                  session=jaeger_http(metrics_status=403))
+        self.assertIn("metrics", snapshot.errors)
+        self.assertNotIn("metrics_api", snapshot.facts)
+
+    def test_the_two_answers_jaeger_gives_are_still_read(self):
+        """200 and 501 are Jaeger answering; neither becomes an error."""
+        for status in (200, 501):
+            with self.subTest(status=status):
+                snapshot = collect_jaeger(
+                    "http://jaeger:16686", "lab-jaeger",
+                    session=jaeger_http(metrics_status=status))
+                self.assertNotIn("metrics", snapshot.errors)
+                self.assertEqual(snapshot.facts["metrics_api"], status)
+
 
 class CollectionFailureTest(unittest.TestCase):
     """A backend that will not answer must not take the report down."""

@@ -190,9 +190,13 @@ class Report:
     def unavailable(self):
         """Nothing was evaluated, because nothing it needed arrived.
 
-        Not a report with no findings: a report of nothing."""
+        Not a report with no findings: a report of nothing. A rule that
+        RAISED counts as well as one that could not look: a report of 31
+        exceptions kept a score of 100 and passed the gate, although
+        nothing in it had reached a verdict."""
         return self.evaluated == 0 and bool(self.collection_errors
-                                            or self.not_evaluated)
+                                            or self.not_evaluated
+                                            or self.errors)
 
     @property
     def score(self):

@@ -29,6 +29,13 @@ from . import run_rules
 from .models import Severity
 from .snapshot import ClusterSnapshot, collect
 
+#: How the certificate switch is spelled, read as a tri-state. Anything
+#: that is neither a yes nor a no keeps the check and says so on stderr:
+#: the cost of misreading the word is a password sent to whoever answered,
+#: and that cannot be taken back.
+VERIFY_YES = frozenset({"true", "1", "yes", "on"})
+VERIFY_NO = frozenset({"false", "0", "no", "off"})
+
 COLORS = {
     Severity.CRITICAL: "\033[91m",
     Severity.WARNING: "\033[93m",
@@ -143,14 +150,27 @@ def _client_config(args, environ):
     answered cannot be taken back.
     """
     written = (environ.get("ELASTICSEARCH_VERIFY_CERTS") or "").strip()
-    verify = written.lower() == "true" if written else True
+    spelled = written.lower()
+    # Only "true" counted as yes, so `=1`, `=yes` and `=on` — how most
+    # people write "on" — turned the check OFF and sent the password to
+    # whatever certificate answered. An operator who wrote `=1` meaning
+    # "verify" ended up worse off than one who set nothing at all.
+    verify = spelled not in VERIFY_NO
+    if written and spelled not in VERIFY_YES and spelled not in VERIFY_NO:
+        print(f"wdash.advisor: ELASTICSEARCH_VERIFY_CERTS={written!r} is "
+              f"neither a yes nor a no; the certificate is checked",
+              file=sys.stderr)
+    # TLS options and a plain-http host are refused by the transport, so a
+    # CA named for an https cluster stopped an http one being read at all.
+    https = str(args.url or "").strip().lower().startswith("https://")
     return {
         "ELASTICSEARCH_URL": args.url,
         "ELASTICSEARCH_USERNAME": environ.get("ELASTICSEARCH_USERNAME"),
         "ELASTICSEARCH_PASSWORD": environ.get("ELASTICSEARCH_PASSWORD"),
         "ELASTICSEARCH_TIMEOUT": 30,
         "ELASTICSEARCH_VERIFY_CERTS": verify and not args.insecure,
-        "ELASTICSEARCH_CA_CERTS": environ.get("ELASTICSEARCH_CA_CERTS") or None,
+        "ELASTICSEARCH_CA_CERTS": (
+            environ.get("ELASTICSEARCH_CA_CERTS") or None) if https else None,
     }
 
 

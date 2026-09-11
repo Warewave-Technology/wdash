@@ -6,6 +6,7 @@ scope — WDash's RBAC has to live in the application layer regardless.
 """
 
 from ..models import Finding, NotEvaluated, Severity, rule
+from ._util import node_infos
 
 CATEGORY = "security"
 
@@ -33,7 +34,7 @@ def _is_true(value):
       needs=("nodes_info",))
 def security_disabled(snap):
     disabled = []
-    for node_id, info in snap.node_infos():
+    for node_id, info in node_infos(snap):
         value = _node_setting(info, "xpack.security.enabled")
         # Security is on by default in ES 8; treat an absent setting as enabled
         if value is not None and not _is_true(value):
@@ -64,7 +65,7 @@ def transport_tls_disabled(snap):
     # If security is off entirely, SEC001 already reports a stronger finding
     any_security = False
     insecure = []
-    for node_id, info in snap.node_infos():
+    for node_id, info in node_infos(snap):
         enabled = _node_setting(info, "xpack.security.enabled")
         if enabled is not None and not _is_true(enabled):
             continue

@@ -681,6 +681,141 @@ def _cluster(slow):
         ilm=_Calls(get_lifecycle=ok), snapshot=_Calls(get_repository=ok))
 
 
+#: Rules whose verdict is about the nodes. Each one reads the node map, and
+#: each one read an empty map as "nothing wrong here".
+NODE_RULES = ("CLU002", "CLU003", "CLU004", "CLU005", "CLU006", "CLU007",
+              "CLU008", "CLU009", "QRY001", "QRY002", "QRY003", "SEC001",
+              "SEC002")
+
+
+def _said_no_nodes():
+    """The lab cluster as the master describes it when the node-level
+    requests failed: HTTP 200, a `_nodes` header counting the failures, and
+    an empty `nodes` map."""
+    snapshot = _lab()
+    empty = {"_nodes": {"total": 3, "successful": 0, "failed": 3}, "nodes": {}}
+    snapshot.nodes_info = dict(empty)
+    snapshot.nodes_stats = dict(empty)
+    return snapshot
+
+
+class NodesThatSaidNothingTest(unittest.TestCase):
+    """An answer that listed no nodes is not a verdict about nodes.
+
+    No call failed — the master answered 200 — so `needs=` never fired and
+    thirteen rules passed against a node map that was empty. Among them
+    SEC001 "Cluster authentication", which is the critical rule on the full
+    report: a cluster whose nodes said nothing was told its security was on.
+    """
+
+    def test_no_node_rule_passes_on_an_empty_node_map(self):
+        report = run_rules(_said_no_nodes())
+        self.assertEqual(_ids(report.passed) & set(NODE_RULES), set(),
+                         "rules passed on a cluster whose nodes said nothing")
+
+    def test_they_are_not_evaluated_rather_than_quietly_dropped(self):
+        report = run_rules(_said_no_nodes())
+        self.assertLessEqual(set(NODE_RULES), _ids(report.not_evaluated))
+        self.assertEqual(report.errors, [], "refusing is not failing")
+
+    def test_authentication_is_not_confirmed_by_a_cluster_that_said_nothing(self):
+        report = run_rules(_said_no_nodes())
+        self.assertNotIn("SEC001", _ids(report.passed))
+        self.assertNotIn("SEC001", {f.rule_id for f in report.findings})
+
+    def test_a_cluster_that_did_answer_is_still_judged(self):
+        """Not a blanket refusal: every node rule still reaches a verdict on
+        the lab fixture, or the guard above would be free."""
+        report = run_rules(_lab())
+        reached = _ids(report.passed) | {f.rule_id for f in report.findings}
+        self.assertLessEqual(set(NODE_RULES), reached)
+
+    def test_a_nodes_call_that_partly_failed_is_recorded_as_a_failure(self):
+        """`_nodes: {failed: 3}` with a 200 is the master saying it could not
+        reach its nodes. Kept as a success, it is an empty node map nobody
+        can tell from a cluster with nothing to report."""
+        from wdash.advisor.snapshot import collect
+
+        def ok(*_, **__):
+            return {"ok": True}
+
+        def partly_failed(*_, **__):
+            return {"_nodes": {"total": 3, "successful": 1, "failed": 2},
+                    "nodes": {"n0": {"name": "n0", "roles": ["data"]}}}
+
+        snapshot = collect(_Calls(
+            info=ok, cluster=_Calls(health=ok, get_settings=ok),
+            nodes=_Calls(info=partly_failed, stats=partly_failed),
+            indices=_Calls(stats=ok, get_settings=ok, get_mapping=ok,
+                           get_index_template=ok),
+            cat=_Calls(indices=lambda **_: [], shards=lambda **_: []),
+            ilm=_Calls(get_lifecycle=ok), snapshot=_Calls(get_repository=ok)),
+            timeout=5)
+        self.assertIn("nodes_info", snapshot.errors)
+        self.assertIn("2", snapshot.errors["nodes_info"])
+        self.assertIn("nodes_stats", snapshot.errors)
+        self.assertNotIn("info", snapshot.errors)
+
+    def test_a_nodes_call_that_wholly_succeeded_is_not_an_error(self):
+        from wdash.advisor.snapshot import collect
+
+        def ok(*_, **__):
+            return {"ok": True}
+
+        def all_well(*_, **__):
+            return {"_nodes": {"total": 1, "successful": 1, "failed": 0},
+                    "nodes": {"n0": {"name": "n0", "roles": ["data"]}}}
+
+        snapshot = collect(_Calls(
+            info=ok, cluster=_Calls(health=ok, get_settings=ok),
+            nodes=_Calls(info=all_well, stats=all_well),
+            indices=_Calls(stats=ok, get_settings=ok, get_mapping=ok,
+                           get_index_template=ok),
+            cat=_Calls(indices=lambda **_: [], shards=lambda **_: []),
+            ilm=_Calls(get_lifecycle=ok), snapshot=_Calls(get_repository=ok)),
+            timeout=5)
+        self.assertEqual(snapshot.errors, {})
+
+
+class EveryRuleRaisedTest(unittest.TestCase):
+    """A report where every rule failed to run is a report of nothing.
+
+    `unavailable` counted collection errors and rules that could not look,
+    but not rules that RAISED. So a report of 31 exceptions kept a score of
+    100, and the command line exited 0 without --fail-on, although the exit
+    status is documented as 2 for "nothing could be evaluated".
+    """
+
+    def _all_raised(self):
+        from wdash.advisor.models import Report
+
+        return Report(taken_at="x", cluster_name="c", version="8.19.9",
+                      distribution="elasticsearch",
+                      errors=[(r.id, "TypeError: boom")
+                              for r in all_rules("elasticsearch")])
+
+    def test_nothing_reached_a_verdict_so_the_report_is_unavailable(self):
+        report = self._all_raised()
+        self.assertEqual(report.evaluated, 0)
+        self.assertTrue(report.unavailable)
+
+    def test_it_carries_no_score(self):
+        self.assertIsNone(self._all_raised().score)
+        self.assertIsNone(self._all_raised().to_dict()["score"])
+
+    def test_a_report_that_did_reach_a_verdict_is_not_unavailable(self):
+        """One rule that ran is enough: this is about nothing being
+        evaluated, not about any error at all."""
+        from wdash.advisor.models import Report
+
+        report = Report(taken_at="x", cluster_name="c", version="8.19.9",
+                        distribution="elasticsearch",
+                        passed=[("CLU001", "Cluster status")],
+                        errors=[("SEC001", "TypeError: boom")])
+        self.assertFalse(report.unavailable)
+        self.assertEqual(report.score, 100)
+
+
 class CollectTimeoutTest(unittest.TestCase):
     """One slow call costs its own field and nothing else.
 

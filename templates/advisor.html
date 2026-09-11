@@ -81,6 +81,12 @@
         {% for name, error in report.collection_errors.items() %}
         <li><code>{{ name }}</code> — {{ error }}</li>
         {% endfor %}
+        {# A report of nothing that lists nothing is a failure shaped like
+           emptiness. When every rule RAISED there is no collection error to
+           show and the reason is in `errors`, so name those here too. #}
+        {% for item in report.errors %}
+        <li><code>{{ item.0 }}</code> — {{ item.1 }}</li>
+        {% endfor %}
     </ul>
 </div>
 {% else %}
@@ -142,13 +148,26 @@
     <p class="mb-0">All {{ report.passed|length }} rules passed against this cluster.</p>
 </div>
 {% else %}
-{# Only a complete report may say everything passed. #}
+{# Only a complete report may say everything passed. There are two ways to
+   be incomplete and they are different sentences: some rules could not
+   look, or every rule looked and a call none of them reads did not arrive.
+   "The rest could not look" in the second case contradicts the count
+   printed right beside it — there is no rest. #}
 <div class="alert alert-warning">
+    {% if report.not_evaluated or report.errors %}
     <h5 class="mb-1"><i class="fas fa-exclamation-triangle"></i> No findings among the rules that could look</h5>
     <p class="mb-0">
         {{ report.evaluated }} of {{ rule_count }} rules reached a verdict. The
         rest could not look, so this is not a clean bill of health.
     </p>
+    {% else %}
+    <h5 class="mb-1"><i class="fas fa-exclamation-triangle"></i> No findings, but not everything was collected</h5>
+    <p class="mb-0">
+        All {{ report.evaluated }} of {{ rule_count }} rules reached a verdict.
+        Some of what was asked for did not arrive, so this report covers less
+        ground than a clean one — the failed calls are listed above.
+    </p>
+    {% endif %}
 </div>
 {% endif %}
 {% endif %}

@@ -442,3 +442,43 @@ class PartialReportPageTest(unittest.TestCase):
         body = self.serve(report)
         self.assertIn(f"All {len(rules)} rules passed against this cluster", body)
         self.assertNotIn("Analysis unavailable", body)
+
+    def test_a_fully_evaluated_report_does_not_invent_a_rest(self):
+        """Every rule looked; the one call that failed is read by none of
+        them. The page said "31 of 31 rules reached a verdict. The rest
+        could not look" — there is no rest."""
+        from wdash.advisor import all_rules
+        from wdash.advisor.models import Report
+
+        rules = all_rules("elasticsearch")
+        report = Report(taken_at="x", cluster_name="c", version="8.19.9",
+                        distribution="elasticsearch",
+                        passed=[(r.id, r.title) for r in rules],
+                        collection_errors={"ilm_policies":
+                                           "AuthorizationException(403)"})
+        # The template wraps that sentence, so the literal string never
+        # appears in the raw body and asserting on it would pass for the
+        # wrong reason.
+        squeezed = " ".join(self.serve(report).split())
+        self.assertIn("31 of 31 rules reached a verdict", squeezed,
+                      "the sentence under test has moved")
+        self.assertNotIn("The rest could not look", squeezed)
+        self.assertIn("ilm_policies", squeezed,
+                      "what was not collected still has to be on the page")
+
+    def test_a_report_where_every_rule_raised_names_the_failures(self):
+        """`unavailable` counted collection errors and rules that could not
+        look, but not rules that RAISED: the page kept a score of 100."""
+        from wdash.advisor import all_rules
+        from wdash.advisor.models import Report
+
+        rules = all_rules("elasticsearch")
+        report = Report(taken_at="x", cluster_name="c", version="8.19.9",
+                        distribution="elasticsearch",
+                        errors=[(r.id, "TypeError: boom") for r in rules])
+        body = self.serve(report)
+        self.assertIn("Analysis unavailable", body)
+        self.assertIn("TypeError: boom", body,
+                      "an unavailable report that lists nothing is a failure "
+                      "shaped like emptiness")
+        self.assertIn("CLU001", body)

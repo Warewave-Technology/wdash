@@ -3,7 +3,9 @@
 import math
 
 from ..models import Finding, NotEvaluated, Severity, rule
-from ._util import GB, human_bytes, parse_bytes, parse_watermark
+from ._util import (
+    GB, human_bytes, node_infos, nodes, parse_bytes, parse_watermark,
+)
 
 CATEGORY = "cluster"
 
@@ -48,7 +50,7 @@ def cluster_status(snap):
 @rule(id="CLU002", category=CATEGORY, title="JVM heap usage", needs=NODES)
 def heap_usage(snap):
     hot = []
-    for node_id, _, stats in snap.nodes():
+    for node_id, _, stats in nodes(snap):
         used = ((stats.get("jvm") or {}).get("mem") or {}).get("heap_used_percent")
         if used is None:
             continue
@@ -79,7 +81,7 @@ def heap_usage(snap):
       needs=NODES)
 def heap_over_compressed_oops(snap):
     offenders = []
-    for node_id, _, stats in snap.nodes():
+    for node_id, _, stats in nodes(snap):
         heap_max = ((stats.get("jvm") or {}).get("mem") or {}).get("heap_max_in_bytes")
         if heap_max and heap_max > 32 * GB:
             offenders.append((snap.node_name(node_id), heap_max))
@@ -103,7 +105,7 @@ def heap_over_compressed_oops(snap):
 
 @rule(id="CLU004", category=CATEGORY, title="Heap to system memory ratio", needs=NODES)
 def heap_ratio(snap):
-    for node_id, _, stats in snap.nodes():
+    for node_id, _, stats in nodes(snap):
         jvm_mem = (stats.get("jvm") or {}).get("mem") or {}
         os_mem = (stats.get("os") or {}).get("mem") or {}
         heap_max = jvm_mem.get("heap_max_in_bytes")
@@ -145,7 +147,7 @@ def heap_ratio(snap):
 @rule(id="CLU005", category=CATEGORY, title="Memory locking (mlockall)",
       needs=("nodes_info",))
 def memory_lock(snap):
-    unlocked = [snap.node_name(nid) for nid, info in snap.node_infos()
+    unlocked = [snap.node_name(nid) for nid, info in node_infos(snap)
                 if (info.get("process") or {}).get("mlockall") is False]
     if not unlocked:
         return
@@ -265,7 +267,7 @@ def disk_watermarks(snap):
     where Elasticsearch — capping it at 150GB free — puts it at 98.5%.
     """
     disks = []
-    for node_id, _, stats in snap.nodes():
+    for node_id, _, stats in nodes(snap):
         fs_total = (stats.get("fs") or {}).get("total") or {}
         total = fs_total.get("total_in_bytes")
         available = fs_total.get("available_in_bytes")
@@ -305,7 +307,7 @@ def thread_pool_rejections(snap):
 
     for pool_name, (title, severity) in watched.items():
         offenders = []
-        for node_id, _, stats in snap.nodes():
+        for node_id, _, stats in nodes(snap):
             pool = (stats.get("thread_pool") or {}).get(pool_name) or {}
             rejected = pool.get("rejected") or 0
             if rejected > 0:
@@ -333,17 +335,19 @@ def thread_pool_rejections(snap):
 @rule(id="CLU008", category=CATEGORY, title="Circuit breaker trips", needs=NODES)
 def circuit_breakers(snap):
     tripped = {}
-    for node_id, _, stats in snap.nodes():
+    for node_id, _, stats in nodes(snap):
         for breaker_name, breaker in (stats.get("breakers") or {}).items():
             count = breaker.get("tripped") or 0
             if count > 0:
                 tripped.setdefault(breaker_name, []).append((snap.node_name(node_id), count))
 
-    for breaker_name, nodes in tripped.items():
+    # Not `nodes`: that is the helper this rule calls above, and binding it
+    # here made the call an UnboundLocalError.
+    for breaker_name, offenders in tripped.items():
         yield Finding(
             rule_id="CLU008", category=CATEGORY, severity=Severity.WARNING,
             title=f"Circuit breaker tripped: {breaker_name}",
-            evidence="; ".join(f"{n}: {c} times" for n, c in nodes)
+            evidence="; ".join(f"{n}: {c} times" for n, c in offenders)
                      + " — cumulative counter",
             impact="Elasticsearch rejected requests to protect memory. Users see this as "
                    "failed queries.",
@@ -358,6 +362,10 @@ def circuit_breakers(snap):
 @rule(id="CLU009", category=CATEGORY, title="Master-eligible node count",
       needs=("nodes_info",))
 def master_eligible_nodes(snap):
+    # An empty node map is not a cluster with no master-eligible node; it is
+    # a cluster that did not say. Refuse before counting, or "0" reads as
+    # "nothing to report here".
+    node_infos(snap)
     count = snap.master_eligible_count
     if count == 0:
         return

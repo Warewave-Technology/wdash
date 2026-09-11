@@ -22,9 +22,12 @@ Rules never see a live connection. Three consequences follow:
 
 Collection is parallel and each call is isolated: if one fails, that field
 stays empty, the error is recorded under `collection_errors`, and the others
-continue. The whole collection has a 30-second budget. A call still running
-when it runs out is recorded as not collected, and everything that did arrive
-is kept. If a rule raises, the report survives and the error is recorded under
+continue. The whole collection has a 30-second budget, and it bounds the
+REPORT rather than the process: a call still running when it runs out is
+recorded as not collected and everything that did arrive is kept, but the
+call itself is not cancelled. It is left on a pool thread the interpreter
+joins at exit, so the command prints its report at the budget and then waits
+for that call before the process ends. If a rule raises, the report survives and the error is recorded under
 `errors`. The Advisor itself must not become an outage.
 
 A rule whose input was not collected is not run. It is listed under
@@ -83,8 +86,13 @@ found is found. Nothing found in a partial report is not the same as nothing
 there, so that exits 2.
 
 The client checks the cluster's certificate. Set `ELASTICSEARCH_CA_CERTS` to
-the CA that signed it. `ELASTICSEARCH_VERIFY_CERTS=false` (the web process's
-own switch) or `--insecure` turns the check off. `ELASTICSEARCH_USERNAME` and
+the CA that signed it; it is sent to the client only for an `https://` URL,
+because TLS options with a plain-http host are refused by the transport.
+`ELASTICSEARCH_VERIFY_CERTS=false` (the web process's own switch) or
+`--insecure` turns the check off. The switch is read as a tri-state:
+`true`, `1`, `yes` and `on` check the certificate, `false`, `0`, `no` and
+`off` do not, and any other value checks it and says on stderr that the
+word was not understood — `=1` meaning "on" used to turn the check off. `ELASTICSEARCH_USERNAME` and
 `ELASTICSEARCH_PASSWORD` are sent with every request, and without the check
 they go to whoever answers. The web process defaults to no check, so that an
 upgrade does not cut a deployment off from its cluster. The command line is

@@ -181,9 +181,13 @@ def collect(es, timeout=30):
     empty, the error is recorded under `errors`, and the rest continue. The
     Advisor itself must not become a point of failure.
 
-    `timeout` bounds the whole collection. A call still running when it runs
-    out is recorded as not collected and left behind; everything that did
-    arrive is kept.
+    `timeout` bounds the REPORT rather than the process. A call still
+    running when it runs out is recorded as not collected and left behind,
+    and everything that did arrive is kept — but it is not cancelled once
+    it has started. It stays on a pool thread that the interpreter joins at
+    exit, so `python -m wdash.advisor` against a cluster that hangs prints
+    its report at the budget and then waits for that call before the
+    process itself ends.
     """
     snapshot = ClusterSnapshot(taken_at=datetime.now(timezone.utc).isoformat())
 
@@ -221,9 +225,22 @@ def collect(es, timeout=30):
         for future in done:
             name = futures[future]
             try:
-                setattr(snapshot, name, future.result())
+                value = future.result()
             except Exception as exc:
                 snapshot.errors[name] = f"{type(exc).__name__}: {exc}"
+                continue
+            setattr(snapshot, name, value)
+            # A `_nodes` header counting failures is the master saying it
+            # could not reach its own nodes: HTTP 200, and a node map with a
+            # hole in it or nothing in it at all. Kept as a success, that is
+            # an answer no rule can tell from a cluster with nothing to
+            # report — and every rule about nodes read it as "no problem".
+            header = value.get("_nodes") if isinstance(value, dict) else None
+            failed = (header or {}).get("failed") or 0
+            if failed:
+                snapshot.errors[name] = (
+                    f"{failed} of {(header or {}).get('total', '?')} node "
+                    f"requests failed, so the node list is incomplete")
         for future in pending:
             snapshot.errors[futures[future]] = f"not collected within {timeout}s"
     finally:

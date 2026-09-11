@@ -278,12 +278,20 @@ def collect_jaeger(url, name, session=None, auth=None, verify=True,
 
     # Not an error when it refuses: HTTP 501 is Jaeger saying the metrics
     # backend is not wired up, which is a finding rather than a collection
-    # failure. A sign-in page is not Jaeger saying anything.
+    # failure. A sign-in page is not Jaeger saying anything — and neither is
+    # a 401, 403 or 503 from an auth proxy or a dead upstream. Those refuse
+    # the call; they say nothing about metrics. Read as "anything but 501
+    # means it works", they made a Jaeger that refused every call score
+    # HIGHER than one that answered: 100, with this rule among those passed.
     try:
         response = (session or requests).get(
             f"{base}/api/metrics/calls", params={"service": "any"},
             timeout=timeout, auth=auth, verify=verify)
-        snapshot.facts["metrics_api"] = _not_a_page(response).status_code
+        status = _not_a_page(response).status_code
+        if status not in (200, 501):
+            raise ValueError(f"answered HTTP {status}, which is not Jaeger "
+                             f"answering about its metrics API")
+        snapshot.facts["metrics_api"] = status
     except Exception as exc:
         snapshot.errors["metrics"] = str(exc)[:200]
 

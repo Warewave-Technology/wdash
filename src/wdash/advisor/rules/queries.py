@@ -1,7 +1,7 @@
 """Query and cache rules."""
 
 from ..models import Finding, Severity, rule
-from ._util import human_bytes, sum_node_stat
+from ._util import human_bytes, nodes, sum_node_stat
 
 CATEGORY = "queries"
 
@@ -74,7 +74,7 @@ def query_cache_hit_rate(snap):
 @rule(id="QRY003", category=CATEGORY, title="Fielddata memory usage", needs=NODES)
 def fielddata_in_use(snap):
     offenders = []
-    for node_id, _, stats in snap.nodes():
+    for node_id, _, stats in nodes(snap):
         used = (((stats.get("indices") or {}).get("fielddata") or {})
                 .get("memory_size_in_bytes")) or 0
         if used > 0:

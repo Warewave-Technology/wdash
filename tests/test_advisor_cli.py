@@ -39,7 +39,7 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from wdash.advisor import ClusterSnapshot  # noqa: E402
-from wdash.advisor.__main__ import main  # noqa: E402
+from wdash.advisor.__main__ import _client_config, _exit_status, main  # noqa: E402
 
 FIXTURE = os.path.join(ROOT, "tests", "fixtures", "lab-cluster.json")
 
@@ -181,6 +181,21 @@ class FailOnTest(unittest.TestCase):
         code, out, err = run_cli("--from-snapshot", self.saved(snapshot),
                                  "--fail-on", "critical")
         self.assertEqual(code, 0, out + err)
+
+    def test_a_report_where_every_rule_raised_does_not_pass_the_gate(self):
+        """Nothing was evaluated, so the status is 2 — with or without
+        --fail-on. It exited 0 without one, because `unavailable` did not
+        count rules that raised."""
+        from wdash.advisor.models import Report, all_rules
+
+        report = Report(taken_at="x", cluster_name="c", version="8.19.9",
+                        distribution="elasticsearch",
+                        errors=[(r.id, "TypeError: boom")
+                                for r in all_rules("elasticsearch")])
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(_exit_status(report, None), 2)
+            self.assertEqual(_exit_status(report, "critical"), 2)
+        self.assertIn("CLU001", err.getvalue(), "the reasons go to stderr")
 
     def test_the_exit_code_reaches_the_shell(self):
         snapshot = failed(ClusterSnapshot(taken_at="x"), "info", "health")
@@ -363,3 +378,105 @@ class CertificateTest(unittest.TestCase):
         not to check, and the same words mean the same here."""
         self.advise(ELASTICSEARCH_VERIFY_CERTS="false")
         self.assertTrue(self.credentials_sent())
+
+    def test_a_switch_spelled_1_does_not_turn_the_check_off(self):
+        """`=1` is how most people write "on". It turned verification OFF
+        and sent the password to whatever certificate answered — the exact
+        hole the check exists to close, and worse than setting nothing."""
+        for written in ("1", "yes", "on", "TRUE"):
+            with self.subTest(written=written):
+                self.received.clear()
+                self.advise(ELASTICSEARCH_VERIFY_CERTS=written)
+                self.assertTrue(self.dialled())
+                self.assertFalse(self.credentials_sent(),
+                                 f"ELASTICSEARCH_VERIFY_CERTS={written} sent "
+                                 f"the password to an untrusted certificate")
+
+    def test_a_value_nobody_can_read_keeps_checking(self):
+        self.advise(ELASTICSEARCH_VERIFY_CERTS="banana")
+        self.assertFalse(self.credentials_sent())
+
+
+class _Args:
+    def __init__(self, url="https://es.example:9200", insecure=False):
+        self.url, self.insecure = url, insecure
+
+
+class ClientConfigTest(unittest.TestCase):
+    """What the command hands the client, read from the environment.
+
+    Two faults live here. The switch was fail-open on any spelling but
+    "true", so `=1` meaning "on" turned the check off. And the CA bundle
+    went to the client whatever the URL's scheme was, which elastic-transport
+    refuses for a plain-http host — so an environment with
+    ELASTICSEARCH_CA_CERTS exported could not run the command at all.
+    """
+
+    def config(self, url="https://es.example:9200", insecure=False, **environ):
+        return _client_config(_Args(url, insecure), environ)
+
+    def test_an_unset_switch_checks_the_certificate(self):
+        self.assertTrue(self.config()["ELASTICSEARCH_VERIFY_CERTS"])
+
+    def test_every_spelling_of_yes_means_yes(self):
+        for written in ("true", "TRUE", "True", "1", "yes", "on", " true "):
+            with self.subTest(written=written):
+                self.assertTrue(
+                    self.config(ELASTICSEARCH_VERIFY_CERTS=written)
+                    ["ELASTICSEARCH_VERIFY_CERTS"])
+
+    def test_every_spelling_of_no_means_no(self):
+        for written in ("false", "FALSE", "0", "no", "off"):
+            with self.subTest(written=written):
+                self.assertFalse(
+                    self.config(ELASTICSEARCH_VERIFY_CERTS=written)
+                    ["ELASTICSEARCH_VERIFY_CERTS"])
+
+    def test_a_value_nobody_can_read_keeps_the_check(self):
+        """Fail closed, and say the word was not understood."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            config = self.config(ELASTICSEARCH_VERIFY_CERTS="banana")
+        self.assertTrue(config["ELASTICSEARCH_VERIFY_CERTS"])
+        self.assertIn("banana", err.getvalue())
+
+    def test_insecure_still_wins(self):
+        self.assertFalse(self.config(insecure=True)
+                         ["ELASTICSEARCH_VERIFY_CERTS"])
+
+    def test_a_ca_bundle_is_not_sent_to_a_plain_http_cluster(self):
+        """TLS options with an http host are refused by the transport, and
+        the whole command died before it reached the cluster."""
+        self.assertIsNone(
+            self.config(url="http://localhost:9200",
+                        ELASTICSEARCH_CA_CERTS="/etc/ssl/cert.pem")
+            ["ELASTICSEARCH_CA_CERTS"])
+
+    def test_a_ca_bundle_reaches_an_https_cluster(self):
+        self.assertEqual(
+            self.config(ELASTICSEARCH_CA_CERTS="/etc/ssl/cert.pem")
+            ["ELASTICSEARCH_CA_CERTS"], "/etc/ssl/cert.pem")
+
+
+class CaBundleWithHttpTest(unittest.TestCase):
+    """The regression, end to end: the command has to run at all."""
+
+    def test_a_ca_bundle_does_not_stop_an_http_cluster_being_read(self):
+        scratch = tempfile.mkdtemp()
+        bundle = os.path.join(scratch, "ca.pem")
+        with open(bundle, "w") as handle:
+            handle.write("-----BEGIN CERTIFICATE-----\n")
+        server = serve_in_background(HTTPServer(("127.0.0.1", 0), Expired))
+        try:
+            code, out, err = run_cli(
+                "--url", f"http://127.0.0.1:{server.server_address[1]}",
+                env={"ELASTICSEARCH_CA_CERTS": bundle})
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertNotIn("TLS options require scheme", err,
+                         "a CA bundle stopped a plain-http cluster being read")
+        # It answered 401 to everything, so the report is of nothing — which
+        # is exit 2, reached by collecting rather than by failing to start.
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("info", err)

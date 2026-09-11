@@ -518,8 +518,10 @@ PYTHONPATH=src python -m wdash.advisor --fail-on critical   # exit 1 on findings
 
 With `--fail-on` it exits 2 when it could not look at everything, and it
 exits 2 in any case when nothing could be evaluated. The cluster's
-certificate is checked, against `ELASTICSEARCH_CA_CERTS` when that is set;
-`ELASTICSEARCH_VERIFY_CERTS=false` or `--insecure` turns the check off.
+certificate is checked, against `ELASTICSEARCH_CA_CERTS` when that is set
+and the URL is `https://`; `ELASTICSEARCH_VERIFY_CERTS=false` (or `0`, `no`,
+`off`) or `--insecure` turns the check off. Any other spelling keeps the
+check and says so.
 
 Two checks are specific to how WDash queries data:
 

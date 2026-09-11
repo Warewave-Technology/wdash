@@ -2,6 +2,8 @@
 
 import re
 
+from ..models import NotEvaluated
+
 GB = 1024 ** 3
 MB = 1024 ** 2
 
@@ -118,10 +120,43 @@ def is_aggregatable(definition):
     return False, False
 
 
+#: What a rule about nodes says when the node map is empty.
+#:
+#: This is the shape the master returns when the node-level requests failed:
+#: HTTP 200, a `_nodes` header counting the failures, and no nodes at all.
+#: Nothing was recorded as a failed call, so `needs=` never fired and
+#: thirteen rules read "no nodes" as "nothing wrong here" — SEC001 among
+#: them, telling an operator that authentication was on for a cluster whose
+#: nodes had said nothing.
+NO_NODES = ("_nodes listed no nodes, so there is nothing to judge this "
+            "cluster's nodes by")
+
+
+def node_infos(snapshot):
+    """The (node_id, info) pairs, or a refusal when there are none."""
+    pairs = list(snapshot.node_infos())
+    if not pairs:
+        raise NotEvaluated(NO_NODES)
+    return pairs
+
+
+def nodes(snapshot):
+    """The (node_id, info, stats) triples, or a refusal when there are none."""
+    triples = list(snapshot.nodes())
+    if not triples:
+        raise NotEvaluated(NO_NODES)
+    return triples
+
+
 def sum_node_stat(snapshot, *path):
-    """Sum a numeric statistic across every node."""
+    """Sum a numeric statistic across every node.
+
+    Refuses rather than returning 0 when no node answered: a sum of nothing
+    is below every threshold a rule compares it against, which reads as a
+    cluster with nothing wrong.
+    """
     total = 0
-    for _, _, stats in snapshot.nodes():
+    for _, _, stats in nodes(snapshot):
         current = stats
         for key in path:
             current = (current or {}).get(key)
