@@ -1255,9 +1255,14 @@ class LogSearch {
                     '<pre class="json-display"><code id="sourceCode" class="text-muted">Loading&hellip;</code></pre></div>' +
             '</div>';
 
+        // The record the detail, raw and context views are about. Their
+        // requests name its source, and the context controls read it at the
+        // moment they are clicked rather than holding the one they were
+        // first bound for.
+        this._openRecord = record;
         this._loadFullRecord(record.ref);
         this._setupModalTabs(record.ref);
-        this._setupContextButtons(record.ref);
+        this._setupContextButtons();
 
         document.getElementById('copyLogButton').addEventListener('click', function() {
             // Copy what is on screen. Looking at the stored document and
@@ -1380,12 +1385,29 @@ class LogSearch {
      * The list view only fetches core fields; the full record is loaded when
      * the modal opens.
      */
+    /**
+     * The URL of one record's detail, raw or context view.
+     *
+     * With the record's own `source`, which is what the server now reads it
+     * from: these used to ask the default source whatever the record's
+     * origin. And the id is everything after the second colon — split
+     * without a limit, an id that itself contains a colon was cut short.
+     */
+    _recordUrl(ref, suffix, params) {
+        const parts = (ref || '').split(':');
+        const query = new URLSearchParams(params || {});
+        const source = this._openRecord && this._openRecord.source;
+        if (source) query.set('source', source);
+        const qs = query.toString();
+        return '/api/log/' + encodeURIComponent(parts[1] || '') + '/' +
+               encodeURIComponent(parts.slice(2).join(':')) + (suffix || '') +
+               (qs ? '?' + qs : '');
+    }
+
     async _loadFullRecord(ref) {
         if (!ref) return;
-        const [, container, id] = ref.split(':');
         try {
-            const response = await fetch('/api/log/' + encodeURIComponent(container) +
-                                         '/' + encodeURIComponent(id));
+            const response = await fetch(this._recordUrl(ref));
             const data = await response.json();
             if (!data.found || !data.record) return;
 
@@ -1456,11 +1478,9 @@ class LogSearch {
         };
 
         if (!ref) return fail('No record handle, so the stored document cannot be located.');
-        const [, container, id] = ref.split(':');
 
         try {
-            const response = await fetch('/api/log/' + encodeURIComponent(container) +
-                                         '/' + encodeURIComponent(id) + '/raw');
+            const response = await fetch(this._recordUrl(ref, '/raw'));
             const data = await response.json();
             if (!response.ok || !data.found) {
                 return fail(data.error || `Could not load the stored document (HTTP ${response.status}).`);
@@ -1472,23 +1492,30 @@ class LogSearch {
         }
     }
 
-    _setupContextButtons(ref) {
-        const self = this;
+    /**
+     * Bound once. The controls live in the modal's footer, which survives
+     * between records, and they used to gain a listener on every opening —
+     * so one click asked for the context of every record opened so far, and
+     * whichever answered last was shown under the current one.
+     */
+    _setupContextButtons() {
+        if (this._contextBound) return;
+        this._contextBound = true;
+        const current = () => this._openRecord && this._openRecord.ref;
         const mainBtn = document.getElementById('contextAllBtn');
         if (mainBtn) {
-            mainBtn.addEventListener('click', () => self._loadContext(ref, ''));
+            mainBtn.addEventListener('click', () => this._loadContext(current(), ''));
         }
         document.querySelectorAll('.context-option').forEach(el => {
             el.addEventListener('click', (e) => {
                 e.preventDefault();
-                self._loadContext(ref, el.dataset.field);
+                this._loadContext(current(), el.dataset.field);
             });
         });
     }
 
     async _loadContext(ref, field) {
         if (!ref) return;
-        const [, container, id] = ref.split(':');
 
         let box = document.getElementById('contextContainer');
         if (!box) {
@@ -1500,11 +1527,9 @@ class LogSearch {
         box.innerHTML = '<div class="text-center py-3"><div class="spinner-border spinner-border-sm text-info"></div> Loading context...</div>';
 
         try {
-            let url = '/api/log/' + encodeURIComponent(container) + '/' +
-                      encodeURIComponent(id) + '/context?count=10';
-            if (field) url += '&field=' + encodeURIComponent(field);
-
-            const response = await fetch(url);
+            const params = {count: '10'};
+            if (field) params.field = field;
+            const response = await fetch(this._recordUrl(ref, '/context', params));
             const data = await response.json();
             if (!response.ok) {
                 box.innerHTML = '<div class="text-danger"><i class="fas fa-exclamation-circle"></i> ' +

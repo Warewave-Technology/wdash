@@ -285,6 +285,28 @@ def save_source():
         config[signal] = block
     password = form.get("password") or None
 
+    # A rename must not quietly change what a role reaches. Role patterns
+    # name sources — `primary:app-*`, `-primary:secret-*` — and the qualifier
+    # is compared by exact name, so renaming `primary` made every such grant
+    # stop granting and every such EXCLUSION stop excluding: a role of `*`
+    # with `-primary:secret-*` could read `secret-*` the moment the page
+    # saved, with no preview and nothing in the audit row but the new name.
+    if source_id:
+        existing = store.sources.get(source_id)
+        new_name = (form.get("name") or "").strip()
+        if existing and new_name and new_name != existing["name"]:
+            naming = _roles_naming_source(store, existing["name"])
+            if naming:
+                flash(f"Roles name the source '{existing['name']}' in their "
+                      f"patterns: {', '.join(naming)}. Renaming it would "
+                      f"change what they reach — their exclusions for it "
+                      f"would stop excluding. Change those patterns first. "
+                      f"Nothing was saved.", "error")
+                _audit("source rename refused", subject=f"source:{source_id}",
+                       state={"name": existing["name"], "to": new_name,
+                              "roles": naming})
+                return redirect(url_for("config.config_page"))
+
     try:
         if source_id:
             saved = store.sources.update(
@@ -308,6 +330,22 @@ def save_source():
         flash(str(exc), "error")
 
     return redirect(url_for("config.config_page"))
+
+
+def _roles_naming_source(store, name):
+    """Roles with a pattern qualified by `name`, granting or excluding."""
+    from ..hub.patterns import split_deny, split_qualifier
+
+    naming = []
+    for role in store.roles.all():
+        for pattern in ((role.get("containers") or [])
+                        + (role.get("trace_containers") or [])):
+            _, rest = split_deny(pattern)
+            qualifier, _ = split_qualifier(rest)
+            if qualifier == name:
+                naming.append(role["name"])
+                break
+    return naming
 
 
 @config_bp.route("/sources/<source_id>/delete", methods=["POST"])

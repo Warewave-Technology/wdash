@@ -53,6 +53,37 @@ class SourceMissing(RuntimeError):
     """A request names a source that is not configured."""
 
 
+def _record_source():
+    """The one source a single record lives in.
+
+    Every record on the list carries the name of the source that answered
+    it, and the detail, raw and context views pass it back as `source=`.
+    They used to ask the DEFAULT source whatever the record's origin, with a
+    hard-coded `elasticsearch` handle, and check the container without
+    saying which source it was in — so a record from a second source opened
+    as "not found" or as somebody else's document, and a role's
+    source-qualified rules were not consulted at all.
+
+    Without a name — an older link, a client that never sent one — the
+    default source, as before. `*` is refused: one record lives in one place,
+    and an id asked of every backend means something different in each.
+    """
+    hub = getattr(current_app, "hub", None)
+    name = request.args.get("source") or None
+    if hub is not None and name == hub.ALL_SOURCES:
+        raise SourceMissing("A single record lives in one source; name it "
+                            "rather than asking all of them.")
+    return _logs(name)
+
+
+def _record_refused(scope, source, index):
+    """The 403 for a container this scope may not read in this source."""
+    if scope.allows_container(index, source=source.name):
+        return None
+    return jsonify({"error": "Access denied to this index",
+                    "error_type": "index_access_denied"}), 403
+
+
 NO_SOURCE = ({"error": "No log source is configured.",
               "error_type": "no_source",
               "suggestion": "Add a source on the configuration page."}, 503)
@@ -289,14 +320,17 @@ def api_get_log(index, doc_id):
                         "error_type": "permission_denied"}), 403
 
     scope = _scope()
-    if not scope.allows_container(index):
-        return jsonify({"error": "Access denied to this index",
-                        "error_type": "index_access_denied"}), 403
-
-    source = _logs()
+    try:
+        source = _record_source()
+    except SourceMissing as exc:
+        return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
     if source is None:
         return _no_source()
-    record = source.fetch(SourceRef("elasticsearch", index, doc_id), scope)
+    refused = _record_refused(scope, source, index)
+    if refused:
+        return refused
+
+    record = source.fetch(SourceRef(source.backend, index, doc_id), scope)
     if record is None:
         return jsonify({"found": False, "error": "Record not found",
                         "error_type": "not_found"}), 404
@@ -320,18 +354,20 @@ def api_get_log_raw(index, doc_id):
                         "error_type": "permission_denied"}), 403
 
     scope = _scope()
-    if not scope.allows_container(index):
-        return jsonify({"error": "Access denied to this index",
-                        "error_type": "index_access_denied"}), 403
-
-    source = _logs()
+    try:
+        source = _record_source()
+    except SourceMissing as exc:
+        return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
     if source is None:
         return _no_source()
+    refused = _record_refused(scope, source, index)
+    if refused:
+        return refused
     if not source.supports(Capability.RAW_DOCUMENT):
         return jsonify({"error": f"{source.name} does not expose raw documents",
                         "error_type": "unsupported"}), 501
 
-    document = source.raw(SourceRef("elasticsearch", index, doc_id), scope)
+    document = source.raw(SourceRef(source.backend, index, doc_id), scope)
     if document is None:
         return jsonify({"found": False, "error": "Record not found",
                         "error_type": "not_found"}), 404
@@ -347,19 +383,27 @@ def api_log_context(index, doc_id):
                         "error_type": "permission_denied"}), 403
 
     scope = _scope()
-    if not scope.allows_container(index):
-        return jsonify({"error": "Access denied to this index",
-                        "error_type": "index_access_denied"}), 403
+    try:
+        source = _record_source()
+    except SourceMissing as exc:
+        return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
+    if source is None:
+        return _no_source()
+    refused = _record_refused(scope, source, index)
+    if refused:
+        return refused
+    if not source.supports(Capability.CONTEXT):
+        return jsonify({"error": f"{source.name} cannot show the records "
+                                 f"around one",
+                        "error_type": "unsupported"}), 501
 
     try:
         count = min(int(request.args.get("count", 10)), 50)
     except ValueError:
         count = 10
 
-    if _logs() is None:
-        return _no_source()
-    context = _logs().context(
-        SourceRef("elasticsearch", index, doc_id), scope,
+    context = source.context(
+        SourceRef(source.backend, index, doc_id), scope,
         before=count, after=count,
         correlate_by=request.args.get("field") or None,
     )

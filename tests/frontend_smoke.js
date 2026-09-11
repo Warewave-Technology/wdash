@@ -98,6 +98,42 @@ const RAW_DOCUMENT = {
 
 console.log('front-end smoke');
 
+// --- the detail views ask the source a record came from ------------------
+//
+// They asked the default source whatever the record's origin, and the id was
+// cut at its first colon. And the context controls gained a listener on
+// every opening: one click asked for the context of every record opened so
+// far, and whichever answered last was shown under the current one.
+
+check('the detail views name the record\'s source and keep its whole id', () => {
+    const urls = [];
+    const w = makeWindow(url => { urls.push(url); return new Promise(() => {}); });
+    const search = Object.create(w.__LogSearch.prototype);
+    search.showLogModal({ ...RECORD, ref: 'elasticsearch:app-logs-1:a:b:c',
+                          source: 'secondary' });
+    assert(urls.includes('/api/log/app-logs-1/a%3Ab%3Ac?source=secondary'),
+           `the record was asked for as ${JSON.stringify(urls)}`);
+    search._loadRawDocument('elasticsearch:app-logs-1:a:b:c');
+    assert(urls.includes('/api/log/app-logs-1/a%3Ab%3Ac/raw?source=secondary'),
+           `the raw document was asked for as ${JSON.stringify(urls)}`);
+});
+
+check('one click asks for the context of the record that is open, once', () => {
+    const urls = [];
+    const w = makeWindow(url => { urls.push(url); return new Promise(() => {}); });
+    const search = Object.create(w.__LogSearch.prototype);
+    search.showLogModal({ ...RECORD, ref: 'elasticsearch:first-1:doc-a',
+                          source: 'primary' });
+    search.showLogModal({ ...RECORD, ref: 'elasticsearch:second-1:doc-b',
+                          source: 'secondary' });
+    urls.length = 0;
+    w.document.getElementById('contextAllBtn').click();
+    const asked = urls.filter(u => u.includes('/context'));
+    assertEqual(JSON.stringify(asked),
+                JSON.stringify(['/api/log/second-1/doc-b/context?count=10&source=secondary']),
+                'the context requests after one click');
+});
+
 // --- the detail modal opens at all --------------------------------------
 
 check('the log detail modal renders', () => {

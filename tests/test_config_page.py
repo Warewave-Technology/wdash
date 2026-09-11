@@ -97,6 +97,49 @@ class AccessTest(ConfigTestCase):
 
 
 class SourceTest(ConfigTestCase):
+    def rename(self, source, to):
+        return self.client.post("/admin/sources", data={
+            "id": source["id"], "name": to, "signal": "logs",
+            "kind": "elasticsearch", "url": "http://elasticsearch:9200",
+            "password": "", "verify_certs": "on", "enabled": "on"},
+            follow_redirects=True)
+
+    def test_a_rename_a_role_depends_on_is_refused(self):
+        """Role patterns name sources, compared by exact name. Renaming
+        `lab-es` made `-lab-es:secret-*` stop excluding — a role of `*` read
+        `secret-*` the moment the page saved — with no preview and nothing
+        in the audit row but the new name."""
+        self.add_source(name="lab-es")
+        self.app.store.roles.upsert(
+            "readers", permissions=["logs:read"],
+            containers=["*", "-lab-es:secret-*"], trace_containers=[])
+        source = self.app.store.sources.all()[0]
+
+        response = self.rename(source, "lab-es-2")
+        self.assertIn(b"readers", response.data)
+        self.assertEqual([s["name"] for s in self.app.store.sources.all()],
+                         ["lab-es"])
+        refused = [row for row in self.app.store.audit.recent()
+                   if row["action"] == "source rename refused"]
+        self.assertEqual(refused[0]["state"]["roles"], ["readers"])
+
+    def test_a_trace_store_pattern_counts_too(self):
+        self.add_source(name="lab-es")
+        self.app.store.roles.upsert(
+            "tracers", permissions=["traces:read"], containers=[],
+            trace_containers=["lab-es:otel-*"])
+        source = self.app.store.sources.all()[0]
+        self.rename(source, "lab-es-2")
+        self.assertEqual([s["name"] for s in self.app.store.sources.all()],
+                         ["lab-es"])
+
+    def test_a_rename_nothing_depends_on_goes_through(self):
+        self.add_source(name="lab-es")
+        source = self.app.store.sources.all()[0]
+        self.rename(source, "lab-es-2")
+        self.assertEqual([s["name"] for s in self.app.store.sources.all()],
+                         ["lab-es-2"])
+
     def test_a_source_can_be_added(self):
         self.add_source(name="lab-es")
         names = [s["name"] for s in self.app.store.sources.all()]

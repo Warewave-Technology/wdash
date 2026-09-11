@@ -439,6 +439,164 @@ class LogContractTest(unittest.TestCase):
         self.assertEqual(self.client.get("/logs").status_code, 302)
 
 
+class RecordingES(FakeES):
+    """FakeES that remembers which indices it was asked to GET."""
+
+    def __init__(self):
+        super().__init__()
+        self.gets = []
+
+    def get(self, index=None, id=None, **kw):
+        self.gets.append(index)
+        return super().get(index=index, id=id, **kw)
+
+
+class TheRecordIsReadFromItsOwnSourceTest(unittest.TestCase):
+    """The record, raw and context views, and the source a record lives in.
+
+    They asked the DEFAULT source whatever the record's origin, with a
+    hard-coded `elasticsearch` handle, and checked the container without
+    saying which source it came from. So a role's source-qualified rules were
+    not consulted at all — `*` with `-primary:app-*` was refused `app-*` by
+    the search and handed it here — and a record from a second source was
+    looked up in the first.
+    """
+
+    def setUp(self):
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource
+
+        self.primary, self.secondary = RecordingES(), RecordingES()
+        self.app = create_app(TestConfig)
+        hub = Hub()
+        hub.add_logs(ElasticsearchLogSource(self.primary, name="primary"))
+        hub.add_logs(ElasticsearchLogSource(self.secondary, name="secondary"))
+        self.app.hub = hub
+        self.client = self.app.test_client()
+
+    def login(self, indices):
+        from tests.support import grant
+        grant(self.app, "u", ["logs:read"], indices)
+        with self.client.session_transaction() as session:
+            session["user_data"] = _session(["logs:read"], indices)
+            session["_user_id"] = "1"
+
+    VIEWS = ("", "/raw", "/context")
+
+    def views(self, container="app-logs-000001", source=None):
+        query = f"?source={source}" if source else ""
+        return {view or "/": self.client.get(
+                    f"/api/log/{container}/doc-1{view}{query}")
+                for view in self.VIEWS}
+
+    def test_a_scoped_exclusion_holds_on_every_record_view(self):
+        self.login(["*", "-primary:app-*"])
+        for named in ("primary", None):          # None: the default source
+            for view, response in self.views(source=named).items():
+                with self.subTest(view=view, source=named):
+                    self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.primary.gets, [], "the excluded record was read")
+
+    def test_a_scoped_grant_opens_them_in_its_source_only(self):
+        """The other half: a role granted only `primary:app-*` was refused
+        every record, because the check never said which source it was."""
+        self.login(["primary:app-*"])
+        opened = self.views(source="primary")
+        for view, response in opened.items():
+            with self.subTest(view=view):
+                self.assertEqual(response.status_code, 200,
+                                 response.get_data(as_text=True)[:200])
+        for view, response in self.views(source="secondary").items():
+            with self.subTest(view=view, source="secondary"):
+                self.assertEqual(response.status_code, 403)
+
+    def test_the_record_is_read_from_the_source_it_came_from(self):
+        self.login(["*"])
+        response = self.client.get(
+            "/api/log/app-logs-000001/doc-1?source=secondary")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.secondary.gets, ["app-logs-000001"])
+        self.assertEqual(self.primary.gets, [])
+
+    def test_one_record_is_not_asked_of_every_source(self):
+        self.login(["*"])
+        response = self.client.get("/api/log/app-logs-000001/doc-1?source=*")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error_type"], "source_missing")
+
+    def test_a_container_expression_is_not_a_container(self):
+        """The container arrives from a URL and Elasticsearch reads it as an
+        index EXPRESSION. `*-logs-*` matched the grant `*` as a string, so
+        the views sent it to a GET and a search — reaching `zzz-logs-*`,
+        which the role excludes."""
+        self.login(["*", "-zzz-*"])
+        for container in ("*-logs-*", "app-logs-000001,zzz-logs-000001"):
+            for view, response in self.views(container=container,
+                                             source="primary").items():
+                with self.subTest(container=container, view=view):
+                    self.assertIn(response.status_code, (403, 404))
+        self.assertEqual(self.primary.gets, [])
+        self.assertFalse(any("*" in str(s["index"]) or "," in str(s["index"])
+                             for s in self.primary.searches),
+                         f"an expression reached a search: "
+                         f"{[s['index'] for s in self.primary.searches]}")
+
+    def test_a_document_answered_from_another_index_is_not_handed_back(self):
+        """A GET through a name that is not the index the document lives in —
+        an alias, say — answers from the index behind it. That index is
+        checked against the scope too, not only the name that was asked."""
+        class AliasingES(RecordingES):
+            def get(self, index=None, id=None, **kw):
+                answer = super().get(index=index, id=id, **kw)
+                return dict(answer, _index="zzz-logs-000001")
+
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource
+        hub = Hub()
+        hub.add_logs(ElasticsearchLogSource(AliasingES(), name="primary"))
+        self.app.hub = hub
+        self.login(["*", "-zzz-*"])
+        for view in ("", "/raw"):
+            with self.subTest(view=view):
+                response = self.client.get(
+                    f"/api/log/app-logs-000001/doc-1{view}?source=primary")
+                self.assertEqual(response.status_code, 404)
+
+    def test_the_handle_names_the_source_backend(self):
+        """It was built as `elasticsearch:` whatever the source was."""
+        from tests.support import StubLogSource
+        from wdash.hub import Hub
+
+        asked = []
+
+        class Recording(StubLogSource):
+            def fetch(self, ref, scope):
+                asked.append(ref)
+                return None
+
+        hub = Hub()
+        hub.add_logs(Recording(name="stub", containers=("app-logs-000001",)))
+        self.app.hub = hub
+        self.login(["*"])
+        self.client.get("/api/log/app-logs-000001/doc-1?source=stub")
+        self.assertEqual([ref.backend for ref in asked], ["stub"])
+
+    def test_context_is_refused_by_a_source_that_cannot_do_it(self):
+        """It had no capability check: a source without CONTEXT raised
+        NotImplementedError out of the base class, a 500."""
+        from tests.support import StubLogSource
+        from wdash.hub import Hub
+
+        hub = Hub()
+        hub.add_logs(StubLogSource(name="stub", containers=("app-logs-000001",)))
+        self.app.hub = hub
+        self.login(["*"])
+        response = self.client.get(
+            "/api/log/app-logs-000001/doc-1/context?source=stub")
+        self.assertEqual(response.status_code, 501)
+        self.assertEqual(response.get_json()["error_type"], "unsupported")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

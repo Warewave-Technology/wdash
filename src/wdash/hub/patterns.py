@@ -139,8 +139,15 @@ def matches_for_source(patterns, name, source_name=None):
     """Does `name` satisfy the rules, given which source it came from?
 
     A qualified pattern applies only to its named source; a bare one applies
-    everywhere. With no source given, qualified patterns are ignored rather
-    than assumed to match — the fail-closed direction.
+    everywhere.
+
+    With no source given, the answer has to hold whichever source the name
+    came from — and the two kinds of rule fail closed in opposite
+    directions. A qualified GRANT is ignored: it cannot be shown to apply. A
+    qualified DENIAL is honoured: it cannot be shown NOT to. Ignoring both,
+    which is what this did, made every source-less check fail open: a role of
+    `*` with `-primary:secret-*` was refused `secret-1` by the search and
+    handed it by the record, raw and context views, which asked without one.
 
     Denials are evaluated first and completely: `-*-pii-*` blocks a name even
     if three other patterns allow it. Any other order would make the meaning
@@ -150,9 +157,10 @@ def matches_for_source(patterns, name, source_name=None):
     for pattern in patterns or ():
         is_denial, rest = split_deny(pattern)
         qualifier, bare = split_qualifier(rest)
-        if qualifier is not None:
-            if source_name is None or qualifier != source_name:
-                continue
+        if qualifier is not None and qualifier != source_name:
+            if source_name is None and is_denial and matches(bare, name):
+                return False
+            continue
         if not matches(bare, name):
             continue
         if is_denial:

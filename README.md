@@ -241,6 +241,12 @@ appear. Exclusions can be source-qualified too (`-primary:secret-*`). An
 exclusion on its own grants nothing: `-secret-*` is a role with no access, not
 a role with all of it.
 
+A check made without knowing the source fails closed both ways: a qualified
+grant does not apply, and a qualified exclusion does. And because a qualifier
+is a source's name, a source that some role's patterns name cannot be renamed
+until those patterns change — renaming `primary` would otherwise turn
+`-primary:secret-*` into an exclusion of nothing.
+
 When a role is edited, the configuration page reports what the change *does* —
 which containers it starts and stops reaching, which permissions it adds and
 removes, and whether the net effect widens access. An end state is easy to read
@@ -458,9 +464,9 @@ without interpreting.
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `GET` | `/api/search` | Search log records |
-| `GET` | `/api/log/<container>/<id>` | Single record, all fields |
-| `GET` | `/api/log/<container>/<id>/context` | Surrounding records |
-| `GET` | `/api/log/<container>/<id>/raw` | The stored document, backend-shaped (diagnostic) |
+| `GET` | `/api/log/<container>/<id>` | Single record, all fields. `?source=` names the source it came from — every record says which — and without it the default source is asked |
+| `GET` | `/api/log/<container>/<id>/context` | Surrounding records, from a source that declares the capability; `?source=` as above |
+| `GET` | `/api/log/<container>/<id>/raw` | The stored document, backend-shaped (diagnostic); `?source=` as above |
 | `GET` | `/api/field-stats` | Field value distributions |
 | `GET` | `/api/indices` | Accessible containers |
 | `GET` | `/api/saved-searches` | List saved searches |

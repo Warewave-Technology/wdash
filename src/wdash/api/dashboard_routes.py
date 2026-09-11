@@ -278,12 +278,34 @@ def _load(dashboard_id):
 
 
 def _targets(dashboard, scope):
-    """Dashboard patterns ∩ scope. Returns (all, resolved, allowed)."""
+    """Dashboard patterns ∩ scope. Returns (all, resolved, allowed).
+
+    `allowed` is what the SOURCE says this scope may read, not a pattern
+    check made without saying which source: that check ignored every
+    source-qualified rule, so a role granted `elasticsearch:app-*` saw no
+    shared dashboard at all, and an exclusion qualified the same way did not
+    exclude.
+    """
     source = _logs(dashboard)
     available = source.containers(Scope.unrestricted())
     resolved = dashboard.get_resolved_indices(available)
-    allowed = [name for name in resolved if scope.allows_container(name)]
+    readable = set(source.containers(scope))
+    allowed = [name for name in resolved if name in readable]
     return available, resolved, allowed
+
+
+def _shown(resolved, allowed):
+    """The resolved containers a caller may be shown by name.
+
+    A dashboard's patterns can resolve to containers the viewer may not read,
+    and naming them is the information the visibility rule exists to hold
+    back — `payment-fraud-investigation` over `fraud-*` says something
+    whether or not you can open the index. An administrator sees them all;
+    everybody else sees what they can read, and a count of the rest.
+    """
+    if current_user.has_permission("system:admin"):
+        return list(resolved)
+    return list(allowed)
 
 
 def _effective_query(dashboard, narrow=None):
@@ -707,7 +729,8 @@ def api_dashboard_data(dashboard_id):
         return jsonify({"error": "No accessible indices for dashboard data.",
                         "error_type": "no_accessible_containers",
                         "dashboard_patterns": dashboard.index_patterns,
-                        "resolved_containers": resolved,
+                        "resolved_containers": _shown(resolved, allowed),
+                        "total_resolved": len(resolved),
                         "total_hits": 0, "panels": [],
                         "queried_containers": []}), 200
 
@@ -774,7 +797,8 @@ def api_dashboard_data(dashboard_id):
         "panels": _panel_results(panels, result,
                                  _trace_panels(panels, query.window, scope)),
         "dashboard_patterns": dashboard.index_patterns,
-        "resolved_containers": resolved,
+        "resolved_containers": _shown(resolved, allowed),
+        "total_resolved": len(resolved),
         "accessible_containers": allowed,
         "queried_containers": allowed,
         "total_accessible_containers": len(allowed),
@@ -812,7 +836,7 @@ def api_dashboard_patterns(dashboard_id):
 
     return jsonify({"dashboard_id": dashboard_id,
                     "index_patterns": dashboard.index_patterns,
-                    "resolved_containers": resolved,
+                    "resolved_containers": _shown(resolved, allowed),
                     "accessible_containers": allowed,
                     "total_resolved": len(resolved),
                     "total_accessible": len(allowed)})

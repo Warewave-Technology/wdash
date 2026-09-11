@@ -81,10 +81,24 @@ class PatternTest(unittest.TestCase):
         self.assertFalse(matches_for_source(patterns, "secret-1", "primary"))
         self.assertTrue(matches_for_source(patterns, "secret-1", "secondary"))
 
-    def test_a_source_scoped_exclusion_does_not_leak_when_unqualified(self):
-        """Asked without a source, a source-specific rule must not apply."""
-        self.assertTrue(matches_for_source(["*", "-primary:secret-*"],
-                                           "secret-1", None))
+    def test_asked_without_a_source_a_scoped_exclusion_still_holds(self):
+        """The answer has to hold whichever source the name came from.
+
+        This test used to assert the opposite — that a source-specific
+        exclusion did NOT apply when no source was given — and so pinned the
+        leak: the record, raw and context views asked without a source, and
+        read `secret-1` for a role that excluded it in `primary`.
+        """
+        self.assertFalse(matches_for_source(["*", "-primary:secret-*"],
+                                            "secret-1", None))
+
+    def test_asked_without_a_source_a_scoped_grant_still_does_not(self):
+        """The other half of failing closed: a grant that names a source
+        cannot be shown to apply when the source is unknown."""
+        self.assertFalse(matches_for_source(["primary:secret-*"],
+                                            "secret-1", None))
+        self.assertTrue(matches_for_source(["primary:secret-*"],
+                                           "secret-1", "primary"))
 
     def test_there_is_exactly_one_pattern_implementation(self):
         """A second one is not a duplicate, it is a second answer.

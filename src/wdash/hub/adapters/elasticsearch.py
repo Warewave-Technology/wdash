@@ -267,12 +267,42 @@ class ElasticsearchLogSource(LogSource):
             histogram=histogram,
         )
 
-    def fetch(self, ref, scope):
-        if not scope.allows_container(ref.container):
+    def _readable(self, container, scope):
+        """The concrete containers this scope may read in THIS source, if
+        `container` is one of them; otherwise None.
+
+        A name rather than a pattern match. The container arrives from a URL,
+        and Elasticsearch reads it as an index EXPRESSION: `app-*` matches the
+        pattern `app-*` as a string and, handed to a search, reaches every
+        `app-*` index — the excluded `app-pii-*` ones included — and an alias
+        that matches a grant can resolve to an index no grant names. Only a
+        name the scope resolved for this source is read, and passing the
+        source is what makes source-qualified rules count here at all.
+        """
+        allowed = set(self.containers(scope))
+        return allowed if container in allowed else None
+
+    def _get(self, ref, scope):
+        """GET one document from a container this scope may read, or None.
+
+        The index Elasticsearch answers from is checked as well as the one
+        asked for: a GET through a name that is not the index it lives in
+        must not hand back a document from somewhere the scope never listed.
+        """
+        allowed = self._readable(ref.container, scope)
+        if allowed is None:
             return None
         try:
             response = self._es.get(index=ref.container, id=ref.id)
         except Exception:
+            return None
+        if response.get("_index") not in allowed:
+            return None
+        return response
+
+    def fetch(self, ref, scope):
+        response = self._get(ref, scope)
+        if response is None:
             return None
         return self._to_record({"_index": response["_index"], "_id": response["_id"],
                                 "_source": response["_source"]})
@@ -284,11 +314,8 @@ class ElasticsearchLogSource(LogSource):
         `_source` alone: which index a record actually landed in is often the
         thing being diagnosed, and it is not visible from the source body.
         """
-        if not scope.allows_container(ref.container):
-            return None
-        try:
-            response = self._es.get(index=ref.container, id=ref.id)
-        except Exception:
+        response = self._get(ref, scope)
+        if response is None:
             return None
         return {"_index": response.get("_index"), "_id": response.get("_id"),
                 "_source": response.get("_source") or {}}

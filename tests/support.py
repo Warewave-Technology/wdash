@@ -178,7 +178,11 @@ class StubLogSource:
     @property
     def capabilities(self):
         from wdash.hub.source import Capability
-        return frozenset({Capability.LOG_SEARCH, Capability.LOG_HISTOGRAM})
+        # SEARCH and HISTOGRAM — the names the catalogue has. This said
+        # LOG_SEARCH and LOG_HISTOGRAM, which do not exist, so reading the
+        # property raised; it held only because no route had asked a stub
+        # what it could do.
+        return frozenset({Capability.SEARCH, Capability.HISTOGRAM})
 
     def supports(self, capability):
         return capability in self.capabilities

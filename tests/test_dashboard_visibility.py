@@ -208,6 +208,43 @@ class ApiIsNotTheWayAroundTest(ListingTest):
             client.get(f"/api/dashboard/{self.ids['AppBoard']}/data").status_code,
             200)
 
+    def test_a_source_qualified_grant_sees_its_dashboards(self):
+        """The targets were computed by a pattern check that never said which
+        source it was about, so a role granted `elasticsearch:app-*` saw no
+        shared dashboard at all, and got 404 from the ones it could read."""
+        client = self.client_for("carol", ["elasticsearch:app-*"])
+        self.assertEqual(self.names_seen(client), ["AppBoard"])
+        self.assertEqual(
+            client.get(f"/api/dashboard/{self.ids['AppBoard']}/data").status_code,
+            200)
+
+    def test_a_source_qualified_exclusion_hides_what_it_excludes(self):
+        client = self.client_for("dave", ["*", "-elasticsearch:infra-*"])
+        self.assertEqual(self.names_seen(client), ["AppBoard"])
+
+    def test_containers_you_cannot_read_are_counted_not_named(self):
+        """A dashboard over `*` resolves to indices a viewer may not read, and
+        naming them is what the visibility rule holds back — `fraud-*` says
+        something whether or not you can open it. An administrator sees them
+        all."""
+        manager = self.app.dashboard_manager
+        manager.create_dashboard("Everything", "", "*", "alice", ["*"])
+        board = next(d.id for d in manager.get_all_dashboards()
+                     if d.name == "Everything")
+
+        reader = self.client_for("bob", ["app-*"])
+        for suffix in ("patterns", "data"):
+            payload = reader.get(f"/api/dashboard/{board}/{suffix}").get_json()
+            with self.subTest(endpoint=suffix):
+                self.assertEqual(payload["resolved_containers"],
+                                 ["app-logs-000001"])
+                self.assertEqual(payload["total_resolved"], 2)
+
+        admin = self.client_for("root", ["app-*"], admin=True)
+        payload = admin.get(f"/api/dashboard/{board}/patterns").get_json()
+        self.assertEqual(sorted(payload["resolved_containers"]),
+                         ["app-logs-000001", "infra-logs-000001"])
+
     def test_an_unreachable_source_hides_rather_than_reveals(self):
         """A backend being down must not open the list up."""
         broken = self.app.hub.logs()
