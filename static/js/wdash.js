@@ -35,8 +35,12 @@ class WDash {
     }
 
     setupEventListeners() {
-        // Auto-dismiss alerts after 5 seconds
-        document.querySelectorAll('.alert').forEach(alert => {
+        // Flash messages close themselves after 5 seconds — the success and
+        // info ones, and only those the layout marks as a flash. This took
+        // every success or info box on the page: the traces page's notice
+        // that some services are hidden from the role was gone at 5.1s, and
+        // with it the advisor's "No findings" and the setup and roles notes.
+        document.querySelectorAll('.alert[data-autodismiss]').forEach(alert => {
             if (alert.classList.contains('alert-success') || alert.classList.contains('alert-info')) {
                 setTimeout(() => {
                     const bsAlert = new bootstrap.Alert(alert);
@@ -485,6 +489,21 @@ class LogSearch {
                 console.log('Hiding empty state');
                 emptyState.classList.add('d-none');
             }
+            // And what the last search drew beside its rows: the chart, the
+            // sources, its warnings and its field statistics stayed on
+            // screen, describing a search that was no longer there.
+            this.clearHistogram();
+            ['sourceBreakdownCard', 'searchWarnings'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.classList.add('d-none');
+            });
+            const warnings = document.getElementById('searchWarnings');
+            if (warnings) warnings.innerHTML = '';
+            const stats = document.getElementById('fieldStatsContent');
+            if (stats) {
+                stats.innerHTML = '<div class="text-center py-3 text-muted"><small>' +
+                    'Run a search to see field stats</small></div>';
+            }
             
             // Hide error display
             this.hideError();
@@ -726,6 +745,15 @@ class LogSearch {
             var response = await fetch('/api/field-stats?' + params.toString());
             var data = await response.json();
             console.log('Field stats response:', data);
+            // A failure is said as one. The status went unread, and a 503
+            // was drawn as "No field data available" beside the results.
+            if (!response.ok || data.error) {
+                container.innerHTML = '<div class="p-2 text-warning"><small>' +
+                    '<i class="fas fa-triangle-exclamation"></i> Field statistics ' +
+                    'could not be loaded: ' + WDash.escapeHtml(data.error ||
+                        ('HTTP ' + response.status)) + '</small></div>';
+                return;
+            }
             this.renderFieldStats(data);
         } catch (e) {
             console.error('Field stats error:', e);
@@ -762,6 +790,14 @@ class LogSearch {
                 '<i class="fas fa-circle-info"></i> Counts exclude ' +
                 data.missing_sources.map(esc).join(', ') +
                 ', which cannot report field statistics.</div>';
+        }
+        // And the members that can, but did not answer this time.
+        if ((data.failed_sources || []).length) {
+            html += '<div class="px-2 py-2 border-bottom text-warning" ' +
+                'style="font-size:.7rem">' +
+                '<i class="fas fa-triangle-exclamation"></i> Counts exclude ' +
+                data.failed_sources.map(esc).join(', ') +
+                ', whose statistics could not be read.</div>';
         }
 
         (data.fields || []).forEach(stat => {
@@ -1032,6 +1068,15 @@ class LogSearch {
      * request would double the round trips for something the search already
      * had to scan.
      */
+    /** Take the chart away, and the bars a theme switch would draw again. */
+    clearHistogram() {
+        const card = document.getElementById('histogramCard');
+        if (card) card.classList.add('d-none');
+        if (this.histogramChart) this.histogramChart.destroy();
+        this.histogramChart = null;
+        this.histogramData = null;
+    }
+
     renderHistogram(data) {
         const card = document.getElementById('histogramCard');
         const canvas = document.getElementById('logHistogram');
@@ -1039,7 +1084,7 @@ class LogSearch {
 
         const buckets = data.histogram || [];
         if (!buckets.length) {
-            card.classList.add('d-none');
+            this.clearHistogram();
             return;
         }
         card.classList.remove('d-none');
@@ -1159,15 +1204,19 @@ class LogSearch {
         
         emptyState.classList.add('d-none');
         
-        // Store cursor for next page
-        if (data.cursor) {
-            this.currentSearchAfter = data.cursor;
-        }
+        // The cursor for the next page, or none. Kept only when there was
+        // one, the last answer's stayed — and a source that cannot page (a
+        // merged search, VictoriaLogs) left none, so Next asked for page one
+        // again and labelled it page two.
+        this.currentSearchAfter = data.cursor || null;
         
         const startResult = this.currentPage * this.pageSize + 1;
         const endResult = Math.min(startResult + data.records.length - 1, this.totalResults);
         
-        let infoText = `Showing ${startResult}-${endResult} of ${this.totalResults.toLocaleString()} results`;
+        // "Showing 1-0 of 0" was the empty answer's line.
+        let infoText = data.records.length
+            ? `Showing ${startResult}-${endResult} of ${this.totalResults.toLocaleString()} results`
+            : `Showing 0 of ${this.totalResults.toLocaleString()} results`;
         const took = WDash.count(data.took_ms);
         if (took) {
             infoText += ` (${took}ms)`;
@@ -1182,6 +1231,13 @@ class LogSearch {
         resultsInfo.innerHTML = infoText;
         logEntries.innerHTML = '';
         
+        // The server sends the histogram with the first page only: it covers
+        // the whole window, so a later page keeps the first page's chart
+        // rather than hiding it for the want of one.
+        if (this.currentPage === 0) this.renderHistogram(data);
+        // Before any return: an empty answer left the last search's pages.
+        this.updatePagination();
+        
         if (data.records.length === 0) {
             if (this.currentPage === 0) {
                 emptyState.classList.remove('d-none');
@@ -1192,10 +1248,6 @@ class LogSearch {
         data.records.forEach(record => {
             logEntries.appendChild(this.createLogEntry(record));
         });
-
-        this.renderHistogram(data);
-        
-        this.updatePagination();
     }
 
     createLogEntry(record) {
@@ -1684,10 +1736,21 @@ class LogSearch {
 
     updatePagination() {
         const pagination = document.getElementById('pagination');
-        const hasMore = this.totalResults > (this.currentPage + 1) * this.pageSize;
+        const beyond = this.totalResults > (this.currentPage + 1) * this.pageSize;
+        // A next page needs a cursor to ask for it with. Without one the
+        // request is page one again.
+        const hasMore = beyond && Boolean(this.currentSearchAfter);
+        // More than fits and no way to page to it: said, rather than a Next
+        // that cannot deliver.
+        const note = (beyond && !hasMore)
+            ? '<small class="text-muted d-block text-center">Showing the first ' +
+              ((this.currentPage + 1) * this.pageSize).toLocaleString() + ' of ' +
+              this.totalResults.toLocaleString() + '; this source cannot page ' +
+              'further, so narrow the time range to see the rest.</small>'
+            : '';
         
         if (!hasMore && this.currentPage === 0) {
-            pagination.innerHTML = '';
+            pagination.innerHTML = note;
             return;
         }
         
@@ -1712,7 +1775,7 @@ class LogSearch {
             </li>`;
         }
         
-        html += '</ul></nav>';
+        html += '</ul></nav>' + note;
         pagination.innerHTML = html;
         
         // Next: use current search_after cursor

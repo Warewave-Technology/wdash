@@ -216,8 +216,15 @@ class ElasticsearchRenderTest(unittest.TestCase):
     def test_exists_and_range(self):
         self.assertEqual(self.render("_exists_:trace_id"),
                          {"exists": {"field": "trace_id"}})
-        self.assertEqual(self.render("duration_ms:[1 TO 9]"),
-                         {"range": {"duration_ms": {"gte": 1, "lte": 9}}})
+        # A name the field table does not know is also tried where the
+        # collector keeps it — under resource.attributes. and attributes.
+        # This pinned the one field, which is where a collector record does
+        # not have it.
+        self.assertEqual(self.render("duration_ms:[1 TO 9]"), {"bool": {
+            "should": [{"range": {name: {"gte": 1, "lte": 9}}}
+                       for name in ("duration_ms", "resource.attributes.duration_ms",
+                                    "attributes.duration_ms")],
+            "minimum_should_match": 1}})
 
 
 if __name__ == "__main__":

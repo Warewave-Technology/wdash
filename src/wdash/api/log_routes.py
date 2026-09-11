@@ -5,9 +5,10 @@ The wire format is the neutral model: `records` / `body` / `severity` /
 `resource` / `attributes`. Elasticsearch's `hits` and `_source` shape no longer
 appears on the wire; it stays inside the adapter.
 
-A record handle is an opaque token in the `ref` field (`backend:container:id`).
-Clients pass it back without interpreting it — they never need to know which
-backend it came from.
+A record handle is a token in the `ref` field (`backend:container:id`). The web
+client takes the container and the id from it for the record, raw and context
+views — `/api/log/<container>/<id>` — and sends the record's own `source` as
+`?source=`; it never needs to know which backend the record came from.
 
 The one deliberate exception is `/api/log/<index>/<id>/raw`, which returns the
 stored document in the backend's own shape. It is a diagnostic tool, gated
@@ -85,6 +86,18 @@ def _record_refused(scope, source, index):
                     "error_type": "index_access_denied"}), 403
 
 
+def _unreachable(source, exc):
+    """The 503 for a record view whose source could not be asked.
+
+    A record that cannot be looked for is not a record that is not there:
+    with the index list unreadable these came back as 500s, or, before the
+    list raised, as "Record not found".
+    """
+    current_app.logger.error(f"Record lookup in {source.name} failed: {exc}")
+    return jsonify({"error": f"{source.name} could not be read: {exc}",
+                    "error_type": "backend_error"}), 503
+
+
 NO_SOURCE = ({"error": "No log source is configured.",
               "error_type": "no_source",
               "suggestion": "Add a source on the configuration page."}, 503)
@@ -127,7 +140,13 @@ def logs_page():
               "Please contact your administrator.", "error")
         return redirect(url_for("index"))
 
-    source = _logs()
+    # Every source, not the default one. A role granted only a second
+    # source's indices was shown "No Access to Log Indices" and no form, while
+    # the search API answered it from that source. The picker starts on "All
+    # sources", so the page's first search asks the same question this does.
+    hub = getattr(current_app, "hub", None)
+    source = _logs(hub.ALL_SOURCES) if hub is not None else None
+    choices = _source_choices()
     if source is None:
         # No source at all is a different thing from a source that is down,
         # and it has a different answer: add one, rather than go and fix one.
@@ -145,7 +164,7 @@ def logs_page():
         flash("Unable to connect to Elasticsearch. Please check the connection "
               "and try again.", "error")
         return render_template("logs.html", indices=[], user_role=current_user.role,
-                               elasticsearch_error=True)
+                               elasticsearch_error=True, source_choices=choices)
 
     if not allowed:
         if not all_indices:
@@ -156,11 +175,11 @@ def logs_page():
                   f"access to any log indices. {_unreadable_named(all_indices)}",
                   "error")
         return render_template("logs.html", indices=[], user_role=current_user.role,
-                               no_access=True)
+                               no_access=True, source_choices=choices)
 
     return render_template("logs.html", indices=allowed,
                            user_role=current_user.role, no_access=False,
-                           source_choices=_source_choices(),
+                           source_choices=choices,
                            per_page=current_app.config.get("LOGS_PER_PAGE", 50))
 
 
@@ -354,7 +373,10 @@ def api_get_log(index, doc_id):
     if refused:
         return refused
 
-    record = source.fetch(SourceRef(source.backend, index, doc_id), scope)
+    try:
+        record = source.fetch(SourceRef(source.backend, index, doc_id), scope)
+    except Exception as exc:
+        return _unreachable(source, exc)
     if record is None:
         return jsonify({"found": False, "error": "Record not found",
                         "error_type": "not_found"}), 404
@@ -391,7 +413,10 @@ def api_get_log_raw(index, doc_id):
         return jsonify({"error": f"{source.name} does not expose raw documents",
                         "error_type": "unsupported"}), 501
 
-    document = source.raw(SourceRef(source.backend, index, doc_id), scope)
+    try:
+        document = source.raw(SourceRef(source.backend, index, doc_id), scope)
+    except Exception as exc:
+        return _unreachable(source, exc)
     if document is None:
         return jsonify({"found": False, "error": "Record not found",
                         "error_type": "not_found"}), 404
@@ -426,11 +451,14 @@ def api_log_context(index, doc_id):
     except ValueError:
         count = 10
 
-    context = source.context(
-        SourceRef(source.backend, index, doc_id), scope,
-        before=count, after=count,
-        correlate_by=request.args.get("field") or None,
-    )
+    try:
+        context = source.context(
+            SourceRef(source.backend, index, doc_id), scope,
+            before=count, after=count,
+            correlate_by=request.args.get("field") or None,
+        )
+    except Exception as exc:
+        return _unreachable(source, exc)
 
     if context.record is None:
         return jsonify({"found": False, "error": "Record not found",
@@ -440,6 +468,19 @@ def api_log_context(index, doc_id):
                         "error_type": "no_timestamp"}), 400
 
     return jsonify(context.to_dict())
+
+
+def _stats_failed(source, exc):
+    """The 503 for field statistics that could not be read.
+
+    Distinct from `{"fields": []}`, which is what a quiet window is. Both
+    were answered as the second — a search that timed out and a mapping an
+    account may not read alike — and the sidebar said "No field data
+    available" beside a page full of results.
+    """
+    current_app.logger.error(f"Field statistics from {source.name} failed: {exc}")
+    return jsonify({"error": f"{source.name} could not answer: {exc}",
+                    "error_type": "backend_error"}), 503
 
 
 @log_bp.route("/api/field-stats")
@@ -478,8 +519,8 @@ def api_field_stats():
     try:
         if not source.containers(scope):
             return jsonify({})
-    except Exception:
-        return jsonify({}), 503
+    except Exception as exc:
+        return _stats_failed(source, exc)
 
     # Aligned at the server boundary: these aggregations run with
     # request_cache, and an unaligned timestamp makes every request unique.
@@ -498,8 +539,16 @@ def api_field_stats():
             LogQuery(window=window, text=request.args.get("q", "*") or "*"), scope)
     except QueryError:
         return jsonify({"fields": []})
+    except Exception as exc:
+        return _stats_failed(source, exc)
 
     payload = {"fields": [stat.to_dict() for stat in stats]}
+    # Members of a merged view whose statistics could not be read: the
+    # counts are the others', and the sidebar says whose are missing.
+    failed = list(getattr(stats, "failed", ()) or ())
+    if failed:
+        payload["partial"] = True
+        payload["failed_sources"] = failed
 
     # Which members of a merged view could not contribute. An answer from a
     # subset is fine; an answer from a subset that does not say so is the
@@ -522,7 +571,13 @@ def api_indices():
     if not current_user.has_permission("logs:read"):
         return jsonify({"error": "Access denied",
                         "error_type": "permission_denied"}), 403
-    source, scope = _logs(), _scope()
+    # The source asked about, as /api/search takes it. This answered for the
+    # default source whatever was named.
+    try:
+        source = _logs(request.args.get("source"))
+    except SourceMissing as exc:
+        return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
+    scope = _scope()
     if source is None:
         return _no_source()
     try:

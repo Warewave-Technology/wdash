@@ -291,13 +291,14 @@ class FanOutLogSource(LogSource):
                 f"{self.name} cannot serve field statistics: no configured "
                 f"source provides them")
 
-        totals = {}
+        totals, failed = {}, []
         for source, stats, error in self._parallel(
                 lambda source: (source.field_stats(query, scope)
                                 if Capability.FIELD_STATS in source.capabilities
                                 else [])):
             if error is not None:
                 logger.warning(f"{source.name} field statistics failed: {error}")
+                failed.append((source.name, error))
                 continue
             for stat in stats or ():
                 bucket = totals.setdefault(stat.field, {})
@@ -315,7 +316,13 @@ class FanOutLogSource(LogSource):
         # field first, so the sidebar does not reshuffle when a source is
         # added.
         out.sort(key=lambda stat: -sum(v.count for v in stat.values))
-        return out
+        # A member that failed was skipped with a log line, and its share of
+        # every count went missing without a word on the page. Every member
+        # failing is a failure; some is an answer that names who is missing.
+        asked = [s for s in self._sources if Capability.FIELD_STATS in s.capabilities]
+        if failed and len(failed) == len(asked):
+            raise RuntimeError("; ".join(f"{name}: {error}" for name, error in failed))
+        return _FieldStats(out, failed=[name for name, _ in failed])
 
     def aggregate(self, query, aggregations, scope):
         if Capability.AGGREGATION not in self.capabilities:
@@ -381,6 +388,18 @@ class FanOutLogSource(LogSource):
 def _cannot_count(page):
     """Is this page's total a floor rather than a match count?"""
     return not page.counted
+
+
+class _FieldStats(list):
+    """Merged field statistics, and the members whose statistics failed.
+
+    A list, so every caller of `field_stats` keeps the type it handles; the
+    route reads `failed` to say whose counts are missing.
+    """
+
+    def __init__(self, stats, failed=()):
+        super().__init__(stats)
+        self.failed = tuple(failed)
 
 
 def _merge_bucket(target, bucket):

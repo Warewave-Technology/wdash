@@ -250,9 +250,16 @@ def create_app(config_class=Config):
         # bodyless records. Those are different statements, and only one of
         # them is about the log source.
         excluded_from_logs = tuple(trace_patterns) or DEFAULT_TRACE_PATTERNS
+        # Heartbeat's too, which the monitor source below reads. Heartbeat 8
+        # writes data streams, and once the catalogue listed streams by name
+        # its checks would have come back from a log search over `*` as
+        # records with no body — the reason the trace indices are left out.
+        from wdash.hub.adapters.es_monitors import DEFAULT_PATTERNS as HEARTBEAT
+        heartbeat = tuple(app.config.get("MONITOR_INDEX_PATTERNS") or HEARTBEAT)
         hub.add_logs(ElasticsearchLogSource(
             es_client.es, name="elasticsearch-logs",
-            exclude=excluded_from_logs + own_indices, catalogue=catalogue))
+            exclude=excluded_from_logs + own_indices + heartbeat,
+            catalogue=catalogue))
         # No patterns means no environment trace source. A deployment that
         # declares its trace backends on the configuration page — APM on one
         # cluster, OpenTelemetry on another — does not want a third source

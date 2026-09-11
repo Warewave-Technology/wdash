@@ -328,12 +328,57 @@ def _values(source, field):
     return list(found) if isinstance(found, list) else [found]
 
 
-def es_query_matches(query, source):
+def _words(value):
+    """Text as the standard analyzer splits it: lower case, word characters."""
+    import re
+    return re.findall(r"\w+", str(value).lower())
+
+
+def _projected(source, includes, prefix=""):
+    """`_source` as Elasticsearch returns it for a list of `includes`: those
+    paths and nothing else, whether a document nests its keys or dots them."""
+    out = {}
+    for key, value in source.items():
+        path = prefix + key
+        if any(path == name or path.startswith(name + ".") for name in includes):
+            out[key] = value
+        elif isinstance(value, dict) and any(name.startswith(path + ".")
+                                             for name in includes):
+            inner = _projected(value, includes, path + ".")
+            if inner:
+                out[key] = inner
+    return out
+
+
+def es_query_matches(query, source, doc_id=None):
     """Whether Elasticsearch would keep a document with this `_source`."""
     if not query or "match_all" in query:
         return True
     if "match_none" in query:
         return False
+    if "ids" in query:
+        return doc_id in (query["ids"].get("values") or ())
+    if "match" in query or "match_phrase" in query:
+        # `match` keeps a value holding ANY of the words (the default `or`);
+        # `match_phrase` one holding all of them, in order and side by side.
+        kind = "match" if "match" in query else "match_phrase"
+        (field, wanted), = query[kind].items()
+        if isinstance(wanted, dict):
+            wanted = wanted.get("query")
+        words = _words(wanted)
+
+        def holds(value):
+            have = _words(value)
+            if kind == "match":
+                return any(word in have for word in words)
+            return any(have[at:at + len(words)] == words
+                       for at in range(len(have) - len(words) + 1))
+        return bool(words) and any(holds(v) for v in _values(source, field))
+    if "prefix" in query:
+        (field, wanted), = query["prefix"].items()
+        if isinstance(wanted, dict):
+            wanted = wanted.get("value")
+        return any(str(v).startswith(str(wanted)) for v in _values(source, field))
     if "term" in query:
         (field, wanted), = query["term"].items()
         if isinstance(wanted, dict):
@@ -365,15 +410,16 @@ def es_query_matches(query, source):
             return value if isinstance(value, list) else [value]
 
         required = listed("must") + listed("filter")
-        if not all(es_query_matches(q, source) for q in required):
+        if not all(es_query_matches(q, source, doc_id) for q in required):
             return False
-        if any(es_query_matches(q, source) for q in listed("must_not")):
+        if any(es_query_matches(q, source, doc_id) for q in listed("must_not")):
             return False
         should = listed("should")
         minimum = clause.get("minimum_should_match")
         if minimum is None:
             minimum = 0 if required else (1 if should else 0)
-        return sum(es_query_matches(q, source) for q in should) >= int(minimum)
+        return sum(es_query_matches(q, source, doc_id)
+                   for q in should) >= int(minimum)
     raise NotImplementedError(f"the model does not know {list(query)}")
 
 
@@ -445,7 +491,7 @@ class ModelledES:
         body = search_body(kwargs)
         self.requests.append({"index": index, "body": body})
         hits = [hit for hit in self._docs(index)
-                if es_query_matches(body.get("query"), hit["_source"])]
+                if es_query_matches(body.get("query"), hit["_source"], hit["_id"])]
         ordered = _sorted_hits(hits, body.get("sort"))
 
         collapse = body.get("collapse")
@@ -469,9 +515,16 @@ class ModelledES:
                 collapsed.append(top)
             ordered = collapsed
 
+        returned = ordered[:body.get("size", 10)]
+        includes = body.get("_source")
+        if isinstance(includes, (list, tuple)):
+            # Only what was asked for, which is what makes a list view that
+            # asks for too little read differently from the record it lists.
+            returned = [dict(hit, _source=_projected(hit["_source"], includes))
+                        for hit in returned]
         response = {"took": 1,
                     "hits": {"total": {"value": len(hits)},
-                             "hits": ordered[:body.get("size", 10)]}}
+                             "hits": returned}}
         if body.get("aggs"):
             response["aggregations"] = {
                 name: self._aggregate(spec, hits)
@@ -481,7 +534,8 @@ class ModelledES:
     def _aggregate(self, spec, hits):
         if "filter" in spec:
             return {"doc_count": sum(1 for hit in hits
-                                     if es_query_matches(spec["filter"], hit["_source"]))}
+                                     if es_query_matches(spec["filter"], hit["_source"],
+                                                         hit["_id"]))}
         terms = spec["terms"]
         buckets = {}
         for hit in hits:

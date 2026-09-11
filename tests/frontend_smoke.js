@@ -467,6 +467,124 @@ check('highlighting never changes the text it colours', () => {
     });
 });
 
+// --- only a flash closes itself -----------------------------------------
+//
+// Every success and info box on any page closed after five seconds, flash
+// or not: the traces page's scope notice, the advisor's "No findings", the
+// setup and roles notes. Measured: the scope notice was gone at 5.1s.
+
+check('only what the layout marks as a flash closes itself', () => {
+    const dom = new JSDOM(`<!doctype html><body>
+        <div class="alert alert-success alert-dismissible" data-autodismiss id="flash">Saved</div>
+        <div class="alert alert-danger alert-dismissible" data-autodismiss id="failed">No</div>
+        <div class="alert alert-info" id="scope">Your role can see spans from: api-*</div>
+        <div class="alert alert-success" id="nofindings">No findings</div>
+        </body>`, { runScripts: 'outside-only' });
+    const w = dom.window;
+    const closed = new Set();
+    w.bootstrap = { Alert: class { constructor(el) { this.el = el; }
+                                   close() { closed.add(this.el.id); } },
+                    Tooltip: class {} };
+    const timers = [];
+    w.setTimeout = (fn) => { timers.push(fn); return timers.length; };
+    w.eval(fs.readFileSync(path.join(ROOT, 'static/js/wdash.min.js'), 'utf8') +
+           '\n; window.__WDash = WDash;');
+    w.__WDash.prototype.setupEventListeners.call({});
+    timers.forEach(fn => fn());
+    assertEqual(JSON.stringify([...closed].sort()), JSON.stringify(['flash']),
+                'what had closed after five seconds');
+});
+
+// --- paging only where there is a cursor ----------------------------------
+//
+// Measured on the lab's VictoriaLogs: 2,027 matches, no cursor, and Next
+// fetched page one again, labelled "Showing 51-100".
+
+const PAGE = Array.from({ length: 50 }, (_, i) =>
+    ({ ...RECORD, ref: 'elasticsearch:app-logs-1:doc-' + i }));
+
+check('Next is offered only when the answer carried a cursor', () => {
+    const w = makeWindow();
+    const search = new w.__LogSearch();
+    search.pageSize = 50;
+    search.displayResults({ records: PAGE, total: 5000, cursor: null,
+                            accessible_containers: [] });
+    const pagination = w.document.getElementById('pagination');
+    assert(!w.document.getElementById('paginationNext'),
+           `Next with no cursor: ${pagination.textContent}`);
+    assert(/narrow the time range/i.test(pagination.textContent),
+           `nothing says why there is no next page: ${pagination.textContent}`);
+
+    search.displayResults({ records: PAGE, total: 5000, cursor: [1, 2],
+                            accessible_containers: [] });
+    assert(w.document.getElementById('paginationNext'), 'no Next with a cursor');
+    search.displayResults({ records: PAGE, total: 5000, cursor: null,
+                            accessible_containers: [] });
+    assert(!w.document.getElementById('paginationNext'),
+           'the previous answer\'s cursor was paged with');
+});
+
+// --- what a new search, a later page and Clear leave on screen ------------
+
+function histogramWindow() {
+    const w = makeWindow();
+    w.document.body.insertAdjacentHTML('beforeend',
+        '<div class="d-none" id="histogramCard"><canvas id="logHistogram"></canvas>' +
+        '<div id="histogramSummary"></div></div>' +
+        '<div id="searchWarnings" class="d-none"></div>');
+    const charts = { built: 0, destroyed: 0 };
+    w.Chart = class { constructor() { charts.built++; }
+                      destroy() { charts.destroyed++; } };
+    const search = new w.__LogSearch();
+    search.pageSize = 1;
+    const histogram = [{ timestamp: '2026-09-11T10:00:00Z', count: 2,
+                         by_severity: { INFO: 2 } }];
+    search.displayResults({ records: [RECORD], total: 2, cursor: [1, 2], histogram,
+                            warnings: ['vl: a note'], accessible_containers: [] });
+    return { w, search, charts,
+             card: w.document.getElementById('histogramCard') };
+}
+
+check('an empty search takes away the chart and the pages of the last', () => {
+    const { w, search, charts, card } = histogramWindow();
+    assert(!card.classList.contains('d-none'), 'the first chart was never drawn');
+    assert(w.document.getElementById('paginationNext'), 'no Next on page one');
+    search.displayResults({ records: [], total: 0, cursor: null, histogram: [],
+                            accessible_containers: [] });
+    assert(card.classList.contains('d-none'),
+           `the last search's chart stayed: ${w.document.getElementById('histogramSummary').textContent}`);
+    assertEqual(charts.destroyed, 1, 'the last chart was not destroyed');
+    assertEqual(w.document.getElementById('pagination').textContent.trim(), '',
+                'the last search\'s pages stayed');
+});
+
+check("a later page keeps the first page's chart", () => {
+    // The server sends the histogram with the first page only.
+    const { search, card } = histogramWindow();
+    search.currentPage = 1;
+    search.displayResults({ records: [RECORD], total: 2, cursor: [3, 4],
+                            accessible_containers: [] });
+    assert(!card.classList.contains('d-none'), 'page two hid the chart');
+});
+
+check('Clear takes away the chart, the sources, the warnings and the stats', () => {
+    const { w, search, charts, card } = histogramWindow();
+    search.renderSourceBreakdown({ sources: [{ name: 'a', count: 1, total: 1 },
+                                             { name: 'b', count: 1, total: 1 }] });
+    w.document.getElementById('fieldStatsContent').textContent = 'level INFO 2';
+    const warnings = w.document.getElementById('searchWarnings');
+    assert(!warnings.classList.contains('d-none'), 'the warning was never shown');
+    search.clearSearch();
+    assert(card.classList.contains('d-none'), 'the chart stayed');
+    assertEqual(charts.destroyed, 1, 'the chart was not destroyed');
+    assert(w.document.getElementById('sourceBreakdownCard').classList.contains('d-none'),
+           'the source breakdown stayed');
+    assert(warnings.classList.contains('d-none') && !warnings.textContent.trim(),
+           `the warning stayed: ${warnings.textContent}`);
+    assert(!w.document.getElementById('fieldStatsContent').textContent.includes('INFO'),
+           'the field statistics of the last search stayed');
+});
+
 // --- asynchronous assertions --------------------------------------------
 
 (async () => {
@@ -696,6 +814,33 @@ check('highlighting never changes the text it colours', () => {
                         'x" data-planted-e="1', 'the time range did not survive');
         });
     }
+
+    // Field statistics that failed. The sidebar rendered whatever came back,
+    // status unread, and a 503 read as "No field data available" beside a
+    // page of results.
+    {
+        const w = makeWindow((url) => url.startsWith('/api/field-stats')
+            ? Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({
+                error: 'es could not answer: read timed out',
+                error_type: 'backend_error' }) })
+            : new Promise(() => {}));
+        await Object.create(w.__LogSearch.prototype).loadFieldStats();
+        check('field statistics that failed say so', () => {
+            const text = w.document.getElementById('fieldStatsContent').textContent;
+            assert(/could not be loaded/i.test(text) && text.includes('read timed out'),
+                   `said: ${text}`);
+            assert(!text.includes('No field data available'),
+                   'a failure was shown as no data');
+        });
+    }
+    check('a merged sidebar names the source whose statistics failed', () => {
+        const w = makeWindow();
+        Object.create(w.__LogSearch.prototype).renderFieldStats({
+            fields: [{ field: 'level', values: [{ value: 'INFO', count: 3 }] }],
+            partial: true, failed_sources: ['es-b'] });
+        const text = w.document.getElementById('fieldStatsContent').textContent;
+        assert(text.includes('es-b') && text.includes('INFO'), `said: ${text}`);
+    });
 
     console.log(failures.length
         ? `\n${failures.length} failure(s)`

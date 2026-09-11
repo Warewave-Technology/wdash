@@ -195,7 +195,8 @@ class LogContractTest(unittest.TestCase):
         self.assertTrue(record["ref"].startswith("elasticsearch:"))
 
     def test_ref_is_an_opaque_handle(self):
-        """The client must pass ref back rather than interpreting it."""
+        """backend:container:id — the client takes the container and the id
+        from it, and names the record's source beside them."""
         record = self.search().get_json()["records"][0]
         self.assertEqual(record["ref"], "elasticsearch:app-logs-000001:doc-1")
 

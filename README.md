@@ -525,8 +525,9 @@ add rules.
 
 Responses use a backend-neutral shape: log records expose `body`, `severity`,
 `resource` and `attributes` rather than Elasticsearch's `_source`. A record's
-`ref` is an opaque handle (`backend:container:id`) that clients pass back
-without interpreting.
+`ref` is a handle (`backend:container:id`); the web client takes the container
+and the id from it for the record views below, and sends the record's
+`source` as `?source=`.
 
 | Method | Endpoint | Purpose |
 |---|---|---|

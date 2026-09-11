@@ -160,9 +160,13 @@ only inside the adapter:
 | Nested aggregation | `{buckets: [...]}` | `sub: {name: [...]}` |
 | Index list | `indices` | `containers` |
 
-A record handle is an opaque token in `ref` (`backend:container:id`). Clients
-pass it back without interpreting it — they never need to know which backend it
-came from.
+A record handle is a token in `ref` (`backend:container:id`). The web client
+takes the container and the id from it for the record, raw and context views —
+`/api/log/<container>/<id>` — and sends the record's own `source` as
+`?source=`, so the record is read from the source that listed it. It never
+needs to know which backend that is. For a data stream the container is the
+stream's name, not the backing index the record is stored in: that is what a
+role is granted, and the raw view says which backing index holds it.
 
 **A concrete payoff:** because a record carries `trace_id` as a contracted
 field, the log detail view can link straight to a trace waterfall. That link

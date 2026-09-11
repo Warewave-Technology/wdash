@@ -68,8 +68,10 @@ class SourceRef:
     """A backend-specific handle for a record.
 
     The internal model carries no backend detail, but fetching a record again
-    later needs a handle. This one is opaque: only the adapter that produced it
-    interprets it.
+    later needs a handle. The web client reads the container and the id out
+    of the token for the record views' URL and names the record's source
+    beside them; what the container and the id mean — an index or a data
+    stream, a document id — is the adapter's business.
     """
     backend: str        # 'elasticsearch', ...
     container: str      # index / stream / table

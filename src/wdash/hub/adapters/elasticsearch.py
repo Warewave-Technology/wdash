@@ -6,18 +6,21 @@ Everything Elasticsearch-specific stops here. Outside this file, `hits`,
 """
 
 import math
+import re
 import time
 
 from ...utils import timerange
 from ..models import (
     FieldStat, FieldValue, LogContext, LogPage, LogRecord, Service, SourceRef,
-    Span, Trace, TraceSummary, normalise_severity,
+    Span, Trace, TraceSummary, UNKNOWN_SEVERITY, normalise_severity,
 )
 from ..aggregation import AggregationResult, Bucket, DateHistogram, Terms
 from ..query import DEFAULT_LOG_FIELDS, SORT_SLOWEST
 from .. import query_language as ql
 from ..source import Capability, LogSource, TraceSource
-from .es_log_schema import field_candidates, schema_for_document
+from .es_log_schema import (
+    field_candidates, match_candidates, schema_for_document, source_fields,
+)
 from .es_trace_schema import detect_schema, dig, parse_time
 
 # Log fields mapped onto the neutral model. Everything else lands in attributes.
@@ -50,6 +53,27 @@ def _count(value, what="a count"):
             or (isinstance(value, float) and not math.isfinite(value))):
         raise MalformedResponse(f"{what} in the answer is not a number")
     return int(value)
+
+
+def _shard_failure(response):
+    """What an answer says about the shards that did not answer, or None.
+
+    Elasticsearch fails a search outright only when every shard fails. When
+    some do, it answers 200 with what the others found and says so in
+    `_shards`, which nothing here read: measured on the lab, `attr_0:abc OR
+    level:ERROR` over two indices, one of which maps `attr_0` as a number,
+    failed on five shards of six and came back as a complete answer.
+    """
+    shards = response.get("_shards") or {}
+    failed = _count(shards.get("failed", 0), "a shard count")
+    if failed <= 0:
+        return None
+    total = _count(shards.get("total", failed), "a shard count")
+    details = [failure.get("reason") for failure in shards.get("failures") or ()]
+    reasons = [str(d.get("reason") or d.get("type")) for d in details
+               if isinstance(d, dict) and (d.get("reason") or d.get("type"))]
+    reason = reasons[0] if reasons else "no reason was given"
+    return f"{failed} of {total} shards failed: {reason[:200]}"
 
 
 def _wildcard_literal(text):
@@ -130,6 +154,22 @@ def _multi_search(es, requests, timeout="15s"):
     return out
 
 
+class CatalogueUnavailable(RuntimeError):
+    """The cluster's index list could not be read, and there is none to reuse.
+
+    Raised rather than answered with an empty list. An empty list is what a
+    cluster with no indices looks like, and every route turned it into "No
+    log indices found" or "your role has access to nothing" — told to an
+    administrator with `*` while the cluster was down.
+    """
+
+
+#: How Elasticsearch 7.11 onwards names a data stream's backing indices. Only
+#: used for an index the catalogue has not listed yet: one a rollover created
+#: since, whose records a search already returns.
+_BACKING_INDEX = re.compile(r"^\.ds-(?P<stream>.+)-\d{4}\.\d{2}\.\d{2}-\d+$")
+
+
 class _IndexCatalogue:
     """Short-lived cache of the cluster's index list.
 
@@ -137,6 +177,15 @@ class _IndexCatalogue:
     yet it was being issued on every single API request. The cache is keyed by
     nothing because the RAW list is user-independent — scope filtering happens
     afterwards, so no user ever sees another user's indices through it.
+
+    Data streams are in the list by their own names. `cat.indices` lists a
+    stream's backing indices (`.ds-<stream>-<date>-<generation>`, which the
+    sources drop as system indices) and never the stream, so no data stream
+    could become a container: Filebeat 8, Elastic Agent, APM 8 and a collector
+    left on its default routing all write to them. Measured on the lab, its
+    four streams were in no source's list. They are read from
+    `_data_stream`, which leaves out hidden streams unless asked, and each is
+    listed with the creation date of its newest backing index.
     """
 
     def __init__(self, client, ttl=30.0):
@@ -144,19 +193,25 @@ class _IndexCatalogue:
         self._ttl = ttl
         self._entries = None
         self._fetched_at = 0.0
+        self._streams = {}
+        self._backing = {}
+        #: Why the data streams could not be listed, while their backing
+        #: indices could; None when they were.
+        self.stream_error = None
 
     def entries(self):
         now = time.monotonic()
         if self._entries is not None and (now - self._fetched_at) < self._ttl:
             return self._entries
         try:
-            fetched = self._es.cat.indices(format="json", h="index,creation.date")
-        except Exception:
+            self._fetch(now)
+        except Exception as exc:
             # Serve a stale list rather than pretending the cluster is empty:
             # an empty list would look like "you have access to nothing".
-            return self._entries if self._entries is not None else []
-        self._entries = [dict(e) for e in fetched]
-        self._fetched_at = now
+            if self._entries is not None:
+                return self._entries
+            raise CatalogueUnavailable(
+                f"the index list could not be read: {exc}") from exc
         return self._entries
 
     def invalidate(self):
@@ -176,11 +231,57 @@ class _IndexCatalogue:
         if self._entries is not None and now - self._fetched_at < min_age:
             return
         try:
-            fetched = self._es.cat.indices(format="json", h="index,creation.date")
+            self._fetch(now)
         except Exception:
             return
-        self._entries = [dict(e) for e in fetched]
+
+    def _fetch(self, now):
+        entries = [dict(e) for e in
+                   self._es.cat.indices(format="json", h="index,creation.date")]
+        streams = self._streams
+        try:
+            answer = self._es.indices.get_data_stream(name="*")
+            streams = {stream["name"]: tuple(index["index_name"]
+                                             for index in stream.get("indices") or ())
+                       for stream in answer.get("data_streams") or ()}
+            self.stream_error = None
+        except Exception as exc:
+            # The indices are listed and the streams are not: what is known
+            # of them is kept, and the sources say which records they cannot
+            # reach rather than leaving them out without a word.
+            self.stream_error = f"data streams could not be listed: {exc}"
+
+        created = {entry["index"]: int(entry.get("creation.date") or 0)
+                   for entry in entries}
+        entries.extend({"index": name, "data_stream": True,
+                        "creation.date": str(max((created.get(index, 0)
+                                                  for index in backing), default=0))}
+                       for name, backing in streams.items())
+        self._streams = streams
+        self._backing = {index: name for name, backing in streams.items()
+                         for index in backing}
+        self._entries = entries
         self._fetched_at = now
+
+    def is_stream(self, name):
+        return name in self._streams
+
+    def stream_of(self, index):
+        """The data stream `index` is a backing index of, or None."""
+        stream = self._backing.get(index)
+        if stream is None:
+            match = _BACKING_INDEX.match(index or "")
+            if match and match.group("stream") in self._streams:
+                stream = match.group("stream")
+        return stream
+
+    def unlisted_backing(self):
+        """Backing indices in the list whose stream could not be named."""
+        if not self.stream_error:
+            return []
+        return [entry["index"] for entry in self._entries or ()
+                if _BACKING_INDEX.match(entry["index"])
+                and self.stream_of(entry["index"]) is None]
 
 
 class ElasticsearchLogSource(LogSource):
@@ -221,22 +322,45 @@ class ElasticsearchLogSource(LogSource):
     def containers(self, scope):
         if scope.is_empty:
             return []
+        # Raises when the cluster's list cannot be read and none was cached:
+        # the routes have an answer for "cannot connect", and [] reached none
+        # of them.
         entries = list(self._catalogue.entries())
         # Newest first: with time-based indices the user almost always cares
-        # about the freshest one.
+        # about the freshest one. System indices and a data stream's backing
+        # indices start with a dot; the stream itself is listed by its name.
         entries = [e for e in entries
                    if not e["index"].startswith(".") and not e["index"].startswith("_")]
         entries.sort(key=lambda e: int(e.get("creation.date") or 0), reverse=True)
-        names = [e["index"] for e in entries]
-
         # The source's own patterns first, then the scope
+        return scope.resolve(self._own([e["index"] for e in entries]),
+                             source=self.name)
+
+    def _own(self, names):
+        """The names this source's patterns take and its exclusions leave."""
         if "*" not in self._patterns:
             names = [n for n in names
                      if any(_pattern_matches(p, n) for p in self._patterns)]
         if self._exclude:
             names = [n for n in names
                      if not any(_pattern_matches(p, n) for p in self._exclude)]
-        return scope.resolve(names, source=self.name)
+        return names
+
+    def _unlisted_streams(self, scope):
+        """Data streams this search would have reached, had they been listed.
+
+        Named from their backing indices, which the index list still has
+        when `_data_stream` did not answer; the scope decides as it does for
+        everything else.
+        """
+        names = sorted({_BACKING_INDEX.match(index).group("stream")
+                        for index in self._catalogue.unlisted_backing()})
+        unreached = scope.resolve(self._own(names), source=self.name)
+        if not unreached:
+            return None
+        return (f"{self._catalogue.stream_error}; not searched: "
+                f"{', '.join(unreached[:5])}"
+                f"{' and more' if len(unreached) > 5 else ''}")
 
     # ---------- search ----------
 
@@ -253,9 +377,15 @@ class ElasticsearchLogSource(LogSource):
         return [name for name in allowed if name in wanted]
 
     def search(self, query, scope):
-        targets = self._targets(query, scope)
+        try:
+            targets = self._targets(query, scope)
+        except CatalogueUnavailable as exc:
+            return LogPage(partial=True, warnings=(str(exc),))
         # Sending an empty target list to Elasticsearch means '*' — the exact opposite.
         if not targets:
+            unreached = self._unlisted_streams(scope)
+            if unreached:
+                return LogPage(partial=True, warnings=(unreached,))
             return LogPage(warnings=("the scope permits no containers",))
 
         body = {
@@ -266,13 +396,14 @@ class ElasticsearchLogSource(LogSource):
             "track_total_hits": True,
         }
         # Keep the list view narrow. The full record is only fetched when the
-        # detail view asks for it.
+        # detail view asks for it — but a row must still carry what the schema
+        # reads, or it reads differently from the record it lists.
         if query.fields:
-            body["_source"] = sorted({name for field in query.fields
-                                      for name in field_candidates(field)})
+            body["_source"] = source_fields(query.fields)
         if query.cursor:
             body["search_after"] = query.cursor
 
+        severity_field = None
         if query.histogram:
             # Rides on the same request. Split by severity because a flat count
             # tells you volume changed; split by severity tells you what changed.
@@ -294,21 +425,35 @@ class ElasticsearchLogSource(LogSource):
                            warnings=(f"search failed: {exc}",))
 
         hits = response["hits"]["hits"]
+        warnings = []
         try:
             total = _count(response["hits"]["total"], "the total")
             took_ms = _count(response.get("took", 0), "took")
+            shards = _shard_failure(response)
             histogram = []
             timeline = (response.get("aggregations") or {}).get("timeline")
             if timeline:
                 for bucket in timeline.get("buckets", []):
+                    count = _count(bucket.get("doc_count", 0))
                     by_severity = {}
+                    # Added, not assigned: INFO and info, WARN and WARNING are
+                    # one level each, and the last spelling used to overwrite
+                    # the others — a bucket of 1100 stacked to 140.
                     for sub in (bucket.get("severity") or {}).get("buckets", []):
-                        by_severity[normalise_severity(sub["key"])] = _count(
-                            sub["doc_count"])
+                        level = normalise_severity(sub["key"])
+                        by_severity[level] = (by_severity.get(level, 0)
+                                              + _count(sub["doc_count"]))
+                    # The page stacks these rather than drawing the count, so
+                    # what no level bucket holds — records without the field,
+                    # levels beyond the ten asked for — is drawn too.
+                    rest = count - sum(by_severity.values())
+                    if severity_field and rest > 0:
+                        by_severity[UNKNOWN_SEVERITY] = (
+                            by_severity.get(UNKNOWN_SEVERITY, 0) + rest)
                     histogram.append({
                         "timestamp": bucket.get("key_as_string"),
                         "key": bucket.get("key"),
-                        "count": _count(bucket.get("doc_count", 0)),
+                        "count": count,
                         "by_severity": by_severity,
                     })
         except MalformedResponse as exc:
@@ -316,6 +461,11 @@ class ElasticsearchLogSource(LogSource):
             return LogPage(partial=True, containers=tuple(targets),
                            warnings=(f"the cluster's answer could not be read: "
                                      f"{exc}",))
+        if shards:
+            warnings.append(shards)
+        unreached = self._unlisted_streams(scope)
+        if unreached:
+            warnings.append(unreached)
 
         return LogPage(
             records=[self._to_record(h) for h in hits],
@@ -323,7 +473,8 @@ class ElasticsearchLogSource(LogSource):
             took_ms=took_ms,
             cursor=hits[-1].get("sort") if hits else None,
             containers=tuple(targets),
-            partial=bool(response.get("timed_out")),
+            partial=bool(response.get("timed_out")) or bool(shards or unreached),
+            warnings=tuple(warnings),
             histogram=histogram,
         )
 
@@ -351,17 +502,33 @@ class ElasticsearchLogSource(LogSource):
         The index Elasticsearch answers from is checked as well as the one
         asked for: a GET through a name that is not the index it lives in
         must not hand back a document from somewhere the scope never listed.
+        A data stream's backing index counts as the stream.
         """
         allowed = self._readable(ref.container, scope)
         if allowed is None:
             return None
         try:
-            response = self._es.get(index=ref.container, id=ref.id)
+            if self._catalogue.is_stream(ref.container):
+                # Elasticsearch refuses a GET through a stream's name —
+                # `index_not_found_exception`, measured on 8.19 — so the id is
+                # looked for in the stream, which reaches every backing index.
+                hits = _search(self._es, ref.container,
+                               {"query": {"ids": {"values": [ref.id]}}, "size": 1},
+                               timeout="10s")["hits"]["hits"]
+                if not hits:
+                    return None
+                response = hits[0]
+            else:
+                response = self._es.get(index=ref.container, id=ref.id)
         except Exception:
             return None
-        if response.get("_index") not in allowed:
+        if self._container_of(response.get("_index")) not in allowed:
             return None
         return response
+
+    def _container_of(self, index):
+        """The container an index is read as: its data stream, or itself."""
+        return self._catalogue.stream_of(index) or index
 
     def fetch(self, ref, scope):
         response = self._get(ref, scope)
@@ -396,28 +563,23 @@ class ElasticsearchLogSource(LogSource):
                 for name, path in discovered.items()}
         body = {"size": 0, "query": self._build_query(query), "aggs": aggs}
 
-        try:
-            response = _search(self._es, targets, body,
-                               timeout="10s", request_cache=True)
-        except Exception:
-            return []
-
+        # A search that fails, a mapping that cannot be read, an answer that
+        # cannot be: each raises, and the route says so. They returned [],
+        # which the sidebar showed as "No field data available" beside a page
+        # full of results.
+        response = _search(self._es, targets, body,
+                           timeout="10s", request_cache=True)
         stats = []
-        try:
-            for name in discovered:
-                buckets = ((response.get("aggregations") or {}).get(name, {})
-                           .get("buckets", []))
-                if buckets:
-                    stats.append(FieldStat(
-                        field=name,
-                        values=[FieldValue(value=b["key"],
-                                           count=_count(b["doc_count"]))
-                                for b in buckets],
-                    ))
-        except MalformedResponse:
-            # Treated as the failed search above is. Neither is shown as a
-            # failure yet; that is the silent-failure work of phase 4.
-            return []
+        for name in discovered:
+            buckets = ((response.get("aggregations") or {}).get(name, {})
+                       .get("buckets", []))
+            if buckets:
+                stats.append(FieldStat(
+                    field=name,
+                    values=[FieldValue(value=b["key"],
+                                       count=_count(b["doc_count"]))
+                            for b in buckets],
+                ))
         return stats
 
     def aggregate(self, query, aggregations, scope):
@@ -427,7 +589,10 @@ class ElasticsearchLogSource(LogSource):
         same query; issuing one request each keeps Elasticsearch's search
         thread pool busy for no reason.
         """
-        targets = self._targets(query, scope)
+        try:
+            targets = self._targets(query, scope)
+        except CatalogueUnavailable as exc:
+            return AggregationResult(warnings=(str(exc),), failed=True)
         if not targets:
             return AggregationResult(warnings=("the scope permits no containers",))
 
@@ -453,11 +618,12 @@ class ElasticsearchLogSource(LogSource):
 
         raw = response.get("aggregations") or {}
         try:
+            shards = _shard_failure(response)
             return AggregationResult(
                 total=_count(response["hits"]["total"], "the total"),
                 buckets={agg.name: self._read_buckets(raw.get(agg.name), agg)
                          for agg in aggregations if agg.name in raw},
-                warnings=tuple(warnings),
+                warnings=tuple(warnings) + ((shards,) if shards else ()),
             )
         except MalformedResponse as exc:
             return AggregationResult(warnings=tuple(warnings) + (str(exc),),
@@ -469,7 +635,11 @@ class ElasticsearchLogSource(LogSource):
 
         for query, aggregations in requests:
             if targets is None:
-                targets = self._targets(query, scope)
+                try:
+                    targets = self._targets(query, scope)
+                except CatalogueUnavailable as exc:
+                    return [AggregationResult(warnings=(str(exc),), failed=True)
+                            for _ in requests]
             if not targets:
                 metadata.append((aggregations, ["the scope permits no containers"]))
                 continue
@@ -496,11 +666,12 @@ class ElasticsearchLogSource(LogSource):
                 continue
             raw = response.get("aggregations") or {}
             try:
+                shards = _shard_failure(response)
                 out.append(AggregationResult(
                     total=_count(response["hits"]["total"], "the total"),
                     buckets={agg.name: self._read_buckets(raw.get(agg.name), agg)
                              for agg in aggregations if agg.name in raw},
-                    warnings=tuple(warnings)))
+                    warnings=tuple(warnings) + ((shards,) if shards else ())))
             except MalformedResponse as exc:
                 out.append(AggregationResult(
                     warnings=tuple(warnings) + (str(exc),), failed=True))
@@ -574,8 +745,14 @@ class ElasticsearchLogSource(LogSource):
         OpenTelemetry Collector. The candidates are tried against the actual
         mapping, so the answer comes from the indices being queried rather than
         from an assumption about who wrote them.
+
+        A mapping that cannot be read leaves the guess below, as it always
+        did; it is only no longer remembered as an empty one.
         """
-        discovered = self._aggregatable_fields(targets, max_fields=1000)
+        try:
+            discovered = self._aggregatable_fields(targets, max_fields=1000)
+        except Exception:
+            discovered = {}
         for candidate in field_candidates(neutral_name):
             if candidate in discovered:
                 return discovered[candidate]
@@ -644,9 +821,11 @@ class ElasticsearchLogSource(LogSource):
         look identical.
 
         Every candidate is tried with `should`. A field that does not exist in
-        an index simply does not match there, which is exactly right.
+        an index simply does not match there, which is exactly right. A name
+        the table does not know is tried where the collector keeps it as
+        well — see `match_candidates`.
         """
-        candidates = field_candidates(neutral_name)
+        candidates = match_candidates(neutral_name)
         if len(candidates) == 1:
             return build(candidates[0])
         return {"bool": {"should": [build(name) for name in candidates],
@@ -725,7 +904,13 @@ class ElasticsearchLogSource(LogSource):
         if record is None or record.timestamp is None:
             return LogContext(record=record)
 
-        anchor = timerange.to_es(record.timestamp)
+        # To the millisecond. The anchor was cut to the second, so `lt` and
+        # `gt` both missed the rest of its second — the closest neighbours.
+        # Measured on the lab: of a second holding three records, the two
+        # beside the one opened were in neither list. The record's own
+        # millisecond goes before it, less the record itself, so a record
+        # sharing it is shown once rather than on both sides.
+        anchor = timerange.to_es_millis(record.timestamp)
         correlation = None
         if correlate_by:
             correlation = self._value_of(record, correlate_by)
@@ -735,11 +920,11 @@ class ElasticsearchLogSource(LogSource):
             if correlation is not None:
                 must.append({"term": {self._field_for(correlate_by): correlation}})
             body = {
-                "query": {"bool": {"must": must}},
-                "sort": [{"@timestamp": {"order": order}}],
+                "query": {"bool": {"must": must,
+                                   "must_not": [{"ids": {"values": [ref.id]}}]}},
+                "sort": [{"@timestamp": {"order": order}}, {"_doc": {"order": order}}],
                 "size": min(size, 50),
-                "_source": sorted({name for field in DEFAULT_LOG_FIELDS
-                                   for name in field_candidates(field)}),
+                "_source": source_fields(DEFAULT_LOG_FIELDS),
             }
             try:
                 response = _search(self._es, ref.container, body, timeout="10s")
@@ -747,7 +932,7 @@ class ElasticsearchLogSource(LogSource):
                 return []
             return [self._to_record(h) for h in response["hits"]["hits"]]
 
-        earlier = neighbours("desc", "lt", before)
+        earlier = neighbours("desc", "lte", before)
         earlier.reverse()          # put back into chronological order
         return LogContext(
             record=record,
@@ -794,13 +979,15 @@ class ElasticsearchLogSource(LogSource):
         an index whose top-level fields are all objects (an APM trace store, for
         instance) landing at the head of the list means nothing is discovered
         and the sidebar goes blank without an error.
+
+        A mapping that cannot be read raises, and so is not cached: it was
+        answered with {} and the {} remembered for a minute, so an account
+        without `view_index_metadata` had "No field data available" on every
+        request.
         """
         if not targets:
             return {}
-        try:
-            mapping = self._es.indices.get_mapping(index=",".join(targets))
-        except Exception:
-            return {}
+        mapping = self._es.indices.get_mapping(index=",".join(targets))
 
         skip = {"@timestamp", "message"}
         aggregatable = {"keyword", "boolean", "integer", "short", "byte", "long", "ip"}
@@ -854,7 +1041,14 @@ class ElasticsearchLogSource(LogSource):
         Chosen per document rather than per index: a search can span indices
         written by different pipelines, and picking one schema for the whole
         response would silently mangle half of it.
+
+        A hit from a data stream names its backing index; the record names
+        the stream, which is what a role is granted, what a person
+        recognises, and what a rollover does not replace.
         """
+        stream = self._catalogue.stream_of(hit.get("_index"))
+        if stream:
+            hit = dict(hit, _index=stream)
         schema = schema_for_document(hit.get("_source"))
         return schema.to_record(hit, self.backend, self.name)
 

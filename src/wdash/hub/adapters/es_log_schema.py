@@ -21,6 +21,8 @@ written from the same assumption and agreed with each other.
 So: detect, then map. Same idea as the trace schemas, same reason.
 """
 
+import json
+
 from ..models import LogRecord, SourceRef, normalise_severity
 from .es_trace_schema import dig, parse_time
 
@@ -35,6 +37,12 @@ _OTEL_CONSUMED = {
     "severity_number", "resource", "scope", "attributes", "trace_id",
     "span_id", "trace_flags", "dropped_attributes_count",
 }
+
+#: Either of these and a document is the collector's. It writes a string body
+#: as `body_text` and a map as `body_structured`, never both, and leaves
+#: `severity_text` out when the application sent none — but it always writes
+#: `severity_number`, 0 when none was sent (measured on the lab's collector).
+_OTEL_MARKERS = ("body_text", "severity_number")
 
 #: OTel SeverityNumber ranges. The number is authoritative; the text is
 #: whatever the application chose to call it, and applications choose badly.
@@ -83,7 +91,7 @@ class OtelLogSchema(LogSchema):
 
     @classmethod
     def detect(cls, properties):
-        return "body_text" in properties or "severity_number" in properties
+        return any(name in properties for name in _OTEL_MARKERS)
 
     def to_record(self, hit, backend, source_name=None):
         source = hit.get("_source") or {}
@@ -93,11 +101,16 @@ class OtelLogSchema(LogSchema):
 
         body = source.get("body_text")
         if body is None:
-            # `body` is a map for structured bodies; render it rather than
-            # showing nothing, because an empty row is indistinguishable from
-            # a record that genuinely has no message.
-            raw = source.get("body")
-            body = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+            # A structured body is a map — `body_structured` from the
+            # collector, `body` from older writers — and is shown as the JSON
+            # it is rather than as nothing, because an empty row is
+            # indistinguishable from a record that genuinely has no message.
+            # Measured on the lab's collector, a map body was read as "" in
+            # the list and in the record alike.
+            raw = source.get("body_structured")
+            if raw is None:
+                raw = source.get("body")
+            body = _as_text(raw)
 
         # The number wins: severity_text is free-form and applications use it
         # for things like "notice" and "problem".
@@ -173,6 +186,17 @@ def detect_schema(properties):
     return None
 
 
+def _as_text(value):
+    """A body as a line of text: a string as it is, a map or list as JSON."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    return str(value)
+
+
 def schema_for_document(source):
     """Pick a schema from a document, for the single-record fetch path.
 
@@ -181,7 +205,7 @@ def schema_for_document(source):
     """
     if not isinstance(source, dict):
         return FlatLogSchema()
-    if "body_text" in source or "severity_number" in source:
+    if any(name in source for name in _OTEL_MARKERS):
         return OtelLogSchema()
     return FlatLogSchema()
 
@@ -209,3 +233,46 @@ FIELD_CANDIDATES = {
 def field_candidates(neutral_name):
     """Every backend field a neutral name might live in."""
     return FIELD_CANDIDATES.get(neutral_name, (neutral_name,))
+
+
+def match_candidates(name):
+    """Every field a query clause naming `name` is tried against.
+
+    The neutral names are the table's. Any other name is also looked for
+    where the collector keeps it: the record view shows a collector record's
+    resource and attributes by their own names — `deployment.environment`,
+    `request_id` — and its filter icon searches for exactly that, while the
+    document holds them under `resource.attributes.` and `attributes.`.
+    Measured on the lab, both clauses matched none of the eleven records
+    they were clicked on. A field that is not there does not match, so trying
+    all three costs nothing where the flat shape is.
+
+    Only for matching. What a list projects and what an aggregation runs on
+    stay `field_candidates`: an aggregation that fell back to a path nothing
+    has would be an empty panel where there is a warning now.
+    """
+    if name in FIELD_CANDIDATES:
+        return FIELD_CANDIDATES[name]
+    if name.startswith(("resource.", "attributes.")):
+        return (name,)
+    return (name, f"resource.attributes.{name}", f"attributes.{name}")
+
+
+#: What the schemas read beyond the neutral fields: the markers that tell a
+#: collector record from a flat one — one of them the number that decides its
+#: level — and a structured body, however it was written.
+SCHEMA_FIELDS = _OTEL_MARKERS + ("body_structured", "body")
+
+
+def source_fields(neutral_fields):
+    """The `_source` a list of neutral fields has to ask for.
+
+    The list view asks for less than the whole record, and the schema is
+    chosen from what arrives. Asking for the neutral fields alone left out
+    `severity_number` and `body_structured`: of eleven records the lab's
+    collector wrote, five read differently in the list than when opened — a
+    level of UNSPECIFIED rather than INFO or ERROR, or no service — and a map
+    body read as empty in both.
+    """
+    return sorted({name for field in neutral_fields
+                   for name in field_candidates(field)} | set(SCHEMA_FIELDS))

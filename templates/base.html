@@ -277,7 +277,7 @@
                                              border-radius:6px">{{ message }}</code>
                             </div>
                             {% else %}
-                            <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
+                            <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert" data-autodismiss>
                                 <i class="fas fa-{{ 'exclamation-circle' if category == 'error' else 'info-circle' if category == 'info' else 'check-circle' if category == 'success' else 'exclamation-triangle' }}"></i>
                                 {{ message }}
                                 <button type="button" class="btn-close" data-bs-dismiss="alert"></button>

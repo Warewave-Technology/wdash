@@ -98,6 +98,28 @@ Both shapes are read now, and `tests/test_otel_shapes.py` holds documents
 captured from a real collector so the fixtures cannot drift back into agreeing
 only with themselves.
 
+A second pass (collector 0.109, `emit.py`'s own payload plus the cases
+applications actually send) found three more things the collector does, and
+`tests/test_es_logs.py` holds those documents:
+
+| An application sends | The collector writes |
+|---|---|
+| a map as the body | `body_structured`, and no `body_text` |
+| no severity text | no `severity_text` at all |
+| no severity number | `severity_number: 0` |
+
+The log list asked Elasticsearch only for the fields it shows, so a list row
+never saw `severity_number` or `body_structured`: 5 of 11 records read
+UNSPECIFIED in the list and INFO or ERROR when opened, and a map body read as
+empty in both. And the record view shows resource and attribute keys by their
+own names — `deployment.environment`, `request_id` — which a filter now also
+looks for under `resource.attributes.` and `attributes.`.
+
+Without `logs_index` and `traces_index` the exporter writes to data streams
+rather than to a named index. WDash lists a data stream by its name, grants
+and searches it by that name, and shows which backing index holds a record in
+the raw view.
+
 ## If you do want ingest one day
 
 Build it as a separate process (`wdash-ingest`) that shares the schema
