@@ -192,6 +192,36 @@ class ElasticsearchClientTest(unittest.TestCase):
             ElasticsearchClient(config)
         return built.call_args.kwargs
 
+    def test_the_timeout_it_is_given_is_the_one_it_keeps(self):
+        """ELASTICSEARCH_TIMEOUT was read into the config and never passed
+        on: the client kept its default of ten seconds while the searches
+        asked the cluster for thirty. Timed against a cluster that accepts
+        and never answers: with one second configured, a request gives up
+        after one second, not ten."""
+        import socket
+        import threading
+        import time
+        from wdash.logs.elasticsearch_client import ElasticsearchClient
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        held = []
+        threading.Thread(target=lambda: held.append(listener.accept()),
+                         daemon=True).start()
+        try:
+            client = ElasticsearchClient({
+                "ELASTICSEARCH_URL": f"http://127.0.0.1:{listener.getsockname()[1]}",
+                "ELASTICSEARCH_USERNAME": None, "ELASTICSEARCH_PASSWORD": None,
+                "ELASTICSEARCH_TIMEOUT": 1})
+            started = time.monotonic()
+            self.assertFalse(client.ping())
+            took = time.monotonic() - started
+        finally:
+            listener.close()
+        self.assertLess(took, 4, f"gave up after {took:.1f}s")
+        self.assertGreater(took, 0.8)
+
     def test_verification_is_off_by_default(self):
         """Stated, so that turning it on is a decision somebody can make.
 
@@ -217,3 +247,111 @@ class ElasticsearchClientTest(unittest.TestCase):
         self.assertTrue(
             self._built(ELASTICSEARCH_VERIFY_CERTS=True)["ssl_show_warn"])
         self.assertFalse(self._built()["ssl_show_warn"])
+
+
+class ProbeTest(unittest.TestCase):
+    """What each Kubernetes probe reads, and how long it takes to answer.
+
+    /health asked every backend in turn, inside the request: the environment
+    cluster twice with a ten-second timeout, then five seconds per Loki,
+    Tempo and VictoriaLogs. Measured: one Loki waiting out its timeout made
+    it answer in 5.0s, past both probe timeouts; a cluster that accepted and
+    never replied made it 20.0s. The kubelet read a slow answer as a dead
+    one and restarted a container that was fine.
+    """
+
+    class _Slow(HealthTest._Source):
+        def __init__(self, name, seconds, healthy=True):
+            super().__init__(name, healthy=healthy)
+            self.seconds, self.asked = seconds, 0
+
+        def health(self):
+            import time
+            self.asked += 1
+            time.sleep(self.seconds)
+            return self._healthy, self._detail
+
+    def _app(self, ping=True, sources=(), **config):
+        app = HealthTest._app(self, ping=ping, sources=sources)
+        app.config.update(config)
+        return app
+
+    def _timed(self, app, path):
+        import time
+        started = time.monotonic()
+        response = app.test_client().get(path)
+        return response, time.monotonic() - started
+
+    def test_liveness_asks_nothing_outside_the_process(self):
+        """A restart fixes only the process. Nothing else may decide it."""
+        hanging = self._Slow('lab-loki', 5)
+        app = self._app(sources=[hanging])
+
+        class Broken:
+            def count(self): raise RuntimeError("database is gone")
+        app.store.users = Broken()
+        response, took = self._timed(app, '/livez')
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(took, 0.5)
+        self.assertEqual(hanging.asked, 0)
+
+    def test_readiness_is_the_store_and_only_the_store(self):
+        hanging = self._Slow('lab-loki', 5)
+        app = self._app(ping=False, sources=[hanging])
+        response, took = self._timed(app, '/readyz')
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(took, 0.5)
+        self.assertEqual(hanging.asked, 0)
+
+        class Broken:
+            def count(self): raise RuntimeError("database is gone")
+        app.store.users = Broken()
+        self.assertEqual(app.test_client().get('/readyz').status_code, 503)
+
+    def test_a_backend_that_hangs_costs_the_report_its_budget_not_its_timeout(self):
+        app = self._app(sources=[self._Slow('lab-loki', 5)],
+                        HEALTH_BUDGET_SECONDS=0.5)
+        response, took = self._timed(app, '/health')
+        self.assertLess(took, 1.5, f"took {took:.1f}s")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['lab-loki'], 'unreachable')
+        self.assertEqual(response.get_json()['degraded'], ['lab-loki'])
+
+    def test_the_backends_are_asked_at_once(self):
+        """Three that take 0.4s each answer in about 0.4s, not 1.2s."""
+        sources = [self._Slow(f'loki-{n}', 0.4) for n in range(3)]
+        app = self._app(sources=sources, HEALTH_BUDGET_SECONDS=2)
+        response, took = self._timed(app, '/health')
+        self.assertLess(took, 1.0, f"took {took:.1f}s")
+        self.assertEqual(response.get_json()['status'], 'healthy')
+
+    def test_the_report_is_reused_for_a_while(self):
+        """A poller must not hold a worker per poll on a backend that hangs."""
+        source = self._Slow('lab-loki', 0)
+        app = self._app(sources=[source], HEALTH_CACHE_SECONDS=60)
+        for _ in range(3):
+            app.test_client().get('/health')
+        self.assertEqual(source.asked, 1)
+        app.config['HEALTH_CACHE_SECONDS'] = 0
+        app.test_client().get('/health')
+        self.assertEqual(source.asked, 2)
+
+    def test_the_environment_cluster_is_asked_once(self):
+        """It is also `elasticsearch-traces`, and was pinged as both."""
+        app = HealthTest._app(self)
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        pings = []
+        app.es_client.es.ping = lambda: pings.append(1) or True
+        app.hub._traces = {'elasticsearch-traces': ElasticsearchTraceSource(
+            app.es_client.es, name='elasticsearch-traces')}
+        payload = app.test_client().get('/health').get_json()
+        self.assertEqual(len(pings), 1)
+        self.assertNotIn('elasticsearch-traces', payload)
+
+    def test_the_probes_answer_before_setup(self):
+        """An unclaimed installation sends everything to /setup, and a probe
+        that got a redirect would never pass."""
+        app = self._app()
+        for path in ('/livez', '/readyz', '/health'):
+            with self.subTest(path=path):
+                self.assertEqual(app.test_client().get(path).status_code, 200)

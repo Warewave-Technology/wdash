@@ -441,6 +441,39 @@ def create_app(config_class=Config):
         _save_saved_searches(searches)
         return jsonify({'success': True})
 
+    @app.route('/livez')
+    def livez():
+        """Is this process serving requests? Nothing else.
+
+        The liveness and startup probes read this. A restart can only fix
+        the process, so nothing outside it — no backend, not even the
+        metadata store — may decide it: a thirty-second Loki outage, or a
+        database failover, used to have the kubelet restart a container that
+        was fine.
+        """
+        return jsonify({'status': 'alive', 'version': __version__})
+
+    @app.route('/readyz')
+    def readyz():
+        """Should this instance be sent traffic? The metadata store decides.
+
+        Accounts and roles live there, so without it nothing can be served;
+        with it, sign-in, the configuration page and every reachable source
+        work, whatever else is down. Only the store is asked, so the answer
+        comes back in the time one small query takes.
+        """
+        try:
+            store.users.count()
+        except Exception as exc:
+            app.logger.warning(f"readyz: metadata store: {exc}")
+            return jsonify({'status': 'unavailable',
+                            'store': 'unreachable'}), 503
+        return jsonify({'status': 'ready', 'store': 'connected'})
+
+    #: The newest /health report and when it was made. Per worker, which is
+    #: enough: what it bounds is how often one worker asks the backends.
+    health_cache = {}
+
     @app.route('/health')
     def health():
         """Is this instance able to answer?
@@ -478,17 +511,27 @@ def create_app(config_class=Config):
         work without — accounts and roles live there — so that alone decides
         the status code. Everything else is reported and named, which is what
         an alert should be reading anyway.
+
+        AND HOW LONG IT TOOK was the fifth. The checks ran one after another
+        inside the request: the environment cluster pinged twice (once as
+        itself, once as `elasticsearch-traces`), each with a ten-second client
+        timeout, then five seconds for every Loki, Tempo and VictoriaLogs.
+        Measured: one Loki waiting out its timeout made this answer in 5.0s,
+        past both probe timeouts, and a cluster that accepted and never
+        replied made it 20.0s. The kubelet read a slow answer as a dead one
+        and restarted a container that was fine. So the probes no longer
+        come here (see /livez and /readyz); the checks run at once, the
+        whole report answers within HEALTH_BUDGET_SECONDS, whatever has not
+        answered by then is named as unreachable, and the report is reused
+        for HEALTH_CACHE_SECONDS so a poller cannot hold every worker on a
+        backend that hangs.
         """
+        cached = health_cache.get('report')
+        ttl = float(app.config['HEALTH_CACHE_SECONDS'])
+        if cached and time.monotonic() - cached[0] < ttl:
+            return jsonify(cached[1]), cached[2]
+
         checks = {}
-
-        if es_client is not None:
-            try:
-                checks['elasticsearch'] = (
-                    'connected' if es_client.es.ping() else 'unreachable')
-            except Exception as exc:
-                app.logger.warning(f"health: elasticsearch: {exc}")
-                checks['elasticsearch'] = 'unreachable'
-
         try:
             store.users.count()
             checks['store'] = 'connected'
@@ -496,16 +539,18 @@ def create_app(config_class=Config):
             app.logger.warning(f"health: metadata store: {exc}")
             checks['store'] = 'unreachable'
 
+        probes = {}
+        if es_client is not None:
+            probes['elasticsearch'] = lambda: (
+                (True, 'ok') if es_client.es.ping()
+                else (False, 'ping failed: no response from the cluster'))
         for source in list(app.hub.log_sources) + list(app.hub.trace_sources):
-            if source.name == 'elasticsearch-logs':
+            if es_client is not None and source.name in (
+                    'elasticsearch-logs', 'elasticsearch-traces'):
                 continue          # the same cluster, already reported above
-            try:
-                healthy, detail = source.health()
-            except Exception as exc:
-                healthy, detail = False, str(exc)
-            checks[source.name] = 'connected' if healthy else 'unreachable'
-            if not healthy:
-                app.logger.warning(f"health: {source.name}: {detail}")
+            probes[source.name] = source.health
+        checks.update(_ask_at_once(probes,
+                                   float(app.config['HEALTH_BUDGET_SECONDS'])))
 
         degraded = sorted(name for name, state in checks.items()
                           if state != 'connected')
@@ -525,8 +570,38 @@ def create_app(config_class=Config):
             # Named, so an alert can say WHICH backend is down without having
             # to diff two payloads.
             payload['degraded'] = degraded
-        return jsonify(payload), (200 if serving else 503)
-    
+        code = 200 if serving else 503
+        health_cache['report'] = (time.monotonic(), payload, code)
+        return jsonify(payload), code
+
+    def _ask_at_once(probes, budget):
+        """{name: 'connected' | 'unreachable'}, every probe at once, the lot
+        within `budget` seconds. A probe still running when it is up is
+        unreachable, and is left to finish on its own thread: its answer is
+        no longer wanted, and waiting for it is what made this slow."""
+        from concurrent.futures import ThreadPoolExecutor, wait
+        if not probes:
+            return {}
+        pool = ThreadPoolExecutor(max_workers=len(probes),
+                                  thread_name_prefix="health")
+        futures = {name: pool.submit(probe) for name, probe in probes.items()}
+        wait(futures.values(), timeout=budget)
+        pool.shutdown(wait=False)
+        out = {}
+        for name, future in futures.items():
+            if not future.done():
+                app.logger.warning(f"health: {name}: no answer within {budget:g}s")
+                out[name] = 'unreachable'
+                continue
+            try:
+                healthy, detail = future.result()
+            except Exception as exc:
+                healthy, detail = False, str(exc)
+            out[name] = 'connected' if healthy else 'unreachable'
+            if not healthy:
+                app.logger.warning(f"health: {name}: {detail}")
+        return out
+
     @app.route('/api/debug/dashboard-manager')
     @login_required
     def debug_dashboard_manager():

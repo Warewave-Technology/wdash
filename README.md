@@ -547,7 +547,9 @@ without interpreting.
 | `GET` | `/api/dashboard/<id>/data` | All dashboard panels plus the previous-period comparison, one round trip |
 | `GET` | `/api/advisor/report` | Advisor findings |
 | `GET` | `/api/advisor/rules` | The rule catalogue |
-| `GET` | `/health` | Liveness, cluster reachability, and the running version |
+| `GET` | `/livez` | Whether the process answers; asks nothing else. The liveness and startup probes read it |
+| `GET` | `/readyz` | Whether the metadata store answers, which decides whether anybody can be served. The readiness probe reads it |
+| `GET` | `/health` | Every backend's reachability and the running version, asked at once and answered within two seconds, then reused for ten. For alerts and people, not probes |
 
 Per-panel dashboard endpoints (`/stats`, `/timeline`, `/log-levels`,
 `/services`, `/heatmap`) remain available for API compatibility, but the UI
@@ -790,9 +792,10 @@ docker run -d wdash-browser \
 - **Two images, and the small one is the default.** The browser is most of the
   second one and nothing in the first needs it. Anybody running a probe for
   http and tcp checks should use `wdash`.
-- **A journey needs a browser agent.** Assign the journey to one. Where no
-  browser agent runs it, the journey reports as unknown rather than as down —
-  a probe that is not there says nothing about the site.
+- **A journey needs a browser agent.** Assign the journey to one. On an agent
+  without a browser it reports down, with the reason "this agent has no
+  browser" — so a journey left unassigned, while plain agents run, is down on
+  each of them.
 - **Two journeys run at a time per agent.** A Chromium is a few hundred
   megabytes of resident memory, and the agent's normal limit of sixteen
   concurrent checks would be five gigabytes on a host sized for a Python

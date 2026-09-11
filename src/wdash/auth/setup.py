@@ -66,7 +66,7 @@ def _administering_role(store):
 setup_bp = Blueprint('setup', __name__)
 
 #: Reachable before an account exists. Everything else redirects to setup.
-OPEN_ENDPOINTS = {'setup.first_run', 'static', 'health'}
+OPEN_ENDPOINTS = {'setup.first_run', 'static', 'health', 'livez', 'readyz'}
 
 #: Blueprints that must never be redirected anywhere.
 #:

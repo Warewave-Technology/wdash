@@ -146,6 +146,22 @@ class LogContractTest(unittest.TestCase):
 
     # ---------- /api/search ----------
 
+    def test_the_page_size_is_the_configured_one(self):
+        """LOGS_PER_PAGE was read into the configuration and nowhere else:
+        the page's list said 50 and the search asked for 50 whatever it was
+        set to."""
+        self.app.config["LOGS_PER_PAGE"] = 100
+        self.client.get(f"/api/search?q=*&start_time={START}&end_time={END}")
+        self.assertEqual(self.es.searches[-1]["body"]["size"], 100)
+        page = self.client.get("/logs").get_data(as_text=True)
+        self.assertRegex(page, r'<option value="100"\s+selected>')
+        self.assertNotRegex(page, r'<option value="50"\s+selected>')
+
+    def test_a_size_nobody_listed_is_still_offered(self):
+        self.app.config["LOGS_PER_PAGE"] = 75
+        page = self.client.get("/logs").get_data(as_text=True)
+        self.assertRegex(page, r'<option value="75"\s+selected>')
+
     def test_response_has_every_key_the_client_reads(self):
         payload = self.search().get_json()
         for key in ("records", "total", "took_ms", "partial", "cursor",

@@ -160,7 +160,8 @@ def logs_page():
 
     return render_template("logs.html", indices=allowed,
                            user_role=current_user.role, no_access=False,
-                           source_choices=_source_choices())
+                           source_choices=_source_choices(),
+                           per_page=current_app.config.get("LOGS_PER_PAGE", 50))
 
 
 def _unreadable(names):
@@ -210,7 +211,8 @@ def api_search():
     scope = _scope()
 
     try:
-        size = min(int(request.args.get("size", 50)),
+        size = min(int(request.args.get(
+                       "size", current_app.config.get("LOGS_PER_PAGE", 50))),
                    current_app.config["MAX_SEARCH_RESULTS"])
     except ValueError as exc:
         return jsonify({"error": f"Invalid search parameters: {exc}",

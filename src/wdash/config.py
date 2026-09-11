@@ -163,6 +163,19 @@ class Config:
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
 
+    #: The largest request body accepted, in bytes. There was no limit: any
+    #: caller, signed in or not, could send a body of any size and a worker
+    #: would read it. 16 MiB is what the proxy in the Kubernetes manifests
+    #: accepts, and the agent keeps each delivery well under it.
+    MAX_CONTENT_LENGTH = 16 * 1024 * 1024
+
+    #: /health asks every backend at once and answers within this many
+    #: seconds; one that has not answered by then is reported unreachable.
+    HEALTH_BUDGET_SECONDS = 2
+    #: How long a /health report is reused, so a poller cannot hold a worker
+    #: per poll on a backend that hangs.
+    HEALTH_CACHE_SECONDS = 10
+
     #: How many reverse proxies sit in front of WDash.
     #:
     #: Zero — the default — means the socket address is used and

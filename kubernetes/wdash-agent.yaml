@@ -57,11 +57,11 @@ spec:
         #
         # For BROWSER JOURNEYS, build and push the other target and use it
         # here instead:
-        #     docker build -t <registry>/wdash-browser:2.4.0 --target browser .
-        # A journey assigned to an agent that has no browser reports as
-        # unknown rather than as down — a probe that is not there says nothing
-        # about the site.
-        image: yigitbasalma/wdash-elastic-dashboard:2.4.0
+        #     docker build -t <registry>/wdash-browser:2.4.1 --target browser .
+        # and raise the memory limit below with it. A journey given to an
+        # agent that has no browser reports down, with the reason "this agent
+        # has no browser".
+        image: yigitbasalma/wdash-elastic-dashboard:2.4.1
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "wdash.agent"]
         env:
@@ -89,6 +89,14 @@ spec:
         volumeMounts:
         - name: spool
           mountPath: /var/spool/wdash
+        # Somewhere to write temporary files, on a root filesystem that is
+        # read-only. Chromium needs it before it opens a page: Playwright
+        # makes its artifacts directory in the temp dir, and without one
+        # every journey on the browser image reported down with "the browser
+        # could not start: EACCES … mkdtemp". It is also where Chromium keeps
+        # the shared memory it would otherwise put in /dev/shm.
+        - name: tmp
+          mountPath: /tmp
         resources:
           requests:
             memory: "128Mi"
@@ -109,3 +117,6 @@ spec:
       volumes:
       - name: spool
         emptyDir: {}
+      - name: tmp
+        emptyDir:
+          sizeLimit: 1Gi

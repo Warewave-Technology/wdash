@@ -48,7 +48,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: wdash
-        image: yigitbasalma/wdash-elastic-dashboard:2.4.0
+        image: yigitbasalma/wdash-elastic-dashboard:2.4.1
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5000
@@ -127,23 +127,33 @@ spec:
         # with a fixed 30-second head start restarts the container in the
         # middle of one — repeatedly, which looks like a crash loop and is
         # actually a timeout.
+        #
+        # None of them reads /health any more. It asked every backend in
+        # turn inside the request, and one that hung — an Elasticsearch GC
+        # pause, a dropped route — made it answer in five seconds for a Loki
+        # and twenty for the cluster, past every timeout here: the pod left
+        # the Service and the kubelet restarted a container that was fine.
+        # /livez asks nothing outside the process, which is all a restart can
+        # fix; /readyz asks the metadata store, which is all that decides
+        # whether anybody can be served. /health is for alerts and people.
         startupProbe:
           httpGet:
-            path: /health
+            path: /livez
             port: 5000
           periodSeconds: 5
+          timeoutSeconds: 3
           # Five minutes to become ready, then liveness takes over.
           failureThreshold: 60
         livenessProbe:
           httpGet:
-            path: /health
+            path: /livez
             port: 5000
           periodSeconds: 10
-          timeoutSeconds: 5
+          timeoutSeconds: 3
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /health
+            path: /readyz
             port: 5000
           periodSeconds: 5
           timeoutSeconds: 3
@@ -177,7 +187,7 @@ spec:
       # somebody on. `replicas: 1` above is what holds it, and
       # tests/test_kubernetes_manifests.py holds `replicas: 1`.
       - name: alerts
-        image: yigitbasalma/wdash-elastic-dashboard:2.4.0
+        image: yigitbasalma/wdash-elastic-dashboard:2.4.1
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "wdash.alerts"]
         envFrom:
@@ -238,7 +248,14 @@ spec:
       - name: nginx
         image: nginx:1.25-alpine
         ports:
-        - containerPort: 80
+        # Not 80. The container runs as uid 101 with every capability
+        # dropped; NET_BIND_SERVICE was added back, but a capability added
+        # in the security context reaches a non-root process only as an
+        # ambient one, which no container runtime sets. Binding 80 then
+        # depended on the node's net.ipv4.ip_unprivileged_port_start: 0 on
+        # Docker and containerd 2, 1024 on containerd 1.x and CRI-O, where
+        # the sidecar crash-looped on its first bind(). 8080 needs nothing.
+        - containerPort: 8080
           name: nginx
         volumeMounts:
         - name: nginx-config
@@ -267,8 +284,6 @@ spec:
           capabilities:
             drop:
             - ALL
-            add:
-            - NET_BIND_SERVICE
 
       volumes:
       - name: rbac-config
@@ -291,7 +306,7 @@ spec:
 
       initContainers:
       - name: copy-static-files
-        image: yigitbasalma/wdash-elastic-dashboard:2.4.0
+        image: yigitbasalma/wdash-elastic-dashboard:2.4.1
         command: ['sh', '-c', 'cp -r /app/static/* /shared/static/']
         volumeMounts:
         - name: static-files
@@ -320,8 +335,10 @@ spec:
     app.kubernetes.io/name: wdash
     app.kubernetes.io/component: web
   ports:
+  # 80 outside, the sidecar's 8080 inside: the Ingress and the agents keep
+  # addressing port 80.
   - port: 80
-    targetPort: 80
+    targetPort: 8080
     name: http
   # Port 5000 is NOT here.
   #

@@ -112,8 +112,12 @@ EXPOSE 5000
 # unhealthy for ever, and a compose service waiting on
 # `condition: service_healthy` would never start. Python is the one program
 # this image is guaranteed to have.
+#
+# /readyz, not /health: it asks the metadata store alone, which is what
+# decides whether this container can serve anybody. /health asks every
+# backend, and one that hangs made it take twenty seconds.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health', timeout=5).status == 200 else 1)"
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/readyz', timeout=5).status == 200 else 1)"
 
 # Run application
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--timeout", "120", "main:app"]

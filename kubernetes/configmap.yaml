@@ -230,8 +230,17 @@ data:
     }
 
     server {
-        listen 80;
+        # The sidecar runs without privileges; see its container.
+        listen 8080;
         server_name _;
+
+        # Agents post their results here, screenshots included, in batches
+        # that nginx's default of 1m refused: a handful of failed journeys
+        # was a 413, and the agent dropped the batch — the down results
+        # never arrived, the monitor stayed green, and nothing on the server
+        # said so. The application refuses anything larger than this too
+        # (MAX_CONTENT_LENGTH), and the agent keeps each batch well under it.
+        client_max_body_size 16m;
 
         # Security headers come from the application, which sets them per
         # response alongside a Content-Security-Policy carrying a per-request

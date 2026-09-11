@@ -35,6 +35,17 @@ FLUSH_INTERVAL = 10
 #: refused whole after the agent had already built it.
 BATCH = 500
 
+#: Bytes one delivery may carry. A journey's failure screenshot rides along
+#: with its result, and a batch counted in results alone was refused whole:
+#: the proxy in front of the server took 1m, a handful of failed journeys
+#: passed it, and the 413 was taken as "the server will never want these" —
+#: the down results were dropped, the monitor stayed green, and nothing on
+#: the server said so. Well under the 16m the server and its proxy accept.
+MAX_BATCH_BYTES = 4 * 1024 * 1024
+
+#: Answers that mean "not now", like a 5xx: the results are kept.
+RETRY_LATER = (408, 429)
+
 #: Checks running at once. A monitor that hangs for its whole timeout must not
 #: hold up the others, and an agent with two hundred monitors should not open
 #: two hundred sockets at the same instant.
@@ -56,6 +67,18 @@ BROWSER_CONCURRENCY = 2
 #: long enough not to hammer a server that is down, short enough that recovery
 #: is noticed quickly.
 BACKOFF = (1, 2, 5, 10, 30, 60)
+
+
+def _within(results, limit):
+    """The oldest results whose JSON fits in `limit` bytes, and at least one."""
+    import json
+    batch, size = [], 0
+    for result in results:
+        size += len(json.dumps(result)) + 2
+        if batch and size > limit:
+            break
+        batch.append(result)
+    return batch
 
 
 class Agent:
@@ -141,22 +164,35 @@ class Agent:
         logger.info(f"configuration: {len(self._monitors)} monitor(s)")
 
     def flush(self):
-        """Ship what is spooled. Returns how many were accepted."""
+        """Ship what is spooled. Returns how many were accepted.
+
+        The oldest results first, as many as fit in MAX_BATCH_BYTES. A batch
+        the server calls too large (413) is halved and offered again until it
+        fits; only a single result too large to be taken at all is given up
+        on, and it alone.
+        """
         pending = self.spool.take(BATCH)
         if not pending:
             return 0
-        try:
-            response = self._client().post(
-                f"{self.server}/api/agent/results", timeout=30,
-                verify=self.verify, json={"results": pending})
-        except Exception as exc:
-            logger.warning(f"could not ship {len(pending)} result(s): {exc}")
-            return 0
+        batch = _within(pending, MAX_BATCH_BYTES)
+        while True:
+            try:
+                response = self._client().post(
+                    f"{self.server}/api/agent/results", timeout=30,
+                    verify=self.verify, json={"results": batch})
+            except Exception as exc:
+                logger.warning(f"could not ship {len(batch)} result(s): {exc}")
+                return 0
+            if response.status_code == 413 and len(batch) > 1:
+                batch = batch[:len(batch) // 2]
+                continue
+            break
 
-        if response.status_code >= 500:
-            # Kept: the server said it failed, not that it did not want them.
+        if response.status_code >= 500 or response.status_code in RETRY_LATER:
+            # Kept: the server said it failed, or not now — not that it did
+            # not want them.
             logger.warning(f"server answered {response.status_code}; "
-                           f"{len(pending)} result(s) stay spooled")
+                           f"{len(batch)} result(s) stay spooled")
             return 0
         if response.status_code == 401:
             logger.error("this agent's token was refused; results stay spooled")
@@ -164,16 +200,18 @@ class Agent:
         if response.status_code >= 400:
             # 4xx that is not auth means the server will never take these.
             # Keeping them would block every later result behind a batch that
-            # can never be delivered.
-            logger.error(f"server rejected {len(pending)} result(s) with "
-                         f"{response.status_code}; dropping them")
-            self.spool.drop(len(pending))
+            # can never be delivered. A 413 reaches here for one result only.
+            logger.error(f"server rejected {len(batch)} result(s) with "
+                         f"{response.status_code}; dropping them"
+                         + (f" (monitor {batch[0].get('monitor_id')})"
+                            if len(batch) == 1 else ""))
+            self.spool.drop(len(batch))
             return 0
 
-        self.spool.drop(len(pending))
-        accepted = (response.json() or {}).get("accepted", len(pending))
-        if accepted < len(pending):
-            logger.warning(f"{len(pending) - accepted} result(s) were not "
+        self.spool.drop(len(batch))
+        accepted = (response.json() or {}).get("accepted", len(batch))
+        if accepted < len(batch):
+            logger.warning(f"{len(batch) - accepted} result(s) were not "
                            f"stored — is this agent still assigned them?")
         return accepted
 

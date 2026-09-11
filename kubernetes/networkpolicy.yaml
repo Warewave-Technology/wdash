@@ -29,15 +29,17 @@ spec:
   policyTypes:
   - Ingress
   ingress:
-  # The ingress controller, on the sidecar's port. Adjust the namespace label
-  # to match your controller — `kubectl get ns --show-labels` will name it.
+  # The ingress controller, on the sidecar's port. That is the pod's port,
+  # 8080, which is what a NetworkPolicy matches; the Service maps 80 to it.
+  # Adjust the namespace label to match your controller — `kubectl get ns
+  # --show-labels` will name it.
   - from:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: ingress-nginx
     ports:
     - protocol: TCP
-      port: 80
+      port: 8080
   # WDash's own agents, pushing check results back to the server. They speak
   # to the same port as everybody else; there is no privileged path.
   - from:
@@ -46,7 +48,7 @@ spec:
           app.kubernetes.io/part-of: wdash
     ports:
     - protocol: TCP
-      port: 80
+      port: 8080
   # NOT LISTED, deliberately: port 5000. The application's own port is
   # reachable only from inside the pod, which is where the sidecar is.
   #

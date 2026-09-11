@@ -23,6 +23,12 @@ class ElasticsearchClient:
         verify = config.get("ELASTICSEARCH_VERIFY_CERTS", False)
         es_config = {
             'hosts': [config["ELASTICSEARCH_URL"]],
+            # The client's own timeout. ELASTICSEARCH_TIMEOUT was documented,
+            # shipped in the configmap and read into the config, and never
+            # passed here: the client kept its default of ten seconds while
+            # the searches asked the cluster for thirty, so a slow search was
+            # cut off at ten with a timeout the setting said it would not get.
+            'request_timeout': config.get("ELASTICSEARCH_TIMEOUT", 30),
             'verify_certs': verify,
             # Only silence the warning when the operator asked for no
             # verification. Otherwise a real certificate problem goes unheard.

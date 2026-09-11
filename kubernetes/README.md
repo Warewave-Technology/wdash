@@ -12,7 +12,22 @@ shipping nothing.
 
 ## Before you apply
 
-Three things, and none of them start without you.
+Four things, and none of them start without you.
+
+**0. The image.** The manifests name
+`yigitbasalma/wdash-elastic-dashboard:2.4.1`, and the published images stop at
+2.2.4 — an apply of these files as they are pulls a tag that does not exist,
+and every container waits in `ErrImagePull`. Build this version and push it
+where your cluster can pull from, then point the manifests at it:
+
+```bash
+docker build -t <registry>/wdash-elastic-dashboard:2.4.1 --target server .
+docker push <registry>/wdash-elastic-dashboard:2.4.1
+cd kubernetes && kustomize edit set image \
+    yigitbasalma/wdash-elastic-dashboard=<registry>/wdash-elastic-dashboard:2.4.1
+```
+
+`wdash-agent.yaml` is not part of the kustomization; set its `image:` by hand.
 
 **1. The two secrets.** Both are empty on purpose. `secret-key` used to ship as
 a working key printed in this repository, so an unedited apply signed every
@@ -105,11 +120,14 @@ Browser journeys need the browser image, which is 1.77GB against 260MB and is
 not published:
 
 ```bash
-docker build -t <registry>/wdash-browser:2.4.0 --target browser .
+docker build -t <registry>/wdash-browser:2.4.1 --target browser .
 ```
 
-A journey assigned to an agent with no browser reports as unknown rather than
-as down. A probe that is not there says nothing about the site.
+Raise the agent's memory limit with it: Chromium needs gigabytes, not the
+256Mi the plain agent is given. The manifest already mounts a writable `/tmp`,
+which Chromium cannot start without on a read-only root filesystem. A journey
+given to an agent with no browser reports down, with the reason "this agent
+has no browser".
 
 ## More than one replica
 

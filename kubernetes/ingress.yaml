@@ -41,6 +41,12 @@ metadata:
     # controller ignores it and needs its own equivalent — and MUST have one,
     # because of the Secure cookie.
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # The body an agent outside the cluster may post: results with their
+    # failure screenshots. ingress-nginx refuses anything over 1m by
+    # default, and a refused batch was a batch the agent dropped. The same
+    # 16m as the sidecar and the application; the agent keeps each delivery
+    # well under it. Another controller needs its own equivalent.
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
     # Uncomment with cert-manager installed, and the controller will obtain
     # and renew the certificate named in `tls:`.
     # cert-manager.io/cluster-issuer: letsencrypt-prod

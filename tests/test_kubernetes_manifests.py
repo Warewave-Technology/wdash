@@ -170,6 +170,50 @@ class ConfigMapTest(unittest.TestCase):
         dead = sorted(key for key in self.data if key.isupper() and key not in read)
         self.assertEqual(dead, [], f"nothing reads these: {dead}")
 
+    def test_every_key_read_into_the_config_is_used(self):
+        """Read is not used. ELASTICSEARCH_TIMEOUT and LOGS_PER_PAGE were in
+        this file, in the README's table and in .env.example, and config.py
+        read both into the configuration — where nothing looked at either.
+        The client kept a ten-second timeout and the page said 50, whatever
+        they were set to. The check above only asked whether config.py read
+        a key, and it did.
+
+        Used means the setting it becomes is named somewhere in the source
+        other than config.py — as a string, `config["KEY"]`, or as an
+        attribute, `Config.KEY` — or is one Flask reads itself: FLASK_DEBUG
+        becomes DEBUG, which only Flask looks at.
+        """
+        from flask import Flask
+        with open(os.path.join(ROOT, "src", "wdash", "config.py")) as handle:
+            config = handle.read()
+        texts = []
+        for directory, subdirectories, files in os.walk(os.path.join(ROOT, "src")):
+            subdirectories[:] = [d for d in subdirectories if d != "__pycache__"]
+            for filename in files:
+                if filename.endswith(".py") and not (
+                        filename == "config.py"
+                        and os.path.basename(directory) == "wdash"):
+                    with open(os.path.join(directory, filename)) as handle:
+                        texts.append(handle.read())
+        source = "\n".join(texts)
+
+        def setting(key):
+            """The Config attribute an environment key is read into."""
+            read = re.search(rf"""os\.environ\.get\(\s*['"]{key}['"]""", config)
+            if not read:
+                return key
+            assigned = re.findall(r"^    ([A-Z_][A-Z0-9_]*)\s*=", config[:read.start()], re.M)
+            return assigned[-1] if assigned else key
+
+        def used(key):
+            name = setting(key)
+            return (name in Flask.default_config
+                    or any(re.search(rf"""['"]{n}['"]|\.{n}\b""", source)
+                           for n in {key, name}))
+
+        unused = sorted(key for key in self.data if key.isupper() and not used(key))
+        self.assertEqual(unused, [], f"read into the config, used nowhere: {unused}")
+
     def test_every_key_reaches_the_process(self):
         """The other direction, and the one that was wrong.
 
@@ -831,3 +875,120 @@ class TheAgentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _nginx_directives():
+    conf = _by_name("configmap.yaml", "ConfigMap", "wdash-nginx-config")["data"]["nginx.conf"]
+    return "\n".join(line for line in conf.splitlines()
+                     if not line.lstrip().startswith("#"))
+
+
+def _bytes(size):
+    """nginx's `16m` and friends, in bytes."""
+    number, unit = re.fullmatch(r"(\d+)([kKmMgG]?)", size.strip()).groups()
+    return int(number) * {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}[unit.lower()]
+
+
+class TheWayInTest(unittest.TestCase):
+    """The port and the size of a request, at every door it passes."""
+
+    def test_every_hop_names_the_same_port(self):
+        """Ingress to Service port 80, Service to the sidecar, the policy on
+        the pod's port. Change one and the pod runs, healthy, while nothing
+        reaches it — the probes go straight to port 5000 and never notice."""
+        listen = int(re.search(r"^\s*listen\s+(\d+);", _nginx_directives(), re.M).group(1))
+        sidecar = [port["containerPort"] for port in _container("nginx")["ports"]]
+        service = _by_name("wdash-deployment.yaml", "Service", "wdash")
+        policy = _by_name("networkpolicy.yaml", "NetworkPolicy", "wdash-ingress")
+        self.assertEqual(sidecar, [listen])
+        self.assertEqual([port["targetPort"] for port in service["spec"]["ports"]],
+                         [listen])
+        for rule in policy["spec"]["ingress"]:
+            self.assertEqual([port["port"] for port in rule["ports"]], [listen])
+
+    def test_the_sidecar_needs_no_privilege_to_listen(self):
+        """It listened on 80 as uid 101 with NET_BIND_SERVICE added back. A
+        capability added in a security context reaches a non-root process
+        only as an ambient one, which no runtime sets, so the bind depended
+        on the node: containerd 1.x and CRI-O leave unprivileged ports at
+        1024, and the sidecar crash-looped on its first bind()."""
+        listen = int(re.search(r"^\s*listen\s+(\d+);", _nginx_directives(), re.M).group(1))
+        self.assertGreaterEqual(listen, 1024)
+        specification = _deployment()["spec"]["template"]["spec"]
+        for pod_container in specification["containers"] + specification.get("initContainers", []):
+            with self.subTest(container=pod_container["name"]):
+                self.assertNotIn("add", pod_container.get("securityContext", {})
+                                 .get("capabilities", {}))
+
+    def test_a_delivery_fits_through_every_door(self):
+        """An agent's results and their screenshots pass the ingress, the
+        sidecar and the application, and each has its own limit. The
+        sidecar's and the controller's were nginx's default of 1m, and a
+        refused batch was a dropped one."""
+        from wdash.agent.runner import MAX_BATCH_BYTES
+        from wdash.config import Config
+        application = Config.MAX_CONTENT_LENGTH
+        sidecar = _bytes(re.search(r"client_max_body_size\s+(\S+);",
+                                   _nginx_directives()).group(1))
+        ingress = _bytes(_by_name("ingress.yaml", "Ingress", "wdash")["metadata"]
+                         ["annotations"]["nginx.ingress.kubernetes.io/proxy-body-size"])
+        self.assertGreaterEqual(sidecar, application)
+        self.assertGreaterEqual(ingress, application)
+        self.assertLess(MAX_BATCH_BYTES, application)
+
+
+class TheProbesTest(unittest.TestCase):
+    """Which question each probe asks. All three read /health, which asked
+    every backend in turn: one that hung made it answer in twenty seconds,
+    past every timeout here, and the kubelet restarted a container that was
+    fine."""
+
+    def setUp(self):
+        self.container = _container("wdash")
+
+    def test_each_probe_asks_only_what_its_answer_can_fix(self):
+        self.assertEqual(self.container["startupProbe"]["httpGet"]["path"], "/livez")
+        self.assertEqual(self.container["livenessProbe"]["httpGet"]["path"], "/livez")
+        self.assertEqual(self.container["readinessProbe"]["httpGet"]["path"], "/readyz")
+
+    def test_every_probe_says_how_long_it_waits(self):
+        """The startup probe had none, so the kubelet's one second applied."""
+        for probe in ("startupProbe", "livenessProbe", "readinessProbe"):
+            with self.subTest(probe=probe):
+                self.assertIn("timeoutSeconds", self.container[probe])
+
+    def test_the_images_own_check_asks_what_readiness_asks(self):
+        """Docker's HEALTHCHECK read /health too: a compose service waiting
+        on `service_healthy` waited on every backend answering in time."""
+        with open(os.path.join(ROOT, "Dockerfile")) as handle:
+            dockerfile = handle.read()
+        check = re.search(r"^HEALTHCHECK .*?localhost:5000(/\w+)", dockerfile,
+                          re.M | re.S)
+        self.assertIsNotNone(check, "the server image has no health check")
+        self.assertEqual(check.group(1), self.container["readinessProbe"]["httpGet"]["path"])
+
+    def test_the_paths_are_ones_the_application_serves(self):
+        from wdash.app import create_app
+        from wdash.config import Config
+        rules = {str(rule) for rule in create_app(Config).url_map.iter_rules()}
+        for probe in ("startupProbe", "livenessProbe", "readinessProbe"):
+            with self.subTest(probe=probe):
+                self.assertIn(self.container[probe]["httpGet"]["path"], rules)
+
+
+class TheBrowserAgentTest(unittest.TestCase):
+    def test_it_has_somewhere_to_write_temporary_files(self):
+        """The root filesystem is read-only, and Playwright makes its
+        artifacts directory in the temp dir before Chromium opens a page:
+        every journey on the browser image reported down with "the browser
+        could not start"."""
+        deployment = _by_name("wdash-agent.yaml", "Deployment", "wdash-agent")
+        specification = deployment["spec"]["template"]["spec"]
+        container = specification["containers"][0]
+        self.assertTrue(container["securityContext"]["readOnlyRootFilesystem"])
+        mounts = {m["mountPath"]: m["name"] for m in container["volumeMounts"]}
+        self.assertIn("/tmp", mounts)
+        volume = next(v for v in specification["volumes"] if v["name"] == mounts["/tmp"])
+        self.assertIn("emptyDir", volume)
+        self.assertIn("sizeLimit", volume["emptyDir"],
+                      "an unbounded emptyDir fills the node's disk")
