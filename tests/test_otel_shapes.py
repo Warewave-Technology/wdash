@@ -419,6 +419,46 @@ class CollectorSpanSearchTest(unittest.TestCase):
                                    "postgres": (1, 0), "auth-service": (1, 0),
                                    "cron": (1, 0)})
 
+    def test_both_spellings_in_one_source_sort_by_their_own_duration(self):
+        """One index of each spelling, in one source, with the limit cutting.
+
+        Both landed in ONE request, because the group was the schema CLASS,
+        and Elasticsearch sorts a document that does not have the primary
+        sort field LAST whatever its value. So every collector-shaped span
+        outranked every older-pipeline one, and the limit cut the genuinely
+        slowest traces out — invisible unless the limit bites, which at the
+        page's 25 it normally does. Measured before: "slowest" with a limit
+        of 1 gave the 40 ms row while a 9,000 ms trace sat in the other
+        index. The test the older spelling already had builds a source
+        holding that spelling ALONE, so nothing guarded the mixed store the
+        `unmapped_type` comment was written for.
+        """
+        from tests.support import ModelledES
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        from wdash.hub.query import SORT_SLOWEST
+
+        older_mapping = {k: v for k, v in COLLECTOR_SPAN_MAPPING.items()
+                         if k not in ("duration", "status")}
+        older_mapping.update({"duration_ns": {"type": "long"},
+                              "status_code": {"type": "keyword"}})
+        older = collector_span("old", "old-root", "legacy", seconds_ago=120)
+        for key in ("duration", "status", "kind"):
+            older.pop(key)
+        older.update({"kind": "SPAN_KIND_SERVER", "status_code": "OK",
+                      "duration_ns": 9000 * 1_000_000})
+
+        self.source = ElasticsearchTraceSource(ModelledES({
+            "new-traces-1": (COLLECTOR_SPAN_MAPPING,
+                             [collector_span("new", "new-root", "modern",
+                                             duration_ms=40, seconds_ago=30)]),
+            "old-traces-1": (older_mapping, [older]),
+        }), name="otel")
+
+        self.assertEqual(self.search(sort=SORT_SLOWEST),
+                         [("old", "legacy"), ("new", "modern")])
+        self.assertEqual(self.search(sort=SORT_SLOWEST, limit=1),
+                         [("old", "legacy")])
+
     def test_an_older_pipeline_s_spellings_are_searched_too(self):
         """`to_span` reads `SPAN_KIND_SERVER`, `status_code` and
         `duration_ns`, so the search asks for them beside the collector's."""

@@ -101,6 +101,7 @@ class FakeTempo(Harness):
         self._fail_next = False
         self._trace_found = True
         self._reject_query = False
+        self._not_found = False
 
     # --- harness contract ---
 
@@ -122,6 +123,11 @@ class FakeTempo(Harness):
 
     def no_trace(self):
         self._trace_found = False
+
+    def not_found(self):
+        """Answer 404 to every path, as a Tempo behind a path prefix that no
+        longer exists does — or one too old for the v2 tag API."""
+        self._not_found = True
 
     def reject_query(self):
         self._reject_query = True
@@ -149,6 +155,9 @@ class FakeTempo(Harness):
         if self._fail_next:
             self._fail_next = False
             return FakeResponse(status_code=503, text="unavailable")
+
+        if self._not_found:
+            return FakeResponse(status_code=404, text="404 page not found")
 
         if path.endswith("/ready"):
             return FakeResponse(text="ready")
@@ -419,6 +428,30 @@ class TempoSpecificTest(unittest.TestCase):
         self.harness.fail_next()
         with self.assertRaises(TempoError):
             self._search(scope=self._role(services=("billing-*",)))
+
+    def test_a_404_from_anything_but_a_trace_is_not_emptiness(self):
+        """`_get` answered None for EVERY 404, and the same `_get` serves the
+        tag values and the search.
+
+        So a source whose base URL has a stale path prefix — a proxy route
+        that was removed, a Tempo too old for the v2 tag API — listed no
+        services and no traces, and the page said "No spans in this time
+        range." / "No traces match." Measured against a server answering 404
+        to everything: services [], search [], trace None, nothing partial and
+        no warning. Only the trace lookup may read a 404 as "I do not hold
+        that".
+        """
+        from wdash.hub.adapters.tempo import TempoError
+        self.harness.not_found()
+        with self.assertRaises(TempoError):
+            self.source.services(self.window, Scope.unrestricted())
+        with self.assertRaises(TempoError):
+            self._search()
+        # The tag lookup a pattern grant needs is the same story.
+        with self.assertRaises(TempoError):
+            self._search(scope=self._role(services=("billing-*",)))
+        self.assertIsNone(self.source.trace(TRACE_ID, self.window,
+                                            Scope.unrestricted()))
 
     def test_an_unreachable_tempo_raises_too(self):
         class Refused:

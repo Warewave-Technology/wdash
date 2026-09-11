@@ -67,6 +67,29 @@ class SpanSchema(ABC):
     parent_field = "parent_span_id"
 
     @classmethod
+    def for_mapping(cls, properties):
+        """An instance suited to ONE index's mapping.
+
+        A schema can read more than one spelling of the same field, and an
+        index maps one of them. Which one it maps decides how that index can
+        be sorted, so it is settled here, per index, rather than guessed once
+        per query.
+        """
+        return cls()
+
+    @property
+    def group_key(self):
+        """What makes two indices searchable in ONE request.
+
+        The class alone was the key. Two indices of the same schema with
+        different field spellings then shared a request — and a sort names a
+        field: Elasticsearch puts every document that does not have it last,
+        whatever its value. So one spelling outranked the other however slow
+        it was, and the limit cut the rest out.
+        """
+        return type(self)
+
+    @classmethod
     @abstractmethod
     def detect(cls, properties):
         """Decide from the index mapping whether this schema applies."""
@@ -124,12 +147,32 @@ class OtelSpanSchema(SpanSchema):
     what landed: `kind` is "Server", "Client", "Internal", "Producer",
     "Consumer" or "Unspecified"; `status.code` is "Ok", "Error" or "Unset";
     `duration` is nanoseconds; a root span has no `parent_span_id` at all.
-    The older spelling is asked for beside it, because `to_span` reads it.
+    The older spelling is asked for beside it, because `to_span` reads it —
+    except in the SORT, which can only name one field. Asking for both there
+    ranks by which spelling an index uses rather than by duration, so
+    `for_mapping` settles it per index and `group_key` keeps the two
+    spellings out of a single request.
     """
 
     name = "otel"
     trace_id_field = "trace_id"
     service_field = "resource.attributes.service.name"
+
+    def __init__(self, duration_field="duration"):
+        #: The duration field THIS index maps: what the collector writes, or
+        #: the older `duration_ns`.
+        self.duration_field = duration_field
+
+    @classmethod
+    def for_mapping(cls, properties):
+        properties = properties or {}
+        if "duration" not in properties and "duration_ns" in properties:
+            return cls(duration_field="duration_ns")
+        return cls()
+
+    @property
+    def group_key(self):
+        return (type(self), self.duration_field)
 
     #: Fields only a log record has. A collector writes `trace_id` and
     #: `span_id` onto a log record made inside a span, so the ids alone said
@@ -163,10 +206,13 @@ class OtelSpanSchema(SpanSchema):
                          "minimum_should_match": 1}}
 
     def slowest_first(self):
-        # `unmapped_type`: an index holds one spelling or the other, and a
-        # sort on a field an index does not map fails that index's shards.
-        return [{"duration": {"order": "desc", "unmapped_type": "long"}},
-                {"duration_ns": {"order": "desc", "unmapped_type": "long"}}]
+        # ONE field: the one this index maps. Sorting on both put every
+        # document missing the first of them last whatever its duration —
+        # Elasticsearch's `missing: _last` default — so a source holding an
+        # index of each spelling ranked every collector-shaped span above
+        # every older one, and the limit cut the genuinely slowest traces
+        # out. `unmapped_type` still covers an index that maps neither.
+        return [{self.duration_field: {"order": "desc", "unmapped_type": "long"}}]
 
     def to_span(self, hit):
         source = hit.get("_source") or {}
@@ -300,5 +346,5 @@ def detect_schema(properties):
     """Pick the matching schema strategy from an index mapping, or None."""
     for schema_cls in SCHEMAS:
         if schema_cls.detect(properties or {}):
-            return schema_cls()
+            return schema_cls.for_mapping(properties or {})
     return None

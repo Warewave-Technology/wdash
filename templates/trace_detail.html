@@ -288,8 +288,20 @@
                    'cannot be looked up.';
         }
         const reasons = (data.warnings || []).map(esc);
-        return 'The log search failed: ' + (reasons.length ? reasons.join('<br>')
-            : esc(data.details || data.error || data.error_type || ('HTTP ' + res.status)));
+        if (reasons.length) {
+            return 'The log search failed: ' + reasons.join('<br>');
+        }
+        const said = data.details || data.error || data.error_type;
+        if (said) {
+            return 'The log search failed: ' + esc(said);
+        }
+        // A page marked partial with nothing to say: an Elasticsearch search
+        // that timed out sets partial and carries no warning, and reporting
+        // that as "The log search failed: HTTP 200" gives a reader a reason
+        // that means nothing.
+        return res.ok
+            ? 'The log search did not finish, so records may be missing.'
+            : 'The log search failed: HTTP ' + res.status;
     }
 
     async function loadLogs() {

@@ -255,6 +255,15 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
           !text(explainedLogs, 'correlatedLogs').includes('Logs need a'),
           text(explainedLogs, 'correlatedLogs'));
 
+    const noReason = buildDetail(TRACE, {
+        records: [], total: 0, partial: true, warnings: [] });
+    await settle();
+    check('a log search that stopped short without a reason still reads as one',
+          text(noReason, 'correlatedLogs').includes('did not finish') &&
+          !text(noReason, 'correlatedLogs').includes('HTTP 200') &&
+          !text(noReason, 'correlatedLogs').includes('Logs need a'),
+          text(noReason, 'correlatedLogs'));
+
     const traceDown = buildDetail(
         { status: 503, body: { error: 'Unable to load trace.',
                                error_type: 'trace_source_error',

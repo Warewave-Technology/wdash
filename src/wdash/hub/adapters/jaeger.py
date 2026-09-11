@@ -114,7 +114,15 @@ class JaegerTraceSource(TraceSource):
 
     # ---------- transport ----------
 
-    def _get(self, path, params=None):
+    def _get(self, path, params=None, missing_is_none=False):
+        """One GET. A 404 is a failure unless the caller says otherwise.
+
+        Only a trace lookup may read a 404 as "I do not hold that". The same
+        `_get` serves `/api/services` and `/api/traces`, and mapping every 404
+        to None there turned a base URL with a stale path prefix into an empty
+        service list and an empty trace list, with nothing said. The page
+        called that "No spans in this time range."
+        """
         headers = {}
         if self._tenant:
             # Jaeger's multi-tenancy header, when the deployment enables it.
@@ -124,7 +132,7 @@ class JaegerTraceSource(TraceSource):
             f"{self._url}{path}", params=params or {}, headers=headers,
             auth=self._auth, timeout=self._timeout, verify=self._verify)
 
-        if response.status_code == 404:
+        if missing_is_none and response.status_code == 404:
             return None          # "no such trace" — a fact, not a failure
         if response.status_code >= 400:
             raise JaegerError(
@@ -195,10 +203,11 @@ class JaegerTraceSource(TraceSource):
     def trace(self, trace_id, window, scope):
         if not self._granted(scope):
             return None
-        # Only a 404 is "no such trace", and `_get` answers None for it.
+        # Only a 404 is "no such trace", and only here: `missing_is_none`
+        # keeps that reading to the trace lookup, where it is true.
         # Anything else is raised: caught here it became None as well, and
         # the page said "not found, widen the time range" during an outage.
-        body = self._get(f"/api/traces/{trace_id}")
+        body = self._get(f"/api/traces/{trace_id}", missing_is_none=True)
 
         if not body:
             return None
@@ -281,9 +290,11 @@ class JaegerTraceSource(TraceSource):
         """Trace summaries.
 
         Jaeger cannot answer "every trace", so a search with no service named
-        is fanned across the service list. Bounded, and the bound is reported:
-        an installation with hundreds of services would otherwise turn one
-        page load into hundreds of round trips.
+        is fanned across the service list. Bounded, and the bound is reported
+        in the answer's warnings: an installation with hundreds of services
+        would otherwise turn one page load into hundreds of round trips, and
+        one that has more services than the bound loses every trace that ran
+        only through the rest — which, unsaid, looks like a quieter hour.
 
         Jaeger answers a service's search with every trace that has a span of
         it, whole, so a trace through three services comes back three times.
@@ -296,13 +307,19 @@ class JaegerTraceSource(TraceSource):
         wanted = getattr(query, "service", None)
         if not self._granted(scope):
             return []
+        short_by = None
         if wanted:
             if not scope.allows_service(wanted, source=self.name):
                 return []
             services = [wanted]
         else:
             # A failure to list the services is raised, not an empty page.
-            services = self._service_names(scope)[:self._service_fanout]
+            known = self._service_names(scope)
+            services = known[:self._service_fanout]
+            if len(known) > len(services):
+                short_by = (f"only {len(services)} of the {len(known)} services "
+                            f"were searched (the fan-out bound), so traces that "
+                            f"ran only through the rest are missing")
 
         if not services:
             return []
@@ -338,8 +355,11 @@ class JaegerTraceSource(TraceSource):
                 tzinfo=timezone.utc), reverse=True)
 
         limit = getattr(query, "limit", None)
+        # The bound belongs beside the failures: both mean the same thing to
+        # a reader — these are not all the rows there are.
+        notes = failures + ([short_by] if short_by else [])
         return PartialList(summaries[:limit] if limit else summaries,
-                           partial=bool(failures), warnings=failures)
+                           partial=bool(notes), warnings=notes)
 
     def _search_one(self, service, query, scope):
         params = {"service": service, "limit": getattr(query, "limit", 20) or 20}

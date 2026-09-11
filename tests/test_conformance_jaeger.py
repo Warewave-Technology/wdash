@@ -100,6 +100,7 @@ class FakeJaeger(Harness):
         self._fail_next = False
         self._trace_found = True
         self._failing_services = set()
+        self._not_found = False
 
     # --- harness contract ---
 
@@ -121,6 +122,11 @@ class FakeJaeger(Harness):
 
     def no_trace(self):
         self._trace_found = False
+
+    def not_found(self):
+        """Answer 404 to every path, as a Jaeger behind a path prefix that no
+        longer exists does."""
+        self._not_found = True
 
     def fail_service(self, name):
         """Answer 503 to every search for one service."""
@@ -149,6 +155,9 @@ class FakeJaeger(Harness):
         if self._fail_next:
             self._fail_next = False
             return FakeResponse(status_code=503, text="unavailable")
+
+        if self._not_found:
+            return FakeResponse(status_code=404, text="404 page not found")
 
         if path.endswith("/api/services"):
             return FakeResponse({"data": list(SERVICES), "total": len(SERVICES)})
@@ -374,6 +383,44 @@ class JaegerSpecificTest(unittest.TestCase):
                                           Scope.unrestricted())):
             with self.assertRaises(ConnectionError):
                 call()
+
+    def test_a_404_from_anything_but_a_trace_is_not_emptiness(self):
+        """`_get` answered None for EVERY 404, and the same `_get` serves the
+        service list and the search.
+
+        So a source whose base URL has a stale path prefix listed no services
+        and no traces, and the page said "No spans in this time range." /
+        "No traces match." Measured against a server answering 404 to
+        everything: services [], search [], trace None, nothing partial and no
+        warning. Only the trace lookup may read a 404 as "I do not hold that".
+        """
+        from wdash.hub.adapters.jaeger import JaegerError
+        self.harness.not_found()
+        with self.assertRaises(JaegerError):
+            self.source.services(self.window, Scope.unrestricted())
+        with self.assertRaises(JaegerError):
+            self._search()
+        with self.assertRaises(JaegerError):
+            self._search(service="billing-api")
+        self.assertIsNone(self.source.trace(TRACE["traceID"], self.window,
+                                            Scope.unrestricted()))
+
+    def test_the_service_fan_out_bound_is_reported(self):
+        """"Bounded, and the bound is reported", said the docstring, and
+        nothing reported it.
+
+        An installation with more services than the bound loses every trace
+        that ran only through the services past it, and the list says nothing
+        — the same "fewer rows look like a quieter hour" this area is
+        closing. Measured against the lab's Jaeger with the bound at 2 of its
+        7 services: 25 rows, partial False, no warning.
+        """
+        source = JaegerTraceSource("http://jaeger:16686", session=self.harness,
+                                   service_fanout=2)
+        found = source.search(self._query(), Scope.unrestricted())
+        self.assertTrue(found.partial)
+        self.assertEqual(len(found.warnings), 1)
+        self.assertIn("2 of the 3", found.warnings[0])
 
     def test_a_service_whose_search_failed_is_named_beside_the_rest(self):
         """One request per service, so one can fail alone. The others'

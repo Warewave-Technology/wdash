@@ -1182,9 +1182,12 @@ class ElasticsearchTraceSource(TraceSource):
                 failures.append(f"{index}: its mapping could not be read ({exc})")
                 continue
             if schema:
-                groups.setdefault(type(schema), []).append(index)
-        return ({schema_cls(): indices for schema_cls, indices in groups.items()},
-                failures)
+                # Keyed by what makes two indices searchable in one request,
+                # which is not the class alone: two spellings of one schema
+                # sort by different fields, and a single request can only
+                # name one of them.
+                groups.setdefault(schema.group_key, (schema, []))[1].append(index)
+        return ({schema: indices for schema, indices in groups.values()}, failures)
 
     def _search_groups(self, groups, requests, failures):
         """Each group's answer, None for one that failed — which `failures`

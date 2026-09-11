@@ -185,7 +185,16 @@ class TempoTraceSource(TraceSource):
 
     # ---------- transport ----------
 
-    def _get(self, path, params=None):
+    def _get(self, path, params=None, missing_is_none=False):
+        """One GET. A 404 is a failure unless the caller says otherwise.
+
+        Only a trace lookup may read a 404 as "I do not hold that". The same
+        `_get` serves `/api/search`, the tag values and the service list, and
+        mapping every 404 to None there turned a base URL with a stale path
+        prefix — a proxy route that was removed, a Tempo too old for the v2
+        tag API — into an empty service list and an empty trace list, with
+        nothing said. The page called that "No spans in this time range."
+        """
         headers = {}
         if self._tenant:
             # Tempo's multi-tenancy header, when the deployment enables it.
@@ -195,7 +204,7 @@ class TempoTraceSource(TraceSource):
             f"{self._url}{path}", params=params or {}, headers=headers,
             auth=self._auth, timeout=self._timeout, verify=self._verify)
 
-        if response.status_code == 404:
+        if missing_is_none and response.status_code == 404:
             return None          # "no such trace" — an answer, not a failure
         if response.status_code == 400:
             # Tempo's parse errors are precise and worth passing on verbatim:
@@ -285,10 +294,11 @@ class TempoTraceSource(TraceSource):
     def trace(self, trace_id, window, scope):
         if not self._granted(scope):
             return None
-        # Only a 404 is "no such trace", and `_get` answers None for it.
+        # Only a 404 is "no such trace", and only here: `missing_is_none`
+        # keeps that reading to the trace lookup, where it is true.
         # Anything else is raised: caught here it became None as well, and
         # the page said "not found, widen the time range" during an outage.
-        body = self._get(f"/api/traces/{trace_id}")
+        body = self._get(f"/api/traces/{trace_id}", missing_is_none=True)
 
         if not body:
             return None
