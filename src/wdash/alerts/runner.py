@@ -53,9 +53,19 @@ def observe(rule, source, store, window, now):
         # `unknown` is NOT down. An agent that stopped reporting says nothing
         # about the target, and paging somebody because a probe restarted is
         # how a channel gets muted. That case has its own rule kind.
+        #
+        # One observation per monitor: the worst of its rows. The agents'
+        # store lists a monitor once per agent, and with both rows keyed on
+        # the same subject the later verdict replaced the earlier — down
+        # from Dublin and up from Frankfurt counted no failure at all.
+        worst = {}
+        for m in monitors:
+            if m.id not in worst or (m.status == "down"
+                                     and worst[m.id].status != "down"):
+                worst[m.id] = m
         return [Observation(m.id, m.status == "down",
                             m.error or "the check failed", m.name)
-                for m in monitors]
+                for m in worst.values()]
 
     if kind == CERTIFICATE_EXPIRING:
         days = int(rule.get("days_before") or 30)

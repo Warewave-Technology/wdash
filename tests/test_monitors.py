@@ -117,8 +117,12 @@ class FakeElasticsearch:
         wants_series = "series" in json.dumps(kwargs.get("aggs") or {})
         buckets = []
         for document in self.documents:
+            # One place per monitor, as a single Heartbeat writes: the
+            # listing asks for the newest check per `observer.geo.name`.
             bucket = {"key": document["_source"]["monitor"]["id"],
-                      "latest": {"hits": {"hits": [document]}}}
+                      "locations": {"buckets": [{
+                          "key": "",
+                          "latest": {"hits": {"hits": [document]}}}]}}
             if wants_series:
                 # Shaped like the real response: three buckets, the middle one
                 # empty. A fake that answers the listing but not the histogram
@@ -913,7 +917,9 @@ class FanOutCompletenessTest(unittest.TestCase):
                 self._checks = checks
 
             def series(self, monitor_id, window, scope, points=120):
-                return [MonitorPoint(timestamp=None,
+                # Timed, as every source's buckets are: two members that both
+                # measured the monitor are merged by time, not by position.
+                return [MonitorPoint(timestamp=window.start,
                                      duration_ms=self._duration,
                                      down=0, checks=self._checks)]
 
@@ -928,7 +934,7 @@ class FanOutCompletenessTest(unittest.TestCase):
 
         fanout = FanOutMonitorSource([Source("busy", 10.0, 50),
                                       Source("quiet", 1000.0, 1)])
-        point = fanout.series("m", None, None, points=1)[0]
+        point = fanout.series("m", TimeWindow.of("1h"), None, points=1)[0]
         # 50 checks at 10 ms and one at 1000: the weighted mean is ~29 ms,
         # the mean of means would be 505.
         self.assertLess(point.duration_ms, 100)

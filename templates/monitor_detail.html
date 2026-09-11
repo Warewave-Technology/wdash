@@ -29,6 +29,18 @@
     </select>
 </div>
 
+{# What could not be read while the rest could: a source of several that did
+   not answer, a journey's steps. A page that does not say so reads the
+   missing checks as checks that never ran. #}
+{% if warnings %}
+<div class="alert alert-warning py-2" style="font-size:.85rem">
+    <i class="fas fa-triangle-exclamation"></i>
+    <strong>This page is incomplete.</strong> What is below is what could
+    be read.
+    {% for warning in warnings %}<div class="small mt-1">{{ warning }}</div>{% endfor %}
+</div>
+{% endif %}
+
 {% if monitor.error %}
 <div class="alert alert-danger py-2">
     <i class="fas fa-circle-xmark"></i>
@@ -38,12 +50,20 @@
 
 {# Availability and percentiles are computed from the RUNS, not the chart
    buckets: a bucket holding six runs of which one failed is one failure in
-   six, and counting buckets would call it one in one. #}
+   six, and counting buckets would call it one in one.
+
+   Over the whole window. Where the source returned fewer checks than the
+   window holds, its own count is used and its percentiles are estimates,
+   and the hint says so; where it has no count, the line below the cards
+   says which checks the figures came from. #}
 <div class="row g-3 mb-4">
     {% for label, value, unit, hint in [
         ('Availability', summary.availability, '%', 'of checks that answered'),
-        ('Median', summary.median_ms, 'ms', 'typical response'),
-        ('p95', summary.p95_ms, 'ms', 'nearest-rank, a real observation'),
+        ('Median', summary.median_ms, 'ms',
+         'estimated by the source' if summary.estimated else 'typical response'),
+        ('p95', summary.p95_ms, 'ms',
+         'estimated by the source' if summary.estimated
+         else 'nearest-rank, a real observation'),
         ('Slowest', summary.worst_ms, 'ms', 'over this window')] %}
     <div class="col-6 col-md-3">
         <div class="card h-100"><div class="card-body py-3">
@@ -59,17 +79,34 @@
     </div>
     {% endfor %}
 </div>
+{% if summary.sample %}
+<p class="text-muted small" style="margin-top:-1rem">
+    From the newest {{ "{:,}".format(summary.sample.used) }} of
+    {{ "{:,}".format(summary.sample.of) }} checks in this window: the source
+    returns no more at once and did not count the rest.
+</p>
+{% endif %}
 
 <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
         <span><i class="fas fa-chart-line"></i> Response time</span>
         <small class="text-muted">
-            {{ summary.checks }} check(s){% if summary.failed %},
-            <span class="text-danger">{{ summary.failed }} failed</span>{% endif %}
+            {% if history_error %}<span class="text-danger">checks could not
+            be read</span>{% else %}{{ "{:,}".format(summary.checks) }}
+            check(s){% if summary.failed %},
+            <span class="text-danger">{{ "{:,}".format(summary.failed) }}
+            failed</span>{% endif %}{% endif %}
         </small>
     </div>
     <div class="card-body">
-        {% if not chart %}
+        {% if chart_error %}
+        <div class="text-center text-danger py-5">
+            <i class="fas fa-triangle-exclamation fa-2x"></i>
+            <div class="mt-2"><small>
+                The response times could not be read: {{ chart_error }}
+            </small></div>
+        </div>
+        {% elif not chart %}
         <div class="text-center text-muted py-5">
             <i class="fas fa-chart-line fa-2x"></i>
             <div class="mt-2"><small>
@@ -147,7 +184,9 @@
 <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
         <span><i class="fas fa-location-dot"></i> By location</span>
-        <small class="text-muted">worst first</small>
+        <small class="text-muted">worst first{% if newest %}, from the
+            newest {{ "{:,}".format(newest.used) }} of
+            {{ "{:,}".format(newest.of) }} checks{% endif %}</small>
     </div>
     <div class="table-responsive">
         <table class="table table-hover mb-0" style="font-size:.85rem">
@@ -207,7 +246,9 @@
     <div class="card-header d-flex justify-content-between align-items-center">
         <span><i class="fas fa-shoe-prints"></i> Steps over the last
             {{ window }}</span>
-        <small class="text-muted">median per step</small>
+        <small class="text-muted">median per step{% if newest %}, from the
+            newest {{ "{:,}".format(newest.used) }} of
+            {{ "{:,}".format(newest.of) }} checks{% endif %}</small>
     </div>
     <div class="table-responsive">
         <table class="table table-hover mb-0" style="font-size:.85rem">
@@ -309,6 +350,15 @@
             This source keeps no per-check history. The chart above is all it
             can say &mdash; which is a limit of the backend, not evidence that
             nothing ran.
+        </div>
+    </div>
+    {% elif history_error %}
+    {# Not "no check in this window": that is a monitor that did not run,
+       and this is a source that did not answer. #}
+    <div class="card-body">
+        <div class="alert alert-danger mb-0">
+            <i class="fas fa-triangle-exclamation"></i>
+            The checks could not be read: {{ history_error }}
         </div>
     </div>
     {% elif not checks %}

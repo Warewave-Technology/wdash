@@ -40,6 +40,7 @@ from .models import (
     PartialCounts, PartialList, Service, Trace,
 )
 from .source import Capability, LogSource, MonitorSource, TraceSource
+from .source import MonitorSourceError
 
 logger = logging.getLogger(__name__)
 
@@ -723,26 +724,83 @@ class FanOutMonitorSource(MonitorSource):
         of them and merging is what makes a history complete when the same
         check runs from two places.
 
-        Paged HERE rather than pushed down, because a page of the merge is not
-        the merge of two pages: taking rows 25-50 from each source and
-        concatenating gives neither source's rows 25-50 nor the combined
-        ones. The members are asked for everything in the window — which the
-        window already bounds — and the slice is taken after the sort.
-        """
-        merged = []
-        for source, checks, error in self._parallel(
-                lambda s: s.history(monitor_id, window, scope)):
-            if error is None and checks:
-                merged.extend(checks)
-        merged.sort(key=lambda check: check.timestamp or 0)
+        A page of the merge is not the merge of two pages, so each member is
+        asked for its newest `offset + limit` and the slice is taken after
+        the sort. The total is the members' totals added up, not the length
+        of what came back: Elasticsearch stops a history at 500, and "of
+        500" under a day of 1,440 checks was a pager that could not reach
+        page 21. When only one member knows the monitor — the usual case —
+        and its own ceiling stops short of the page, that member is asked
+        for the page itself.
 
-        total = len(merged)
+        A member that fails is named in `warnings` rather than dropped. When
+        no member that answered had a check, this raises instead: the store
+        knowing nothing of an Elasticsearch monitor while Elasticsearch is
+        down is not "no check in this window", it is nobody able to say.
+        """
+        offset = max(0, int(offset or 0))
+        wanted = None if limit is None else offset + int(limit)
+
+        def ask(source, **paging):
+            try:
+                return source.history(monitor_id, window, scope, **paging)
+            except TypeError:
+                if not paging:
+                    raise
+                # Written against the three-argument interface: it answers
+                # with the whole window, and the page is cut here.
+                return source.history(monitor_id, window, scope)
+
+        answered, warnings, failed = [], [], 0
+        for source, checks, error in self._parallel(
+                lambda s: ask(s) if wanted is None
+                else ask(s, offset=0, limit=wanted)):
+            if error is not None:
+                failed += 1
+                warnings.append(_named(source, error))
+                continue
+            warnings.extend(getattr(checks, "warnings", ()))
+            if checks:
+                answered.append((source, checks))
+        if failed and not answered:
+            raise MonitorSourceError("; ".join(warnings))
+
+        def total_of(checks):
+            return getattr(checks, "total", None) or len(checks)
+
+        if len(answered) == 1 and wanted is not None:
+            source, checks = answered[0]
+            if len(checks) < min(wanted, total_of(checks)):
+                page = source.history(monitor_id, window, scope,
+                                      offset=offset, limit=limit)
+                result = _CountedChecks(page)
+                result.total = total_of(checks)
+                result.warnings = tuple(dict.fromkeys(
+                    warnings + list(getattr(page, "warnings", ()))))
+                return result
+
+        merged = []
+        for source, checks in answered:
+            merged.extend(checks)
+            if len(answered) > 1 and len(checks) < min(
+                    wanted or total_of(checks), total_of(checks)):
+                warnings.append(
+                    f"{source.name}: only its newest {len(checks):,} of "
+                    f"{total_of(checks):,} checks could be merged")
+        merged.sort(key=lambda check: check.timestamp or _EPOCH)
+
         if limit is not None:
             newest_first = list(reversed(merged))
-            merged = list(reversed(
-                newest_first[int(offset):int(offset) + int(limit)]))
+            merged = list(reversed(newest_first[offset:offset + int(limit)]))
         result = _CountedChecks(merged)
-        result.total = total
+        result.total = sum(total_of(checks) for _, checks in answered)
+        result.warnings = tuple(warnings)
+        if len(answered) == 1:
+            # One member's own count of the whole window travels with it.
+            # Several members' estimates cannot be added together, and the
+            # page says so by falling back to the rows it holds.
+            result.whole_window = getattr(answered[0][1], "whole_window",
+                                          None)
         return result
 
     def series(self, monitor_id, window, scope, points=120):
@@ -755,28 +813,59 @@ class FanOutMonitorSource(MonitorSource):
         `series=True` gap on `monitors`: one instance of the class was fixed
         and the class was not.
 
-        Members share the window and the bucket count, so bucket `i` is the
-        same span everywhere and the merge is by index. Durations are averaged
-        WEIGHTED by how many checks each bucket holds — a plain mean of means
-        lets a source with one check outweigh one with fifty.
+        A member whose buckets hold no check is left out. The store answers
+        every monitor with a full set of empty buckets, and merging those by
+        position with Elasticsearch's — which sit on multiples of the
+        interval since the epoch, 33 of them for fifteen minutes — drew 120
+        labels, the data in the first 33, and time running backwards where
+        the two met. One member left is returned as it came.
+
+        Several members that measured the monitor are merged BY TIME onto
+        one grid of `points` equal spans across the window. Durations are
+        averaged WEIGHTED by how many checks each bucket holds — a plain mean
+        of means lets a source with one check outweigh one with fifty.
         """
-        collected = []
-        for _, series, error in self._parallel(
+        collected, warnings, failed = [], [], 0
+        for source, series, error in self._parallel(
                 lambda s: s.series(monitor_id, window, scope, points=points)
                 if hasattr(s, "series") else []):
-            if error is None and series:
+            if error is not None:
+                failed += 1
+                warnings.append(_named(source, error))
+            elif series:
                 collected.append(series)
 
-        if not collected:
-            return []
-        if len(collected) == 1:
-            return collected[0]
+        measured = [s for s in collected if any(p.checks for p in s)]
+        if failed and not measured:
+            # Empty buckets from the members that answered, and the one that
+            # might have measured it did not: that is not an empty chart.
+            raise MonitorSourceError("; ".join(warnings))
+        if len(measured) > 1:
+            merged = _CountedPoints(self._on_one_grid(measured, window, points))
+        else:
+            merged = _CountedPoints((measured or collected or [[]])[0])
+        merged.warnings = tuple(warnings)
+        return merged
 
-        width = max(len(series) for series in collected)
+    @staticmethod
+    def _on_one_grid(collected, window, points):
+        """Every member's buckets, put where their time says they go."""
+        points = max(1, int(points))
+        width = max(1.0, (window.end - window.start).total_seconds()) / points
+        cells = [[] for _ in range(points)]
+        for series in collected:
+            for point in series:
+                if not point.checks:
+                    continue
+                index = int((point.timestamp - window.start).total_seconds()
+                            // width)
+                # A bucket that starts before the window — Elasticsearch's
+                # first one usually does — holds only checks inside it, and
+                # those belong to the first span.
+                cells[min(points - 1, max(0, index))].append(point)
+
         merged = []
-        for index in range(width):
-            buckets = [series[index] for series in collected
-                       if index < len(series)]
+        for index, buckets in enumerate(cells):
             checks = sum(b.checks for b in buckets)
             weighted = sum((b.duration_ms or 0) * b.checks
                            for b in buckets if b.duration_ms is not None)
@@ -785,8 +874,7 @@ class FanOutMonitorSource(MonitorSource):
             worsts = [w for w in worsts if w is not None]
 
             point = MonitorPoint(
-                timestamp=next((b.timestamp for b in buckets if b.timestamp),
-                               None),
+                timestamp=window.start + dt.timedelta(seconds=index * width),
                 duration_ms=(weighted / counted) if counted else None,
                 down=sum(b.down for b in buckets),
                 checks=checks)
@@ -808,3 +896,18 @@ class FanOutMonitorSource(MonitorSource):
 class _CountedChecks(list):
     """A list of checks that also knows the total, matching the sources."""
     total = 0
+    #: Members that could not answer, by name. The rows are what the others
+    #: said, and the page says what is missing from them.
+    warnings = ()
+    whole_window = None
+
+
+class _CountedPoints(list):
+    """A merged chart, and the members that could not be asked for theirs."""
+    warnings = ()
+
+
+def _named(source, error):
+    """A member's failure as a sentence that names it once."""
+    text = str(error) or type(error).__name__
+    return text if text.startswith(f"{source.name}:") else f"{source.name}: {text}"

@@ -53,7 +53,7 @@ from ..models import (
     DOWN, STEP_FAILED, STEP_PASSED, STEP_SKIPPED, UNKNOWN, UP, Certificate,
     Monitor, MonitorCheck, MonitorPage, MonitorPoint, SourceRef, StepResult,
 )
-from ..source import Capability, MonitorSource
+from ..source import Capability, MonitorSource, MonitorSourceError
 
 #: Where Heartbeat and the Fleet-managed Synthetics integration write.
 DEFAULT_PATTERNS = ("heartbeat-*", "synthetics-*")
@@ -62,6 +62,12 @@ DEFAULT_PATTERNS = ("heartbeat-*", "synthetics-*")
 #: has a naming problem rather than a paging problem, but the cap keeps one
 #: aggregation from trying to hold everything in memory.
 MAX_MONITORS = 500
+
+#: Places one monitor is checked from, per listing row. Elastic's own
+#: service offers about a dozen locations. The cap keeps the listing inside
+#: the cluster's bucket limit (65,536 by default): 500 monitors, this many
+#: places each and a sparkline each come to about 38,000.
+MAX_LOCATIONS = 25
 
 #: How many past checks a history returns.
 MAX_HISTORY = 500
@@ -208,6 +214,32 @@ class _CheckList(list):
     """
     total = 0
     offset = 0
+    #: The header figures over every check in the window, counted by the
+    #: cluster — see `_whole_window`. None on a page of checks.
+    whole_window = None
+    #: What could not be read beside the checks — a journey's steps.
+    warnings = ()
+
+
+def _whole_window(response, total):
+    """The detail page's header figures, from the history's aggregations.
+
+    Counts and the slowest check are exact. The median and p95 are the
+    cluster's estimates, and marked so: the page's own figures are
+    nearest-rank, a value that actually happened, and these are not.
+    """
+    def ms(value):
+        return None if value is None else round(float(value) / 1000.0, 1)
+
+    spread = _dig(response, "aggregations.spread.values") or {}
+    return {
+        "checks": total,
+        "failed": int(_dig(response, "aggregations.down.doc_count") or 0),
+        "median_ms": ms(spread.get("50.0")),
+        "p95_ms": ms(spread.get("95.0")),
+        "worst_ms": ms(_dig(response, "aggregations.slowest.value")),
+        "estimated": True,
+    }
 
 
 class ElasticsearchMonitorSource(MonitorSource):
@@ -285,11 +317,25 @@ class ElasticsearchMonitorSource(MonitorSource):
 
     def monitors(self, window, scope, series=False):
         aggregations = {
-            # One document per monitor: the most recent check. A terms
-            # aggregation alone would give counts, and a count cannot say
-            # whether the thing is up NOW.
-            "latest": {"top_hits": {
-                "size": 1, "sort": [{"@timestamp": {"order": "desc"}}]}},
+            # The most recent check from EACH place the monitor runs from. A
+            # terms aggregation alone would give counts, and a count cannot
+            # say whether the thing is up NOW.
+            #
+            # Per place, not per monitor. The newest check of all was the
+            # row, and with Dublin down and Frankfurt up reporting in turn it
+            # went down, up, down, up — an alert with a threshold of three
+            # counted one failure, then none, and never fired.
+            #
+            # `missing` keeps the checks that name no place: a self-managed
+            # Heartbeat writes no `observer` at all, and grouped by a field
+            # it does not have, its monitors would drop out of the list.
+            "locations": {
+                "terms": {"field": "observer.geo.name", "missing": "",
+                          "size": MAX_LOCATIONS},
+                "aggs": {"latest": {"top_hits": {
+                    "size": 1,
+                    "sort": [{"@timestamp": {"order": "desc"}}]}}},
+            },
         }
         if series:
             # In the SAME query as the listing. A second round trip per
@@ -339,10 +385,14 @@ class ElasticsearchMonitorSource(MonitorSource):
         buckets = _dig(response, "aggregations.monitors.buckets") or []
         monitors = []
         for bucket in buckets:
-            hits = _dig(bucket, "latest.hits.hits") or []
-            if not hits:
+            latest = []
+            for place in _dig(bucket, "locations.buckets") or ():
+                hits = _dig(place, "latest.hits.hits") or []
+                if hits:
+                    latest.append(hits[0])
+            if not latest:
                 continue
-            monitor = self._to_monitor(hits[0])
+            monitor = self._to_monitor(latest)
             if series:
                 monitor.series = self._to_series(bucket)
             monitors.append(monitor)
@@ -357,9 +407,33 @@ class ElasticsearchMonitorSource(MonitorSource):
                 f"{self.name}: showing the first {MAX_MONITORS} monitors.",)
         return page
 
-    def _to_monitor(self, hit):
+    def _to_monitor(self, latest):
+        """One row from the newest check at each place the monitor runs from.
+
+        Down if ANY place's newest check is down, and the row is that check:
+        its time, its duration, its error, with the place named in front of
+        the error when there is more than one place to tell apart. One row
+        per monitor rather than one per place, so an alert keyed on the
+        monitor sees every failure — the detail page's "By location" card is
+        where the places are set side by side.
+        """
+        def moment(hit):
+            return (_parse_time(_dig(hit, "_source.@timestamp"))
+                    or datetime.min.replace(tzinfo=timezone.utc))
+
+        newest_first = sorted(latest, key=moment, reverse=True)
+        down = [hit for hit in newest_first
+                if _status(hit.get("_source") or {}) == DOWN]
+        hit = (down or newest_first)[0]
         source = hit.get("_source") or {}
         duration = _dig(source, "monitor.duration.us")
+        error = _dig(source, "error.message") or ""
+        if down and len(latest) > 1:
+            places = ", ".join(dict.fromkeys(
+                _location(h.get("_source") or {}) or "an unnamed location"
+                for h in down))
+            error = (f"down from {places}: {error}" if error
+                     else f"down from {places}")
         return Monitor(
             id=_dig(source, "monitor.id") or "",
             name=_dig(source, "monitor.name") or _dig(source, "monitor.id") or "",
@@ -368,9 +442,15 @@ class ElasticsearchMonitorSource(MonitorSource):
             status=_status(source),
             checked_at=_parse_time(source.get("@timestamp")),
             duration_ms=(duration / 1000.0) if duration is not None else None,
-            error=_dig(source, "error.message") or "",
+            error=error,
             tags=tuple(source.get("tags") or ()),
-            certificate=_certificate(source),
+            # The endpoint's certificate, from the newest check that saw one.
+            # A place that could not connect saw none, and taking the row's
+            # would drop the monitor off the TLS tab — and resolve a
+            # certificate alert — because of where the failure happened.
+            certificate=next((c for c in (
+                _certificate(h.get("_source") or {}) for h in newest_first)
+                if c is not None), None),
             source=self.name,
             ref=SourceRef(backend=self.backend, container=hit.get("_index", ""),
                           id=hit.get("_id", "")),
@@ -425,10 +505,9 @@ class ElasticsearchMonitorSource(MonitorSource):
                 },
             }},
         }
-        try:
-            response = self._search(body)
-        except Exception:
-            return []
+        # Raised, not answered with []: an empty series is what "not enough
+        # checks in this window to draw a line" is drawn from.
+        response = self._answer(body)
         points_out = []
         for point in _dig(response, "aggregations.series.buckets") or ():
             average = _dig(point, "duration.value")
@@ -479,13 +558,27 @@ class ElasticsearchMonitorSource(MonitorSource):
             # is a number that is simply wrong.
             "track_total_hits": True,
         }
-        try:
-            response = self._search(body)
-        except Exception:
-            return []
+        if limit is None:
+            # The whole window, counted by the cluster, for the figures at the
+            # top of the detail page. This read stops at MAX_HISTORY, and the
+            # header used to be computed from what it returned: a monitor
+            # down for most of a day and up for its last 500 minutes read
+            # 100.0% available with its slowest check at 1 ms. In the same
+            # request, so the count and the rows cannot disagree.
+            body["aggs"] = {
+                "down": {"filter": {"term": {"summary.status": DOWN}}},
+                "slowest": {"max": {"field": "monitor.duration.us"}},
+                # Estimates — a t-digest, not a rank — and said to be on the
+                # page. Only used when the rows returned are not the window.
+                "spread": {"percentiles": {"field": "monitor.duration.us",
+                                           "percents": [50, 95]}},
+            }
+        # Raised, not answered with []: an empty history is what "no check in
+        # this window" is drawn from.
+        response = self._answer(body)
 
         hits = _dig(response, "hits.hits") or []
-        steps = self._steps_for(hits)
+        steps, unread = self._steps_for(hits)
         checks = []
         for hit in hits:
             source = hit.get("_source") or {}
@@ -506,7 +599,23 @@ class ElasticsearchMonitorSource(MonitorSource):
         checks = _CheckList(checks)
         checks.total = int(_dig(response, "hits.total.value") or len(checks))
         checks.offset = max(0, int(offset))
+        if limit is None:
+            checks.whole_window = _whole_window(response, checks.total)
+        if unread:
+            checks.warnings = (unread,)
         return checks
+
+    def _answer(self, body):
+        """One search, or an error that says which source could not answer.
+
+        For the reads whose empty answer means something: no checks, no
+        line to draw. The listing has its own partial page for this, and the
+        step lookup a warning on a history that is otherwise right.
+        """
+        try:
+            return self._search(body)
+        except Exception as exc:
+            raise MonitorSourceError(f"{self.name}: {exc}") from exc
 
     def _steps_for(self, hits):
         """The steps of every browser check in `hits`, by check group.
@@ -527,6 +636,8 @@ class ElasticsearchMonitorSource(MonitorSource):
         journey came back with no steps on any deployment with more than one
         monitor source. Measuring it through the adapter alone hid that
         completely.
+
+        Returns (steps by group, why they could not be read or "").
         """
         groups = [_dig(hit.get("_source") or {}, "monitor.check_group")
                   for hit in hits
@@ -534,7 +645,7 @@ class ElasticsearchMonitorSource(MonitorSource):
                       "").lower() == "browser"]
         groups = [group for group in groups if group]
         if not groups:
-            return {}
+            return {}, ""
 
         body = {
             "size": min(len(groups) * MAX_STEPS, MAX_STEP_DOCUMENTS),
@@ -551,10 +662,13 @@ class ElasticsearchMonitorSource(MonitorSource):
         }
         try:
             response = self._search(body)
-        except Exception:
+        except Exception as exc:
             # No steps rather than no history. The check itself is real and
-            # already read; losing the detail should not lose the page.
-            return {}
+            # already read; losing the detail should not lose the page. Said,
+            # though: journeys with nothing to expand read as journeys that
+            # had no steps.
+            return {}, (f"{self.name}: the steps of these runs could not be "
+                        f"read: {exc}")
 
         found = {}
         for hit in _dig(response, "hits.hits") or []:
@@ -590,7 +704,13 @@ class ElasticsearchMonitorSource(MonitorSource):
                 # carries whatever literal was typed into it.
                 description=_dig(source, "synthetics.step.name") or "",
                 status=outcome,
-                duration_us=duration,
+                # None for a skipped step, whatever the document says. It
+                # carries one — 11 µs and 4 µs in the fixture, a few µs on
+                # the lab — which is the time Heartbeat took to write down
+                # that the step never ran. Passed through, a journey that
+                # broke at sign-in reported its basket step as the fastest
+                # step on the page and getting quicker by 100%.
+                duration_us=None if outcome == STEP_SKIPPED else duration,
                 # The synthetics message, which is the browser's own; the ECS
                 # one prefixes it with "error executing step: ".
                 error=(_dig(source, "synthetics.error.message")
@@ -601,7 +721,7 @@ class ElasticsearchMonitorSource(MonitorSource):
         # same millisecond would then be in whichever order the cluster
         # happened to return them.
         return {group: tuple(sorted(steps, key=lambda step: step.index))
-                for group, steps in found.items()}
+                for group, steps in found.items()}, ""
 
     def step_screenshot(self, token, scope):
         """The page as it was at the end of one step, in pieces.

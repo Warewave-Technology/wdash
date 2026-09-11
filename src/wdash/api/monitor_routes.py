@@ -84,11 +84,34 @@ def _source(name=None):
     agent's monitors in isolation — the question is always "is anything
     down", and asking it of one region at a time is how an outage in the
     other one is missed.
+
+    A name that is not configured raises SourceMissing. It reached the
+    browser as "500 Internal Server Error" — from a bookmark, after somebody
+    renamed a source — where the log and trace routes say which source is
+    missing.
     """
     hub = getattr(current_app, "hub", None)
     if hub is None:
         return None
-    return hub.monitors(name or hub.ALL_SOURCES)
+    try:
+        return hub.monitors(name or hub.ALL_SOURCES)
+    except KeyError:
+        raise SourceMissing(f"There is no monitor source called '{name}'.")
+
+
+class SourceMissing(RuntimeError):
+    """A request names a monitor source that is not configured."""
+
+
+def _missing_source(exc):
+    """For a page: say so, and go to the list with every source."""
+    flash(str(exc), "warning")
+    return redirect(url_for("monitors.monitors_page", window=_window()[1]))
+
+
+def _reason(exc):
+    """What went wrong, in the source's words, for the page."""
+    return str(exc) or type(exc).__name__
 
 
 def _window():
@@ -256,7 +279,13 @@ def _step_history(checks, window):
                 # A step that never ran is absent, not fast. Counting its
                 # missing duration as zero is how a journey that broke at
                 # step 2 reports steps 3 to 7 getting quicker.
+                #
+                # Decided by the status, not by the duration being missing:
+                # Heartbeat writes a few microseconds for a skipped step,
+                # and the rule held only for as long as nobody passed them
+                # through.
                 row["skipped"] += 1
+                continue
             if step.duration_ms is None:
                 continue
             row["durations"].append(step.duration_ms)
@@ -433,7 +462,10 @@ def monitors_page():
               "error")
         return redirect(url_for("index"))
 
-    source = _source(request.args.get("source"))
+    try:
+        source = _source(request.args.get("source"))
+    except SourceMissing as exc:
+        return _missing_source(exc)
     window, window_label = _window()
 
     if source is None:
@@ -493,7 +525,10 @@ def monitors_json():
         return jsonify({"error": "monitors:read is required",
                         "error_type": "permission_denied"}), 403
 
-    source = _source(request.args.get("source"))
+    try:
+        source = _source(request.args.get("source"))
+    except SourceMissing as exc:
+        return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
     if source is None:
         return jsonify({"error": "No monitor source is configured.",
                         "error_type": "no_monitor_source",
@@ -512,7 +547,10 @@ def monitor_history(monitor_id):
         return jsonify({"error": "monitors:read is required",
                         "error_type": "permission_denied"}), 403
 
-    source = _source(request.args.get("source"))
+    try:
+        source = _source(request.args.get("source"))
+    except SourceMissing as exc:
+        return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
     if source is None:
         return jsonify({"error": "No monitor source is configured.",
                         "error_type": "no_monitor_source"}), 503
@@ -521,13 +559,22 @@ def monitor_history(monitor_id):
                         "reason": f"{source.name} keeps no monitor history."})
 
     window, _ = _window()
-    checks = source.history(monitor_id, window, _scope())
+    try:
+        checks = source.history(monitor_id, window, _scope())
+    except Exception as exc:
+        # Not `{"checks": []}`, which is a monitor that did not run.
+        return jsonify({"error": f"The checks could not be read: "
+                                 f"{_reason(exc)}",
+                        "error_type": "monitor_source_failed"}), 502
+    warnings = list(getattr(checks, "warnings", ()))
     return jsonify({"checks": [
         {"timestamp": c.timestamp.isoformat() if c.timestamp else None,
          "status": c.status,
          "duration_ms": round(c.duration_ms, 1) if c.duration_ms is not None else None,
          "error": c.error}
-        for c in checks]})
+        for c in checks],
+        "total": getattr(checks, "total", None) or len(checks),
+        "partial": bool(warnings), "warnings": warnings})
 
 
 @monitor_bp.route("/monitors/<monitor:monitor_id>")
@@ -545,7 +592,10 @@ def monitor_detail(monitor_id):
               "error")
         return redirect(url_for("index"))
 
-    source = _source(request.args.get("source"))
+    try:
+        source = _source(request.args.get("source"))
+    except SourceMissing as exc:
+        return _missing_source(exc)
     window, window_label = _window()
     if source is None:
         return redirect(url_for("monitors.monitors_page"))
@@ -561,11 +611,20 @@ def monitor_detail(monitor_id):
         # Not a 404: the monitor may simply not have reported inside the
         # window, which is a different thing from not existing and has a
         # different fix — a longer window.
-        flash(f"No check from '{monitor_id}' in the last {window_label}.",
-              "warning")
+        #
+        # Unless the listing did not complete. Then nobody knows whether it
+        # reported, and "no check from it" would be a guess stated as fact.
+        if page.partial:
+            said = "; ".join(page.warnings) or (
+                f"no answer from {', '.join(page.missing_sources)}")
+            flash(f"Could not tell whether '{monitor_id}' reported in the "
+                  f"last {window_label}: {said}", "warning")
+        else:
+            flash(f"No check from '{monitor_id}' in the last {window_label}.",
+                  "warning")
         return redirect(url_for("monitors.monitors_page", window=window_label))
 
-    points = _series_for(source, monitor_id, window)
+    points, chart_error = _series_for(source, monitor_id, window)
     page_number = max(1, request.args.get("page", type=int) or 1)
 
     # Availability comes from the WHOLE window, not from the page on screen.
@@ -578,20 +637,42 @@ def monitor_detail(monitor_id):
     # already hold. On Elasticsearch that second query costs two round trips
     # rather than one — a browser journey's steps are separate documents, so
     # every history call fetches them as well.
-    everything = (source.history(monitor_id, window, _scope())
-                  if source.supports(Capability.MONITOR_HISTORY) else [])
-    checks, total = _checks_page(source, monitor_id, window, page_number,
-                                 everything)
-
-    # Clamp AFTER the count is known, then fetch again. `?page=99` on ten
-    # pages used to render an empty table under a pager insisting it was on
-    # page ten — the table and the control disagreeing about where you are,
-    # which reads as "the checks were deleted".
-    pages = max(1, (total + CHECKS_PER_PAGE - 1) // CHECKS_PER_PAGE)
-    if page_number > pages:
-        page_number = pages
+    #
+    # A source that cannot answer raises, and the page says so where the
+    # checks would be — never "no check in this window", which is what the
+    # empty list it used to return was drawn as.
+    history_error = None
+    try:
+        everything = (source.history(monitor_id, window, _scope())
+                      if source.supports(Capability.MONITOR_HISTORY) else [])
         checks, total = _checks_page(source, monitor_id, window, page_number,
                                      everything)
+
+        # Clamp AFTER the count is known, then fetch again. `?page=99` on ten
+        # pages used to render an empty table under a pager insisting it was
+        # on page ten — the table and the control disagreeing about where you
+        # are, which reads as "the checks were deleted".
+        pages = max(1, (total + CHECKS_PER_PAGE - 1) // CHECKS_PER_PAGE)
+        if page_number > pages:
+            page_number = pages
+            checks, total = _checks_page(source, monitor_id, window,
+                                         page_number, everything)
+    except Exception as exc:
+        everything, checks, total = [], [], 0
+        history_error = _reason(exc)
+
+    # Members of a fan-out that did not answer, while others did. The page
+    # is drawn from the ones that did, and says which are missing from it.
+    warnings = list(dict.fromkeys(
+        list(getattr(everything, "warnings", ()))
+        + list(getattr(checks, "warnings", ()))
+        + list(getattr(points, "warnings", ()))))
+
+    # The step and location cards are computed from the rows in hand, and
+    # when those stop short of the window their headers say so.
+    held = getattr(everything, "total", None) or len(everything)
+    newest = ({"used": len(everything), "of": held}
+              if held > len(everything) else None)
 
     return render_template(
         "monitor_detail.html",
@@ -609,6 +690,8 @@ def monitor_detail(monitor_id):
         summary=_availability(points, everything),
         window=window_label,
         history_supported=source.supports(Capability.MONITOR_HISTORY),
+        history_error=history_error, chart_error=chart_error,
+        warnings=warnings, newest=newest,
         warning_days=EXPIRY_WARNING_DAYS, critical_days=EXPIRY_CRITICAL_DAYS)
 
 
@@ -685,14 +768,17 @@ def _pager(page_number, total):
 
 
 def _series_for(source, monitor_id, window):
-    """The finer per-monitor series, when the backend has one."""
+    """The finer per-monitor series, when the backend has one, and why not
+    when it failed — (points, error). An empty series is drawn as "not
+    enough checks in this window", which a backend that is down has not
+    said."""
     getter = getattr(source, "series", None)
     if getter is None:
-        return []
+        return [], None
     try:
-        return getter(monitor_id, window, _scope())
-    except Exception:
-        return []
+        return getter(monitor_id, window, _scope()), None
+    except Exception as exc:
+        return [], _reason(exc)
 
 
 def _check(check):
@@ -733,8 +819,29 @@ def _availability(points, checks):
     A bucket that holds six runs of which one failed is one failure out of
     six, and counting buckets would call it one failure out of one. Bucket
     counts are for drawing; run counts are for arithmetic.
+
+    Over the WHOLE window, which the rows in hand are not when a source
+    stops short of it — Elasticsearch returns 500. From those alone, a
+    monitor down for most of a day and up for its last 500 minutes read
+    100.0% available with its slowest check at 1 ms. The source's own count
+    of the window is used instead (`whole_window`, its percentiles marked
+    as estimates), and a source that has none gets figures from the rows it
+    returned with the header saying which rows those were (`sample`).
     """
     total = len(checks)
+    held = getattr(checks, "total", None) or total
+    whole = getattr(checks, "whole_window", None)
+    if held > total and whole:
+        counted, failed = whole["checks"], whole["failed"]
+        return {
+            "checks": counted, "failed": failed,
+            "availability": (round(100.0 * (counted - failed) / counted, 2)
+                             if counted else None),
+            "median_ms": whole["median_ms"], "p95_ms": whole["p95_ms"],
+            "worst_ms": whole["worst_ms"],
+            "estimated": bool(whole.get("estimated")), "sample": None,
+        }
+
     failed = sum(1 for c in checks if c.status == DOWN)
     durations = sorted(c.duration_ms for c in checks
                        if c.duration_ms is not None)
@@ -744,6 +851,8 @@ def _availability(points, checks):
         "availability": (round(100.0 * (total - failed) / total, 2)
                          if total else None),
         "median_ms": None, "p95_ms": None, "worst_ms": None,
+        "estimated": False,
+        "sample": {"used": total, "of": held} if held > total else None,
     }
     if durations:
         summary["median_ms"] = round(durations[len(durations) // 2], 1)

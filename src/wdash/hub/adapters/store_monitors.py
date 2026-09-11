@@ -26,7 +26,7 @@ from datetime import timezone
 
 from ..models import DOWN, STEP_SKIPPED, UNKNOWN, UP, Certificate, Monitor, \
     MonitorCheck, MonitorPage, MonitorPoint, SourceRef, StepResult
-from ..source import Capability, MonitorSource
+from ..source import Capability, MonitorSource, MonitorSourceError
 
 logger = logging.getLogger(__name__)
 
@@ -248,12 +248,16 @@ class StoreMonitorSource(MonitorSource):
     # ---------- history ----------
 
     def _results(self, monitor_id, window):
+        """Raises rather than answering []: the page draws "no check in this
+        window" from an empty history, and a store that could not be read
+        has not said that."""
         try:
             return self._store.results.series(
                 monitor_id, window.start, window.end)
         except Exception as exc:
             logger.warning(f"{self.name}: could not read history: {exc}")
-            return []
+            raise MonitorSourceError(
+                f"{self.name}: could not read the results: {exc}") from exc
 
     def _agent_names(self):
         """Agent id -> the name somebody typed when they registered it.

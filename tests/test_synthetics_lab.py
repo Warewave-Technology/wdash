@@ -251,6 +251,70 @@ class WhereTheAgentStoodTest(unittest.TestCase):
         self.assertEqual({c.location for c in checks}, {"lab-frankfurt"})
 
 
+@unittest.skipUnless(LAB, _MISSING)
+class TheMonitorQueriesAgainstHeartbeatTest(unittest.TestCase):
+    """The listing, the history's whole-window figures and a journey's
+    steps, asked of what a real Heartbeat wrote.
+
+    `tests/test_monitor_data.py` holds the logic against a model that
+    evaluates the query. Only a cluster can refuse one — a `missing` a
+    keyword field will not take, a percentile on a field that is not a
+    number — and a refusal here would reach the page as a failure on every
+    load.
+    """
+
+    def setUp(self):
+        self.source = ElasticsearchMonitorSource(CLIENT, name="lab")
+        self.window = TimeWindow.of("1h")
+        self.scope = Scope.unrestricted()
+
+    def test_the_listing_asks_each_place_and_keeps_the_answer(self):
+        from wdash.hub.models import DOWN
+        page = self.source.monitors(self.window, self.scope)
+        self.assertFalse(page.partial, page.warnings)
+        rows = {m.id: m for m in page.monitors}
+        self.assertEqual(rows["lab-http-down"].status, DOWN)
+        # One place in the lab, so Heartbeat's own sentence, unprefixed.
+        self.assertIn("500", rows["lab-http-down"].error)
+        self.assertFalse(rows["lab-http-down"].error.startswith("down from"))
+
+    def test_the_whole_window_is_counted_by_the_cluster(self):
+        """The down monitor, so the count of failures has to be every check.
+        The hour fits under the ceiling, so the rows can check the count."""
+        from wdash.hub.models import DOWN
+        checks = self.source.history("lab-http-down", self.window, self.scope)
+        self.assertTrue(checks)
+        self.assertEqual(len(checks), checks.total)
+        whole = checks.whole_window
+        self.assertEqual(whole["checks"], checks.total)
+        self.assertEqual(whole["failed"],
+                         sum(1 for c in checks if c.status == DOWN))
+        self.assertEqual(whole["worst_ms"],
+                         max(round(c.duration_ms, 1) for c in checks))
+        self.assertIsNotNone(whole["median_ms"])
+        self.assertLessEqual(whole["median_ms"], whole["worst_ms"])
+
+    def test_a_step_that_never_ran_has_no_duration(self):
+        """Heartbeat writes one for it anyway — a few microseconds."""
+        written = CLIENT.search(
+            index="synthetics-browser-*", size=1,
+            sort=[{"@timestamp": "desc"}],
+            query={"bool": {"filter": [
+                {"term": {"synthetics.type": "step/end"}},
+                {"term": {"synthetics.step.status": "skipped"}}]}})
+        hits = _dig(written, "hits.hits")
+        self.assertTrue(hits, "no skipped step to measure")
+        self.assertIsNotNone(_dig(hits[0]["_source"],
+                                  "synthetics.step.duration.us"),
+                             "Heartbeat stopped writing a duration for a "
+                             "skipped step, so this proves nothing")
+        checks = self.source.history("lab-journey-down", self.window,
+                                     self.scope, limit=5)
+        skipped = [s for c in checks for s in c.steps if s.status == "skipped"]
+        self.assertTrue(skipped)
+        self.assertEqual({s.duration_ms for s in skipped}, {None})
+
+
 def _playwright():
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401

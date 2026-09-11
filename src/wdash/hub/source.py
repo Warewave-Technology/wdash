@@ -153,6 +153,10 @@ class MonitorSource(Source):
 
         Optional: a backend that keeps only the current state can serve
         MONITOR_LIST without this. Declare MONITOR_HISTORY only if it works.
+
+        Raises MonitorSourceError when the backend cannot answer. An empty
+        list is "no check in this window", and a backend that is down has
+        not said that.
         """
         raise NotImplementedError(
             f"{self.name} does not keep monitor history.")
@@ -166,3 +170,11 @@ class MonitorSource(Source):
         """
         raise NotImplementedError(
             f"{self.name} does not report TLS certificates.")
+
+
+class MonitorSourceError(RuntimeError):
+    """A monitor backend could not answer a history or a chart.
+
+    Raised rather than answered with an empty list, and worded for a person:
+    the message is shown on the page, after the name of the source.
+    """
