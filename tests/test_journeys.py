@@ -23,7 +23,6 @@ import base64
 import json
 import os
 import sys
-import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -520,11 +519,9 @@ class RealBrowserTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        from tests.support import serve_in_background
+        cls.server = serve_in_background(ThreadingHTTPServer(("127.0.0.1", 0), _Handler))
         cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
-        cls.thread = threading.Thread(target=cls.server.serve_forever,
-                                      daemon=True)
-        cls.thread.start()
 
     @classmethod
     def tearDownClass(cls):
@@ -569,9 +566,11 @@ class RealBrowserTest(unittest.TestCase):
     def test_playwrights_own_error_text_is_redacted(self):
         """The reason this class exists. Playwright's messages carry the
         arguments of the call, and one of those is the password."""
+        # A second, not eight: what is being checked is the message a
+        # timeout produces, and it says the same whenever it comes.
         steps = [{"kind": "goto", "value": self.base + "/"},
                  {"kind": "fill", "selector": "#nonexistent",
-                  "value": "{{ secret.password }}"},
+                  "value": "{{ secret.password }}", "timeout_ms": 1000},
                  {"kind": "expect_text", "value": "Shop"}]
         result = self._run(PASSWORD, steps=steps, timeout=8)
         self.assertEqual(result["status"], "down")
@@ -635,7 +634,8 @@ class RealBrowserTest(unittest.TestCase):
         check entirely leaves every test green — every other journey here
         expects text that is present."""
         steps = [{"kind": "goto", "value": self.base + "/"},
-                 {"kind": "expect_text", "value": "Order confirmed"}]
+                 {"kind": "expect_text", "value": "Order confirmed",
+                  "timeout_ms": 800}]
         result = run_journey({"id": "m1", "timeout_seconds": 5,
                               "steps": steps}, secrets={})
         self.assertEqual(result["status"], "down")
@@ -650,7 +650,7 @@ class RealBrowserTest(unittest.TestCase):
         steps = [{"kind": "goto", "value": self.base + "/slow"},
                  {"kind": "expect_text", "value": "eventually"}]
         clock = time.monotonic()
-        result = run_journey({"id": "m1", "timeout_seconds": 3,
+        result = run_journey({"id": "m1", "timeout_seconds": 2,
                               "steps": steps}, secrets={})
         elapsed = time.monotonic() - clock
         self.assertEqual(result["status"], "down")

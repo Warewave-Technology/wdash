@@ -22,7 +22,6 @@ import base64
 import json
 import os
 import sys
-import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -82,8 +81,8 @@ class _Listener:
             def log_message(self, *args):
                 pass
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        from tests.support import serve_in_background
+        self.server = serve_in_background(ThreadingHTTPServer(("127.0.0.1", 0), Handler))
         self.url = f"http://127.0.0.1:{self.server.server_port}"
 
     def stop(self):

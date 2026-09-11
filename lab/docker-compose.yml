@@ -313,6 +313,10 @@ services:
     image: postgres:${POSTGRES_VERSION}
     container_name: wdash-lab-postgres
     profiles: ["postgres"]
+    # Not the default hundred. `python -m tests.run` runs a process a core,
+    # each holding a few connections, and at eighteen processes the suite
+    # ran into "sorry, too many clients already".
+    command: ["postgres", "-c", "max_connections=400"]
     environment:
       - POSTGRES_USER=wdash
       - POSTGRES_PASSWORD=wdash-lab

@@ -25,7 +25,8 @@ scheme — say so in the list, with the reason.
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
 npm ci                                    # for the front-end suites
 
-./venv/bin/python -m unittest discover -s tests -t .
+./venv/bin/python -m tests.run            # on every core; the quick way
+./venv/bin/python -m unittest discover -s tests -t .   # one after another, as CI does
 npm test
 ```
 

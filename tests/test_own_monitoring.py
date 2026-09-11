@@ -1179,7 +1179,6 @@ class RedirectTest(unittest.TestCase):
 
     @classmethod
     def _server(cls, answer):
-        import threading
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         seen = cls.seen
@@ -1198,9 +1197,8 @@ class RedirectTest(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        return server
+        from tests.support import serve_in_background
+        return serve_in_background(ThreadingHTTPServer(("127.0.0.1", 0), Handler))
 
     @classmethod
     def _answer(cls, handler):

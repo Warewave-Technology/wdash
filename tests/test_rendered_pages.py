@@ -26,12 +26,10 @@ some way; it is also the only one that has ever seen the product.
 import os
 import sys
 import tempfile
-import threading
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-PORT = int(os.environ.get("WDASH_RENDER_PORT", "5093"))
 PASSWORD = "rendered-pages-only-password"
 
 #: Bootstrap 5.3's own palette. None of it is in `wdash.css`, so an element
@@ -184,15 +182,29 @@ class EveryScreenTest(unittest.TestCase):
         cls.app.store.settings.set("rbac.user_roles", {"admin": "test-role"})
         cls.app.store.rbac.invalidate()
 
-        threading.Thread(
-            target=lambda: cls.app.run(port=PORT, threaded=True,
-                                       use_reloader=False),
-            daemon=True).start()
+        # A port of its own. It was a fixed one, and two of these running at
+        # once — the parallel runner splits this class — took each other's.
+        from werkzeug.serving import make_server
+        from tests.support import serve_in_background
+        cls.server = serve_in_background(
+            make_server("127.0.0.1", 0, cls.app, threaded=True))
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
 
-    def test_no_screen_wears_bootstraps_colours_or_fails_to_be_read(self):
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    # One theme a test, so a parallel run can take them one each.
+    def test_no_screen_wears_bootstraps_colours_or_fails_to_be_read_dark(self):
+        self._every_screen("dark")
+
+    def test_no_screen_wears_bootstraps_colours_or_fails_to_be_read_light(self):
+        self._every_screen("light")
+
+    def _every_screen(self, theme):
         from playwright.sync_api import sync_playwright
 
-        base = f"http://127.0.0.1:{PORT}"
+        base = self.base
         faults = []
         with sync_playwright() as play:
             browser = play.chromium.launch()
@@ -213,16 +225,15 @@ class EveryScreenTest(unittest.TestCase):
                 f"{r.status} {r.url.split('?')[0]}") if r.status >= 400
                 else None)
 
-            for theme in ("dark", "light"):
-                for name, url in self.PAGES:
-                    trouble.clear()
-                    page.goto(base + url, wait_until="networkidle")
-                    page.evaluate(f"window.wdashTheme.set('{theme}')")
-                    page.wait_for_timeout(400)
-                    report = page.evaluate(AUDIT, BOOTSTRAP)
-                    for line in (list(dict.fromkeys(trouble))
-                                 + report["defaults"] + report["unreadable"]):
-                        faults.append(f"{theme} · {name}: {line}")
+            for name, url in self.PAGES:
+                trouble.clear()
+                page.goto(base + url, wait_until="networkidle")
+                page.evaluate(f"window.wdashTheme.set('{theme}')")
+                page.wait_for_timeout(400)
+                report = page.evaluate(AUDIT, BOOTSTRAP)
+                for line in (list(dict.fromkeys(trouble))
+                             + report["defaults"] + report["unreadable"]):
+                    faults.append(f"{theme} · {name}: {line}")
             browser.close()
 
         self.assertEqual(faults, [], "\n".join([""] + faults))
@@ -235,7 +246,7 @@ class EveryScreenTest(unittest.TestCase):
         histogram quietly skips itself when Chart is missing."""
         from playwright.sync_api import sync_playwright
 
-        base = f"http://127.0.0.1:{PORT}"
+        base = self.base
         refused, loaded = [], {}
         with sync_playwright() as play:
             browser = play.chromium.launch()

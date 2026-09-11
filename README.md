@@ -613,8 +613,15 @@ Elasticsearch service against the lab's version.
 
 ```bash
 cd lab && ./lab.sh up && ./lab.sh seed     # sample cluster
-python -m unittest discover -s tests -t .  # no cluster required
+python -m tests.run                        # the suite, on every core
+python -m unittest discover -s tests -t .  # the same, one after another, as CI runs it
 ```
+
+`python -m tests.run` runs each test module in a process of its own, as many
+at once as there are cores, and learns from each run which modules and
+classes to split: about a quarter of a minute on an 18-core machine, against
+a minute and a half one after another. `-j N` sets how many at once; module
+names narrow it (`python -m tests.run test_store test_identity`).
 
 The same suite on Postgres, with every store it opens a schema of its own in
 a database made for the run and dropped after it:

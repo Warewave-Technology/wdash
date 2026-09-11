@@ -55,3 +55,4 @@ lab/synthetics/certs/*
 .vscode/
 .kiro/
 .idea/
+tests/.timings*.json

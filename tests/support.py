@@ -13,6 +13,25 @@ the same path a real deployment takes.
 TEST_ROLE = "test-role"
 
 
+#: How often a test server's loop looks for a request to stop.
+#:
+#: `serve_forever` looks every half second by default, and `shutdown()` waits
+#: for it to look. A server started per test therefore cost every test half a
+#: second in its tearDown, whether or not it was sent anything: measured, the
+#: sixty-odd tests of test_alert_delivery took 0.51s each, and together with
+#: test_secret_destinations that was about forty-five seconds of a two-and-a-
+#: half-minute suite spent waiting for a loop to notice it was told to stop.
+POLL_SECONDS = 0.01
+
+
+def serve_in_background(server):
+    """Start `server` on a daemon thread, stoppable at once. Returns it."""
+    import threading
+    threading.Thread(target=server.serve_forever,
+                     kwargs={"poll_interval": POLL_SECONDS}, daemon=True).start()
+    return server
+
+
 #: Argon2 is deliberately expensive, which is right in production and wrong in
 #: a setUp that runs hundreds of times. Hashed once per process; the real
 #: hashing path is exercised by tests/test_identity.py.

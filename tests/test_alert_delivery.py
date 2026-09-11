@@ -11,7 +11,6 @@ import json
 import os
 import sys
 import tempfile
-import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -51,9 +50,8 @@ class Receiver:
             def log_message(self, *arguments):
                 pass
 
-        self._server = HTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=self._server.serve_forever,
-                         daemon=True).start()
+        from tests.support import serve_in_background
+        self._server = serve_in_background(HTTPServer(("127.0.0.1", 0), Handler))
 
     @property
     def url(self):
