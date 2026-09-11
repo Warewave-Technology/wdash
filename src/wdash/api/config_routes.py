@@ -1303,14 +1303,29 @@ def audit_page():
     except ValueError:
         page = 0
 
-    entries = store.audit.recent(limit=AUDIT_PAGE_SIZE,
-                                 offset=page * AUDIT_PAGE_SIZE, **filters)
-    total = store.audit.count(**filters)
+    # The reads raise now, and the page is the place that decides what a
+    # failure looks like. It is NOT an empty trail: the two halves are caught
+    # apart from each other so a screen that can still show one of them does,
+    # and each one that cannot says so where its rows would have been.
+    entries, total, actions, trail_error = [], 0, [], None
+    try:
+        entries = store.audit.recent(limit=AUDIT_PAGE_SIZE,
+                                     offset=page * AUDIT_PAGE_SIZE, **filters)
+        total = store.audit.count(**filters)
+        actions = store.audit.actions()
+    except Exception as exc:
+        logger.error(f"Could not read the audit trail: {exc}")
+        trail_error = str(exc)
 
     # Sign-in attempts are not filtered by the same fields — they have no
     # action or subject — so they are shown as their own list rather than
     # pretending the filters apply to them.
-    attempts = store.signin.recent(limit=50)
+    attempts, attempts_error = [], None
+    try:
+        attempts = store.signin.recent(limit=50)
+    except Exception as exc:
+        logger.error(f"Could not read sign-in attempts: {exc}")
+        attempts_error = str(exc)
 
     forwarding = store.settings.get(AUDIT_FORWARDING) or {}
     pending = 0
@@ -1334,8 +1349,10 @@ def audit_page():
         pages=max(1, (total + AUDIT_PAGE_SIZE - 1) // AUDIT_PAGE_SIZE),
         filters={key: request.args.get(key, "") for key in
                  ("actor", "action", "subject", "since", "until")},
-        actions=store.audit.actions(),
+        actions=actions,
         attempts=attempts,
+        trail_error=trail_error,
+        attempts_error=attempts_error,
     )
 
 
@@ -1360,7 +1377,16 @@ def audit_export():
         return jsonify({"error": "No metadata store is configured."}), 503
 
     limit = min(int(request.args.get("limit", 10000)), 50000)
-    entries = store.audit.recent(limit=limit, **_audit_filters())
+    try:
+        entries = store.audit.recent(limit=limit, **_audit_filters())
+    except Exception as exc:
+        # 503 and not an empty file. Somebody downloading this is collecting
+        # evidence, and a zero-length wdash-audit.jsonl with a 200 on it is
+        # evidence of the wrong thing.
+        logger.error(f"Could not export the audit trail: {exc}")
+        return jsonify({"error": "The audit trail could not be read, so "
+                                 "this export would understate it.",
+                        "detail": str(exc)}), 503
 
     import json
 

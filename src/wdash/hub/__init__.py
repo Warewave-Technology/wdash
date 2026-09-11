@@ -152,9 +152,25 @@ class Hub:
             logger.exception("Could not reload the configured sources")
             return sum(len(group) for group in self._configured.values())
 
-        swapped = {signal: {source.name: source
-                            for source in built.get(signal, ())}
-                   for signal in ("logs", "traces", "monitors")}
+        swapped = {}
+        for signal in ("logs", "traces", "monitors"):
+            registry = {}
+            for source in built.get(signal, ()):
+                # Two sources of one name in one signal: the second one wins
+                # the key and the first is never asked again. The store
+                # refuses this now, but a store that already had it — or one
+                # edited directly — must not have it silently.
+                shadowed = registry.get(source.name)
+                if shadowed is not None:
+                    logger.warning(
+                        "Two %s sources are called %r (%s and %s). Only one "
+                        "can be reached under that name: %s is being kept "
+                        "and the other answers nothing, including in the "
+                        "'*' fan-out. Rename one of them.",
+                        signal, source.name, type(shadowed).__name__,
+                        type(source).__name__, type(source).__name__)
+                registry[source.name] = source
+            swapped[signal] = registry
         failures = dict(built.get("failures") or {})
         with self._lock:
             # Swapped whole, never mutated in place: a search that is reading

@@ -275,6 +275,93 @@ class ExportTest(AuditTestCase):
                              50000)
 
 
+class ATrailThatCannotBeReadIsNotAnEmptyTrailTest(AuditTestCase):
+    """A lock, a statement timeout, a missing grant, a damaged table.
+
+    Every read swallowed its error into `[]`, `0` and `[]`, so the page came
+    back 200 with a "0 entries" badge and "Nothing recorded yet" twice, and
+    the export streamed an empty file with a 200 on it. An administrator
+    collecting evidence was handed the absence of a record nothing had looked
+    for — from the one screen in this application whose entire job is to say
+    what happened.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.save_role()
+        self.app.store.signin.record("alice", "10.0.0.1", "failure")
+
+    def hide(self, *tables):
+        """Rename a table out from under the reader.
+
+        The nearest thing to a damaged table, a revoked grant or a statement
+        timeout that a test can arrange, and the failure arrives where a real
+        one would: out of the driver, in the middle of a query. The store is
+        a temporary database of this test's own, torn down with it, so
+        nothing is put back.
+        """
+        from sqlalchemy import text
+        for table in tables:
+            with self.app.store.engine.begin() as connection:
+                connection.execute(
+                    text(f"ALTER TABLE {table} RENAME TO {table}_hidden"))
+
+    def test_the_page_says_it_could_not_be_read(self):
+        self.hide("wdash_audit")
+        body = self.client.get("/admin/audit").get_data(as_text=True)
+        self.assertIn("could not be read", body)
+        self.assertNotIn("Nothing recorded yet", body)
+
+    def test_the_badge_does_not_claim_the_trail_is_empty(self):
+        self.hide("wdash_audit")
+        body = self.client.get("/admin/audit").get_data(as_text=True)
+        self.assertNotIn("0 entries", body)
+
+    def test_the_page_still_renders_what_it_can_read(self):
+        """Partial, not blank: the sign-in half is a different table and a
+        different question, and losing one must not cost the other."""
+        self.hide("wdash_audit")
+        body = self.client.get("/admin/audit").get_data(as_text=True)
+        self.assertEqual(self.client.get("/admin/audit").status_code, 200)
+        self.assertIn("alice", body)
+
+    def test_the_sign_in_half_reports_its_own_failure(self):
+        self.hide("wdash_signin_attempts")
+        body = self.client.get("/admin/audit").get_data(as_text=True)
+        self.assertIn("could not be read", body)
+        self.assertIn("role saved", body)
+
+    def test_the_export_refuses_rather_than_downloading_nothing(self):
+        """A zero-length wdash-audit.jsonl with a 200 on it is evidence of
+        the wrong thing."""
+        self.hide("wdash_audit")
+        response = self.client.get("/admin/audit/export")
+        self.assertEqual(response.status_code, 503)
+        self.assertIn(b"could not be read", response.data)
+
+    def test_the_store_itself_raises_rather_than_answering_nothing(self):
+        """Where the decision belongs. A read that answers `[]` has told its
+        caller something that is not true, and every caller after this one
+        inherits it."""
+        self.hide("wdash_audit", "wdash_signin_attempts")
+        with self.assertRaises(Exception):
+            self.app.store.audit.recent()
+        with self.assertRaises(Exception):
+            self.app.store.audit.count()
+        with self.assertRaises(Exception):
+            self.app.store.audit.actions()
+        with self.assertRaises(Exception):
+            self.app.store.signin.recent()
+
+    def test_writing_an_entry_still_never_raises(self):
+        """The other half of the rule, and it did not change: losing an audit
+        row is bad, refusing an administrator's repair because the audit
+        table is unhappy is worse."""
+        self.hide("wdash_audit", "wdash_signin_attempts")
+        self.app.store.audit.record("owner", "role saved")
+        self.app.store.signin.record("owner", "10.0.0.1", "failure")
+
+
 class ImmutabilityTest(AuditTestCase):
     def test_the_screen_offers_no_way_to_change_the_trail(self):
         """Not a claim about the database — a claim about this application.

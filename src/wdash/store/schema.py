@@ -96,8 +96,18 @@ sources = Table(
     Column("enabled", Boolean, nullable=False, default=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
-    #: The name alone. It used to be (name, signal), which let two rows share
-    #: a name — the very duplication `signals` removes.
+    #: (name, legacy signal), which is as far as the database can go. It
+    #: cannot express the rule that matters — one name per signal, where
+    #: `signals` is the list and not the legacy column — so `SourceRepository`
+    #: enforces that, and this stays as the backstop against two identical
+    #: rows racing in. The comment here used to claim "the name alone", which
+    #: it never was: an Elasticsearch source named `prod` serving logs and
+    #: traces sat happily beside a Jaeger `prod` serving traces, and the hub,
+    #: which keys one registry per signal by name, answered every trace query
+    #: from one of them and never asked the other. Not tightened to
+    #: UniqueConstraint("name"): migration 7 deliberately left the legacy
+    #: pairs — one row for logs, one for traces, sharing a name — for an
+    #: operator to merge by hand, and those are still legitimate.
     UniqueConstraint("name", "signal", name="uq_wdash_sources_name"),
 )
 

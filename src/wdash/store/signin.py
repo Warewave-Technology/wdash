@@ -234,21 +234,23 @@ class SignInGuard:
     # ---------- reading ----------
 
     def recent(self, limit=100, username=None, outcome=None):
-        """Attempt history, newest first. For the audit screen."""
-        try:
-            query = (select(signin_attempts)
-                     .order_by(signin_attempts.c.at.desc()).limit(limit))
-            if username:
-                query = query.where(
-                    signin_attempts.c.username == _normalise(username))
-            if outcome:
-                query = query.where(signin_attempts.c.outcome == outcome)
-            with self._engine.connect() as connection:
-                return [dict(row) for row
-                        in connection.execute(query).mappings().all()]
-        except Exception as exc:
-            logger.error(f"Could not read sign-in attempts: {exc}")
-            return []
+        """Attempt history, newest first. For the audit screen.
+
+        Raises on a database failure, unlike `check` above and `record`.
+        Those two are on the sign-in path, where a refusal costs somebody
+        their way in; this one is a screen, where an empty list is a claim —
+        "nobody has tried to sign in" — that the table never made.
+        """
+        query = (select(signin_attempts)
+                 .order_by(signin_attempts.c.at.desc()).limit(limit))
+        if username:
+            query = query.where(
+                signin_attempts.c.username == _normalise(username))
+        if outcome:
+            query = query.where(signin_attempts.c.outcome == outcome)
+        with self._engine.connect() as connection:
+            return [dict(row) for row
+                    in connection.execute(query).mappings().all()]
 
 
 def _normalise(username):

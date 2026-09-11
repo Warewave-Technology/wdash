@@ -280,6 +280,86 @@ def _index_alert_history_latest(connection):
         "CREATE INDEX IF NOT EXISTS ix_wdash_alert_history_latest "
         "ON wdash_alert_history (rule_id, subject, id)"))
 
+def _report_source_name_collisions(connection):
+    """Version 16: name the sources that have been shadowing each other.
+
+    Until now two rows could share a name as long as their legacy `signal`
+    columns differed, so an Elasticsearch source called `prod` serving logs
+    and traces sat beside a Jaeger `prod` serving traces. Both were stored,
+    both were built, and the hub keeps one registry per signal keyed by name
+    — so one of them answered every trace query, the `*` fan-out included,
+    and the other was never asked. The configuration page showed two healthy
+    sources. `SourceRepository` refuses this now, which does nothing for a
+    store that already has it.
+
+    The rows are left exactly as they are. Merging them would have to choose
+    which name survives and which credential wins, and renaming one silently
+    would break every role rule that names it (`prod:app-*` is a rule for a
+    source called prod and a pattern for everybody else). What this step does
+    is make the collision visible: a log line for whoever is watching the
+    upgrade, and an audit row, which is the copy still there next week — and
+    the audit screen is where an administrator looks when a source they
+    configured is returning nothing.
+    """
+    from .schema import audit, sources
+
+    rows = connection.execute(select(
+        sources.c.id, sources.c.name, sources.c.kind,
+        sources.c.signal, sources.c.signals)).mappings().all()
+
+    by_name = {}
+    for row in rows:
+        by_name.setdefault(row["name"], []).append(row)
+
+    for name, group in sorted(by_name.items()):
+        if len(group) < 2:
+            continue
+        for index, row in enumerate(group):
+            mine = _signals_of(row)
+            for other in group[index + 1:]:
+                shared = sorted(mine & _signals_of(other))
+                if not shared:
+                    continue
+                logger.warning(
+                    "Two sources are called %r and both serve %s: %s (%s) "
+                    "and %s (%s). Only one of them is ever asked. Rename one "
+                    "on the configuration page.",
+                    name, " and ".join(shared), row["id"], row["kind"],
+                    other["id"], other["kind"])
+                connection.execute(audit.insert().values(
+                    at=datetime.now(timezone.utc),
+                    actor="migration",
+                    action="source name collision",
+                    subject=f"source:{name}",
+                    state={
+                        "name": name, "signals": shared,
+                        "sources": [{"id": row["id"], "kind": row["kind"]},
+                                    {"id": other["id"],
+                                     "kind": other["kind"]}],
+                        "consequence": "Only one of these answers a query "
+                                       "for this signal; the other is never "
+                                       "asked.",
+                    }))
+
+
+def _signals_of(row):
+    """What a source row serves, as a set.
+
+    Read through the typed column rather than through raw SQL, so SQLAlchemy
+    decodes the JSON on both dialects and this does not have to know which
+    one it is on. Migration 8 read a JSON column through `text()`, got a
+    string on SQLite and a list on Postgres, and quietly skipped every row on
+    one of them.
+
+    A row still carrying NULL — written before migration 7 and never
+    backfilled — falls back to the legacy single-signal column, which is the
+    same rule `SourceRepository._public` reads by.
+    """
+    value = row["signals"]
+    if not isinstance(value, list):
+        value = [row["signal"]]
+    return set(value)
+
 
 MIGRATIONS = [
     (1, "initial schema", _create_everything),
@@ -299,6 +379,8 @@ MIGRATIONS = [
      _add_browser_journeys),
     (15, "index alert history for the undelivered badge",
      _index_alert_history_latest),
+    (16, "report sources that shadow each other by name",
+     _report_source_name_collisions),
 ]
 
 

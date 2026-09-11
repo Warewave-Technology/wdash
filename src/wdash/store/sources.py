@@ -267,6 +267,44 @@ class SourceRepository:
             # the collision itself, and says so on the page.
             return frozenset()
 
+    def _shared_signals(self, name, signals, exclude_id=None):
+        """Signals another source of this name already serves, or None.
+
+        The database refuses a repeat of (name, legacy signal) and that is
+        all it can refuse, so an Elasticsearch source called `prod` serving
+        logs and traces was accepted alongside a Jaeger `prod` serving
+        traces. Both were stored, both were built into adapters, and the hub
+        keys its registry by name within a signal — so one of them answered
+        every trace query, including the `*` fan-out, and the other was never
+        asked. Both showed as healthy on the configuration page.
+
+        Overlapping signals rather than the name alone, because migration 7
+        deliberately left the legacy pairs in place — one row for logs and
+        one for traces, sharing a name, for somebody to merge by hand — and
+        refusing every repeated name would make those pairs uneditable.
+        """
+        wanted = set(signals)
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                select(sources.c.id, sources.c.signal, sources.c.signals)
+                .where(sources.c.name == name)).mappings().all()
+        for row in rows:
+            if row["id"] == exclude_id:
+                continue
+            shared = wanted & set(row["signals"] or [row["signal"]])
+            if shared:
+                return sorted(shared)
+        return None
+
+    def _refuse_a_taken_name(self, name, signals, exclude_id=None):
+        shared = self._shared_signals(name, signals, exclude_id)
+        if shared:
+            raise SourceError(
+                f"A source called '{name}' already exists and serves "
+                f"{' and '.join(shared)}. Two sources cannot share a name "
+                f"within one signal: only one of them can be reached by that "
+                f"name, so the other would answer nothing and say nothing.")
+
     def all(self, signal=None, enabled_only=False):
         with self._engine.connect() as connection:
             query = select(sources).order_by(sources.c.name)
@@ -351,6 +389,7 @@ class SourceRepository:
             "updated_at": datetime.now(timezone.utc),
         }
         _check_name(record["name"], self._reserved())
+        self._refuse_a_taken_name(record["name"], signals)
         try:
             with self._engine.begin() as connection:
                 connection.execute(sources.insert().values(**record))
@@ -391,6 +430,15 @@ class SourceRepository:
                 changes.get("signals") or existing["signals"], config)
         if enabled is not None:
             changes["enabled"] = bool(enabled)
+
+        # Checked against what the row will BE, not what it was: a rename
+        # onto a name in use and a signal added to a name somebody else
+        # already serves are the same collision arriving from two directions.
+        if name is not None or signals is not None:
+            self._refuse_a_taken_name(
+                changes.get("name", existing["name"]),
+                changes.get("signals", existing["signals"]),
+                exclude_id=source_id)
 
         # A blank credential field means "leave it alone", not "delete it".
         # Treating blank as deletion means anybody who saves this form without

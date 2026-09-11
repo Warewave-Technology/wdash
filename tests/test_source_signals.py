@@ -124,6 +124,103 @@ class StorageTest(SignalTestCase):
             self.create(name="cluster")
 
 
+class OneNamePerSignalTest(SignalTestCase):
+    """Two sources can share a name only while no signal is shared.
+
+    The database can refuse a repeat of (name, legacy signal) and nothing
+    more, so an Elasticsearch source called `prod` serving logs and traces
+    was accepted alongside a Jaeger `prod` serving traces. Both were stored,
+    both were built into adapters, and the hub keys one registry per signal
+    by name — so one of them answered every trace query, the `*` fan-out
+    included, and the other was never asked. Both showed as healthy.
+    """
+
+    JAEGER = {"url": "http://jaeger:16686"}
+    TEMPO = {"url": "http://tempo:3200"}
+    LOKI = {"url": "http://loki:3100"}
+
+    def test_a_name_taken_in_a_shared_signal_is_refused(self):
+        self.create(name="prod")
+        with self.assertRaises(SourceError) as caught:
+            self.store.sources.create(name="prod", signal=["traces"],
+                                      kind="jaeger", config=dict(self.JAEGER))
+        self.assertIn("traces", str(caught.exception))
+        self.assertEqual([s["name"] for s in self.store.sources.all()],
+                         ["prod"])
+
+    def test_the_legacy_pair_is_still_allowed(self):
+        """Migration 7 deliberately left one row for logs and one for traces
+        sharing a name, for an operator to merge by hand. Refusing every
+        repeated name would make those pairs uneditable."""
+        self.create(name="eu", signal=("logs",), kind="loki",
+                    config=dict(self.LOKI))
+        self.store.sources.create(name="eu", signal=["traces"], kind="tempo",
+                                  config=dict(self.TEMPO))
+        self.assertEqual(len(self.store.sources.all()), 2)
+
+    def test_a_rename_onto_a_shared_signal_is_refused(self):
+        self.create(name="prod")
+        other = self.store.sources.create(
+            name="spare", signal=["traces"], kind="jaeger",
+            config=dict(self.JAEGER))
+        with self.assertRaises(SourceError):
+            self.store.sources.update(other["id"], name="prod")
+        self.assertEqual(
+            sorted(s["name"] for s in self.store.sources.all()),
+            ["prod", "spare"])
+
+    def test_growing_into_a_signal_somebody_else_serves_is_refused(self):
+        """The same collision arriving from the other direction: the name
+        was already shared, legitimately, and one of the two reaches for the
+        signal the other has."""
+        self.create(name="eu", signal=("logs",))
+        traces = self.create(name="eu", signal=("traces",),
+                             config={"url": "http://cluster:9200",
+                                     "traces": {"index_patterns": ["*apm*"]}})
+        with self.assertRaises(SourceError):
+            self.store.sources.update(traces["id"], signals=["logs", "traces"])
+        self.assertEqual(
+            self.store.sources.get(traces["id"])["signals"], ["traces"])
+
+    def test_a_source_can_still_be_saved_under_its_own_name(self):
+        """The check must not read a row as its own duplicate."""
+        row = self.create(name="prod")
+        saved = self.store.sources.update(row["id"], name="prod",
+                                          signals=["logs", "traces"])
+        self.assertEqual(saved["name"], "prod")
+
+
+class TheHubSaysWhenTwoSourcesShareANameTest(unittest.TestCase):
+    """A store that already holds the pair `create` now refuses — made
+    before this, or edited straight against the database — keeps exactly one
+    of them reachable. That has to be said out loud somewhere."""
+
+    class Fake:
+        def __init__(self, name):
+            self.name = name
+
+    def test_the_collision_is_logged_and_one_source_is_kept(self):
+        from wdash.hub import Hub
+
+        hub = Hub()
+        with self.assertLogs("wdash.hub", "WARNING") as caught:
+            hub.reload_with(
+                lambda: {"traces": [self.Fake("prod"), self.Fake("prod")]},
+                lambda: 1)
+        self.assertIn("prod", "\n".join(caught.output))
+        self.assertEqual(len(hub.trace_sources), 1)
+
+    def test_one_source_per_name_says_nothing(self):
+        from wdash.hub import Hub
+
+        hub = Hub()
+        with self.assertNoLogs("wdash.hub", "WARNING"):
+            hub.reload_with(
+                lambda: {"traces": [self.Fake("prod"), self.Fake("eu")]},
+                lambda: 1)
+        self.assertEqual(len(hub.trace_sources), 2)
+
+
 class PerSignalConfigTest(SignalTestCase):
     def test_each_signal_keeps_its_own_patterns(self):
         """One list for both means a trace search scans the log indices."""

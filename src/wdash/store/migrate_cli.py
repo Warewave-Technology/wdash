@@ -20,6 +20,13 @@ indistinguishable.
 
 Idempotent: an object already present by id is skipped, so an interrupted run
 can simply be repeated.
+
+With no --dashboards, the file the application itself reads is used —
+DASHBOARD_STORAGE_FILE, the same environment variable — and saved searches
+are taken from beside it, which is where the application keeps them. Both
+absolute paths are printed before anything is read, and a file that is not
+there stops the run instead of counting as none: "0 moved" is the answer this
+command must never give when it never looked.
 """
 
 import argparse
@@ -160,11 +167,44 @@ def migrate_saved_searches(store, path, dry_run=False):
     return moved, skipped
 
 
+def _files(arguments):
+    """The two paths this reads, absolute, as the application would name them.
+
+    The saved-searches file is derived from the dashboards file rather than
+    defaulted on its own, because that is exactly what the application does:
+    it keeps searches in the directory DASHBOARD_STORAGE_FILE names. Two
+    independent defaults are how a deployment that moved its data directory
+    migrates its dashboards and leaves its searches behind.
+    """
+    from ..config import Config
+
+    dashboards = os.path.abspath(
+        arguments.dashboards or Config.DASHBOARD_STORAGE_FILE)
+    searches = os.path.abspath(
+        arguments.saved_searches
+        or os.path.join(os.path.dirname(dashboards), "saved_searches.json"))
+    return dashboards, searches
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
-    parser.add_argument("--dashboards", default="data/dashboards.json")
-    parser.add_argument("--saved-searches", default="data/saved_searches.json")
+    # Defaulted after parsing, from the same configuration the application
+    # reads. The literals that used to be here — data/dashboards.json and
+    # data/saved_searches.json, relative to wherever the command was run —
+    # matched the app only in the Docker image, whose WORKDIR is /app. Any
+    # deployment with DASHBOARD_STORAGE_FILE set elsewhere, or anybody
+    # running this from a directory other than the app root, got "0 moved"
+    # and a "Done" and an empty dashboard list after flipping the switch.
+    parser.add_argument("--dashboards", default=None,
+                        help="dashboards JSON (default: DASHBOARD_STORAGE_FILE)")
+    parser.add_argument("--saved-searches", default=None,
+                        help="saved searches JSON (default: saved_searches.json "
+                             "beside the dashboards file, which is where the "
+                             "application keeps it)")
+    parser.add_argument("--allow-missing", action="store_true",
+                        help="treat a source file that is not there as empty, "
+                             "instead of refusing to run")
     parser.add_argument("--dry-run", action="store_true",
                         help="report what would move, change nothing")
     parser.add_argument("--from-elasticsearch", metavar="URL",
@@ -176,6 +216,24 @@ def main(argv=None):
     parser.add_argument("--es-password")
     parser.add_argument("--es-verify-certs", action="store_true")
     arguments = parser.parse_args(argv)
+
+    dashboards_path, searches_path = _files(arguments)
+    # Absolute, and printed before anything is read. "0 moved" against a path
+    # nobody named is indistinguishable from "0 moved" against the right one.
+    if not arguments.from_elasticsearch:
+        print(f"Dashboard file: {dashboards_path}")
+    print(f"Searches file:  {searches_path}")
+
+    wanted = ([] if arguments.from_elasticsearch else [dashboards_path]) \
+        + [searches_path]
+    missing = [path for path in wanted if not os.path.exists(path)]
+    if missing and not arguments.allow_missing:
+        for path in missing:
+            print(f"not found: {path}", file=sys.stderr)
+        print("Nothing was read and nothing was written. Name the files with "
+              "--dashboards and --saved-searches, or pass --allow-missing if "
+              "this deployment really has none.", file=sys.stderr)
+        return 1
 
     # Pass the RBAC file so an import run before the first app start does not
     # seed built-in defaults and thereby shadow the roles somebody wrote.
@@ -193,7 +251,7 @@ def main(argv=None):
         print(f"Source:         {arguments.index} on "
               f"{arguments.from_elasticsearch}")
 
-    moved, skipped = migrate_dashboards(store, arguments.dashboards,
+    moved, skipped = migrate_dashboards(store, dashboards_path,
                                         arguments.dry_run, records=records)
     print(f"Dashboards:     {moved} to move, {skipped} already present"
           if arguments.dry_run else
@@ -205,7 +263,7 @@ def main(argv=None):
         print("Saved searches: not stored in Elasticsearch; skipped")
         moved, skipped = 0, 0
     else:
-        moved, skipped = migrate_saved_searches(store, arguments.saved_searches,
+        moved, skipped = migrate_saved_searches(store, searches_path,
                                                 arguments.dry_run)
     if not arguments.from_elasticsearch:
         print(f"Saved searches: {moved} to move, {skipped} already present"

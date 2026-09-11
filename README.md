@@ -875,6 +875,12 @@ Stated plainly, because they affect whether this fits your deployment:
   # then set DASHBOARD_STORAGE=database
   ```
 
+  With no paths given it reads the file the application itself reads —
+  `DASHBOARD_STORAGE_FILE` — and the saved searches beside it, prints both
+  absolute paths, and stops with a non-zero exit if one of them is not there
+  rather than reporting "0 moved". Pass `--allow-missing` for a deployment
+  that really has none.
+
   The JSON files are left untouched, so the move is reversible.
 - **A source saved in the UI is used within a few seconds.** The worker that
   handled the save uses it immediately; the others notice on their next check,

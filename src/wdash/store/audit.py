@@ -76,48 +76,51 @@ class AuditLog:
         streaming everything: an audit trail is append-only and grows forever,
         so "show me the last hundred" has to be the default rather than a
         thing the caller remembers to ask for.
+
+        RAISES on a database failure. Writing never does — see `record` — but
+        a read must, and this one used to answer a lock, a statement timeout,
+        a missing grant or a damaged table with `[]`. The page then said
+        "Nothing recorded yet" and the export streamed an empty file with a
+        200, which is the one thing an audit trail must never do: report the
+        absence of a record it could not look for.
         """
-        try:
-            query = select(audit).order_by(desc(audit.c.at))
-            if subject:
-                query = query.where(audit.c.subject == subject)
-            if actor:
-                query = query.where(audit.c.actor == actor)
-            if action:
-                query = query.where(audit.c.action == action)
-            if since is not None:
-                query = query.where(audit.c.at >= since)
-            if until is not None:
-                query = query.where(audit.c.at <= until)
-            query = query.limit(limit).offset(offset)
-            with self._engine.connect() as connection:
-                rows = connection.execute(query).mappings().all()
-            return [dict(row) for row in rows]
-        except Exception as exc:
-            logger.error(f"Could not read the audit trail: {exc}")
-            return []
+        query = select(audit).order_by(desc(audit.c.at))
+        if subject:
+            query = query.where(audit.c.subject == subject)
+        if actor:
+            query = query.where(audit.c.actor == actor)
+        if action:
+            query = query.where(audit.c.action == action)
+        if since is not None:
+            query = query.where(audit.c.at >= since)
+        if until is not None:
+            query = query.where(audit.c.at <= until)
+        query = query.limit(limit).offset(offset)
+        with self._engine.connect() as connection:
+            rows = connection.execute(query).mappings().all()
+        return [dict(row) for row in rows]
 
     def count(self, subject=None, actor=None, action=None,
               since=None, until=None):
-        """How many rows match, so the page can say what it is a page OF."""
+        """How many rows match, so the page can say what it is a page OF.
+
+        Raises, like `recent`: a count that answers 0 when it could not count
+        is a badge on the page saying the trail is empty.
+        """
         from sqlalchemy import func
-        try:
-            query = select(func.count()).select_from(audit)
-            if subject:
-                query = query.where(audit.c.subject == subject)
-            if actor:
-                query = query.where(audit.c.actor == actor)
-            if action:
-                query = query.where(audit.c.action == action)
-            if since is not None:
-                query = query.where(audit.c.at >= since)
-            if until is not None:
-                query = query.where(audit.c.at <= until)
-            with self._engine.connect() as connection:
-                return connection.execute(query).scalar() or 0
-        except Exception as exc:
-            logger.error(f"Could not count the audit trail: {exc}")
-            return 0
+        query = select(func.count()).select_from(audit)
+        if subject:
+            query = query.where(audit.c.subject == subject)
+        if actor:
+            query = query.where(audit.c.actor == actor)
+        if action:
+            query = query.where(audit.c.action == action)
+        if since is not None:
+            query = query.where(audit.c.at >= since)
+        if until is not None:
+            query = query.where(audit.c.at <= until)
+        with self._engine.connect() as connection:
+            return connection.execute(query).scalar() or 0
 
     def actions(self):
         """Distinct action names, for a filter that offers what exists.
@@ -125,31 +128,29 @@ class AuditLog:
         A free-text box here would be the same mistake the permission
         catalogue exists to prevent: a typo that returns nothing looks
         identical to a period when nothing happened.
+
+        Raises, for that same reason one level up: an empty list of actions
+        is a filter that offers nothing and explains nothing.
         """
-        try:
-            with self._engine.connect() as connection:
-                rows = connection.execute(
-                    select(audit.c.action).distinct()
-                    .order_by(audit.c.action)).scalars().all()
-            return list(rows)
-        except Exception as exc:
-            logger.error(f"Could not list audit actions: {exc}")
-            return []
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                select(audit.c.action).distinct()
+                .order_by(audit.c.action)).scalars().all()
+        return list(rows)
 
     def state_at(self, subject, moment):
         """What `subject` looked like at `moment`, or None.
 
         The whole point of storing the resulting state rather than a diff: one
         row answers the question without replaying anything.
+
+        Raises, like the other reads. None has to keep meaning "there is no
+        such row", not "there may be one and the table would not say".
         """
-        try:
-            with self._engine.connect() as connection:
-                row = connection.execute(
-                    select(audit)
-                    .where(audit.c.subject == subject)
-                    .where(audit.c.at <= moment)
-                    .order_by(desc(audit.c.at)).limit(1)).mappings().first()
-            return dict(row) if row else None
-        except Exception as exc:
-            logger.error(f"Could not read the audit trail: {exc}")
-            return None
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(audit)
+                .where(audit.c.subject == subject)
+                .where(audit.c.at <= moment)
+                .order_by(desc(audit.c.at)).limit(1)).mappings().first()
+        return dict(row) if row else None

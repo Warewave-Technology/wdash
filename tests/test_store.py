@@ -370,6 +370,17 @@ class MigrationCliTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             main(arguments)
 
+    def run_cli(self, arguments):
+        """The command as an operator runs it: exit code, stdout, stderr."""
+        import contextlib
+        import io
+
+        from wdash.store.migrate_cli import main
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(arguments)
+        return code, out.getvalue(), err.getvalue()
+
     def store(self):
         return Store.open(f"sqlite:///{self.database}")
 
@@ -430,6 +441,185 @@ class MigrationCliTest(unittest.TestCase):
         """The migration has to be reversible while people are trying it."""
         self.run_migration()
         self.assertTrue(os.path.exists(self.dashboards))
+
+    # ---------- what it reads when nobody says ----------
+
+    def configured_at(self, path):
+        """Point the application's own setting at a file, as a deployment
+        with DASHBOARD_STORAGE_FILE set does."""
+        from unittest import mock
+
+        from wdash.config import Config
+        return mock.patch.object(Config, "DASHBOARD_STORAGE_FILE", path)
+
+    def test_with_no_paths_it_reads_what_the_application_reads(self):
+        """The defaults were the literals `data/dashboards.json` and
+        `data/saved_searches.json`, relative to whatever directory the
+        command was run from. The application reads DASHBOARD_STORAGE_FILE
+        and keeps searches beside it, so any deployment that set it — the
+        Kubernetes one, /data — or anybody running this from somewhere other
+        than the app root got "0 moved ... Done" and, after flipping
+        DASHBOARD_STORAGE to database, an empty dashboard list."""
+        with self.configured_at(self.dashboards):
+            code, out, _ = self.run_cli(
+                ["--database-url", f"sqlite:///{self.database}"])
+        self.assertEqual(code, 0)
+        self.assertIn("Dashboards:     2 moved", out)
+        self.assertIn("Saved searches: 1 moved", out)
+        self.assertEqual(
+            {d.name for d in self.store().dashboards.get_all_dashboards()},
+            {"Existing", "Private"})
+
+    def test_the_searches_file_follows_the_dashboards_file(self):
+        """Two independent defaults are how a deployment that moved its data
+        directory migrates its dashboards and leaves its searches behind."""
+        with self.configured_at(self.dashboards):
+            self.run_cli(["--database-url", f"sqlite:///{self.database}"])
+        self.assertEqual(
+            [s.name for s in self.store().saved_searches.all_for("someone")],
+            ["Mine"])
+
+    def test_the_paths_it_read_are_printed_in_full(self):
+        """"0 moved" against a path nobody named is indistinguishable from
+        "0 moved" against the right one."""
+        with self.configured_at(self.dashboards):
+            _, out, _ = self.run_cli(
+                ["--database-url", f"sqlite:///{self.database}"])
+        self.assertIn(os.path.abspath(self.dashboards), out)
+        self.assertIn(os.path.abspath(self.searches), out)
+
+    def test_a_file_that_is_not_there_stops_the_run(self):
+        """It counted as none: `_load_json` answered a missing path with an
+        empty list, and the run finished with "Done. Set
+        DASHBOARD_STORAGE=database"."""
+        missing = os.path.join(self.directory, "elsewhere", "dashboards.json")
+        code, out, err = self.run_cli(
+            ["--database-url", f"sqlite:///{self.database}",
+             "--dashboards", missing, "--saved-searches", self.searches])
+        self.assertEqual(code, 1)
+        self.assertIn(f"not found: {missing}", err)
+        self.assertNotIn("Done.", out)
+        self.assertFalse(os.path.exists(self.database))
+
+    def test_a_deployment_that_really_has_none_can_say_so(self):
+        missing = os.path.join(self.directory, "elsewhere", "dashboards.json")
+        code, out, _ = self.run_cli(
+            ["--database-url", f"sqlite:///{self.database}",
+             "--dashboards", missing, "--saved-searches", self.searches,
+             "--allow-missing"])
+        self.assertEqual(code, 0)
+        self.assertIn("Done.", out)
+        self.assertEqual(
+            [s.name for s in self.store().saved_searches.all_for("someone")],
+            ["Mine"])
+
+
+class SourcesThatShadowEachOtherAreReportedTest(unittest.TestCase):
+    """A store that already has two sources sharing a name within one signal.
+
+    `SourceRepository` refuses to make another, which does nothing for the
+    ones that are already there: one of them answers every query for that
+    signal and the other is never asked, while the configuration page shows
+    two healthy sources. The rows are left exactly as they are — renaming one
+    would break every role rule that names it — so the upgrade's job is to
+    say which pair it is, in the log and in the trail that is still there
+    next week.
+    """
+
+    def upgrade_from_fourteen(self, rows):
+        """A store at the previous version, with these source rows in it."""
+        import logging
+        from datetime import datetime, timezone
+
+        from wdash.store import migrations
+        from wdash.store.schema import sources
+
+        engine = build_engine("sqlite:///:memory:")
+        every = migrations.MIGRATIONS
+        migrations.MIGRATIONS = [step for step in every if step[0] <= 14]
+        try:
+            migrations.migrate(engine)
+        finally:
+            migrations.MIGRATIONS = every
+
+        now = datetime.now(timezone.utc)
+        with engine.begin() as connection:
+            for row in rows:
+                record = dict(row)
+                # The legacy column is NOT NULL and is written by every
+                # version of this application; `signals` is the one that
+                # might be missing.
+                if "signal" not in record:
+                    record["signal"] = record["signals"][0]
+                connection.execute(sources.insert().values(
+                    config={}, secrets=None, enabled=True,
+                    created_at=now, updated_at=now, **record))
+
+        with self.assertLogs("wdash.store.migrations", "INFO") as caught:
+            migrations.migrate(engine)
+        warnings = [record.getMessage() for record in caught.records
+                    if record.levelno >= logging.WARNING]
+        return engine, warnings
+
+    ELASTIC = {"id": "one", "name": "prod", "kind": "elasticsearch",
+               "signals": ["logs", "traces"]}
+    JAEGER = {"id": "two", "name": "prod", "kind": "jaeger",
+              "signals": ["traces"]}
+    #: The pair migration 7 deliberately left for somebody to merge by hand.
+    LEGACY_LOGS = {"id": "three", "name": "eu", "kind": "loki",
+                   "signals": ["logs"]}
+    LEGACY_TRACES = {"id": "four", "name": "eu", "kind": "tempo",
+                     "signals": ["traces"]}
+
+    def test_the_pair_is_named_with_the_signal_they_share(self):
+        _, warnings = self.upgrade_from_fourteen([self.ELASTIC, self.JAEGER])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("prod", warnings[0])
+        self.assertIn("traces", warnings[0])
+        self.assertIn("jaeger", warnings[0])
+
+    def test_it_reaches_the_audit_trail(self):
+        """A log line is gone by the time somebody asks why a source they
+        configured returns nothing."""
+        engine, _ = self.upgrade_from_fourteen([self.ELASTIC, self.JAEGER])
+        from wdash.store.audit import AuditLog
+        rows = [row for row in AuditLog(engine).recent()
+                if row["action"] == "source name collision"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["subject"], "source:prod")
+        self.assertEqual(rows[0]["state"]["signals"], ["traces"])
+
+    def test_a_row_that_never_got_a_signals_list_is_read_by_its_column(self):
+        """Migration 7 backfilled `signals` from the legacy column, but a row
+        written straight into the database can still carry NULL, and it is
+        shadowing whatever shares its name just the same."""
+        _, warnings = self.upgrade_from_fourteen(
+            [self.ELASTIC, dict(self.JAEGER, signals=None, signal="traces")])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("traces", warnings[0])
+
+    def test_the_legacy_pair_is_not_reported(self):
+        """One row for logs and one for traces sharing a name is the shape
+        migration 7 left behind on purpose. Neither shadows the other."""
+        engine, warnings = self.upgrade_from_fourteen(
+            [self.LEGACY_LOGS, self.LEGACY_TRACES])
+        self.assertEqual(warnings, [])
+        from wdash.store.audit import AuditLog
+        self.assertEqual([row for row in AuditLog(engine).recent()
+                          if row["action"] == "source name collision"], [])
+
+    def test_the_rows_are_left_exactly_as_they_are(self):
+        """Renaming one silently would break every role rule naming it, and
+        merging them would have to choose which credential wins."""
+        engine, _ = self.upgrade_from_fourteen([self.ELASTIC, self.JAEGER])
+        from sqlalchemy import select
+
+        from wdash.store.schema import sources
+        with engine.connect() as connection:
+            rows = connection.execute(
+                select(sources.c.id, sources.c.name)).mappings().all()
+        self.assertEqual({row["id"]: row["name"] for row in rows},
+                         {"one": "prod", "two": "prod"})
 
 
 if __name__ == "__main__":
@@ -513,11 +703,185 @@ class TheTwoSetsOfDefaultsAgreeTest(unittest.TestCase):
                                   f"{label} grants {permission} to no role, "
                                   f"so nothing it gates can be reached")
 
+    @staticmethod
+    def _boundaries(definition, containers, trace_containers):
+        """The three boundaries, with the two spellings of "everything"
+        written the same way. `services: None` means no service restriction
+        and the file's `["*"]` is a pattern that matches every service; they
+        come to the same thing, and demanding one spelling would make this a
+        test about style rather than about access."""
+        def unrestricted(value):
+            return ["*"] if value is None else sorted(value)
+        return {"containers": unrestricted(definition.get(containers)),
+                "trace_containers": unrestricted(
+                    definition.get(trace_containers)),
+                "services": unrestricted(definition.get("services"))}
+
+    def test_the_boundaries_match(self):
+        """Names, groups and permissions agreeing is not enough: the three
+        boundaries are what a role IS, and they had drifted the other way
+        from the names. `developer` reached every log container and every
+        service here, while the file held it to `app-*`, `service-*` and six
+        application services; `viewer` reached every service here and exactly
+        one in the file. An installation that found no readable file — a pip
+        install outside the repository, a renamed ConfigMap key, a mount that
+        was not there yet — was seeded with the WIDER set, and seeding runs
+        once."""
+        from_code = {name: self._boundaries(
+            definition, "containers", "trace_containers")
+            for name, definition in self.code.items()}
+        from_file = {name: self._boundaries(
+            definition, "indices", "trace_indices")
+            for name, definition in self.file["roles"].items()}
+        self.assertEqual(from_code, from_file)
+
+    def test_an_installation_seeded_without_the_file_gets_them(self):
+        """The comparison above is between two literals. This is what a
+        deployment actually ends up holding."""
+        store = Store.open("sqlite:///:memory:")
+        developer = store.roles.get("developer")
+        self.assertEqual(sorted(developer["containers"]),
+                         ["app-*", "service-*"])
+        self.assertIn("api-gateway", developer["services"])
+        self.assertNotIn("postgres", developer["services"])
+        self.assertEqual(store.roles.get("viewer")["services"],
+                         ["api-gateway"])
+
     def test_the_shipped_file_maps_no_named_person(self):
         """It is imported into every fresh installation, so anything here is
         a mapping a stranger inherits. It used to carry a maintainer's own
         username, which granted admin to anyone signing in with that name."""
         self.assertEqual(self.file.get("user_roles") or {}, {})
+
+
+class AnRbacFileThatCannotBeUsedSaysSoTest(unittest.TestCase):
+    """Seeding runs once, so a file that is not read is not read ever.
+
+    Three ways of losing one, all of which happen: the path is wrong (a
+    renamed ConfigMap key, a mount that moved, a pip install run outside the
+    repository), the `roles` block is mis-indented or misnamed — `role:` —
+    or it is there and empty. Every one of them produced a running
+    installation on the built-in default roles with the file's own
+    group_roles, user_roles and default_role dropped, and the only line
+    written was INFO "Seeded 3 roles from built-in defaults".
+    """
+
+    LOGGER = "wdash.store.roles"
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    def written(self, body):
+        path = os.path.join(self.directory, "rbac.yaml")
+        with open(path, "w") as handle:
+            handle.write(body)
+        return path
+
+    def seed(self, path, level="INFO"):
+        """Open a store on that file and hand back what was logged."""
+        with self.assertLogs(self.LOGGER, level) as caught:
+            store = Store.open("sqlite:///:memory:", rbac_file=path)
+        return store, [f"{r.levelname} {r.getMessage()}" for r in caught.records]
+
+    # ---------- the file is not read ----------
+
+    def test_a_missing_file_is_a_warning_naming_the_path(self):
+        path = os.path.join(self.directory, "not-here", "rbac.yaml")
+        _, lines = self.seed(path)
+        warnings = [line for line in lines if line.startswith("WARNING")]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn(os.path.abspath(path), warnings[0])
+
+    def test_a_roles_block_that_is_a_list_is_an_error_naming_the_path(self):
+        """`roles:` written as a list, which is what a mis-indentation
+        produces."""
+        path = self.written("roles:\n  - admin\n  - viewer\n")
+        _, lines = self.seed(path)
+        errors = [line for line in lines if line.startswith("ERROR")]
+        self.assertEqual(len(errors), 1)
+        self.assertIn(os.path.abspath(path), errors[0])
+
+    def test_a_misspelt_block_is_an_error_naming_the_path(self):
+        path = self.written("role:\n  ops:\n    permissions: [logs:read]\n"
+                            "default_role: ops\n")
+        _, lines = self.seed(path)
+        self.assertTrue([line for line in lines if line.startswith("ERROR")])
+
+    def test_an_empty_roles_block_is_an_error_too(self):
+        """The worst of the three: it parsed, so it counted as a file."""
+        path = self.written("roles: {}\ndefault_role: ops\n")
+        _, lines = self.seed(path)
+        self.assertTrue([line for line in lines if line.startswith("ERROR")])
+
+    def test_the_info_line_names_the_source_actually_used(self):
+        """With `roles: {}` it named the file while seeding the built-in
+        roles, which is the one combination that cannot be true."""
+        path = self.written(
+            "roles: {}\ndefault_role: ops\n"
+            "group_roles:\n  corp-admins: admin\n")
+        _, lines = self.seed(path)
+        seeded = [line for line in lines if "Seeded" in line]
+        self.assertEqual(len(seeded), 1)
+        self.assertIn("built-in defaults", seeded[0])
+        self.assertNotIn(path, seeded[0])
+
+    def test_an_unusable_roles_block_takes_the_file_s_mappings_with_it(self):
+        """Half of one file and half of another is the state nothing can
+        describe: the built-in roles were seeded, and then the file's group
+        mapping was applied to them, its default_role stored and its
+        user_roles stored — pointing at roles from the other source."""
+        path = self.written(
+            "roles: {}\ndefault_role: ops\n"
+            "user_roles:\n  alice@example.com: admin\n"
+            "group_roles:\n  corp-admins: admin\n")
+        store, _ = self.seed(path)
+        self.assertEqual(store.roles.get("admin")["groups"], ["wdash-admins"])
+        self.assertEqual(store.settings.get("rbac.default_role"), "viewer")
+        self.assertEqual(store.settings.get("rbac.user_roles"), {})
+
+    # ---------- the file is read, and points at roles it has not got ----------
+
+    def test_a_group_mapped_to_an_undefined_role_is_named(self):
+        """The inversion can only attach a group to a role being seeded, so
+        this one was dropped on the floor."""
+        path = self.written(
+            "roles:\n  ops:\n    permissions: [logs:read]\n"
+            "  viewer:\n    permissions: [logs:read]\n"
+            "default_role: viewer\n"
+            "group_roles:\n  corp-devs: developers\n")
+        store, lines = self.seed(path, level="WARNING")
+        self.assertTrue(any("corp-devs" in line and "developers" in line
+                            for line in lines), lines)
+        self.assertEqual(store.roles.get("ops")["groups"], [])
+
+    def test_a_person_mapped_to_an_undefined_role_is_named(self):
+        """Stored as written, resolving to a role that is not there, which
+        is no permissions at all."""
+        path = self.written(
+            "roles:\n  ops:\n    permissions: [logs:read]\n"
+            "default_role: ops\n"
+            "user_roles:\n  bob@example.com: developers\n")
+        _, lines = self.seed(path, level="WARNING")
+        self.assertTrue(any("bob@example.com" in line for line in lines), lines)
+
+    def test_a_default_role_that_is_not_defined_is_named(self):
+        path = self.written(
+            "roles:\n  ops:\n    permissions: [logs:read]\n"
+            "default_role: readers\n")
+        _, lines = self.seed(path, level="WARNING")
+        self.assertTrue(any("readers" in line for line in lines), lines)
+
+    def test_the_shipped_file_produces_nothing_above_info(self):
+        """The one that matters: none of this may cry wolf on a fresh clone
+        of this repository."""
+        rbac = os.path.join(os.path.dirname(__file__), "..", "config",
+                            "rbac.yaml")
+        with self.assertNoLogs(self.LOGGER, "WARNING"):
+            Store.open("sqlite:///:memory:", rbac_file=rbac)
 
 
 class DatabaseAddressTest(unittest.TestCase):
