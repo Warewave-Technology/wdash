@@ -56,6 +56,8 @@ function makeWindow(fetchImpl) {
         <div id="errorDisplay" class="d-none"><div id="errorAlert">
           <div id="errorContent"></div></div></div>
         <div id="logEntries"></div><div id="emptyState"></div>
+        <span id="totalIndicesBadge"></span>
+        <span id="dashboardScopeBadge" class="d-none"></span>
         <div id="savedSearchList"></div>
         <div id="searchResults"></div>
         <div class="card d-none" id="sourceBreakdownCard">
@@ -177,6 +179,77 @@ check('clicking a field narrows the search instead of replacing it', () => {
                 'level:ERROR AND service:"payment-service"',
                 'clauses must accumulate with AND');
     assert(searched, 'the search was not re-run');
+});
+
+// --- a drill-down from a dashboard stays inside that dashboard ----------
+//
+// The click-through carries `dashboard=<id>`, which is what decides WHERE
+// the query runs: /api/search with no dashboard searches every container the
+// role allows, so a card on a dashboard over `app-logs-*` opened more records
+// than it counted. The page has to keep the id and send it back on every
+// search made from here, not only the first.
+
+check('the Logs page keeps the dashboard a drill-down came from', () => {
+    const w = makeWindow();
+    w.history.replaceState(null, '', '/logs?query=level%3AERROR&dashboard=board-7');
+    const search = Object.create(w.__LogSearch.prototype);
+    search.performSearch = () => {};
+    search._applyUrlParams();
+    assertEqual(search.scopedDashboard, 'board-7',
+                'the dashboard was read off the URL and thrown away');
+});
+
+check('and sends it back with the search', () => {
+    const calls = [];
+    const w = makeWindow((url) => { calls.push(url); return new Promise(() => {}); });
+    const search = Object.create(w.__LogSearch.prototype);
+    search.searchForm = w.document.getElementById('searchForm');
+    search.scopedDashboard = 'board-7';
+    ['showLoading', 'hideError', 'displayResults', 'updateIndexInfo',
+     'renderSourceBreakdown', 'loadFieldStats'].forEach(name => {
+        search[name] = () => {};
+    });
+    search.performSearch();
+    assertEqual(calls.length, 1, `it made ${calls.length} request(s)`);
+    assertEqual(new URL(calls[0], 'http://localhost').searchParams.get('dashboard'),
+                'board-7', `it asked ${calls[0]}`);
+});
+
+check('an ordinary search still names no dashboard', () => {
+    const calls = [];
+    const w = makeWindow((url) => { calls.push(url); return new Promise(() => {}); });
+    const search = Object.create(w.__LogSearch.prototype);
+    search.searchForm = w.document.getElementById('searchForm');
+    ['showLoading', 'hideError', 'displayResults', 'updateIndexInfo',
+     'renderSourceBreakdown', 'loadFieldStats'].forEach(name => {
+        search[name] = () => {};
+    });
+    search.performSearch();
+    assert(!new URL(calls[0], 'http://localhost').searchParams.has('dashboard'),
+           `it asked ${calls[0]}`);
+});
+
+check('a scoped page says which dashboard it is scoped to', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.updateIndexInfo({
+        accessible_containers: ['app-logs-000001'],
+        dashboard: { id: 'board-7', name: 'App board',
+                     containers: ['app-logs-000001'] },
+    });
+    const badge = w.document.getElementById('dashboardScopeBadge');
+    assert(!badge.classList.contains('d-none'), 'the badge stayed hidden');
+    assert(/App board/.test(badge.textContent),
+           `the badge said "${badge.textContent}"`);
+});
+
+check('and an unscoped one says nothing', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.updateIndexInfo({ accessible_containers: ['a', 'b'] });
+    assert(w.document.getElementById('dashboardScopeBadge')
+            .classList.contains('d-none'),
+           'an ordinary search claimed to be scoped to a dashboard');
 });
 
 check('a bare * is replaced rather than kept as a clause', () => {

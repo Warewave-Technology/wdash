@@ -403,6 +403,13 @@ class LogSearch {
         let touched = set('query', params.get('query'));
         touched = set('sourceSelect', params.get('source')) || touched;
 
+        // A drill-down from a dashboard. Kept and sent back on every search
+        // from this page, because the dashboard decides WHERE the query runs
+        // — without it the same query is answered from the whole scope, which
+        // is how clicking a stat card showed more records than the card.
+        this.scopedDashboard = params.get('dashboard') || null;
+        if (this.scopedDashboard) touched = true;
+
         // An explicit window wins over a named range: it is more specific, and
         // it is what a click on a single histogram bar produces.
         const start = params.get('start'), end = params.get('end');
@@ -553,6 +560,11 @@ class LogSearch {
         // change of what saved links mean.
         const source = formData.get('source');
         if (source) params.append('source', source);
+
+        // The dashboard this page was opened from, if any. The server
+        // resolves it: the id travels, the containers do not, because a
+        // client-supplied container list is not a boundary.
+        if (this.scopedDashboard) params.append('dashboard', this.scopedDashboard);
         
         // Handle time range — always required
         const timeRange = document.getElementById('timeRange')?.value;
@@ -640,6 +652,21 @@ class LogSearch {
         const badgeEl = document.getElementById('totalIndicesBadge');
         if (badgeEl && data.accessible_containers) {
             badgeEl.textContent = `Available: ${data.accessible_containers.length} indices`;
+        }
+
+        // Say when this page is answering inside a dashboard's reach rather
+        // than the whole of the role's. Without it the reader has no way to
+        // tell a narrowed result set from all their logs.
+        const scope = document.getElementById('dashboardScopeBadge');
+        if (!scope) return;
+        if (data.dashboard) {
+            scope.textContent =
+                `Scoped to the "${data.dashboard.name}" dashboard`
+                + ` (${(data.dashboard.containers || []).length} indices)`;
+            scope.classList.remove('d-none');
+        } else {
+            scope.textContent = '';
+            scope.classList.add('d-none');
         }
     }
 

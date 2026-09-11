@@ -94,7 +94,7 @@ class User(UserMixin):
 class Dashboard:
     def __init__(self, dashboard_id, name, description, query, created_by,
                  created_at=None, index_patterns=None, panels=None,
-                 thresholds=None, visibility=None):
+                 thresholds=None, visibility=None, source=None):
         self.id = dashboard_id
         self.name = name
         self.description = description
@@ -109,6 +109,14 @@ class Dashboard:
         #: What "normal" looks like for this dashboard. Empty means it is
         #: never alarming, which is different from "everything is fine".
         self.thresholds = thresholds or {}
+        #: Which configured log source this dashboard reads from. None means
+        #: the default, which is what every dashboard written before there
+        #: was more than one source means. It lives on the model rather than
+        #: only on the database row because the FILE store had nowhere to put
+        #: it: the README said a dashboard may name its source, the forms had
+        #: no field for it, and the default store could not have held one if
+        #: they had.
+        self.source = source or None
         #: Who may see that this dashboard exists. See dashboard/visibility.py;
         #: the data boundary applies regardless.
         from .dashboard.visibility import normalise as _normalise_visibility
@@ -137,6 +145,10 @@ class Dashboard:
             data['panels'] = self.panels
         if self.thresholds:
             data['thresholds'] = self.thresholds
+        # Written only when one was chosen, so a dashboard on the default
+        # source keeps following the default rather than pinning today's.
+        if self.source:
+            data['source'] = self.source
         data['visibility'] = self.visibility
         return data
 
@@ -151,7 +163,8 @@ class Dashboard:
             index_patterns=data.get('index_patterns', ['*']),  # Backward compatibility
             panels=data.get('panels'),
             thresholds=data.get('thresholds'),
-            visibility=data.get('visibility')
+            visibility=data.get('visibility'),
+            source=data.get('source'),
         )
         if 'created_at' in data:
             dashboard.created_at = datetime.fromisoformat(data['created_at'])
@@ -193,7 +206,13 @@ class SavedSearch:
 
     @classmethod
     def from_dict(cls, data):
-        s = cls(data['id'], data['name'], data['query'], data['time_range'], data['created_by'])
+        # `time_range` arrived after the first saved searches were written, so
+        # an entry from before it exists and has none. Reading that as a
+        # KeyError made one old row throw away the whole file, because the
+        # loader parsed the list inside a single try. An hour is what the
+        # search form offers when nobody has chosen.
+        s = cls(data['id'], data['name'], data['query'],
+                data.get('time_range') or '1h', data['created_by'])
         if 'created_at' in data:
             s.created_at = datetime.fromisoformat(data['created_at'])
         return s

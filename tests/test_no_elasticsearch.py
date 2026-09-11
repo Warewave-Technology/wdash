@@ -186,6 +186,34 @@ class DashboardStorageTest(NoElasticsearchTestCase):
         self.assertIn("migrate_cli", message)
         self.assertIn("--from-elasticsearch", message)
 
+    def test_nothing_still_recommends_the_store_that_was_removed(self):
+        """A refusal is loud, and being sent into one by the documentation is
+        still an hour of somebody's evening.
+
+        `config.py` said dashboards go to "'file' (default) or
+        'elasticsearch'" and told anything with more than one replica to use
+        'elasticsearch' — the one setting that now refuses to start.
+        `.env.example` offered it as "elasticsearch (legacy)" four lines above
+        saying it had been removed.
+        """
+        root = os.path.join(os.path.dirname(__file__), "..")
+        for name, marker in ((os.path.join("src", "wdash", "config.py"),
+                              "Where dashboards are persisted"),
+                             (".env.example", "Where dashboards live")):
+            with self.subTest(file=name):
+                with open(os.path.join(root, name)) as handle:
+                    lines = handle.read().splitlines()
+                start = next(i for i, line in enumerate(lines) if marker in line)
+                end = next((i for i in range(start + 1, len(lines))
+                            if not lines[i].strip()), len(lines))
+                block = "\n".join(lines[start:end])
+                offered = [line for line in block.splitlines()
+                           if "elasticsearch" in line.lower()
+                           and "removed" not in line.lower()]
+                self.assertEqual(offered, [], f"{name} still offers it")
+                self.assertIn("database", block,
+                              f"{name} does not name the store to use instead")
+
     def _refusal(self):
         database = self.database
 

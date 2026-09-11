@@ -55,6 +55,34 @@ class SourceMissing(RuntimeError):
     """A request names a source that is not configured."""
 
 
+def _search_dashboard():
+    """The dashboard a search is scoped to, None, or a refusal to return.
+
+    `?dashboard=<id>` is what a click-through from a dashboard sends. The
+    dashboard is loaded and checked HERE — its own permission, its own
+    visibility rule — rather than trusting a pattern list off the URL, which
+    would make the query string a way around the boundary instead of a way
+    into it.
+    """
+    dashboard_id = request.args.get("dashboard") or None
+    if not dashboard_id:
+        return None
+
+    from .dashboard_routes import _load as _load_dashboard, _may_view
+    if not current_user.has_permission("dashboard:view"):
+        return jsonify({"error": "Access denied: You do not have permission to "
+                                 "view dashboards.",
+                        "error_type": "permission_denied"}), 403
+    dashboard = _load_dashboard(dashboard_id)
+    # Not there and not visible answer alike, as everywhere else: a distinct
+    # "you may not see this" turns the parameter into a way to find out which
+    # dashboards exist.
+    if not dashboard or not _may_view(dashboard):
+        return jsonify({"error": "Dashboard not found.",
+                        "error_type": "dashboard_not_found"}), 404
+    return dashboard
+
+
 def _record_source():
     """The one source a single record lives in.
 
@@ -219,8 +247,23 @@ def api_search():
                                  "read logs.",
                         "error_type": "permission_denied"}), 403
 
+    # A drill-down from a dashboard names it, and is answered inside that
+    # dashboard's reach.
+    #
+    # It was not. A dashboard queries its own patterns ∩ the viewer's scope,
+    # and the click-through sent only the query and the window — so the Logs
+    # screen answered from every container the ROLE allows. Measured against
+    # the lab: a dashboard over `app-logs-*`, read by a role holding
+    # `*-logs-*`, counted 30,576 records over seven days, and its total card
+    # opened 91,407 across five indices. Resolved here rather than trusted
+    # from the URL, because a client-supplied pattern list is not a boundary.
+    dashboard = _search_dashboard()
+    if isinstance(dashboard, tuple):        # a refusal, already shaped
+        return dashboard
+
     try:
-        source = _logs(request.args.get("source"))
+        source = _logs(getattr(dashboard, "source", None) if dashboard
+                       else request.args.get("source"))
     except SourceMissing as exc:
         return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
     if source is None:
@@ -257,7 +300,11 @@ def api_search():
     # range check so error responses carry the index metadata too.
     try:
         all_indices = source.containers(Scope.unrestricted())
-        allowed = source.containers(scope)
+        if dashboard is not None:
+            from .dashboard_routes import _targets
+            _, _, allowed = _targets(dashboard, scope)
+        else:
+            allowed = source.containers(scope)
     except Exception as exc:
         current_app.logger.error(f"Failed to get containers from {source.name}: {exc}")
         return jsonify({"error": f"Unable to connect to {source.name}. Please "
@@ -276,6 +323,17 @@ def api_search():
                             "error_type": "no_indices",
                             "suggestion": "Please check if logs are being ingested "
                                           "into Elasticsearch."}), 404
+        if dashboard is not None:
+            # The role may well reach plenty; this dashboard's patterns reach
+            # none of it, and saying "your role has no access" would be false.
+            return jsonify({
+                "error": f'This dashboard\'s data — {", ".join(dashboard.index_patterns)} '
+                         f"— is outside your access.",
+                "error_type": "no_accessible_containers",
+                "dashboard": dashboard.name,
+                "dashboard_id": dashboard.id,
+                "suggestion": "Please contact your administrator to grant "
+                              "access to this dashboard's data."}), 403
         return jsonify({"error": f'Your role "{current_user.role}" does not have '
                                  "access to any indices.",
                         "error_type": "no_accessible_containers",
@@ -316,6 +374,10 @@ def api_search():
             # Only on the first page: the histogram covers the whole window and
             # does not change as the user pages through it.
             histogram=(cursor is None),
+            # Named only for a dashboard drill-down. Without it the query runs
+            # over everything the scope allows, which is what made a
+            # drill-down widen the result set rather than narrow it.
+            containers=tuple(allowed) if dashboard is not None else None,
         )
     except QueryError as exc:
         # Syntax error caught before the query left the process; the message is
@@ -355,8 +417,15 @@ def api_search():
         # difference between "this is missing" and "you are looking at the
         # wrong store".
         "multiple_sources": _source_count() > 1,
-        "source": request.args.get("source") or None,
+        "source": (source.name if dashboard is not None
+                   else request.args.get("source") or None),
     })
+    if dashboard is not None:
+        # Said on the page, because a narrowed result set that does not say it
+        # is narrowed is a wrong number: the reader came here from a chart and
+        # has every reason to think this is "the logs".
+        payload["dashboard"] = {"id": dashboard.id, "name": dashboard.name,
+                                "containers": list(allowed)}
     return jsonify(payload)
 
 

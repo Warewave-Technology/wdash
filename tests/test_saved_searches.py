@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -171,6 +172,155 @@ class FileStoreTest(SavedSearchTestCase):
         with self.app.store.engine.connect() as connection:
             self.assertEqual(
                 connection.execute(select(saved_searches.c.name)).all(), [])
+
+
+class UnreadableFileTest(SavedSearchTestCase):
+    """A file that cannot be read must not read as "you have none".
+
+    Measured before the fix, on a file holding alice's, bob's and one entry
+    written before `time_range` existed: GET answered 200 [], POST answered
+    201, and the file then held one row — everybody else's searches were
+    gone. Over a file truncated mid-JSON, the same.
+    """
+
+    STORAGE = "file"
+
+    @property
+    def path(self):
+        return os.path.join(self.directory, "saved_searches.json")
+
+    def write(self, text):
+        with open(self.path, "w") as handle:
+            handle.write(text)
+
+    def rows(self):
+        with open(self.path) as handle:
+            return json.load(handle)
+
+    def other_peoples(self):
+        return [{"id": "a1", "name": "alice's", "query": "*",
+                 "time_range": "1h", "created_by": "alice"},
+                {"id": "b1", "name": "bob's", "query": "*",
+                 "time_range": "1h", "created_by": "bob"}]
+
+    def test_a_truncated_file_is_not_an_empty_list(self):
+        self.write('[{"id": "a1", "name": ')
+        reply = self.client.get("/api/saved-searches")
+        self.assertEqual(reply.status_code, 503)
+        self.assertEqual(reply.get_json()["error_type"],
+                         "saved_searches_unavailable")
+
+    def test_a_create_over_a_truncated_file_does_not_overwrite_it(self):
+        self.write('[{"id": "a1", "name": ')
+        reply = self.create(name="mine")
+        self.assertEqual(reply.status_code, 503)
+        with open(self.path) as handle:
+            self.assertEqual(handle.read(), '[{"id": "a1", "name": ')
+
+    def test_a_delete_over_a_truncated_file_does_not_overwrite_it(self):
+        self.write('[{"id": "a1", "name": ')
+        reply = self.client.delete("/api/saved-searches/a1")
+        self.assertEqual(reply.status_code, 503)
+        with open(self.path) as handle:
+            self.assertEqual(handle.read(), '[{"id": "a1", "name": ')
+
+    def test_one_entry_from_before_time_range_does_not_lose_the_rest(self):
+        """The legacy row that emptied three people's lists.
+
+        `time_range` arrived after the first saved searches were written, so
+        an entry from before it has none. The parse ran over the whole file
+        inside one try, so that one KeyError returned `[]` — and the next
+        create wrote `[]` plus one row over everybody's.
+        """
+        rows = self.other_peoples()
+        rows.append({"id": "c1", "name": "legacy", "query": "level:ERROR",
+                     "created_by": "owner"})
+        self.write(json.dumps(rows))
+
+        self.assertEqual(self.create(name="mine").status_code, 201)
+        self.assertEqual(sorted(row["name"] for row in self.rows()),
+                         ["alice's", "bob's", "legacy", "mine"])
+        # And its owner still sees it, with the window the search form
+        # offers when nobody has chosen one.
+        listed = {search["name"]: search for search in self.listed()}
+        self.assertEqual(sorted(listed), ["legacy", "mine"])
+        self.assertEqual(listed["legacy"]["time_range"], "1h")
+
+    def test_a_row_that_cannot_be_read_is_skipped_not_dropped(self):
+        """Skipping it keeps the list usable; leaving it in the file keeps it
+        recoverable once whatever wrote it is fixed."""
+        rows = self.other_peoples()
+        rows.append({"nonsense": True})
+        self.write(json.dumps(rows))
+
+        self.assertEqual(self.listed(), [])          # none are the owner's
+        self.assertEqual(self.create(name="mine").status_code, 201)
+        self.assertIn({"nonsense": True}, self.rows())
+        self.assertEqual(len(self.rows()), 4)
+
+    def signed_in(self):
+        """Another client for the same account — another worker's request."""
+        client = self.app.test_client()
+        client.post("/auth/login",
+                    data={"username": "owner", "password": PASSWORD})
+        return client
+
+    def test_saves_made_at_the_same_moment_all_survive(self):
+        """Read-modify-write over one file with nothing held across it: each
+        worker reads the list, adds one row, and writes the whole thing back,
+        so a save that lands between another's read and write is erased."""
+        workers, each = 6, 8
+        clients = [self.signed_in() for _ in range(workers)]
+        started = threading.Barrier(workers)
+        replies = []
+
+        def save(client, index):
+            started.wait()
+            for step in range(each):
+                replies.append(
+                    self.create(name=f"w{index}-{step}", client=client).status_code)
+
+        threads = [threading.Thread(target=save, args=(client, index))
+                   for index, client in enumerate(clients)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+
+        self.assertEqual(set(replies), {201})
+        self.assertEqual(len(self.rows()), workers * each,
+                         f"{workers * each - len(self.rows())} saved searches "
+                         f"were written and then lost")
+
+    def test_a_reader_never_sees_a_half_written_file(self):
+        """'w' truncates before it writes, so a reader landing in the middle
+        of a save saw an empty or partial file."""
+        self.create(name="first")
+        seen = []
+        stop = threading.Event()
+
+        def read():
+            while not stop.is_set():
+                try:
+                    with open(self.path) as handle:
+                        seen.append(len(json.load(handle)))
+                except FileNotFoundError:
+                    pass
+                except ValueError:
+                    seen.append("half-written")
+
+        reader = threading.Thread(target=read)
+        reader.start()
+        try:
+            for index in range(40):
+                self.create(name=f"s{index}")
+        finally:
+            stop.set()
+            reader.join(20)
+
+        self.assertNotIn("half-written", seen)
+        self.assertFalse([count for count in seen if count == 0],
+                         "a reader saw an empty file mid-save")
 
 
 if __name__ == "__main__":

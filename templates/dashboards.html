@@ -22,6 +22,23 @@
 </div>
 {% endif %}
 
+{# A source that cannot be reached is a failure, not a boundary. Counted and
+   said apart from the sentence above, because the two ask for different
+   things from the reader: one is a conversation with an administrator, the
+   other is a backend to bring back. #}
+{% if unchecked_count %}
+<div class="alert alert-warning py-2" style="font-size:.85rem">
+  <i class="fas fa-triangle-exclamation"></i>
+  {{ unchecked_count }} dashboard{{ 's' if unchecked_count != 1 else '' }}
+  could not be checked:
+  {{ unchecked_sources | join(', ') }}
+  {{ 'are' if unchecked_sources | length != 1 else 'is' }} not answering, so
+  there is no saying what {{ 'they' if unchecked_count != 1 else 'it' }} can
+  reach. {{ 'They are' if unchecked_count != 1 else 'It is' }} left out rather
+  than shown.
+</div>
+{% endif %}
+
 {% if dashboards %}
     {% if pages > 1 %}
     <div class="d-flex justify-content-between align-items-center mb-2">

@@ -369,6 +369,131 @@ async function main() {
             assert(opened[3] === '(service:payments) AND level:ERROR', opened[3]));
     }
 
+    // A drill-down must be answered inside the dashboard's own containers.
+    // The query went across and the dashboard did not, and /api/search with
+    // no dashboard searches every container the ROLE allows — so clicking a
+    // stat card on a dashboard over `app-logs-*` opened more records than
+    // the card counted. Measured against the lab: 30,576 on the dashboard,
+    // 91,407 on the drill-down, over five indices instead of one.
+    {
+        const w = makeDashboard(jsonResponse({}));
+        const dashboard = new w.AsyncDashboard('board-7');
+        dashboard.lastData = { effective_query: 'env:prod' };
+        const opened = [];
+        w.open = (url) => opened.push(new URL(url, 'http://localhost'));
+        dashboard.openLogs({ level: 'ERROR' });
+        const bucketWindow = {
+            start: new Date('2026-09-01T10:00:00Z'),
+            end: new Date('2026-09-01T11:00:00Z'),
+        };
+        dashboard.openLogs({ ...bucketWindow, service: 'api' });
+
+        check('a drill-down names the dashboard it came from', () =>
+            assert(opened[0].searchParams.get('dashboard') === 'board-7',
+                   `it sent ${opened[0].search}`));
+        check('and so does one from a single time bucket', () =>
+            assert(opened[1].searchParams.get('dashboard') === 'board-7',
+                   `it sent ${opened[1].search}`));
+        check('the window still travels with it', () =>
+            assert(opened[0].searchParams.get('time_range') === '1h'
+                   && opened[1].searchParams.get('start'),
+                   `it sent ${opened[0].search} / ${opened[1].search}`));
+    }
+
+    // A change made while a load is running used to be dropped: the select
+    // and the address bar moved, the request never went out, and the page
+    // went on showing the previous window's numbers under the new label.
+    {
+        let release;
+        const held = new Promise(resolve => { release = resolve; });
+        const requests = [];
+        const w = makeDashboard(async (url) => {
+            requests.push(url);
+            if (requests.length === 1) await held;
+            const range = new URL(url, 'http://localhost')
+                .searchParams.get('time_range');
+            return {
+                ok: true, status: 200,
+                json: async () => ({
+                    total_hits: range === '24h' ? 24 : 1,
+                    time_range: range, panels: [],
+                }),
+            };
+        });
+        w.document.getElementById('timeRange').innerHTML =
+            '<option value="1h">1h</option><option value="24h">24h</option>';
+        const dashboard = new w.AsyncDashboard('d1');
+        // The first load is in flight and held. Change the range, the way the
+        // handler does.
+        const select = w.document.getElementById('timeRange');
+        select.value = '24h';
+        dashboard.syncUrl();
+        dashboard.load();
+        release();
+        await settle(dashboard);
+
+        check('a change made during a load is not dropped', () =>
+            assert(requests.length === 2,
+                   `${requests.length} request(s): ${requests.join(', ')}`));
+        check('and the numbers on screen are the ones that were asked for', () =>
+            assert(dashboard.lastData && dashboard.lastData.time_range === '24h',
+                   `the page is showing ${dashboard.lastData
+                       && dashboard.lastData.time_range}`));
+        check('the control, the address bar and the data agree', () => {
+            assert(select.value === '24h', `the select says ${select.value}`);
+            assert(/time_range=24h/.test(w.location.search),
+                   `the url says ${w.location.search}`);
+            assert(w.document.getElementById('totalHits').textContent
+                       .includes('24'),
+                   'the card still shows the first window\'s count');
+        });
+    }
+
+    // A trace service list whose fan-out lost a backend is not a shorter
+    // list: the services that store held are missing and the counts of the
+    // ones it shared are short. The answer says `partial`; the panel drew
+    // the rows and said nothing, so a store that did not reply read as a
+    // service having gone quiet.
+    const TRACE = { id: 't1', title: 'Services', type: 'trace_services',
+                    width: 6, sort: 'spans', size: 5 };
+    const partial = await loadWith({
+        total_hits: 1,
+        panels: [{ ...TRACE, partial: true,
+                   warnings: ['jaeger did not answer the service list'],
+                   rows: [{ name: 'api', span_count: 10, error_count: 1,
+                            error_rate: 0.1 }] }],
+    });
+    check('a partial service list says so beside its rows', () => {
+        const slot = partial.document.querySelector('[data-panel-id="t1"]');
+        const hint = slot.querySelector('.panel-hint').textContent;
+        assert(/jaeger did not answer/.test(hint), `the panel said "${hint}"`);
+        assert(slot.querySelectorAll('tbody tr').length === 1,
+               'the rows that did arrive were thrown away');
+    });
+
+    const partialEmpty = await loadWith({
+        total_hits: 1,
+        panels: [{ ...TRACE, partial: true,
+                   warnings: ['tempo did not answer the service list'],
+                   rows: [] }],
+    });
+    check('an empty partial list is not "no trace data in this window"', () => {
+        const said = partialEmpty.document
+            .querySelector('[data-panel-id="t1"] .panel-empty small').textContent;
+        assert(/tempo did not answer/.test(said), `the panel said "${said}"`);
+    });
+
+    const whole = await loadWith({
+        total_hits: 1,
+        panels: [{ ...TRACE, rows: [{ name: 'api', span_count: 10,
+                                      error_count: 0, error_rate: 0 }] }],
+    });
+    check('a whole service list keeps its ordinary hint', () => {
+        const hint = whole.document
+            .querySelector('[data-panel-id="t1"] .panel-hint').textContent;
+        assert(/Click a value/.test(hint), `the panel said "${hint}"`);
+    });
+
     check('a severity takes its colour from the palette', () =>
         assert(palette.AsyncDashboard.seriesColour('ERROR', 0) === '#abcdef',
                `got ${palette.AsyncDashboard.seriesColour('ERROR', 0)}`));

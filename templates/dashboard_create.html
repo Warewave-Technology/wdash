@@ -27,6 +27,30 @@
                                   placeholder="Enter dashboard description (optional)"></textarea>
                     </div>
 
+                    {# Which configured log source this dashboard reads from.
+                       The README said a dashboard may name one and there was
+                       no way to say it: no field here, no column on the file
+                       store, so every dashboard read from the first source
+                       whatever the deployment had configured. #}
+                    {% if sources | length > 1 %}
+                    <div class="mb-3">
+                        <label for="source" class="form-label">Log source</label>
+                        <select class="form-select" id="source" name="source">
+                            <option value="">Default ({{ sources[0] }})</option>
+                            {% for name in sources %}
+                                <option value="{{ name }}"
+                                    {% if dashboard is defined and dashboard.source == name %}selected{% endif %}>
+                                    {{ name }}</option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">
+                            Which store this dashboard's panels are answered
+                            from. Leave it on the default unless this
+                            dashboard's data lives somewhere else.
+                        </div>
+                    </div>
+                    {% endif %}
+
                     <div class="mb-3">
                         <label for="index_patterns" class="form-label">Index Patterns</label>
                         <select class="form-select" id="index_patterns" name="index_patterns" multiple size="6">

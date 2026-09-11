@@ -41,6 +41,27 @@
                                   placeholder="Enter dashboard description (optional)">{{ dashboard.description or '' }}</textarea>
                     </div>
 
+                    {# See dashboard_create.html: the source a dashboard reads
+                       from could be stored and never chosen. #}
+                    {% if sources | length > 1 %}
+                    <div class="mb-3">
+                        <label for="source" class="form-label">Log source</label>
+                        <select class="form-select" id="source" name="source">
+                            <option value="" {% if not dashboard.source %}selected{% endif %}>
+                                Default ({{ sources[0] }})</option>
+                            {% for name in sources %}
+                                <option value="{{ name }}"
+                                    {% if dashboard.source == name %}selected{% endif %}>
+                                    {{ name }}</option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">
+                            Which store this dashboard's panels are answered
+                            from.
+                        </div>
+                    </div>
+                    {% endif %}
+
                     <div class="mb-3">
                         <label for="index_patterns" class="form-label">Index Patterns</label>
                         <select class="form-select" id="index_patterns" name="index_patterns" multiple size="6">

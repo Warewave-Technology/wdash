@@ -134,6 +134,12 @@
                     <span class="badge bg-info" id="totalIndicesBadge">
                         <i class="fas fa-database"></i> Available: {{ indices|length }} indices
                     </span>
+                    {# A drill-down from a dashboard is answered inside that
+                       dashboard's reach, which is narrower than the role's.
+                       Said here, because a narrowed count that does not say
+                       it is narrowed is just a wrong number. #}
+                    <span class="badge bg-secondary d-none ms-1"
+                          id="dashboardScopeBadge"></span>
                 </small>
             </div>
         </div>

@@ -267,6 +267,36 @@ class TracePanelTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("error", response.get_json()["panels"][1])
 
+    def half_an_answer(self):
+        """A fan-out that lost one backend: the shape `FanOutTraceSource`
+        returns when one member did not reply."""
+        from wdash.hub.models import PartialList, Service
+
+        def half(window, scope):
+            return PartialList(
+                [Service(name="api", span_count=10, error_count=1)],
+                partial=True,
+                warnings=["jaeger did not answer the service list"])
+        self.hub.traces().services = half
+
+    def test_a_service_list_missing_a_backend_says_so(self):
+        """Half a service list drawn as a whole one reads as services having
+        gone quiet — which is the one reading this panel exists to support.
+        The fan-out marks the answer `partial`; the panel threw it away."""
+        self.half_an_answer()
+        panel = self.panel()
+        self.assertTrue(panel["partial"])
+        self.assertEqual(panel["warnings"],
+                         ["jaeger did not answer the service list"])
+        self.assertEqual([row["name"] for row in panel["rows"]], ["api"],
+                         "the rows that did arrive must still be drawn")
+
+    def test_a_whole_service_list_is_not_marked(self):
+        """Otherwise every panel carries a caveat and nobody reads any."""
+        panel = self.panel()
+        self.assertNotIn("partial", panel)
+        self.assertNotIn("warnings", panel)
+
 
 class WireTest(unittest.TestCase):
     """/data must answer any panel list in a single round trip."""
@@ -413,3 +443,133 @@ class SourceBindingTest(unittest.TestCase):
         self.assertIn("retired", response.get_json()["error"])
         self.assertEqual(self.primary.round_trips, 0,
                          "it fell back to the default instead of reporting")
+
+
+class SourceFormTest(unittest.TestCase):
+    """Choosing that source, which is the half that did not exist.
+
+    The README said a dashboard may name the source it reads from. The create
+    and edit forms had no field for it, `_dashboard_form` returned no key for
+    it, and `models.Dashboard` had no attribute for it — so on the default
+    (file) store there was nowhere to put one even if there had been. Measured
+    before: POST /dashboard/create with source=secondary returned 302 and
+    stored a dashboard with no source at all, and every dashboard read from
+    the first registered source.
+    """
+
+    STORAGE = "file"
+
+    def setUp(self):
+        import tempfile
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource
+        from tests.support import grant
+        from tests.test_dashboard_contract import FakeES
+
+        self.directory = tempfile.mkdtemp(prefix="wdash-source-form-")
+        storage = os.path.join(self.directory, "dashboards.json")
+        database = os.path.join(self.directory, "wdash.db")
+        backend = self.STORAGE
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "source-form"
+            DASHBOARD_STORAGE_FILE = storage
+            DASHBOARD_STORAGE = backend
+            DATABASE_URL = f"sqlite:///{database}"
+
+        self.primary = FakeES()
+        self.secondary = FakeES()
+        self.app = create_app(TestConfig)
+        hub = Hub()
+        hub.add_logs(ElasticsearchLogSource(self.primary, name="primary"))
+        hub.add_logs(ElasticsearchLogSource(self.secondary, name="secondary"))
+        self.app.hub = hub
+
+        self.client = self.app.test_client()
+        permissions = ["dashboard:view", "dashboard:create", "dashboard:edit"]
+        grant(self.app, "u", permissions)
+        with self.client.session_transaction() as session:
+            session["user_data"] = {"id": "1", "email": "u@x", "username": "u",
+                                    "groups": []}
+            session["_user_id"] = "1"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    def create(self, **overrides):
+        form = {"name": "Board", "query": "*", "description": "",
+                "index_patterns": ["*"]}
+        form.update(overrides)
+        return self.client.post("/dashboard/create", data=form,
+                                follow_redirects=True)
+
+    def stored(self):
+        manager = self.app.dashboard_manager
+        manager.refresh_cache()
+        return next(d for d in manager.get_all_dashboards() if d.name == "Board")
+
+    def test_the_create_form_offers_the_configured_sources(self):
+        page = self.client.get("/dashboard/create").data.decode()
+        self.assertIn('name="source"', page)
+        self.assertIn("secondary", page)
+
+    def test_a_chosen_source_is_stored(self):
+        self.create(source="secondary")
+        self.assertEqual(self.stored().source, "secondary")
+
+    def test_it_is_the_source_the_panels_are_answered_from(self):
+        """The point of storing it at all."""
+        self.create(source="secondary")
+        self.client.get(f"/api/dashboard/{self.stored().id}/data")
+        self.assertEqual(self.primary.round_trips, 0)
+        self.assertGreater(self.secondary.round_trips, 0)
+
+    def test_choosing_nothing_leaves_it_on_the_default(self):
+        self.create()
+        self.assertIsNone(self.stored().source)
+
+    def test_a_source_that_is_not_configured_is_refused_where_it_was_typed(self):
+        """Stored, it would be reported to every reader for ever."""
+        response = self.create(source="nowhere")
+        self.assertIn(b"no log source called", response.data)
+        manager = self.app.dashboard_manager
+        manager.refresh_cache()
+        self.assertEqual([d.name for d in manager.get_all_dashboards()], [])
+
+    def test_the_edit_form_carries_the_current_source_and_can_change_it(self):
+        self.create(source="secondary")
+        board = self.stored()
+        page = self.client.get(f"/dashboard/{board.id}/edit").data.decode()
+        self.assertIn('name="source"', page)
+
+        self.client.post(f"/dashboard/{board.id}/edit",
+                         data={"name": "Board", "query": "*", "description": "",
+                               "index_patterns": ["*"], "source": "primary"},
+                         follow_redirects=True)
+        self.assertEqual(self.stored().source, "primary")
+
+    def test_it_can_be_put_back_on_the_default(self):
+        self.create(source="secondary")
+        board = self.stored()
+        self.client.post(f"/dashboard/{board.id}/edit",
+                         data={"name": "Board", "query": "*", "description": "",
+                               "index_patterns": ["*"], "source": ""},
+                         follow_redirects=True)
+        self.assertIsNone(self.stored().source)
+
+    def test_it_survives_a_round_trip_through_the_store(self):
+        self.create(source="secondary")
+        from wdash.models import Dashboard
+        board = self.stored()
+        self.assertEqual(Dashboard.from_dict(board.to_dict()).source,
+                         "secondary")
+
+
+class DatabaseSourceFormTest(SourceFormTest):
+    """The same, on the store a deployment with two sources will be using."""
+
+    STORAGE = "database"

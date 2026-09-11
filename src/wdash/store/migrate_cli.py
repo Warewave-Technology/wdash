@@ -128,7 +128,10 @@ def migrate_dashboards(store, path, dry_run=False, records=None):
             # the one moment somebody is trusting this to move their data
             # faithfully. A migration that changes what a thing means is not
             # a migration.
-            visibility=record.get("visibility"))
+            visibility=record.get("visibility"),
+            # Same reason: a dashboard that named its source must come out of
+            # the move reading from the same store, not from the default one.
+            source=record.get("source"))
         moved += 1
     return moved, skipped
 

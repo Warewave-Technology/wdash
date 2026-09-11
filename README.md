@@ -28,7 +28,9 @@ issues carries an explicit authorization scope.
 - **Dashboards** — a panel list you choose: volume over time (optionally split
   by a field), top values of a field, and services from the trace store. Every
   count is compared against the preceding window of the same length, and every
-  chart and stat card opens the log records behind it. Log panels are answered
+  chart and stat card opens the log records behind it — inside the dashboard's
+  own index patterns, so the drill-down narrows what is on screen rather than
+  widening it. Log panels are answered
   in a single backend round trip however many there are. Optional thresholds
   say whether the dashboard is outside what its owner calls normal.
   A dashboard link carries its time range and filter, so what you share is the
@@ -487,10 +489,13 @@ the Logs screen shows it as a badge — but only when more than one source is
 configured. A badge repeated on every row that always says the same thing is
 noise, and noise is how people stop reading the row footer at all.
 
-A dashboard may name the source it reads from. One naming a source that is no
-longer configured reports that plainly instead of falling back to the default:
-quietly answering from a different store is how somebody concludes their data
-has disappeared.
+A dashboard may name the source it reads from — a **Log source** field on the
+create and edit forms, shown once more than one is configured, and stored in
+whichever dashboard store is in use. Leaving it on the default is what every
+dashboard written before there was a choice means. One naming a source that is
+no longer configured reports that plainly instead of falling back to the
+default: quietly answering from a different store is how somebody concludes
+their data has disappeared.
 
 ### OpenTelemetry
 

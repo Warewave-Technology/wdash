@@ -590,6 +590,87 @@ class SimultaneousWriteTest(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(self.store.roles.get("ops")["permissions"], ["logs:read"])
 
+    def test_two_saves_of_one_dashboard_at_the_same_revision(self):
+        """The lost update the revision column exists to stop.
+
+        It was checked in Python and then written `WHERE id = :id`, so the
+        check and the write were two statements with the whole race window
+        between them. Measured on a file SQLite store before the fix: 20
+        trials of 4 barrier-aligned saves at revision 1, 57 of 80 calls
+        reported success and 18 of 20 trials had more than one winner. On
+        Postgres the second UPDATE waits for the row lock and then re-checks
+        a WHERE clause that names only the id, so it applies too.
+
+        Deterministic rather than a race: the first save is held open,
+        uncommitted, while the second reads the revision it is about to
+        invalidate.
+        """
+        board = self.store.dashboards.create_dashboard("D", "", "*", "u")
+        stale = board.revision
+
+        from datetime import datetime, timezone
+        from wdash.store.schema import dashboards
+        failures, wrote = [], []
+
+        def second():
+            try:
+                wrote.append(self.store.dashboards.update_dashboard(
+                    board.id, name="second", revision=stale))
+            except Exception as exc:
+                failures.append(exc)
+
+        holder = self.store.engine.connect()
+        transaction = holder.begin()
+        holder.execute(dashboards.update()
+                       .where(dashboards.c.id == board.id)
+                       .values(name="first", revision=stale + 1,
+                               updated_at=datetime.now(timezone.utc)))
+        thread = threading.Thread(target=second)
+        thread.start()
+        thread.join(0.5)             # it has read the revision, and is waiting
+        transaction.commit()
+        holder.close()
+        thread.join(20)
+
+        self.assertEqual([type(f).__name__ for f in failures], ["ObjectConflict"],
+                         f"the second save was not refused: wrote={wrote}")
+        self.assertEqual(self.store.dashboards.get_dashboard(board.id).name,
+                         "first", "the first writer's edit was overwritten")
+
+    def test_a_revisionless_save_still_wins_after_losing_the_race(self):
+        """Last-write-wins was documented for callers that track nothing, and
+        a revision predicate must not turn that into a refusal."""
+        board = self.store.dashboards.create_dashboard("D", "", "*", "u")
+
+        from datetime import datetime, timezone
+        from wdash.store.schema import dashboards
+        failures, wrote = [], []
+
+        def second():
+            try:
+                wrote.append(self.store.dashboards.update_dashboard(
+                    board.id, name="script").name)
+            except Exception as exc:
+                failures.append(exc)
+
+        holder = self.store.engine.connect()
+        transaction = holder.begin()
+        holder.execute(dashboards.update()
+                       .where(dashboards.c.id == board.id)
+                       .values(name="person", revision=board.revision + 1,
+                               updated_at=datetime.now(timezone.utc)))
+        thread = threading.Thread(target=second)
+        thread.start()
+        thread.join(0.5)
+        transaction.commit()
+        holder.close()
+        thread.join(20)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(wrote, ["script"])
+        self.assertEqual(self.store.dashboards.get_dashboard(board.id).name,
+                         "script")
+
     def test_a_setting_written_twice_at_once(self):
         from datetime import datetime, timezone
         from wdash.store.schema import settings

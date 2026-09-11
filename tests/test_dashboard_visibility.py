@@ -243,6 +243,83 @@ class ListingTest(unittest.TestCase):
         self.assertEqual(self.names_seen(client), [])
         self.assertIn(b"not shown", page)
 
+    # ---------- a source that cannot answer is not a boundary ----------
+
+    def notices(self, client):
+        """The page's own sentences, with the template's line breaks taken
+        out so an assertion reads like the screen does."""
+        import re
+        page = client.get("/dashboards").data.decode()
+        body = page.split('<h2><i class="fas fa-chart-bar"></i> Dashboards')[-1]
+        body = body.split("No Dashboards Found")[0].split('<div class="row">')[0]
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)).strip()
+
+    def unreachable_source(self):
+        """Make the catalogue raise, the way Loki and VictoriaLogs do when
+        their labels cannot be read."""
+        source = self.app.hub.logs()
+        original = source.containers
+
+        def failing(scope, *args, **kwargs):
+            raise ConnectionError("stream labels could not be read: refused")
+        source.containers = failing
+        self.addCleanup(setattr, source, "containers", original)
+
+    def test_an_outage_is_not_reported_as_privacy_or_access(self):
+        """Measured before: as bob, with the catalogue raising, the page said
+        '3 dashboards are not shown: either private to their authors, or
+        covering data outside your access' and mentioned no outage at all.
+        The reader goes to an administrator for access they already have."""
+        self.unreachable_source()
+        client = self.client_for("bob", ["app-*"])
+        said = self.notices(client)
+
+        self.assertIn("3 dashboards could not be checked", said)
+        self.assertIn("elasticsearch", said)
+        self.assertNotIn("not shown", said,
+                         "an outage was counted as privacy or access")
+
+    def test_the_two_counts_are_kept_apart(self):
+        """One private dashboard and two that could not be checked: the page
+        must say one of each, not three of the wrong one."""
+        source = self.app.hub.logs()
+        original = source.containers
+        secret = self.ids["SecretBoard"]
+
+        def selective(scope, *args, **kwargs):
+            # The private one resolves normally; the shared two cannot be
+            # checked, because their reach is what an outage hides.
+            if getattr(selective, "board", None) == secret:
+                return original(scope, *args, **kwargs)
+            raise ConnectionError("stream labels could not be read: refused")
+
+        from wdash.api import dashboard_routes
+        original_targets = dashboard_routes._targets
+
+        def targets(dashboard, scope):
+            selective.board = dashboard.id
+            return original_targets(dashboard, scope)
+
+        source.containers = selective
+        dashboard_routes._targets = targets
+        self.addCleanup(setattr, source, "containers", original)
+        self.addCleanup(setattr, dashboard_routes, "_targets", original_targets)
+
+        client = self.client_for("bob", ["app-*"])
+        said = self.notices(client)
+        self.assertIn("1 dashboard is not shown", said)
+        self.assertIn("2 dashboards could not be checked", said)
+
+    def test_the_author_still_sees_their_own_through_an_outage(self):
+        """An outage hides what a dashboard reaches; it does not hide a
+        dashboard from the person who wrote it."""
+        self.unreachable_source()
+        client = self.client_for("alice", ["app-*"])
+        said = self.notices(client)
+        self.assertEqual(sorted(self.names_seen(client)),
+                         ["AppBoard", "InfraBoard", "SecretBoard"])
+        self.assertNotIn("could not be checked", said)
+
 
 class ColonNameTest(unittest.TestCase):
     """A dashboard over `unknown_service:*` is visible to a role granted

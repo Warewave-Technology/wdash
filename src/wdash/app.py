@@ -3,9 +3,11 @@ WDash - Main Application
 A minimal Kibana alternative with RBAC and OIDC support
 """
 
+import contextlib
 import os
 import sys
 import json
+import threading
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
 from flask_login import LoginManager, login_required, current_user
 
@@ -38,6 +40,21 @@ from wdash.hub.factory import build_configured_sources
 from datetime import datetime, timedelta
 import time
 import uuid
+
+try:                                    # POSIX only; Linux and macOS have it.
+    import fcntl
+except ImportError:                     # pragma: no cover - not our platforms
+    fcntl = None
+
+
+class SavedSearchesUnavailable(RuntimeError):
+    """The saved-search file is there and could not be read.
+
+    Kept apart from "there is no file yet", which is an empty list and a
+    perfectly good answer. Reading them as the same thing turned an
+    unreadable file into "you have no saved searches", and then the next
+    create wrote that emptiness over everybody's.
+    """
 
 
 def create_app(config_class=Config):
@@ -356,25 +373,93 @@ def create_app(config_class=Config):
         os.path.dirname(app.config['DASHBOARD_STORAGE_FILE']),
         'saved_searches.json')
 
-    def _load_saved_searches():
-        """Every stored search. File store only — the database never reads
-        them all, because it can ask for one person's."""
+    @contextlib.contextmanager
+    def _saved_search_lock():
+        """Hold the saved searches across a read-modify-write.
+
+        Create and delete read the whole list, change it and write it back.
+        Two workers doing that at the same moment — four gunicorn workers is
+        the packaged default — both read the old list, and the second write
+        drops whatever the first added. The lock lives on a file BESIDE the
+        list rather than on the list itself, because the write replaces the
+        file and a lock held on an unlinked inode guards nothing.
+        """
+        if fcntl is None:               # pragma: no cover - not our platforms
+            yield
+            return
+        os.makedirs(os.path.dirname(SAVED_SEARCHES_FILE), exist_ok=True)
+        handle = open(f"{SAVED_SEARCHES_FILE}.lock", "a+")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            handle.close()              # releases the lock
+
+    def _saved_search_rows():
+        """The file's rows, exactly as stored. File store only.
+
+        Three answers, not two. No file is an empty list. A file that cannot
+        be parsed at all raises, because the caller must not write over
+        something it could not read. A row that cannot be understood is left
+        where it is — see `_load_saved_searches`.
+        """
         if not os.path.exists(SAVED_SEARCHES_FILE):
             return []
         try:
             with open(SAVED_SEARCHES_FILE, 'r') as f:
-                return [SavedSearch.from_dict(d) for d in json.load(f)]
-        except Exception:
-            return []
+                rows = json.load(f)
+        except (OSError, ValueError) as exc:
+            raise SavedSearchesUnavailable(str(exc)) from exc
+        if not isinstance(rows, list):
+            raise SavedSearchesUnavailable(
+                "the file does not hold a list of searches")
+        return rows
 
-    def _save_saved_searches(searches):
-        # Read-modify-write over one file: two people saving a search at the
-        # same moment lose one of the two, invisibly, because both writes
-        # succeed. The database store does not have this problem, which is
-        # the argument for moving.
+    def _load_saved_searches():
+        """Every stored search that can be read.
+
+        One row that cannot be used to empty the list for everybody: the
+        parse ran over the whole file, so a single entry written before
+        `time_range` existed raised a KeyError and three people's searches
+        became `[]`. A bad row is skipped and logged now, and left in the
+        file, so it comes back when whatever wrote it is fixed.
+        """
+        searches = []
+        for row in _saved_search_rows():
+            try:
+                searches.append(SavedSearch.from_dict(row))
+            except Exception as exc:
+                app.logger.error(
+                    f"Skipping a saved search that could not be read: {exc}")
+        return searches
+
+    def _save_saved_search_rows(rows):
+        """Replace the file, atomically. Call inside `_saved_search_lock`.
+
+        It opened the real file with 'w', which truncates before it writes:
+        another worker reading at that instant saw an empty or half-written
+        file, and a crash mid-write left one behind.
+        """
         os.makedirs(os.path.dirname(SAVED_SEARCHES_FILE), exist_ok=True)
-        with open(SAVED_SEARCHES_FILE, 'w') as f:
-            json.dump([s.to_dict() for s in searches], f, indent=2)
+        temp_path = (f"{SAVED_SEARCHES_FILE}.tmp."
+                     f"{os.getpid()}.{threading.get_ident()}")
+        try:
+            with open(temp_path, 'w') as f:
+                json.dump(rows, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, SAVED_SEARCHES_FILE)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
+            raise
+
+    def _searches_unreadable(exc, consequence):
+        app.logger.error(f"Saved searches could not be read: {exc}")
+        return jsonify({
+            'error': f"Your saved searches could not be read, so {consequence}. "
+                     f"Check the server logs.",
+            'error_type': 'saved_searches_unavailable'}), 503
 
     @app.route('/api/saved-searches')
     @login_required
@@ -389,7 +474,12 @@ def create_app(config_class=Config):
             return jsonify([search.to_dict() for search
                             in store.saved_searches.all_for(
                                 current_user.username)])
-        searches = _load_saved_searches()
+        try:
+            searches = _load_saved_searches()
+        except SavedSearchesUnavailable as exc:
+            # Not an empty list: "you have none" and "they could not be read"
+            # are different answers and need different actions.
+            return _searches_unreadable(exc, "none can be listed")
         user_searches = [s.to_dict() for s in searches
                          if s.created_by == current_user.username]
         return jsonify(user_searches)
@@ -411,7 +501,6 @@ def create_app(config_class=Config):
                 created_by=current_user.username)
             return jsonify(search.to_dict()), 201
 
-        searches = _load_saved_searches()
         search = SavedSearch(
             search_id=str(uuid.uuid4()),
             name=data['name'],
@@ -419,8 +508,22 @@ def create_app(config_class=Config):
             time_range=data.get('time_range', '1h'),
             created_by=current_user.username
         )
-        searches.append(search)
-        _save_saved_searches(searches)
+        # The whole read-modify-write under one lock, so a second worker
+        # cannot read the list between this read and this write.
+        with _saved_search_lock():
+            try:
+                rows = _saved_search_rows()
+            except SavedSearchesUnavailable as exc:
+                return _searches_unreadable(exc, "this one was not saved")
+            rows.append(search.to_dict())
+            try:
+                _save_saved_search_rows(rows)
+            except OSError as exc:
+                app.logger.error(f"Saved searches could not be written: {exc}")
+                return jsonify({
+                    'error': "This search could not be saved. Check the "
+                             "server logs.",
+                    'error_type': 'saved_searches_unavailable'}), 503
         return jsonify(search.to_dict()), 201
 
     @app.route('/api/saved-searches/<search_id>', methods=['DELETE'])
@@ -438,14 +541,26 @@ def create_app(config_class=Config):
                 return jsonify({'error': 'Not found or not owned by you'}), 404
             return jsonify({'success': True})
 
-        searches = _load_saved_searches()
-        original_len = len(searches)
-        searches = [s for s in searches
-                    if not (s.id == search_id
-                            and s.created_by == current_user.username)]
-        if len(searches) == original_len:
-            return jsonify({'error': 'Not found or not owned by you'}), 404
-        _save_saved_searches(searches)
+        with _saved_search_lock():
+            try:
+                rows = _saved_search_rows()
+            except SavedSearchesUnavailable as exc:
+                # Answering 404 here would say "it is already gone", which is
+                # the one thing nobody can tell from an unreadable file.
+                return _searches_unreadable(exc, "this one was not deleted")
+            kept = [row for row in rows
+                    if not (row.get('id') == search_id
+                            and row.get('created_by') == current_user.username)]
+            if len(kept) == len(rows):
+                return jsonify({'error': 'Not found or not owned by you'}), 404
+            try:
+                _save_saved_search_rows(kept)
+            except OSError as exc:
+                app.logger.error(f"Saved searches could not be written: {exc}")
+                return jsonify({
+                    'error': "This search could not be deleted; it is still "
+                             "there. Check the server logs.",
+                    'error_type': 'saved_searches_unavailable'}), 503
         return jsonify({'success': True})
 
     @app.route('/livez')

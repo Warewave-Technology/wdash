@@ -582,3 +582,137 @@ class RecentLogsShapeTest(DashboardContractTest):
         payload = self.get("recent-logs").get_json()
         self.assertIn("records", payload)
         self.assertNotIn("hits", payload)
+
+
+class DrillDownScopeTest(unittest.TestCase):
+    """A chart opens the records BEHIND it, not every record the role allows.
+
+    The dashboard queries its index patterns intersected with the viewer's
+    scope; the click-through sent only the query and the window, and
+    /api/search with no dashboard searches every container the scope allows.
+    So a dashboard over `app-logs-*`, read by a role holding `*-logs-*`,
+    counted one index and its stat card opened five. Measured against the
+    lab: 30,576 records over seven days on the dashboard, 91,407 on the
+    drill-down; 30,565 after the fix.
+
+    Modelled rather than faked: the fake cluster evaluates the query and
+    answers per index, so the narrowing is actually exercised.
+    """
+
+    WINDOW = ("start_time=2026-09-01T09:00:00Z&end_time=2026-09-01T11:00:00Z")
+
+    def setUp(self):
+        from tests.support import ModelledES
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource
+
+        class Cluster(ModelledES):
+            """The modelled cluster, plus the date histogram the Logs search
+            asks for on a first page. What the histogram holds is not what
+            these tests are about; that the SEARCH is evaluated, per index,
+            is."""
+
+            def _aggregate(self, spec, hits):
+                if "date_histogram" in spec:
+                    return {"buckets": []}
+                return super()._aggregate(spec, hits)
+
+        fields = {"@timestamp": {"type": "date"}, "message": {"type": "text"},
+                  "level": {"type": "keyword"}, "service": {"type": "keyword"}}
+
+        def record(prefix, number):
+            return {"_id": f"{prefix}-{number}",
+                    "@timestamp": "2026-09-01T10:00:00Z", "level": "ERROR",
+                    "service": "api", "message": f"failure {number}"}
+
+        self.es = Cluster({
+            "app-logs-000001": (fields, [record("app", n) for n in range(3)]),
+            "infra-logs-000001": (fields, [record("infra", n) for n in range(7)]),
+        })
+        self.app = create_app(TestConfig)
+        hub = Hub()
+        hub.add_logs(ElasticsearchLogSource(self.es))
+        self.app.hub = hub
+
+        self.dashboard = Dashboard(dashboard_id=DASH_ID, name="App board",
+                                   description="", query="*", created_by="u",
+                                   index_patterns=["app-logs-*"])
+        self.app.dashboard_manager.dashboards[DASH_ID] = self.dashboard
+
+        self.client = self.app.test_client()
+        permissions = ["dashboard:view", "logs:read"]
+        from tests.support import grant
+        grant(self.app, "u", permissions, ["*-logs-*"])
+        with self.client.session_transaction() as session:
+            session["user_data"] = {
+                "id": "1", "email": "u@x", "username": "u", "groups": [],
+                "role": "admin", "permissions": permissions,
+                "allowed_indices": ["*-logs-*"],
+                "allowed_trace_indices": [], "allowed_services": []}
+            session["_user_id"] = "1"
+
+    def search(self, **params):
+        query = "&".join(f"{key}={value}" for key, value in params.items())
+        return self.client.get(f"/api/search?{self.WINDOW}&{query}").get_json()
+
+    def test_the_role_really_does_reach_both_indices(self):
+        """Otherwise the scoped numbers below would be right by accident."""
+        payload = self.search(q="level:ERROR")
+        self.assertEqual(payload["total"], 10)
+        self.assertEqual(sorted(payload["accessible_containers"]),
+                         ["app-logs-000001", "infra-logs-000001"])
+
+    def test_a_drill_down_reaches_only_what_the_dashboard_counted(self):
+        dashboard_total = self.client.get(
+            f"/api/dashboard/{DASH_ID}/data?time_range=1h").get_json()
+        payload = self.search(q="level:ERROR", dashboard=DASH_ID)
+        self.assertEqual(payload["total"], 3)
+        self.assertEqual(payload["dashboard"]["containers"],
+                         ["app-logs-000001"])
+        self.assertEqual(sorted(payload["dashboard"]["containers"]),
+                         sorted(dashboard_total["queried_containers"]))
+
+    def test_it_says_on_the_page_that_it_is_scoped(self):
+        """A narrowed result set that does not say it is narrowed is a wrong
+        number to whoever came here from a chart."""
+        payload = self.search(q="level:ERROR", dashboard=DASH_ID)
+        self.assertEqual(payload["dashboard"]["name"], "App board")
+        self.assertEqual(payload["dashboard"]["id"], DASH_ID)
+
+    def test_a_plain_search_is_unchanged(self):
+        payload = self.search(q="level:ERROR")
+        self.assertNotIn("dashboard", payload)
+
+    def test_a_dashboard_that_is_not_there_is_not_a_wider_search(self):
+        reply = self.client.get(
+            f"/api/search?{self.WINDOW}&q=*&dashboard=no-such-board")
+        self.assertEqual(reply.status_code, 404)
+        self.assertEqual(reply.get_json()["error_type"], "dashboard_not_found")
+
+    def test_a_dashboard_you_may_not_see_answers_the_same_way(self):
+        """Otherwise the parameter becomes a way to find out what exists."""
+        from wdash.dashboard.visibility import PRIVATE
+        private = Dashboard(dashboard_id="private-1", name="Fraud",
+                            description="", query="*", created_by="alice",
+                            index_patterns=["app-logs-*"], visibility=PRIVATE)
+        self.app.dashboard_manager.dashboards["private-1"] = private
+        before = len(self.es.requests)
+        reply = self.client.get(
+            f"/api/search?{self.WINDOW}&q=*&dashboard=private-1")
+        self.assertEqual(reply.status_code, 404)
+        self.assertEqual(len(self.es.requests), before,
+                         "somebody else's private query was run")
+
+    def test_a_dashboard_over_data_outside_your_access_says_which(self):
+        """Not 'your role has no access to any indices': the role reaches
+        plenty, and this dashboard's patterns reach none of it."""
+        elsewhere = Dashboard(dashboard_id="far-1", name="Far", description="",
+                              query="*", created_by="u",
+                              index_patterns=["nothing-here-*"])
+        self.app.dashboard_manager.dashboards["far-1"] = elsewhere
+        reply = self.client.get(f"/api/search?{self.WINDOW}&q=*&dashboard=far-1")
+        self.assertEqual(reply.status_code, 403)
+        payload = reply.get_json()
+        self.assertEqual(payload["error_type"], "no_accessible_containers")
+        self.assertIn("nothing-here-*", payload["error"])
+        self.assertEqual(payload["dashboard"], "Far")

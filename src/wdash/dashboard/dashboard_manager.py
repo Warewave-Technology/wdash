@@ -120,9 +120,31 @@ class DashboardManager:
                     pass
                 raise DashboardStorageError(str(e)) from e
     
+    def _snapshot(self):
+        """The in-memory dashboards, copied deeply enough to restore from."""
+        return {key: Dashboard.from_dict(value.to_dict())
+                for key, value in self.dashboards.items()}
+
+    def _save_or_restore(self, snapshot):
+        """Persist; on failure put memory back the way it was, and re-raise.
+
+        The routes tell the reader "has NOT been created", "your changes were
+        NOT applied" and "it is still there" when the save raises. That was
+        true of the disk and false of this worker: the change stayed in
+        `self.dashboards`, `_loaded_signature` still matched the untouched
+        file so `load_dashboards()` never reloaded, and every later read in
+        this process served the change the user had just been told did not
+        happen. The next save that DID succeed then wrote it out.
+        """
+        try:
+            self.save_dashboards()
+        except DashboardStorageError:
+            self.dashboards = snapshot
+            raise
+
     def create_dashboard(self, name, description, query, created_by,
                          index_patterns=None, panels=None,
-                         thresholds=None, visibility=None):
+                         thresholds=None, visibility=None, source=None):
         """Create a new dashboard with thread safety"""
         with self._lock:
             # Reload to ensure we have latest data
@@ -143,11 +165,13 @@ class DashboardManager:
                 index_patterns=index_patterns or ['*'],
                 panels=panels,
                 thresholds=thresholds,
-                visibility=visibility
+                visibility=visibility,
+                source=source
             )
             
+            snapshot = self._snapshot()
             self.dashboards[dashboard_id] = dashboard
-            self.save_dashboards()
+            self._save_or_restore(snapshot)
             return dashboard
     
     def get_dashboard(self, dashboard_id):
@@ -166,7 +190,7 @@ class DashboardManager:
     
     def update_dashboard(self, dashboard_id, name=None, description=None,
                          query=None, index_patterns=None, panels=None,
-                         thresholds=None, visibility=None):
+                         thresholds=None, visibility=None, source=None):
         """Update existing dashboard with thread safety"""
         with self._lock:
             # Reload to ensure we have latest data
@@ -175,7 +199,8 @@ class DashboardManager:
             dashboard = self.dashboards.get(dashboard_id)
             if not dashboard:
                 return None
-            
+
+            snapshot = self._snapshot()
             if name is not None:
                 dashboard.name = name
             if description is not None:
@@ -190,8 +215,12 @@ class DashboardManager:
                 dashboard.thresholds = thresholds
             if visibility is not None:
                 dashboard.visibility = visibility
-            
-            self.save_dashboards()
+            if source is not None:
+                # "" is how the form says "the default source", which is a
+                # choice and not an absence: `None` means "leave it alone".
+                dashboard.source = source or None
+
+            self._save_or_restore(snapshot)
             return dashboard
     
     def delete_dashboard(self, dashboard_id):
@@ -201,8 +230,9 @@ class DashboardManager:
             self.load_dashboards()
             
             if dashboard_id in self.dashboards:
+                snapshot = self._snapshot()
                 del self.dashboards[dashboard_id]
-                self.save_dashboards()
+                self._save_or_restore(snapshot)
                 return True
             return False
     

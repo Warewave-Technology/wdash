@@ -299,6 +299,91 @@ class StorageTest(unittest.TestCase):
                          ["keep me"])
 
 
+class FailedWriteTest(unittest.TestCase):
+    """What memory holds after a save that raised.
+
+    The routes say "has NOT been created", "your changes were NOT applied"
+    and "it is still there". Every read in this worker said the opposite,
+    because the mutation happened before the write and nothing put it back —
+    and `_loaded_signature` still matched the untouched file, so no read ever
+    reloaded. The existing tests could not see it: they all call
+    `refresh_cache()` first, which reads the file the save never reached.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp(prefix="wdash-failed-write-")
+        self.storage = os.path.join(self.directory, "dashboards.json")
+        with open(self.storage, "w") as file:
+            file.write("[]")
+        self.manager = DashboardManager(self.storage)
+        self.manager.create_dashboard("keep", "", "*", "u", ["*"])
+        self.manager.create_dashboard("to-delete", "", "*", "u", ["*"])
+        self.ids = {d.name: d.id for d in self.manager.get_all_dashboards()}
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    def unwritable(self):
+        """Point the manager at a directory that does not exist.
+
+        The file keeps its contents, which is the case that matters: the disk
+        still holds the dashboards the user was told they still have.
+        """
+        self.manager.storage_path = os.path.join(
+            self.directory, "gone", "dashboards.json")
+
+    def names(self):
+        """Without refresh_cache: what this worker serves, right now."""
+        return sorted(d.name for d in self.manager.dashboards.values())
+
+    def on_disk(self):
+        with open(self.storage) as file:
+            return sorted(d["name"] for d in json.load(file))
+
+    def test_a_create_that_could_not_be_written_is_not_in_memory_either(self):
+        self.unwritable()
+        with self.assertRaises(DashboardStorageError):
+            self.manager.create_dashboard("phantom", "", "*", "u", ["*"])
+        self.assertEqual(self.names(), ["keep", "to-delete"])
+        self.assertEqual(self.on_disk(), ["keep", "to-delete"])
+
+    def test_an_edit_that_could_not_be_written_is_not_applied_in_memory(self):
+        self.unwritable()
+        with self.assertRaises(DashboardStorageError):
+            self.manager.update_dashboard(self.ids["keep"],
+                                          name="edit-not-applied")
+        self.assertEqual(self.names(), ["keep", "to-delete"])
+        self.assertEqual(self.on_disk(), ["keep", "to-delete"])
+
+    def test_a_delete_that_could_not_be_written_leaves_it_there(self):
+        self.unwritable()
+        with self.assertRaises(DashboardStorageError):
+            self.manager.delete_dashboard(self.ids["to-delete"])
+        self.assertEqual(self.names(), ["keep", "to-delete"])
+        self.assertEqual(self.on_disk(), ["keep", "to-delete"])
+
+    def test_the_next_successful_save_does_not_carry_the_failures_out(self):
+        """The part that reaches the disk: three refusals, then one create,
+        and the file held all four."""
+        self.unwritable()
+        for attempt in (
+                lambda: self.manager.create_dashboard("phantom", "", "*", "u", ["*"]),
+                lambda: self.manager.update_dashboard(self.ids["keep"],
+                                                      name="edit-not-applied"),
+                lambda: self.manager.delete_dashboard(self.ids["to-delete"])):
+            with self.assertRaises(DashboardStorageError):
+                attempt()
+
+        self.manager.storage_path = self.storage
+        self.manager.create_dashboard("next", "", "*", "u", ["*"])
+        self.assertEqual(self.on_disk(), ["keep", "next", "to-delete"])
+
+        fresh = DashboardManager(self.storage)
+        self.assertEqual(sorted(d.name for d in fresh.get_all_dashboards()),
+                         ["keep", "next", "to-delete"])
+
+
 class IsolationTest(unittest.TestCase):
     """A test run must not write into the repository's data directory.
 

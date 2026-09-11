@@ -123,6 +123,29 @@ class UnreachableLokiTest(_Installation):
         self.assertEqual(entry["containers"], [])
         self.assertTrue(entry.get("error"), entry)
 
+    def board(self):
+        """A dashboard owned by the signed-in account, over this source."""
+        manager = self.app.dashboard_manager
+        manager.create_dashboard("Board", "", "*", "owner", ["*"])
+        return next(d.id for d in manager.get_all_dashboards()
+                    if d.name == "Board")
+
+    def test_a_dashboard_names_the_source_that_did_not_answer(self):
+        """It said "Unable to connect to Elasticsearch" whichever backend was
+        down, so a Loki outage sent whoever was looking to a cluster this
+        deployment does not even have."""
+        board = self.board()
+        for endpoint in ("data", "recent-logs", "stats"):
+            with self.subTest(endpoint=endpoint):
+                reply = self.client.get(f"/api/dashboard/{board}/{endpoint}")
+                self.assertEqual(reply.status_code, 503)
+                payload = reply.get_json()
+                self.assertIn(self.NAME, payload["error"])
+                self.assertNotIn("Elasticsearch", payload["error"])
+                # A field of its own as well: the client draws its own
+                # suggestions beside the message.
+                self.assertEqual(payload["source"], self.NAME)
+
     def test_every_source_down_behind_all_sources_is_an_error_too(self):
         """The fan-out took a member's failure as an empty list as well, so
         `All sources` over two dead backends answered "no indices"."""

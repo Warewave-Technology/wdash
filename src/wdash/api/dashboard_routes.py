@@ -214,6 +214,14 @@ def _trace_panels(panels, window, scope):
         return {p["id"]: {"error": "Trace data could not be loaded."}
                 for p in wanted}
 
+    # A service list with one backend missing from it is not a shorter list,
+    # it is a list nobody can read as one: the services that store held are
+    # absent, and the span counts of the ones it shares are short. The
+    # fan-out says so on the answer, and this threw that away — so a store
+    # that did not reply rendered as a service having gone quiet.
+    partial = bool(getattr(services, "partial", False))
+    notes = [str(note) for note in (getattr(services, "warnings", ()) or ())]
+
     orders = {
         "spans": lambda s: s.span_count,
         "errors": lambda s: s.error_count,
@@ -223,7 +231,11 @@ def _trace_panels(panels, window, scope):
     out = {}
     for panel in wanted:
         ranked = sorted(services, key=orders[panel["sort"]], reverse=True)
-        out[panel["id"]] = {"rows": [s.to_dict() for s in ranked[:panel["size"]]]}
+        rendered = {"rows": [s.to_dict() for s in ranked[:panel["size"]]]}
+        if partial:
+            rendered["partial"] = True
+            rendered["warnings"] = notes
+        out[panel["id"]] = rendered
     return out
 
 
@@ -366,7 +378,7 @@ def _panel(dashboard_id, aggregations, empty):
         # looking to check a cluster that is perfectly healthy.
         return {"error": str(exc), "error_type": "source_missing"}, 400
     except Exception as exc:
-        return {"error": str(exc), "error_type": "elasticsearch_connection"}, 503
+        return _unreachable(dashboard, exc), 503
 
     if not allowed:
         return dict(empty), 200
@@ -409,27 +421,67 @@ def _did_not_run(result):
 # --------------------------------------------------------------------------
 
 def _visible(dashboards):
-    """Filter a list to what this person may know exists.
+    """Split a list into what this person may know exists, and what could not
+    be decided. Returns (visible, unchecked, sources).
 
-    The same helper backs the list page and every dashboard endpoint. Using it
-    in one place only would make the API the way around the list, which is not
-    a boundary, it is a speed bump.
+    `unchecked` holds the dashboards hidden only because their source could
+    not say what they reach. They stay hidden — a source being down must not
+    open the list up — but "hidden because you may not see it" and "hidden
+    because nothing could be checked" are different facts, and the page said
+    only the first: three dashboards behind an unreachable Loki were reported
+    as "not shown: either private to their authors, or covering data outside
+    your access", which sends the reader to their administrator to ask for
+    access they already have.
     """
     scope = _scope()
     username = current_user.username
     is_admin = current_user.has_permission("system:admin")
 
-    out = []
+    out, unchecked, sources = [], [], {}
     for dashboard in dashboards:
+        failure = None
         try:
             _, _, allowed = _targets(dashboard, scope)
-        except Exception:
+        except Exception as exc:
             # Cannot tell what it reaches — treat it as unreachable rather than
             # visible. A source being down must not open the list up.
             allowed = []
+            failure = exc
         if can_view(dashboard, username, is_admin, allowed):
             out.append(dashboard)
-    return out
+        elif failure is not None:
+            unchecked.append(dashboard)
+            sources[_source_name(dashboard)] = str(failure)
+    return out, unchecked, sorted(sources)
+
+
+def _source_name(dashboard):
+    """Which source a dashboard reads from, for a message about it failing."""
+    name = getattr(dashboard, "source", None)
+    if name:
+        return str(name)
+    hub = getattr(current_app, "hub", None)
+    try:
+        return hub.logs().name if hub is not None else "the log source"
+    except Exception:
+        return "the log source"
+
+
+def _unreachable(dashboard, exc):
+    """What to say when a source could not tell us what a dashboard reaches.
+
+    It said "Unable to connect to Elasticsearch" whatever the backend was, so
+    a Loki or VictoriaLogs outage sent whoever was looking to a cluster the
+    deployment may not even have. The name is a field of its own as well as
+    part of the sentence, because the client draws its own suggestions beside
+    the message — see the same shape in `log_routes.api_search`.
+    """
+    name = _source_name(dashboard)
+    return {"error": f"Unable to connect to {name}. Please check the "
+                     f"connection.",
+            "error_type": "elasticsearch_connection",
+            "source": name,
+            "details": str(exc)}
 
 
 def _may_view(dashboard):
@@ -455,7 +507,7 @@ def dashboards_page():
         return redirect(url_for("index"))
 
     everything = _manager().get_all_dashboards()
-    visible = _visible(everything)
+    visible, unchecked, unchecked_sources = _visible(everything)
 
     # Paged AFTER the visibility filter, deliberately.
     #
@@ -490,7 +542,14 @@ def dashboards_page():
         # Said plainly rather than left as a gap in a list: "there are 4 more
         # you cannot see" is information somebody needs to ask the right
         # question, and hiding the count only makes them ask the wrong one.
-        hidden_count=len(everything) - len(visible),
+        #
+        # The ones nothing could be checked for are counted apart from it. A
+        # backend outage folded into "private, or outside your access" is a
+        # failure wearing the clothes of a boundary, and the reader acts on
+        # the wrong one.
+        hidden_count=len(everything) - len(visible) - len(unchecked),
+        unchecked_count=len(unchecked),
+        unchecked_sources=unchecked_sources,
         can_create=current_user.has_permission("dashboard:create"))
 
 
@@ -571,6 +630,15 @@ def _dashboard_form():
     except ThresholdError as exc:
         return None, str(exc)
 
+    # Which source this dashboard reads from. Validated against the names the
+    # hub actually has: a stored name that is not configured is reported to
+    # every reader for ever ("reads from 'loki', which is not configured"),
+    # and the place to catch that is here, once, where it was typed.
+    source = (request.form.get("source") or "").strip()
+    if source and source not in _source_names():
+        return None, (f"There is no log source called '{source}'. "
+                      f"Configured: {', '.join(_source_names()) or 'none'}.")
+
     return {
         "name": name,
         "description": (request.form.get("description") or "").strip(),
@@ -579,7 +647,17 @@ def _dashboard_form():
         "panels": panels,
         "thresholds": thresholds,
         "visibility": request.form.get("visibility"),
+        # "" is a choice — "the default source" — and the stores read it as
+        # one. Omitting the key would mean "leave it alone", which is not what
+        # a form with the field cleared is saying.
+        "source": source,
     }, None
+
+
+def _source_names():
+    """The configured log sources, in the order the hub holds them."""
+    hub = getattr(current_app, "hub", None)
+    return [source.name for source in (hub.log_sources if hub else [])]
 
 
 @dashboard_bp.route("/dashboard/create", methods=["GET", "POST"])
@@ -595,6 +673,7 @@ def create_dashboard():
         if error:
             flash(error, "error")
             return render_template("dashboard_create.html", indices=indices,
+                                   sources=_source_names(),
                                    visibilities=VISIBILITIES)
 
         try:
@@ -605,12 +684,14 @@ def create_dashboard():
             flash("The dashboard could not be saved and has NOT been created. "
                   "Check the server logs and try again.", "error")
             return render_template("dashboard_create.html", indices=indices,
+                                   sources=_source_names(),
                                    visibilities=VISIBILITIES)
 
         flash("Dashboard created successfully", "success")
         return redirect(url_for("dashboards.view_dashboard", dashboard_id=dashboard.id))
 
     return render_template("dashboard_create.html", indices=indices,
+                           sources=_source_names(),
                            visibilities=VISIBILITIES)
 
 
@@ -654,6 +735,7 @@ def edit_dashboard(dashboard_id):
                                    panels=dashboard.get_panels(),
                                    aggregatable_fields=list(AGGREGATABLE_FIELDS),
                            thresholds=dashboard.thresholds,
+                           sources=_source_names(),
                            visibilities=VISIBILITIES)
         # The revision the form was rendered from. The database store refuses
         # a write against a stale one — its docstring said "the edit form
@@ -693,6 +775,7 @@ def edit_dashboard(dashboard_id):
                            panels=dashboard.get_panels(),
                            aggregatable_fields=list(AGGREGATABLE_FIELDS),
                            thresholds=dashboard.thresholds,
+                           sources=_source_names(),
                            visibilities=VISIBILITIES)
 
 
@@ -751,9 +834,7 @@ def api_dashboard_data(dashboard_id):
     except SourceMissing as exc:
         return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
     except Exception as exc:
-        return jsonify({"error": "Unable to connect to Elasticsearch.",
-                        "error_type": "elasticsearch_connection",
-                        "details": str(exc)}), 503
+        return jsonify(_unreachable(dashboard, exc)), 503
 
     if not allowed:
         # Returning empty data beats an error: the dashboard opens with a blank panel
@@ -992,8 +1073,7 @@ def api_dashboard_recent_logs(dashboard_id):
     except Exception as exc:
         # Not "no records": the source could not say what the dashboard
         # reaches, which is a different answer and needs a different look.
-        return jsonify({"error": str(exc),
-                        "error_type": "elasticsearch_connection"}), 503
+        return jsonify(_unreachable(dashboard, exc)), 503
     if not allowed:
         return jsonify({"records": []})
 

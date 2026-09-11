@@ -60,15 +60,20 @@ function queryValue(value) {
 class AsyncDashboard {
     constructor(dashboardId, dashboardQuery) {
         this.dashboardId = dashboardId;
-        // Carried into every click-through so a drill-down never widens the
-        // scope the dashboard was defined with.
+        // Carried into every click-through, along with the dashboard's id:
+        // the query narrows what is asked, and the id is what narrows WHERE
+        // it is asked — the containers the dashboard's patterns resolve to.
+        // Without the id the Logs screen answered from the whole scope.
         this.dashboardQuery = dashboardQuery || '*';
         this.lastData = null;
         this.charts = {};
         this.autoRefreshInterval = null;
         this.isAutoRefreshing = false;
         this.loading = false;
-        
+        //: A load asked for while one was running, to be run when it ends.
+        this.pending = null;
+
+
         this.init();
     }
 
@@ -197,7 +202,21 @@ class AsyncDashboard {
      * everyone to ignore toasts — including the one that matters.
      */
     async load({ quiet = false } = {}) {
-        if (this.loading) return;
+        // A change made while a load is running is QUEUED, not dropped.
+        //
+        // It used to return here and leave nothing behind. The handlers for
+        // the time range, the filter and the clear button all call syncUrl()
+        // and then load(), so a change made during a load moved the select,
+        // moved the address bar, and then never asked: the page showed the
+        // last hour's answer under a control reading "24 hours", the URL said
+        // ?time_range=24h, and a green "loaded" toast said it had worked.
+        if (this.loading) {
+            this.pending = this.pending || {};
+            // The queued load is a user action unless every request that
+            // arrived while this one ran was a background refresh.
+            this.pending.quiet = Boolean(this.pending.quiet ?? true) && quiet;
+            return;
+        }
         this.loading = true;
 
         if (!quiet) this.showAllLoadingStates();
@@ -216,7 +235,9 @@ class AsyncDashboard {
             this.showMessage(data.error || '', data.warnings,
                              data.error ? 'warning' : 'info');
 
-            if (lastUpdatedEl) lastUpdatedEl.textContent = new Date().toLocaleString();
+            if (lastUpdatedEl && !this.pending) {
+                lastUpdatedEl.textContent = new Date().toLocaleString();
+            }
         } catch (error) {
             console.error('Dashboard load failed:', error);
             if (lastUpdatedEl) lastUpdatedEl.textContent = 'Failed to load';
@@ -224,6 +245,12 @@ class AsyncDashboard {
                                error.payload);
         } finally {
             this.loading = false;
+            const queued = this.pending;
+            this.pending = null;
+            // Run the newest request, and only the newest: the controls hold
+            // one state, so several changes made during one load all ask for
+            // the same thing.
+            if (queued) await this.load(queued);
         }
     }
 
@@ -373,9 +400,26 @@ class AsyncDashboard {
         slot.className = `col-md-${panel.width} panel-slot`;
         slot.dataset.panelId = panel.id;
         slot.querySelector('.panel-title').textContent = panel.title;
-        slot.querySelector('.panel-hint').textContent =
-            panel.type === 'timeseries' ? 'Click a segment to open those records'
-                                        : 'Click a value to filter by it';
+
+        // A panel whose source answered for only some of its backends says so
+        // where its numbers are. It used to draw the rows it got and nothing
+        // else, so a trace store that did not reply looked like a service
+        // that had gone quiet — which is the one reading this panel exists to
+        // support.
+        const hint = slot.querySelector('.panel-hint');
+        const notes = (panel.warnings || []).filter(Boolean);
+        if (panel.partial) {
+            hint.className = 'text-warning panel-hint';
+            hint.textContent = notes.length
+                ? `Incomplete: ${notes.join('; ')}`
+                : 'Incomplete: a store did not answer, so these are a lower bound.';
+        } else {
+            hint.className = 'text-muted panel-hint';
+            hint.textContent =
+                panel.type === 'timeseries' ? 'Click a segment to open those records'
+                                            : 'Click a value to filter by it';
+        }
+        hint.style.fontSize = '.7rem';
         return slot;
     }
 
@@ -702,6 +746,14 @@ class AsyncDashboard {
 
         const params = new URLSearchParams();
         params.set('query', clauses.length ? clauses.join(' AND ') : '*');
+        // The dashboard itself, so the Logs screen can be answered inside its
+        // reach. The query alone was not enough: the dashboard queries its own
+        // index patterns intersected with the viewer's scope, and /api/search
+        // with no dashboard searches everything the scope allows — so a
+        // drill-down from a dashboard scoped to `app-logs-*` returned records
+        // from every index the role could read: 91,407 against the lab where
+        // the card said 30,576.
+        params.set('dashboard', this.dashboardId);
 
         if (start && end) {
             params.set('start', this.pickerTime(start));
@@ -908,7 +960,13 @@ class AsyncDashboard {
         const container = slot.querySelector('.chart-container');
 
         if (!rows.length) {
-            this.panelMessage(panel.id, 'No trace data in this window');
+            // An empty list from a store that did not answer is not an empty
+            // window, and "No trace data in this window" is the one sentence
+            // that cannot be told apart from it.
+            this.panelMessage(panel.id, panel.partial
+                ? ((panel.warnings || []).filter(Boolean).join('; ')
+                   || 'No trace data could be read: a store did not answer.')
+                : 'No trace data in this window');
             return;
         }
 
