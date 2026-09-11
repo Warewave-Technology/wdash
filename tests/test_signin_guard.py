@@ -19,7 +19,8 @@ from sqlalchemy import create_engine  # noqa: E402
 
 from wdash.store.schema import metadata, signin_attempts  # noqa: E402
 from wdash.store.signin import (  # noqa: E402
-    FAILURE, LOCKED, SUCCESS, Limit, SignInGuard, client_address)
+    FAILURE, LOCKED, REFUSED, SUCCESS, UNAVAILABLE, Limit, SignInGuard,
+    client_address)
 
 
 class GuardTestCase(unittest.TestCase):
@@ -34,7 +35,10 @@ class GuardTestCase(unittest.TestCase):
         self.engine.dispose()
         os.unlink(self.database)
 
-    def fail(self, times, username="owner", address="10.0.0.1"):
+    # Not `fail`: that is TestCase's own, and every assertion calls it. Named
+    # so, a failed assertion here called this with its message as `times`
+    # and was reported as a TypeError instead of the failure it was.
+    def guess(self, times, username="owner", address="10.0.0.1"):
         for _ in range(times):
             self.guard.record(username, address, FAILURE)
 
@@ -55,11 +59,11 @@ class GuardTestCase(unittest.TestCase):
 class ThresholdTest(GuardTestCase):
     def test_an_ordinary_mistype_is_not_punished(self):
         """Four wrong passwords is a person, not an attack."""
-        self.fail(4)
+        self.guess(4)
         self.assertIsNone(self.guard.check("owner", "10.0.0.1"))
 
     def test_repeated_failure_locks_the_pair(self):
-        self.fail(6)
+        self.guess(6)
         lockout = self.guard.check("owner", "10.0.0.1")
         self.assertIsNotNone(lockout, "unlimited guessing was allowed")
         self.assertEqual(lockout.limit, "pair")
@@ -74,7 +78,7 @@ class ThresholdTest(GuardTestCase):
         self.assertEqual(limit.wait_for(500), dt.timedelta(minutes=15))
 
     def test_the_lockout_lifts(self):
-        self.fail(6)
+        self.guess(6)
         self.assertIsNotNone(self.guard.check("owner", "10.0.0.1"))
         self.backdate(dt.timedelta(hours=2))
         self.assertIsNone(self.guard.check("owner", "10.0.0.1"),
@@ -83,9 +87,9 @@ class ThresholdTest(GuardTestCase):
     def test_the_wait_is_measured_from_the_last_failure(self):
         """Measured from the first, the wait is spent while the attacker is
         still going and expires the moment they pause."""
-        self.fail(6)
+        self.guess(6)
         self.backdate(dt.timedelta(minutes=10))
-        self.fail(1)          # still at it
+        self.guess(1)          # still at it
         self.assertIsNotNone(self.guard.check("owner", "10.0.0.1"))
 
 
@@ -93,13 +97,13 @@ class BlastRadiusTest(GuardTestCase):
     """A rate limit that locks the wrong people out is a denial of service."""
 
     def test_one_locked_pair_does_not_lock_the_account_elsewhere(self):
-        self.fail(6, address="10.0.0.1")
+        self.guess(6, address="10.0.0.1")
         self.assertIsNotNone(self.guard.check("owner", "10.0.0.1"))
         self.assertIsNone(self.guard.check("owner", "192.168.1.5"),
                           "an attacker locked the owner out of every machine")
 
     def test_one_locked_pair_does_not_lock_the_address_for_others(self):
-        self.fail(6, username="owner")
+        self.guess(6, username="owner")
         self.assertIsNone(self.guard.check("someone-else", "10.0.0.1"),
                           "one colleague's typo locked out a shared office")
 
@@ -118,6 +122,55 @@ class BlastRadiusTest(GuardTestCase):
             self.guard.record("owner", f"10.0.{index % 250}.1", FAILURE)
         for limit in self.guard._limits:
             self.assertLessEqual(limit.wait_for(200), dt.timedelta(minutes=30))
+
+
+class RefusedAttemptsTest(GuardTestCase):
+    """The account-wide limit counts guesses, not knocks.
+
+    It counted every attempt that was not a success, and that includes the
+    ones this guard itself turned away before any password was checked. So
+    one address that kept sending the break-glass administrator's name
+    locked that account out from every other address after fifty requests —
+    five of them guesses — and the owner's own refused attempts pushed the
+    end of the lockout further away.
+    """
+
+    def knock(self, times, address="6.6.6.6", username="owner"):
+        for _ in range(times):
+            self.guard.record(username, address, LOCKED)
+
+    def test_one_address_knocking_does_not_lock_the_account_elsewhere(self):
+        self.guess(5, address="6.6.6.6")
+        self.knock(45)
+        self.assertIsNone(self.guard.check("owner", "10.0.0.5"),
+                          "fifty requests from one address locked the owner out")
+
+    def test_the_knocking_address_stays_locked(self):
+        """The pair and address limits still count refusals: they only ever
+        hold back the address sending them, and it keeps sending."""
+        self.guess(6, address="6.6.6.6")
+        self.backdate(dt.timedelta(minutes=14))
+        self.knock(3)
+        self.assertIsNotNone(self.guard.check("owner", "6.6.6.6"))
+
+    def test_the_owners_refused_attempts_do_not_extend_it(self):
+        for index in range(60):
+            self.guard.record("owner", f"10.1.{index}.1", FAILURE)
+        before = self.guard.check("owner", "10.0.0.5").until
+        self.backdate(dt.timedelta(minutes=1))
+        self.knock(5, address="10.0.0.5")
+        after = self.guard.check("owner", "10.0.0.5")
+        self.assertIsNotNone(after)
+        self.assertLessEqual(after.until, before)
+
+    def test_an_outage_or_a_refused_name_counts_against_no_limit(self):
+        """Neither is a guess: the directory could not answer, or a provider
+        asserted a name that belongs to a local account."""
+        for outcome in (UNAVAILABLE, REFUSED):
+            for index in range(60):
+                self.guard.record("owner", "10.0.0.7", outcome)
+        self.assertIsNone(self.guard.check("owner", "10.0.0.7"))
+        self.assertIsNone(self.guard.check("someone", "10.0.0.7"))
 
 
 class SprayTest(GuardTestCase):
@@ -139,9 +192,9 @@ class SprayTest(GuardTestCase):
 
 class SuccessTest(GuardTestCase):
     def test_signing_in_resets_the_counter_for_that_pair(self):
-        self.fail(4)
+        self.guess(4)
         self.guard.record("owner", "10.0.0.1", SUCCESS)
-        self.fail(4)
+        self.guess(4)
         self.assertIsNone(self.guard.check("owner", "10.0.0.1"),
                           "the counter never reset after a real sign-in")
 
@@ -153,7 +206,7 @@ class SuccessTest(GuardTestCase):
         got them there — on the one screen an administrator would look at
         afterwards.
         """
-        self.fail(4)
+        self.guess(4)
         self.guard.record("owner", "10.0.0.1", SUCCESS)
         outcomes = [row["outcome"] for row in self.guard.recent()]
         self.assertEqual(outcomes.count(FAILURE), 4,
@@ -161,7 +214,7 @@ class SuccessTest(GuardTestCase):
 
     def test_a_success_here_does_not_reset_the_counter_there(self):
         """Otherwise an attacker arranges a success of their own to reset it."""
-        self.fail(6, address="10.0.0.99")
+        self.guess(6, address="10.0.0.99")
         self.guard.record("owner", "10.0.0.1", SUCCESS)
         self.assertIsNotNone(self.guard.check("owner", "10.0.0.99"),
                              "a sign-in elsewhere lifted a lockout")
@@ -189,13 +242,13 @@ class RecordKeepingTest(GuardTestCase):
         self.assertEqual(self.guard.recent()[0]["outcome"], LOCKED)
 
     def test_old_attempts_are_pruned(self):
-        self.fail(3)
+        self.guess(3)
         self.backdate(dt.timedelta(days=60))
         self.guard.prune()
         self.assertEqual(self.guard.recent(), [])
 
     def test_pruning_keeps_what_is_still_relevant(self):
-        self.fail(3)
+        self.guess(3)
         self.guard.prune()
         self.assertEqual(len(self.guard.recent()), 3)
 

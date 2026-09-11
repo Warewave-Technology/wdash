@@ -179,6 +179,9 @@ class RoleRepository:
                 "rbac.default_role", (parsed or {}).get("default_role", "viewer"))
             settings_repository.set(
                 "rbac.user_roles", (parsed or {}).get("user_roles") or {})
+            if (parsed or {}).get("claim_mappings"):
+                settings_repository.set(
+                    "rbac.claim_mappings", dict(parsed["claim_mappings"]))
 
         logger.info(
             f"Seeded {len(roles_source)} roles from "

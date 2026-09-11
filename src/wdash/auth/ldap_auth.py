@@ -17,6 +17,12 @@ How a sign-in works
 Step 2 is the one people get wrong. Searching with a service account and
 treating "found" as "authenticated" is a complete authentication bypass, and it
 looks like working code.
+
+A wrong password and a directory that could not answer are different outcomes.
+The second raises `DirectoryUnavailable`: it was returned as "no such user", so
+an outage — or a service account whose password had changed — was recorded as
+a failed guess against every name that tried, and five tries locked people out
+of an account that was fine.
 """
 
 import logging
@@ -25,6 +31,14 @@ import re
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 10
+
+#: LDAP result code for a bind with the wrong password (RFC 4511).
+INVALID_CREDENTIALS = 49
+
+
+class DirectoryUnavailable(RuntimeError):
+    """The directory could not answer: unreachable, its certificate refused,
+    the service account refused, or a search that failed."""
 
 #: Characters that would change the meaning of an LDAP filter. A username is
 #: interpolated into one, so it is escaped the way RFC 4515 requires — the
@@ -38,14 +52,51 @@ def escape_filter(value):
     return "".join(_ESCAPES.get(char, char) for char in value or "")
 
 
-def _connection(server_uri, user=None, password=None, receive_timeout=TIMEOUT):
+def _tls(settings):
+    """How ldaps:// is checked: the certificate and the name on it.
+
+    ldap3's own default is CERT_NONE, and the password a person types is sent
+    in the bind that follows — so anybody between WDash and the directory
+    could present any certificate and read it. The system's CAs are used
+    unless a CA file is given; turning the check off is a setting somebody
+    has to choose, and it is logged every time.
+    """
+    import ssl
+    from ldap3 import Tls
+
+    if settings.get("verify_certs", True) is False:
+        logger.warning("LDAP: certificate verification is OFF for "
+                       f"{settings.get('server')}; a password can be read by "
+                       f"anything that answers in the directory's place")
+        return Tls(validate=ssl.CERT_NONE)
+    return Tls(validate=ssl.CERT_REQUIRED,
+               ca_certs_file=settings.get("ca_certs") or None)
+
+
+def _connection(settings, user=None, password=None, receive_timeout=TIMEOUT):
     from ldap3 import ALL, Connection, Server
 
+    server_uri = settings["server"]
     use_ssl = server_uri.lower().startswith("ldaps://")
     server = Server(server_uri, get_info=ALL, connect_timeout=receive_timeout,
-                    use_ssl=use_ssl)
+                    use_ssl=use_ssl, tls=_tls(settings) if use_ssl else None)
     return Connection(server, user=user, password=password,
                       auto_bind=False, receive_timeout=receive_timeout)
+
+
+def _bind(connection, who):
+    """True on success, False on a wrong password, raising otherwise."""
+    from ldap3.core.exceptions import LDAPException
+    try:
+        if connection.bind():
+            return True
+    except LDAPException as exc:
+        raise DirectoryUnavailable(f"{who} could not bind: {exc}") from exc
+    code = (connection.result or {}).get("result")
+    if code == INVALID_CREDENTIALS:
+        return False
+    raise DirectoryUnavailable(
+        f"{who} could not bind: {(connection.result or {}).get('description')}")
 
 
 def authenticate(settings, username, password):
@@ -70,9 +121,9 @@ def authenticate(settings, username, password):
         return None
 
     # THE actual check: bind as that user with the password they typed.
-    connection = _connection(settings["server"], user=user_dn, password=password)
+    connection = _connection(settings, user=user_dn, password=password)
     try:
-        if not connection.bind():
+        if not _bind(connection, "the user"):
             logger.info(f"LDAP: bind rejected for {username!r}")
             return None
     finally:
@@ -90,24 +141,41 @@ def authenticate(settings, username, password):
 
 
 def _find_user(settings, user_filter):
-    """Locate the user entry, returning (dn, attributes)."""
+    """Locate the user entry, returning (dn, attributes).
+
+    Raises DirectoryUnavailable when the directory cannot say: a service
+    account that cannot bind is a configuration fault, not an unknown user,
+    and so is a search that fails — a base DN that does not exist answered
+    exactly like a name that does not.
+    """
     from ldap3 import SUBTREE
+    from ldap3.core.exceptions import LDAPException
 
     bind_dn = settings.get("bind_dn") or None
-    connection = _connection(settings["server"], user=bind_dn,
+    connection = _connection(settings, user=bind_dn,
                              password=settings.get("bind_password") or None)
     try:
-        if not connection.bind():
-            logger.error("LDAP: the service account could not bind")
-            return None, {}
+        if not _bind(connection, "the service account"):
+            raise DirectoryUnavailable("the service account could not bind: "
+                                       "its password was refused")
 
         group_attribute = settings.get("group_attribute") or "memberOf"
-        found = connection.search(
-            search_base=settings["base_dn"], search_filter=user_filter,
-            search_scope=SUBTREE, attributes=["mail", "cn", group_attribute],
-            size_limit=2)
+        try:
+            found = connection.search(
+                search_base=settings["base_dn"], search_filter=user_filter,
+                search_scope=SUBTREE, attributes=["mail", "cn", group_attribute],
+                size_limit=2)
+        except LDAPException as exc:
+            raise DirectoryUnavailable(f"the search failed: {exc}") from exc
 
-        if not found or not connection.entries:
+        code = (connection.result or {}).get("result")
+        # 0 is success and 4 is sizeLimitExceeded, which size_limit=2 asks
+        # for when the filter matches several; anything else is the search
+        # failing, not the user being absent.
+        if not found and code not in (0, 4):
+            raise DirectoryUnavailable(
+                f"the search failed: {(connection.result or {}).get('description')}")
+        if not connection.entries:
             return None, {}
         if len(connection.entries) > 1:
             # An ambiguous filter must not silently pick the first match: which

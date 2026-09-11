@@ -88,6 +88,15 @@ class Config:
     OIDC_CLIENT_SECRET = os.environ.get('OIDC_CLIENT_SECRET')
     OIDC_DISCOVERY_URL = os.environ.get('OIDC_DISCOVERY_URL')
     OIDC_REDIRECT_URI = os.environ.get('OIDC_REDIRECT_URI') or 'http://127.0.0.1:5001/auth/callback'
+    # Which claims name a person. Unset falls back to rbac.yaml's
+    # claim_mappings, then to preferred_username / email / groups.
+    OIDC_USERNAME_CLAIM = os.environ.get('OIDC_USERNAME_CLAIM')
+    OIDC_EMAIL_CLAIM = os.environ.get('OIDC_EMAIL_CLAIM')
+    OIDC_GROUPS_CLAIM = os.environ.get('OIDC_GROUPS_CLAIM')
+    # An email is used only when the provider says it is verified. A provider
+    # that never sends email_verified needs this to be trusted at all.
+    OIDC_TRUST_UNVERIFIED_EMAIL = (os.environ.get('OIDC_TRUST_UNVERIFIED_EMAIL', '')
+                                   .lower() in ('1', 'true', 'yes'))
     #: What to ask the provider for. `groups` is included because roles are
     #: mapped from groups, and a provider that gates that claim behind a
     #: scope sends nothing without it — which reaches WDash as "this person

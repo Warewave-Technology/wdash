@@ -477,6 +477,13 @@ def save_auth():
             "client_id": (request.form.get("client_id") or "").strip(),
             "discovery_url": (request.form.get("discovery_url") or "").strip(),
             "redirect_uri": (request.form.get("redirect_uri") or "").strip(),
+            # Blank is "use the default", and saved as blank so a default
+            # that changes reaches this installation too.
+            "username_claim": (request.form.get("username_claim") or "").strip(),
+            "email_claim": (request.form.get("email_claim") or "").strip(),
+            "groups_claim": (request.form.get("groups_claim") or "").strip(),
+            "trust_unverified_email":
+                request.form.get("trust_unverified_email") == "on",
             "enabled": request.form.get("enabled") == "on",
         }
         secret = request.form.get("client_secret") or None
@@ -488,6 +495,8 @@ def save_auth():
             "base_dn": (request.form.get("base_dn") or "").strip(),
             "user_filter": (request.form.get("user_filter") or "").strip(),
             "group_attribute": (request.form.get("group_attribute") or "").strip(),
+            "verify_certs": request.form.get("verify_certs") == "on",
+            "ca_certs": (request.form.get("ca_certs") or "").strip(),
             "enabled": request.form.get("enabled") == "on",
         }
         secret = request.form.get("bind_password") or None

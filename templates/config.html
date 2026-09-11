@@ -158,10 +158,43 @@
                      {% if not secrets_available %}disabled{% endif %}>
               <div class="form-text">Stored encrypted and never shown again.</div>
             </div>
-            <div class="mb-3">
+            <div class="mb-2">
               <label class="form-label small">Redirect URI</label>
               <input class="form-control form-control-sm" name="redirect_uri"
                      value="{{ oidc.value.redirect_uri if oidc.value else '' }}">
+            </div>
+            <div class="row g-2 mb-2">
+              {% for field, default in (("username_claim", "preferred_username"),
+                                        ("email_claim", "email"),
+                                        ("groups_claim", "groups")) %}
+              <div class="col-md-4">
+                <label class="form-label small">{{ field.replace('_claim', '') | capitalize }} claim</label>
+                <input class="form-control form-control-sm" name="{{ field }}"
+                       placeholder="{{ default }}"
+                       value="{{ oidc.value[field] if oidc.value and oidc.value[field] else '' }}">
+              </div>
+              {% endfor %}
+              <div class="form-text">
+                Blank uses rbac.yaml's <code>claim_mappings</code>, then the
+                placeholder. A username claim is what ownership and name
+                mappings trust: pick one your users cannot edit. A dotted name
+                reaches into an object (<code>realm_access.roles</code>).
+              </div>
+            </div>
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox"
+                     name="trust_unverified_email" id="oidcTrustEmail"
+                     {% if oidc.value and oidc.value.trust_unverified_email %}checked{% endif %}>
+              <label class="form-check-label small" for="oidcTrustEmail">
+                Trust an email the provider has not marked verified
+              </label>
+              <div class="form-text">
+                Off, an email counts only when the provider sends
+                <code>email_verified: true</code> — otherwise anybody able to
+                set their own address could take a mapping written against
+                somebody else's. On only for a provider that never sends the
+                claim and lets nobody edit the address.
+              </div>
             </div>
             <button class="btn btn-primary btn-sm">Save OIDC settings</button>
           </form>
@@ -209,12 +242,38 @@
                      placeholder="(uid={username})"
                      value="{{ ldap.value.user_filter if ldap.value else '' }}">
             </div>
-            <div class="mb-3">
+            <div class="mb-2">
               <label class="form-label small">Group attribute</label>
               <input class="form-control form-control-sm" name="group_attribute"
                      placeholder="memberOf"
                      value="{{ ldap.value.group_attribute if ldap.value else '' }}">
             </div>
+            <div class="mb-2">
+              <label class="form-label small">CA certificate file
+                <span class="text-muted">(optional)</span></label>
+              <input class="form-control form-control-sm" name="ca_certs"
+                     placeholder="/etc/ssl/certs/corp-ca.pem — blank uses the system's"
+                     value="{{ ldap.value.ca_certs if ldap.value and ldap.value.ca_certs else '' }}">
+            </div>
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" name="verify_certs"
+                     id="ldapVerify"
+                     {% if not ldap.value or ldap.value.verify_certs is not defined or ldap.value.verify_certs %}checked{% endif %}>
+              <label class="form-check-label small" for="ldapVerify">
+                Verify the directory's certificate (ldaps://)
+              </label>
+              <div class="form-text">
+                The bind that follows carries the password a person typed.
+                Unchecked, anything that answers in the directory's place reads it.
+              </div>
+            </div>
+            {% if ldap.value and (ldap.value.server or '').lower().startswith('ldap://') %}
+            <div class="alert alert-warning py-1 px-2 mb-2" style="font-size:.8rem">
+              <i class="fas fa-triangle-exclamation"></i>
+              <code>ldap://</code> sends every password in clear text. Use
+              <code>ldaps://</code>.
+            </div>
+            {% endif %}
             <button class="btn btn-primary btn-sm">Save LDAP settings</button>
           </form>
         </div>

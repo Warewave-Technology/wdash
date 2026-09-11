@@ -8,7 +8,9 @@ from flask_login import current_user, login_user, logout_user, login_required
 from authlib.integrations.flask_client import OAuth
 
 from ..models import User
-from ..store.signin import FAILURE, LOCKED, SUCCESS, client_address
+from ..store.signin import (
+    FAILURE, LOCKED, REFUSED, SUCCESS, UNAVAILABLE, client_address)
+from .ldap_auth import DirectoryUnavailable
 from .providers import ldap_settings, oidc_settings
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/auth')
@@ -31,9 +33,10 @@ def init_oauth(app, settings=None):
         client_secret=settings['client_secret'],
         server_metadata_url=settings['discovery_url'],
         # `groups` is in the default because this product maps groups to
-        # roles — `rbac.yaml` has a `groups_claim` and the callback below
-        # reads it — and a provider that gates the claim behind a scope sends
-        # nothing without it. Dex does; so do Keycloak and Okta with the
+        # roles — the callback reads the groups claim (`groups_claim`,
+        # rbac.yaml's `claim_mappings` or the configuration page) — and a
+        # provider that gates the claim behind a scope sends nothing
+        # without it. Dex does; so do Keycloak and Okta with the
         # usual configuration.
         #
         # Measured in the lab: without this every OIDC identity signed in
@@ -147,7 +150,26 @@ def login():
     account = store.users.verify(username, password)
 
     if account is None and directory is not None:
-        account = _authenticate_directory(directory, username, password)
+        try:
+            account = _authenticate_directory(directory, username, password)
+        except DirectoryUnavailable as exc:
+            # Not a wrong password, and not recorded as one: counted as a
+            # guess, an outage locked people out of accounts that were fine,
+            # and the page told them their password was wrong.
+            store.signin.record(username, address, UNAVAILABLE)
+            current_app.logger.error(f"LDAP could not answer: {exc}")
+            flash('The directory could not be reached, so the password could '
+                  'not be checked. Try again shortly, or sign in with a local '
+                  'account.', 'error')
+            return render_template('login.html', oidc_available=oidc_available,
+                                   ldap_available=True, local_available=True,
+                                   username=username), 503
+        if account and _local_name_taken(store, account['username'],
+                                         account.get('email'), 'directory',
+                                         address):
+            return render_template('login.html', oidc_available=oidc_available,
+                                   ldap_available=True, local_available=True,
+                                   username=username), 403
 
     if not account:
         # One message for every failure. Saying which half was wrong tells an
@@ -189,16 +211,49 @@ def _describe_wait(seconds):
     return "a minute" if minutes == 1 else f"{minutes} minutes"
 
 
+def _local_name_taken(store, username, email, method, address):
+    """True, having refused and said so, when a provider asserts a name that
+    belongs to a local account.
+
+    Ownership here is the username: dashboards, saved searches and a
+    mapping written against a name all follow it. So an identity provider
+    that let somebody call themselves `owner` — preferred_username is
+    whatever the provider allows a user to edit — handed them the
+    break-glass administrator's private dashboards and whatever the name was
+    mapped to. A local name is the local account's; a provider may not
+    claim it.
+    """
+    if store.users.by_username(username) is None:
+        return False
+    store.signin.record(username, address, REFUSED)
+    store.audit.record(username, "sign-in refused", subject=f"user:{username}",
+                       address=address,
+                       state={"method": method, "email": email or None,
+                              "reason": "the name belongs to a local account"})
+    current_app.logger.warning(
+        f"Refused a {method} sign-in as {username!r}: that name is a local "
+        f"account")
+    flash(f'"{username}" is the name of a local account here, so it cannot '
+          f'be used to sign in through {method}. Ask an administrator.',
+          'error')
+    return True
+
+
 def _authenticate_directory(settings, username, password):
-    """Check credentials against LDAP. Returns an account-shaped dict, or None."""
+    """Check credentials against LDAP. Returns an account-shaped dict, or None.
+
+    Raises DirectoryUnavailable when the directory could not answer — any
+    failure of its own counts as that, never as a wrong password.
+    """
     from .ldap_auth import authenticate
 
     try:
         result = authenticate(settings, username, password)
+    except DirectoryUnavailable:
+        raise
     except Exception as exc:
         # A directory outage must not surface as a stack trace on a login form.
-        current_app.logger.error(f"LDAP authentication failed: {exc}")
-        return None
+        raise DirectoryUnavailable(str(exc)) from exc
 
     if result is None:
         return None
@@ -253,11 +308,14 @@ def callback():
         if not user_info:
             user_info = oidc.parse_id_token(token, nonce=nonce)
         
-        # Extract user information
-        email = user_info.get('email', '')
-        username = user_info.get('preferred_username', email)
-        groups = user_info.get('groups', [])
-        
+        email, username, groups = _identity(user_info, settings)
+        address = client_address(
+            request, current_app.config.get('TRUSTED_PROXY_COUNT', 0))
+        store = _store()
+        if store is not None and _local_name_taken(store, username, email,
+                                                   'oidc', address):
+            return redirect(url_for('auth.login'))
+
         # Create user object
         user = User(
             user_id=str(uuid.uuid4()),
@@ -269,13 +327,11 @@ def callback():
         # Role and boundaries come from the store, resolved on every request
         # from here on; nothing is frozen into the session.
         _start_session(user)
-        store = _store()
         if store is not None:
             store.audit.record(
                 username, "sign-in", subject=f"user:{username}",
-                address=client_address(
-                    request, current_app.config.get('TRUSTED_PROXY_COUNT', 0)),
-                state={"method": "oidc"})
+                address=address,
+                state={"method": "oidc", "email_verified": bool(email)})
         current_app.logger.info(f"Sign-in: {username} via oidc")
         flash(f'Welcome {username}! Role: {user.role}', 'success')
 
@@ -289,6 +345,48 @@ def callback():
         flash('Sign-in failed. Please try again, or contact your '
               'administrator if this continues.', 'error')
         return redirect(url_for('auth.login'))
+
+def _claim(info, name):
+    """A claim by name, a dotted name reaching into an object: Keycloak puts
+    realm roles at `realm_access.roles`."""
+    value = info
+    for part in (name or "").split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
+def _identity(info, settings):
+    """(email, username, groups) from the provider's claims.
+
+    The email is used only when the provider says it is verified. It was used
+    as sent, and mappings and roles are written against it: somebody who
+    could set their own address at the provider — an account console,
+    self-registration, a multi-tenant provider — set it to one mapped to
+    admin and was admin. A provider that never sends `email_verified` has to
+    be trusted explicitly, on the configuration page.
+
+    The username falls back to the verified email, then to `sub`, which the
+    provider promises is unique and stable. It fell back to the email as
+    sent, unverified, which was the same hole a second time.
+    """
+    verified = info.get("email_verified")
+    verified = verified is True or str(verified).lower() == "true"
+    email = _claim(info, settings.get("email_claim") or "email")
+    email = str(email).strip() if email and (
+        verified or settings.get("trust_unverified_email")) else ""
+
+    username = _claim(info, settings.get("username_claim") or "preferred_username")
+    username = (str(username).strip() if username else "") or email \
+        or str(info.get("sub") or "")
+
+    groups = _claim(info, settings.get("groups_claim") or "groups") or []
+    if isinstance(groups, str):
+        groups = [groups]
+    groups = [str(group) for group in groups if group is not None]
+    return email, username, groups
+
 
 @auth_bp.route('/logout')
 @login_required

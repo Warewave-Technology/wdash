@@ -135,6 +135,35 @@ class DirectorySignInTest(unittest.TestCase):
         who submits a blank field. Worth checking against a real one."""
         self.assertIsNone(authenticate(SETTINGS, "alice", ""))
 
+    # --- a directory that cannot answer is not a wrong password ---
+    #
+    # Each of these returned None — "no such user" — and was recorded as a
+    # failed guess against whoever tried. Measured against this directory.
+
+    def test_a_directory_nobody_is_listening_for_cannot_answer(self):
+        from wdash.auth.ldap_auth import DirectoryUnavailable
+        with self.assertRaises(DirectoryUnavailable):
+            authenticate({**SETTINGS, "server": "ldap://localhost:1"},
+                         "alice", PASSWORD)
+
+    def test_a_service_account_it_refuses_cannot_answer(self):
+        from wdash.auth.ldap_auth import DirectoryUnavailable
+        with self.assertRaises(DirectoryUnavailable):
+            authenticate({**SETTINGS, "bind_password": "not-it"}, "alice", PASSWORD)
+
+    def test_a_base_dn_it_does_not_hold_cannot_answer(self):
+        from wdash.auth.ldap_auth import DirectoryUnavailable
+        with self.assertRaises(DirectoryUnavailable):
+            authenticate({**SETTINGS, "base_dn": "dc=nowhere"}, "alice", PASSWORD)
+
+    def test_its_ldaps_certificate_is_checked(self):
+        """The lab's certificate is self-signed, for a container id, and
+        expired: nothing should accept it. It was never looked at."""
+        from wdash.auth.ldap_auth import DirectoryUnavailable
+        ldaps = LDAP_URL.replace("ldap://", "ldaps://").replace(":1389", ":1636")
+        with self.assertRaises(DirectoryUnavailable):
+            authenticate({**SETTINGS, "server": ldaps}, "alice", PASSWORD)
+
 
 @unittest.skipUnless(DIRECTORY and PROVIDER, _MISSING)
 class ProviderSignInTest(unittest.TestCase):

@@ -33,6 +33,33 @@ def _store(app):
     return getattr(app, "store", None)
 
 
+#: Which claims name a person, unless something more specific says otherwise.
+DEFAULT_CLAIMS = {"username_claim": "preferred_username",
+                  "email_claim": "email", "groups_claim": "groups"}
+
+
+def _claims(app, configured):
+    """The claim names and the email rule, from the most specific place.
+
+    This provider's own settings first, then the `claim_mappings` block
+    rbac.yaml was imported with, then the defaults. That block was shipped,
+    documented and never read: an operator whose provider sends groups as
+    `roles` edited it and every OIDC user still landed on the default role.
+    """
+    store = _store(app)
+    seeded = {}
+    if store is not None:
+        try:
+            seeded = store.settings.get("rbac.claim_mappings") or {}
+        except Exception:
+            seeded = {}
+    configured = configured or {}
+    claims = {key: (configured.get(key) or seeded.get(key) or default)
+              for key, default in DEFAULT_CLAIMS.items()}
+    claims["trust_unverified_email"] = bool(configured.get("trust_unverified_email"))
+    return claims
+
+
 def oidc_settings(app):
     """Effective OIDC settings, or None when no provider is usable.
 
@@ -61,6 +88,7 @@ def oidc_settings(app):
                     "redirect_uri": stored.get("redirect_uri")
                     or app.config.get("OIDC_REDIRECT_URI"),
                     "source": "configuration",
+                    **_claims(app, stored),
                 }
             logger.warning(
                 "OIDC is enabled but incomplete (client id and discovery URL "
@@ -79,6 +107,13 @@ def oidc_settings(app):
             "discovery_url": app.config["OIDC_DISCOVERY_URL"],
             "redirect_uri": app.config.get("OIDC_REDIRECT_URI"),
             "source": "environment",
+            **_claims(app, {
+                "username_claim": app.config.get("OIDC_USERNAME_CLAIM"),
+                "email_claim": app.config.get("OIDC_EMAIL_CLAIM"),
+                "groups_claim": app.config.get("OIDC_GROUPS_CLAIM"),
+                "trust_unverified_email":
+                    app.config.get("OIDC_TRUST_UNVERIFIED_EMAIL"),
+            }),
         }
     return None
 
@@ -111,4 +146,8 @@ def ldap_settings(app):
         "base_dn": stored["base_dn"],
         "user_filter": stored.get("user_filter") or "(uid={username})",
         "group_attribute": stored.get("group_attribute") or "memberOf",
+        # On unless somebody turned it off: settings saved before the switch
+        # existed have no key, and they get the check.
+        "verify_certs": stored.get("verify_certs", True) is not False,
+        "ca_certs": stored.get("ca_certs") or None,
     }

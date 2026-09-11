@@ -39,6 +39,11 @@ from .schema import signin_attempts
 logger = logging.getLogger(__name__)
 
 SUCCESS, FAILURE, LOCKED = "success", "failure", "locked"
+#: An attempt that was not a guess: the directory could not answer, or the
+#: name belongs to a local account and a provider asserted it. Recorded, so
+#: the trail shows it, and counted by no limit — neither says anything about
+#: whether somebody is guessing a password.
+UNAVAILABLE, REFUSED = "unavailable", "refused"
 
 
 class Limit:
@@ -144,9 +149,19 @@ class SignInGuard:
             if last_success is not None:
                 since = max(since, last_success)
 
+        # The account-wide limit counts guesses only. It counted refused
+        # attempts too — the ones this guard turned away before any password
+        # was checked — so one address that kept knocking locked the account
+        # out from every other address, the owner's included, and each of the
+        # owner's own refused attempts pushed the end further away. Fifty
+        # requests from anywhere was a lockout of the break-glass
+        # administrator. The pair and address limits keep counting refusals:
+        # those only ever hold back the address sending them.
+        outcomes = ((FAILURE,) if limit.name == "username"
+                    else (FAILURE, LOCKED))
         query = (select(func.count(), func.max(signin_attempts.c.at))
                  .where(signin_attempts.c.at >= since)
-                 .where(signin_attempts.c.outcome != SUCCESS))
+                 .where(signin_attempts.c.outcome.in_(outcomes)))
 
         if limit.name == "pair":
             query = query.where(signin_attempts.c.username == username)

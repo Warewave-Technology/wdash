@@ -412,6 +412,45 @@ class AuthSettingsTest(ConfigTestCase):
                          "ldaps://ldap:636")
 
 
+class IdentityProviderSettingsTest(AuthSettingsTest):
+    def save_ldap(self, **overrides):
+        form = {"provider": "ldap", "server": "ldaps://ldap:636",
+                "base_dn": "dc=example,dc=com", "enabled": "on",
+                "verify_certs": "on"}
+        form.update(overrides)
+        return self.client.post("/admin/auth", data=form, follow_redirects=True)
+
+    def test_the_claims_and_the_email_rule_are_saved(self):
+        self.save_oidc(username_claim="login", groups_claim="realm_access.roles",
+                       trust_unverified_email="on")
+        stored = self.app.store.settings.get("auth.oidc")
+        self.assertEqual(stored["username_claim"], "login")
+        self.assertEqual(stored["groups_claim"], "realm_access.roles")
+        self.assertTrue(stored["trust_unverified_email"])
+        self.save_oidc()
+        self.assertFalse(self.app.store.settings.get("auth.oidc")
+                         ["trust_unverified_email"])
+
+    def test_the_certificate_check_is_on_unless_turned_off(self):
+        from wdash.auth.providers import ldap_settings
+        # Saved before the switch existed: no key at all.
+        self.app.store.settings.set("auth.ldap", {
+            "enabled": True, "server": "ldaps://ldap:636", "base_dn": "dc=x"})
+        self.assertTrue(ldap_settings(self.app)["verify_certs"])
+        page = self.client.get("/admin/config").get_data(as_text=True)
+        self.assertRegex(page, r'name="verify_certs"\s+id="ldapVerify"\s+checked')
+
+        self.save_ldap(verify_certs="", ca_certs="/etc/ssl/corp.pem")
+        settings = ldap_settings(self.app)
+        self.assertFalse(settings["verify_certs"])
+        self.assertEqual(settings["ca_certs"], "/etc/ssl/corp.pem")
+
+    def test_a_clear_text_directory_is_pointed_out(self):
+        self.save_ldap(server="ldap://ldap:389")
+        self.assertIn(b"sends every password in clear text",
+                      self.client.get("/admin/config").data)
+
+
 class RoleEditingTest(ConfigTestCase):
     def setUp(self):
         super().setUp()

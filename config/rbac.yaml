@@ -96,7 +96,10 @@ user_roles:
 # Applied to authenticated users with no explicit mapping
 default_role: viewer
 
-# OIDC claim mapping
+# Which OIDC claims name a person. Imported with the rest of this file and used
+# unless the configuration page names others. Ownership and name mappings trust
+# the username claim: choose one your users cannot edit. An email counts only
+# when the provider marks it verified.
 claim_mappings:
   email_claim: email
   username_claim: preferred_username

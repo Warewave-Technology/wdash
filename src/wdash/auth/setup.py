@@ -27,6 +27,31 @@ from ..models import User
 from ..store import SetupClosed, WeakPassword
 from .auth import _start_session
 
+
+def _administering_role(store):
+    """A role that can administer, for the account setup creates.
+
+    It was always `admin`. An installation whose rbac.yaml calls its
+    administrator role something else — or has none — got a break-glass
+    account that fell through to the default role: it could sign in and
+    could not open the page that would fix anything.
+    """
+    from ..permissions import PERMISSIONS
+
+    roles = {role["name"]: role for role in store.roles.all()}
+    administering = sorted(name for name, role in roles.items()
+                           if "system:admin" in (role.get("permissions") or []))
+    if "admin" in administering:
+        return "admin"
+    if administering:
+        return administering[0]
+    name = "admin" if "admin" not in roles else "setup-admin"
+    store.roles.upsert(
+        name, permissions=list(PERMISSIONS), containers=["*"],
+        trace_containers=["*"], services=None,
+        description="Created at setup: no role in rbac.yaml could administer.")
+    return name
+
 setup_bp = Blueprint('setup', __name__)
 
 #: Reachable before an account exists. Everything else redirects to setup.
@@ -98,7 +123,8 @@ def first_run():
         return again('The two passwords do not match.')
 
     try:
-        account = store.users.create_first_admin(username, password, email=email)
+        account = store.users.create_first_admin(
+            username, password, role=_administering_role(store), email=email)
     except WeakPassword as exc:
         return again(str(exc))
     except SetupClosed:

@@ -82,7 +82,9 @@ issues carries an explicit authorization scope.
   when somebody needs telling.
 - **Sign-in** — OIDC, LDAP, and a local break-glass account created at first
   run that keeps working when the identity provider does not. Repeated failures
-  are throttled per account, per address and per pair.
+  are throttled per account, per address and per pair. The account-wide limit
+  counts only guesses, so an address knocking on a locked door cannot lock the
+  owner out from everywhere else.
 - **Audit trail** — every configuration change with its resulting state, every
   sign-in, sign-out and lockout, each with the address it came from. Read-only
   from the application, filterable, exportable as JSON lines, and forwardable
@@ -153,6 +155,8 @@ rather than two owners.
 | `OIDC_CLIENT_SECRET` | OIDC client secret | — |
 | `OIDC_DISCOVERY_URL` | Provider discovery document | — |
 | `OIDC_REDIRECT_URI` | Callback URL | `http://127.0.0.1:5001/auth/callback` |
+| `OIDC_USERNAME_CLAIM` / `OIDC_EMAIL_CLAIM` / `OIDC_GROUPS_CLAIM` | Which claims name a person. Unset falls back to rbac.yaml's `claim_mappings`, then `preferred_username` / `email` / `groups` | — |
+| `OIDC_TRUST_UNVERIFIED_EMAIL` | Use an email the provider has not marked verified. Only for a provider that never sends `email_verified` and lets nobody edit the address | `false` |
 | `OIDC_SCOPES` | What to ask the provider for. `groups` is included because roles are mapped from groups, and a provider that gates that claim behind a scope sends nothing without it | `openid email profile groups` |
 | `RBAC_CONFIG_FILE` | Roles imported **once** into the database on a fresh installation, then ignored | `config/rbac.yaml` |
 | `LOGS_PER_PAGE` | Records per page in the log list | `50` |
@@ -185,6 +189,29 @@ only when `DATABASE_URL` points at Postgres — and it is kept behind
 as libraries over their published interfaces, which is what the LGPL is for;
 neither pulls WDash's own licence with it. `tests/test_dependency_licences.py`
 refuses anything proprietary or source-available.
+
+`ldaps://` certificates are checked against the system's CAs, or a CA file
+named on the page. The bind carries the password a person typed, so a
+directory whose certificate is not checked hands that password to anything
+that answers in its place. Turning the check off is a switch somebody has to
+choose, and it is logged on every sign-in. `ldap://` sends passwords in clear
+text, and the page says so. A directory that cannot answer — unreachable, its
+certificate refused, the service account refused, a search that fails — is
+reported as that and answered with a 503. It is not recorded as a wrong
+password, so an outage cannot lock anybody out.
+
+**What a provider may assert about a person.** An OIDC email counts only when
+the provider sends `email_verified: true`: roles can be mapped to an address,
+and a provider that lets people set their own address would otherwise let them
+take somebody else's mapping. A provider that never sends the claim has to be
+trusted explicitly. The username, email and groups claims are chosen on the
+page, in rbac.yaml's `claim_mappings` or with `OIDC_USERNAME_CLAIM`,
+`OIDC_EMAIL_CLAIM` and `OIDC_GROUPS_CLAIM`. A dotted name reaches into an
+object (`realm_access.roles`). Ownership and name mappings trust the username
+claim, so choose one your users cannot edit. Without a username, the fallback is
+the verified email, then `sub`. No provider, OIDC or directory, may sign
+somebody in under the name of a local account: that name owns the break-glass
+administrator's dashboards. Such a sign-in is refused and audited.
 
 ### The configuration page
 

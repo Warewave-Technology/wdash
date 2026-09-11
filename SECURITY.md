@@ -123,7 +123,15 @@ So that a report can say what it got past:
   secrets — and a refusal to store a secret at all when no encryption key is
   configured, rather than writing it as text;
 * sign-in throttling per account, per address and per pair, applied before
-  the password is checked so a lockout also stops the guessing;
+  the password is checked so a lockout also stops the guessing — the
+  account-wide limit counting guesses only, so an address knocking on a
+  locked door cannot lock the owner out everywhere, and a directory outage
+  counting as no guess at all;
+* an OIDC email trusted only when the provider marks it verified, the claims
+  that name a person configurable, and no provider allowed to sign anybody in
+  under a local account's name;
+* `ldaps://` certificates checked, against the system's CAs or a named CA
+  file, with turning the check off an explicit and logged choice;
 * an append-only audit trail, not deletable from the UI, recording refused
   changes as well as accepted ones;
 * a Content-Security-Policy where `script-src` is `'self'` and a

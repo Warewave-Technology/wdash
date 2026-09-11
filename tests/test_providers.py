@@ -194,6 +194,13 @@ class LdapAuthenticationTest(unittest.TestCase):
         self.original_connection = ldap_auth._connection
 
         class FakeConnection:
+            # What ldap3 leaves on a connection after a bind: a rejected
+            # password is result 49, invalidCredentials. Without it a refusal
+            # cannot be told from a directory that failed to answer.
+            result = ({"result": 0, "description": "success"}
+                      if user_bind_succeeds else
+                      {"result": 49, "description": "invalidCredentials"})
+
             def bind(self):
                 return user_bind_succeeds
 

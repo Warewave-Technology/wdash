@@ -415,3 +415,245 @@ class OidcScopeTest(unittest.TestCase):
         A deployment that meets one needs a way out that is not a fork."""
         scope = self._registered_scope({"OIDC_SCOPES": "openid email"})
         self.assertEqual(scope, "openid email")
+
+
+class KnockingTest(IdentityTestCase):
+    """The account-wide limit counted refused attempts. Measured before the
+    fix: fifty POSTs from one address answered 5x401 and 45x429, and the
+    owner, from another address with the right password, got 429."""
+
+    def test_fifty_requests_from_one_address_do_not_lock_the_owner_out(self):
+        self.complete_setup()
+        self.client.get("/auth/logout")
+        for _ in range(50):
+            self.client.post("/auth/login",
+                             data={"username": "owner", "password": "wrong-one-here"},
+                             environ_base={"REMOTE_ADDR": "6.6.6.6"})
+        response = self.client.post(
+            "/auth/login", data={"username": "owner", "password": PASSWORD},
+            environ_base={"REMOTE_ADDR": "10.0.0.5"})
+        self.assertEqual(response.status_code, 302)
+
+
+class DirectoryTest(IdentityTestCase):
+    """What the sign-in page does with what the directory says."""
+
+    SETTINGS = {"server": "ldaps://directory.invalid", "base_dn": "dc=corp"}
+
+    def setUp(self):
+        super().setUp()
+        self.complete_setup()
+        self.client.get("/auth/logout")
+
+    def attempt(self, answer, username="alice", address="10.0.0.9"):
+        from wdash.auth import ldap_auth
+
+        def authenticate(settings, name, password):
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        with unittest.mock.patch("wdash.auth.auth.ldap_settings",
+                                 return_value=self.SETTINGS), \
+             unittest.mock.patch.object(ldap_auth, "authenticate", authenticate):
+            return self.client.post(
+                "/auth/login", data={"username": username, "password": "typed-pw"},
+                environ_base={"REMOTE_ADDR": address})
+
+    def test_an_outage_is_said_as_one_and_counted_as_no_guess(self):
+        """It was "Invalid username or password" and a failure on the
+        record: five of them during an outage locked alice out."""
+        from wdash.auth.ldap_auth import DirectoryUnavailable
+        for _ in range(8):
+            response = self.attempt(DirectoryUnavailable("unreachable"))
+        self.assertEqual(response.status_code, 503)
+        self.assertIn(b"could not be reached", response.data)
+        self.assertIsNone(self.app.store.signin.check("alice", "10.0.0.9"))
+        signed_in = self.attempt({"username": "alice", "email": "alice@corp",
+                                  "groups": []})
+        self.assertEqual(signed_in.status_code, 302)
+
+    def test_any_failure_of_the_directory_code_is_an_outage_too(self):
+        response = self.attempt(RuntimeError("socket closed"))
+        self.assertEqual(response.status_code, 503)
+
+    def test_a_directory_may_not_sign_in_as_a_local_account(self):
+        """Ownership and name mappings follow the username, so a directory
+        entry called `owner` was the break-glass administrator's
+        dashboards."""
+        response = self.attempt({"username": "owner", "email": None, "groups": []},
+                                username="owner")
+        self.assertEqual(response.status_code, 403)
+        self.assertIn(b"name of a local account", response.data)
+        self.assertEqual(self.client.get("/admin/config").status_code, 302)
+        refused = [row for row in self.app.store.audit.recent()
+                   if row["action"] == "sign-in refused"]
+        self.assertEqual(refused[0]["state"]["method"], "directory")
+
+
+class ProviderIdentityTest(IdentityTestCase):
+    """What the OIDC callback takes from the provider's claims."""
+
+    def setUp(self):
+        super().setUp()
+        self.complete_setup()
+        self.client.get("/auth/logout")
+        self.app.store.settings.set("rbac.user_roles",
+                                    {"boss@corp.example": "admin",
+                                     "mallory": "viewer"})
+        self.app.store.rbac.invalidate()
+
+    def sign_in(self, claims, **settings):
+        class Provider:
+            def authorize_access_token(self):
+                return {"userinfo": claims}
+
+        effective = {"client_id": "wdash", "redirect_uri": "http://x/cb",
+                     "username_claim": "preferred_username", "email_claim": "email",
+                     "groups_claim": "groups", "trust_unverified_email": False,
+                     **settings}
+        with self.client.session_transaction() as session:
+            session["oidc_nonce"] = "n"
+        with unittest.mock.patch("wdash.auth.auth.oidc_settings",
+                                 return_value=effective), \
+             unittest.mock.patch("wdash.auth.auth.init_oauth",
+                                 return_value=(None, Provider())):
+            return self.client.get("/auth/callback")
+
+    def administers(self):
+        return self.client.get("/admin/config").status_code == 200
+
+    def test_an_unverified_email_is_not_the_person_it_names(self):
+        """Measured before the fix: a userinfo of boss@corp.example with
+        email_verified false, beside a mapping of that address to admin,
+        resolved to admin."""
+        self.sign_in({"sub": "1", "preferred_username": "mallory",
+                      "email": "boss@corp.example", "email_verified": False})
+        self.assertFalse(self.administers())
+
+    def test_a_verified_email_is(self):
+        self.sign_in({"sub": "1", "preferred_username": "boss",
+                      "email": "boss@corp.example", "email_verified": True})
+        self.assertTrue(self.administers())
+
+    def test_a_verified_flag_sent_as_text_counts(self):
+        self.sign_in({"sub": "1", "preferred_username": "boss",
+                      "email": "boss@corp.example", "email_verified": "true"})
+        self.assertTrue(self.administers())
+
+    def test_a_provider_that_never_says_can_be_trusted_on_purpose(self):
+        self.sign_in({"sub": "1", "preferred_username": "boss",
+                      "email": "boss@corp.example"}, trust_unverified_email=True)
+        self.assertTrue(self.administers())
+
+    def test_a_provider_may_not_sign_in_as_a_local_account(self):
+        """preferred_username is whatever the provider lets people edit."""
+        self.sign_in({"sub": "1", "preferred_username": "Owner",
+                      "email": "o@x", "email_verified": True})
+        self.assertFalse(self.administers())
+        with self.client.session_transaction() as session:
+            self.assertNotIn("user_data", session)
+        refused = [row for row in self.app.store.audit.recent()
+                   if row["action"] == "sign-in refused"]
+        self.assertEqual(refused[0]["state"]["method"], "oidc")
+
+    def test_with_no_username_the_fallback_is_not_an_unverified_email(self):
+        """It fell back to the email as sent, which was the same hole."""
+        self.sign_in({"sub": "subject-42", "email": "boss@corp.example",
+                      "email_verified": False})
+        with self.client.session_transaction() as session:
+            self.assertEqual(session["user_data"]["username"], "subject-42")
+            self.assertEqual(session["user_data"]["email"], "")
+
+    def test_the_claims_are_the_ones_configured(self):
+        """Keycloak puts realm roles at realm_access.roles."""
+        self.app.store.roles.upsert("ops", permissions=["system:admin"],
+                                    containers=["*"], trace_containers=["*"],
+                                    groups=["platform-ops"])
+        self.app.store.rbac.invalidate()
+        self.sign_in({"sub": "1", "login": "dora",
+                      "realm_access": {"roles": ["platform-ops"]}},
+                     username_claim="login", groups_claim="realm_access.roles")
+        with self.client.session_transaction() as session:
+            self.assertEqual(session["user_data"]["username"], "dora")
+        self.assertTrue(self.administers())
+
+
+class ClaimSettingsTest(IdentityTestCase):
+    def test_the_configuration_page_s_claims_reach_the_callback(self):
+        from wdash.auth.providers import oidc_settings
+        self.app.store.settings.set("auth.oidc", {
+            "enabled": True, "client_id": "c", "discovery_url": "https://i/.w",
+            "username_claim": "login", "email_claim": "", "groups_claim": "",
+            "trust_unverified_email": True})
+        settings = oidc_settings(self.app)
+        self.assertEqual(settings["username_claim"], "login")
+        self.assertEqual(settings["email_claim"], "email")
+        self.assertTrue(settings["trust_unverified_email"])
+
+    def test_rbac_yaml_s_claim_mappings_are_the_default(self):
+        """Shipped, documented and never read."""
+        from wdash.auth.providers import oidc_settings
+        self.app.store.settings.set("rbac.claim_mappings",
+                                    {"groups_claim": "roles"})
+        self.app.store.settings.set("auth.oidc", {
+            "enabled": True, "client_id": "c", "discovery_url": "https://i/.w"})
+        self.assertEqual(oidc_settings(self.app)["groups_claim"], "roles")
+
+    def test_the_import_carries_them(self):
+        from wdash.store import Store
+        path = os.path.join(tempfile.mkdtemp(), "rbac.yaml")
+        with open(path, "w") as handle:
+            handle.write("roles:\n  admin:\n    permissions: [system:admin]\n"
+                         "claim_mappings:\n  groups_claim: roles\n")
+        store = Store.open(f"sqlite:///{tempfile.mkdtemp()}/c.db", rbac_file=path)
+        self.assertEqual(store.settings.get("rbac.claim_mappings"),
+                         {"groups_claim": "roles"})
+
+    def test_the_environment_can_name_them(self):
+        from wdash.auth.providers import oidc_settings
+        self.app.config.update(OIDC_CLIENT_ID="c", OIDC_DISCOVERY_URL="https://i/.w",
+                               OIDC_GROUPS_CLAIM="cognito:groups")
+        self.assertEqual(oidc_settings(self.app)["groups_claim"], "cognito:groups")
+
+
+class SetupRoleTest(unittest.TestCase):
+    """The account setup creates always got the role called `admin`. An
+    rbac.yaml that calls its administrator role something else — or has
+    none — left the break-glass account on the default role: it could sign
+    in and could not open the page that fixes anything."""
+
+    def app_with(self, rbac):
+        path = os.path.join(tempfile.mkdtemp(), "rbac.yaml")
+        with open(path, "w") as handle:
+            handle.write(rbac)
+        database = os.path.join(tempfile.mkdtemp(), "setup.db")
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "setup-role"
+            DATABASE_URL = f"sqlite:///{database}"
+            RBAC_CONFIG_FILE = path
+            OIDC_CLIENT_ID = None
+
+        app = create_app(TestConfig)
+        client = app.test_client()
+        client.post("/setup", data={"username": "owner", "password": PASSWORD,
+                                    "confirm": PASSWORD})
+        return app, client
+
+    def test_an_administering_role_by_another_name_is_used(self):
+        app, client = self.app_with(
+            "roles:\n  superusers:\n    permissions: [system:admin]\n"
+            "    indices: ['*']\n  readers:\n    permissions: [logs:read]\n"
+            "default_role: readers\n")
+        self.assertEqual(app.store.users.by_username("owner")["role"], "superusers")
+        self.assertEqual(client.get("/admin/config").status_code, 200)
+
+    def test_with_no_administering_role_one_is_made(self):
+        app, client = self.app_with(
+            "roles:\n  readers:\n    permissions: [logs:read]\n"
+            "default_role: readers\n")
+        role = app.store.users.by_username("owner")["role"]
+        self.assertIn("system:admin", app.store.roles.get(role)["permissions"])
+        self.assertEqual(client.get("/admin/config").status_code, 200)
