@@ -262,6 +262,184 @@ class SearchTest(FanOutTestCase):
         self.assertEqual({s.source for s in found}, {"jaeger", "tempo"})
 
 
+class SlowestAcrossBackendsTest(FanOutTestCase):
+    """"Slowest" over every source was the newest, whatever it asked.
+
+    Each member sorted its own rows by duration, and the merge sorted the
+    lot by start time again before cutting it to the limit. Measured on the
+    lab: the five slowest of Tempo were 34 minutes each, the merged five
+    were Jaeger's 69 ms rows. The picker's first choice is every source, so
+    that was the default view.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Older than trace-1 and far slower than either.
+        self.second._summaries.append(
+            TraceSummary(trace_id="trace-3", service="payment-service",
+                         name="batch", start=NOW - dt.timedelta(minutes=30),
+                         duration_us=9_000_000))
+
+    def _search(self, sort, limit):
+        from wdash.hub.query import TraceQuery
+        return self.source.search(
+            TraceQuery(window=self.window, limit=limit, sort=sort),
+            Scope.unrestricted())
+
+    def test_slowest_is_ordered_by_duration(self):
+        from wdash.hub.query import SORT_SLOWEST
+        self.assertEqual([s.trace_id for s in self._search(SORT_SLOWEST, 5)],
+                         ["trace-3", "trace-1", "trace-2"])
+
+    def test_the_limit_keeps_the_slowest(self):
+        from wdash.hub.query import SORT_SLOWEST
+        self.assertEqual([s.trace_id for s in self._search(SORT_SLOWEST, 1)],
+                         ["trace-3"])
+
+    def test_recent_is_still_newest_first(self):
+        from wdash.hub.query import SORT_RECENT
+        self.assertEqual([s.trace_id for s in self._search(SORT_RECENT, 5)],
+                         ["trace-1", "trace-3", "trace-2"])
+
+
+class FailureIsNotEmptinessTest(FanOutTestCase):
+    """A member that failed was a log line and nothing else.
+
+    The lookup returned None when nothing was found, so a trace whose only
+    store was down answered 404 "not found — widen the time range" where one
+    source alone answered 503. Search and the service list dropped the
+    member and returned the rest as a plain list, which is what fewer rows
+    look like.
+    """
+
+    def _search(self):
+        from wdash.hub.query import TraceQuery
+        return self.source.search(TraceQuery(window=self.window, limit=10),
+                                  Scope.unrestricted())
+
+    def test_a_lookup_every_member_failed_raises(self):
+        self.first.fail = self.second.fail = True
+        with self.assertRaises(RuntimeError) as caught:
+            self.trace()
+        self.assertIn("jaeger", str(caught.exception))
+        self.assertIn("tempo", str(caught.exception))
+
+    def test_a_failure_beside_a_member_without_the_trace_raises(self):
+        """The trace may be exactly what the failed member holds."""
+        self.second.fail = True
+        with self.assertRaises(RuntimeError) as caught:
+            self.trace("trace-only-tempo-might-hold")
+        self.assertIn("tempo", str(caught.exception))
+        self.assertNotIn("jaeger", str(caught.exception))
+
+    def test_a_trace_nobody_holds_is_still_none_when_everyone_answered(self):
+        self.assertIsNone(self.trace("never-existed"))
+
+    def test_a_partial_trace_says_which_member_failed(self):
+        self.second.fail = True
+        trace = self.trace()
+        self.assertTrue(trace.partial)
+        self.assertTrue(any("tempo" in warning for warning in trace.warnings),
+                        trace.warnings)
+        self.assertIn("tempo", str(trace.to_dict()["warnings"]))
+
+    def test_search_says_which_member_failed(self):
+        self.second.fail = True
+        found = self._search()
+        self.assertEqual([s.trace_id for s in found], ["trace-1"])
+        self.assertTrue(found.partial)
+        self.assertTrue(any("tempo" in w for w in found.warnings), found.warnings)
+
+    def test_a_complete_search_is_not_partial(self):
+        found = self._search()
+        self.assertFalse(found.partial)
+        self.assertEqual(found.warnings, ())
+
+    def test_search_with_every_member_down_raises(self):
+        self.first.fail = self.second.fail = True
+        with self.assertRaises(RuntimeError):
+            self._search()
+
+    def test_services_say_which_member_failed(self):
+        self.second.fail = True
+        services = self.source.services(self.window, Scope.unrestricted())
+        self.assertEqual([s.name for s in services], ["api-gateway"])
+        self.assertTrue(services.partial)
+        self.assertTrue(any("tempo" in w for w in services.warnings))
+
+    def test_services_with_every_member_down_raise(self):
+        self.first.fail = self.second.fail = True
+        with self.assertRaises(RuntimeError):
+            self.source.services(self.window, Scope.unrestricted())
+
+    def test_a_member_s_own_partial_answer_survives_the_merge(self):
+        from wdash.hub.models import PartialList
+        rows = list(self.first._summaries)
+        services = list(self.first._services)
+        self.first.search = lambda query, scope: PartialList(
+            rows, partial=True, warnings=("billing-api could not be searched",))
+        self.first.services = lambda window, scope: PartialList(
+            services, partial=True, warnings=("otel-traces-1: refused",))
+        found = self._search()
+        self.assertTrue(found.partial)
+        self.assertIn("jaeger: billing-api could not be searched", found.warnings)
+        listed = self.source.services(self.window, Scope.unrestricted())
+        self.assertTrue(listed.partial)
+        self.assertIn("jaeger: otel-traces-1: refused", listed.warnings)
+
+    def test_a_member_s_warnings_on_a_trace_survive_the_merge(self):
+        original = self.first.trace
+
+        def partial(trace_id, window, scope):
+            found = original(trace_id, window, scope)
+            found.partial, found.warnings = True, ("apm-traces-1: refused",)
+            return found
+
+        self.first.trace = partial
+        self.assertIn("jaeger: apm-traces-1: refused", self.trace().warnings)
+
+
+class RealAdapterFailureTest(unittest.TestCase):
+    """The same, with an adapter that talks HTTP rather than a stub.
+
+    The partial-trace test above passed only because the stub raises. The
+    real adapters caught their own failure and answered None, so a trace
+    split across a live store and a down Tempo came back whole-looking:
+    2 spans, partial False, measured.
+    """
+
+    class Refused:
+        def get(self, url, **kwargs):
+            raise ConnectionError(f"connection refused: {url}")
+
+    def setUp(self):
+        from wdash.hub.adapters.jaeger import JaegerTraceSource
+        from wdash.hub.adapters.tempo import TempoTraceSource
+        self.live = StubTraceSource(
+            "live", spans=[_span("a", "api-gateway", minutes=5),
+                           _span("b", "auth-service", parent="a", minutes=4)])
+        self.tempo = TempoTraceSource("http://tempo:3200", name="down-tempo",
+                                      session=self.Refused())
+        self.jaeger = JaegerTraceSource("http://jaeger:16686", name="down-jaeger",
+                                        session=self.Refused())
+        self.window = TimeWindow.exact(NOW - dt.timedelta(hours=1), NOW)
+
+    def test_a_split_trace_with_a_store_down_is_partial(self):
+        for down in (self.tempo, self.jaeger):
+            trace = FanOutTraceSource([self.live, down]).trace(
+                "trace-1", self.window, Scope.unrestricted())
+            self.assertEqual(len(trace.spans), 2)
+            self.assertTrue(trace.partial, down.name)
+            self.assertTrue(any(down.name in w for w in trace.warnings))
+
+    def test_a_trace_only_the_down_store_could_hold_is_not_called_missing(self):
+        with self.assertRaises(RuntimeError) as caught:
+            FanOutTraceSource([self.live, self.tempo]).trace(
+                "trace-9", self.window, Scope.unrestricted())
+        self.assertIn("down-tempo", str(caught.exception))
+        self.assertIn("connection refused", str(caught.exception))
+
+
 class CapabilityTest(unittest.TestCase):
     def test_capabilities_are_the_intersection(self):
         """Union would offer a feature that quietly answers from a subset."""

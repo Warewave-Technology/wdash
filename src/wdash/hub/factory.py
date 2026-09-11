@@ -73,8 +73,14 @@ def build_source(record, credential, catalogue=None, signal=None):
                 client, name=record["name"],
                 patterns=tuple(configured) or DEFAULT_PATTERNS,
                 catalogue=catalogue)
+        # Read again without the `*` default, for the monitor side's reason.
+        # A trace pattern left blank read every index in the cluster — the
+        # log indices, and a collector's log index whose records carry span
+        # ids — where the form's placeholder promises the trace indices.
+        from .adapters.elasticsearch import DEFAULT_TRACE_PATTERNS
+        configured = _signal_config(config, signal, "index_patterns", ())
         return ElasticsearchTraceSource(client, name=record["name"],
-                                        patterns=patterns or ("*",),
+                                        patterns=configured or DEFAULT_TRACE_PATTERNS,
                                         catalogue=catalogue)
 
     if kind == "loki":

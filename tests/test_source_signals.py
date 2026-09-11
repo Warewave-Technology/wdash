@@ -163,6 +163,23 @@ class AdapterBuildingTest(SignalTestCase):
         self.assertEqual(self._build(row, "logs")._patterns, ("app-*",))
         self.assertEqual(self._build(row, "traces")._patterns, ("*apm*",))
 
+    def test_a_trace_source_left_blank_reads_the_trace_indices(self):
+        """The form's trace-pattern field shows `*traces*, *apm*` as its
+        placeholder, and left blank the source read `*`: every index in the
+        cluster was a candidate trace store. Measured on the lab: all six
+        indices, the log indices among them, where the placeholder names
+        two. The log side keeps its `*`."""
+        for traces in ({"index_patterns": ""}, None):
+            config = {"url": "http://cluster:9200",
+                      "logs": {"index_patterns": ["app-*"]}}
+            if traces is not None:
+                config["traces"] = traces
+            row = self.create(name=f"cluster-{traces is None}", config=config)
+            self.assertEqual(self._build(row, "traces")._patterns,
+                             ("*traces*", "*apm*"), config)
+            self.assertEqual(self._build(dict(row, config={"url": "http://c:9200"}),
+                                         "logs")._patterns, ("*",))
+
     def test_both_adapters_carry_the_source_name(self):
         """So the log picker and the trace picker say the same thing, and a
         record's badge names the source rather than the signal."""

@@ -73,6 +73,73 @@ COLLECTOR_SPAN = {
     },
 }
 
+#: The mapping of the lab's otel-traces-000001 once the collector (0.109.0,
+#: `mapping.mode: otel`) had written to it: the seed's keyword fields and
+#: what the collector added dynamically, cut to the fields a reader uses.
+COLLECTOR_SPAN_MAPPING = {
+    "@timestamp": {"type": "date"},
+    "trace_id": {"type": "keyword"},
+    "span_id": {"type": "keyword"},
+    "parent_span_id": {"type": "keyword"},
+    "name": {"type": "keyword"},
+    "kind": {"type": "keyword"},
+    "duration": {"type": "long"},
+    "status": {"properties": {
+        "code": {"type": "keyword"},
+        "message": {"type": "text",
+                    "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}}},
+    "resource": {"properties": {
+        "attributes": {"properties": {"service": {"properties": {
+            "name": {"type": "keyword"}, "version": {"type": "keyword"}}}}},
+        "dropped_attributes_count": {"type": "long"}}},
+    "dropped_attributes_count": {"type": "long"},
+    "dropped_events_count": {"type": "long"},
+    "dropped_links_count": {"type": "long"},
+}
+
+#: What dynamic mapping makes of a collector log index once a record carried
+#: a span id (an application that logs inside a span).
+COLLECTOR_LOG_MAPPING = {
+    "@timestamp": {"type": "date"},
+    "body_text": {"type": "text"},
+    "severity_number": {"type": "long"},
+    "severity_text": {"type": "text",
+                      "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
+    "trace_id": {"type": "text",
+                 "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
+    "span_id": {"type": "text",
+                "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
+    "observed_timestamp": {"type": "date"},
+    "resource": {"properties": {"attributes": {"properties": {"service": {
+        "properties": {"name": {"type": "text"}}}}}}},
+}
+
+
+def collector_span(trace_id, span_id, service, parent=None, kind="Server",
+                   code="Ok", duration_ms=10, seconds_ago=60, name=None):
+    """One span document as the collector writes it: `kind` "Server",
+    `status.code` "Ok"/"Error"/"Unset", `duration` in nanoseconds, and no
+    `parent_span_id` at all on a root. Measured by pushing OTLP through the
+    lab collector with lab/otel/emit.py's own builder."""
+    import datetime as dt
+    stamp = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds_ago)
+             ).strftime("%Y-%m-%dT%H:%M:%S.%f000Z")
+    doc = {"_id": span_id, "@timestamp": stamp, "trace_id": trace_id,
+           "span_id": span_id, "name": name or f"{service} op", "kind": kind,
+           "duration": duration_ms * 1_000_000, "status": {"code": code},
+           "resource": {"attributes": {"service.name": service,
+                                       "deployment.environment": "lab"},
+                        "dropped_attributes_count": 0},
+           "scope": {"dropped_attributes_count": 0},
+           "attributes": {}, "dropped_attributes_count": 0,
+           "dropped_events_count": 0, "dropped_links_count": 0}
+    if parent:
+        doc["parent_span_id"] = parent
+    if code == "Error":
+        doc["status"]["message"] = "boom"
+    return doc
+
+
 #: The shape most existing shippers write, and what WDash read exclusively
 #: before this. Still supported.
 FLAT_LOG = {
@@ -214,6 +281,172 @@ class CollectorSpanTest(unittest.TestCase):
         self.assertEqual(span.duration_us, 7_000)
         self.assertEqual(span.status, STATUS_ERROR)
         self.assertEqual(span.service, "legacy-service")
+
+
+class SpanIndexDetectionTest(unittest.TestCase):
+    """Which indices a trace source reads as spans.
+
+    Two ids were the whole test. A collector writes both onto a log record
+    made inside a span, so a trace source whose patterns reached an
+    otel-logs index — the configured default was `*` — counted every such
+    record in the service list as a span.
+    """
+
+    def detect(self, mapping):
+        from wdash.hub.adapters.es_trace_schema import detect_schema as detect
+        return detect(mapping)
+
+    def test_the_collector_s_span_index_is_one(self):
+        self.assertIsInstance(self.detect(COLLECTOR_SPAN_MAPPING), OtelSpanSchema)
+
+    def test_an_older_pipeline_s_span_index_still_is(self):
+        mapping = {k: v for k, v in COLLECTOR_SPAN_MAPPING.items()
+                   if k not in ("duration", "status")}
+        mapping.update({"duration_ns": {"type": "long"},
+                        "status_code": {"type": "keyword"}})
+        self.assertIsInstance(self.detect(mapping), OtelSpanSchema)
+
+    def test_the_collector_s_log_index_is_not(self):
+        self.assertIsNone(self.detect(COLLECTOR_LOG_MAPPING))
+
+    def test_two_ids_alone_are_not(self):
+        self.assertIsNone(self.detect({"trace_id": {"type": "keyword"},
+                                       "span_id": {"type": "keyword"}}))
+
+    def test_a_span_needs_its_kind_and_its_duration(self):
+        for missing in ("kind", "duration"):
+            mapping = {k: v for k, v in COLLECTOR_SPAN_MAPPING.items()
+                       if k != missing}
+            self.assertIsNone(self.detect(mapping), missing)
+
+    def test_an_index_holding_log_records_too_is_not_read_as_spans(self):
+        """Both signals pointed at one index. Read as spans, its log records
+        would be counted as spans; left out, the trace source says so."""
+        for field in ("body_text", "severity_number", "severity_text"):
+            mapping = dict(COLLECTOR_SPAN_MAPPING, **{field: {"type": "text"}})
+            self.assertIsNone(self.detect(mapping), field)
+
+
+class CollectorSpanSearchTest(unittest.TestCase):
+    """Searching what the collector writes, against a cluster model that
+    answers the query it is sent.
+
+    The reader had been fixed to the collector's field names; the search
+    beside it had not. It asked for entry spans as `kind: SPAN_KIND_SERVER`,
+    errors as `status_code: ERROR` and durations as `duration_ns`, none of
+    which a collector writes. Measured on the lab's OTel index over 7 days:
+    the trace list, errors-only, a minimum duration and "slowest" were all
+    empty, and 13,537 spans had 0 errors — where the APM copy of the same
+    traces gave 25 rows and 171 errors. Nothing failed.
+    """
+
+    def setUp(self):
+        from tests.support import ModelledES
+        from wdash.hub import Scope, TimeWindow
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        # The fast trace is first in the index, so that only the cluster's
+        # sort — not the order documents happen to sit in — puts the slow one
+        # first when the limit cuts the list.
+        docs = [
+            # t2: newer, faster, clean.
+            collector_span("t2", "t2-gw", "api-gateway", duration_ms=40,
+                           seconds_ago=30),
+            collector_span("t2", "t2-auth", "auth-service", parent="t2-gw",
+                           duration_ms=20, seconds_ago=29),
+            # t1: a failed request through the gateway, 1.2 s.
+            collector_span("t1", "t1-gw", "api-gateway", code="Error",
+                           duration_ms=1200, seconds_ago=120),
+            collector_span("t1", "t1-pay", "payment-service", parent="t1-gw",
+                           code="Error", duration_ms=900, seconds_ago=119),
+            collector_span("t1", "t1-pg", "postgres", parent="t1-pay",
+                           kind="Client", duration_ms=300, seconds_ago=118),
+            # t3: a job with no request behind it: not an entry span.
+            collector_span("t3", "t3-job", "cron", kind="Internal",
+                           code="Unset", duration_ms=5000, seconds_ago=60),
+        ]
+        self.es = ModelledES({"otel-traces-000001": (COLLECTOR_SPAN_MAPPING, docs)})
+        self.source = ElasticsearchTraceSource(self.es, name="otel")
+        self.window = TimeWindow.of("1h")
+        self.scope = Scope.unrestricted()
+
+    def search(self, **arguments):
+        from wdash.hub.query import TraceQuery
+        arguments.setdefault("limit", 10)
+        return [(row.trace_id, row.service) for row in self.source.search(
+            TraceQuery(window=self.window, **arguments), self.scope)]
+
+    def test_the_list_holds_the_traces_that_entered_through_a_server(self):
+        self.assertEqual(self.search(), [("t2", "api-gateway"),
+                                         ("t1", "api-gateway")])
+
+    def test_a_service_s_own_entry_spans_are_found(self):
+        self.assertEqual(self.search(service="payment-service"),
+                         [("t1", "payment-service")])
+
+    def test_errors_only_finds_the_failed_request(self):
+        self.assertEqual(self.search(only_errors=True), [("t1", "api-gateway")])
+        self.assertEqual(self.search(service="payment-service", only_errors=True),
+                         [("t1", "payment-service")])
+        self.assertEqual(self.search(service="auth-service", only_errors=True), [])
+
+    def test_a_minimum_duration_is_read_in_nanoseconds(self):
+        self.assertEqual(self.search(min_duration_us=1_000_000),
+                         [("t1", "api-gateway")])
+        self.assertEqual(self.search(min_duration_us=30_000),
+                         [("t2", "api-gateway"), ("t1", "api-gateway")])
+
+    def test_slowest_is_ordered_by_the_collector_s_duration(self):
+        from wdash.hub.query import SORT_SLOWEST
+        self.assertEqual(self.search(sort=SORT_SLOWEST),
+                         [("t1", "api-gateway"), ("t2", "api-gateway")])
+        # The rows are sorted again after they arrive; which rows arrive is
+        # the cluster's sort.
+        self.assertEqual(self.search(sort=SORT_SLOWEST, limit=1),
+                         [("t1", "api-gateway")])
+
+    def test_the_rows_carry_the_collector_s_values(self):
+        from wdash.hub.query import TraceQuery
+        rows = {row.trace_id: row for row in self.source.search(
+            TraceQuery(window=self.window, limit=10), self.scope)}
+        self.assertEqual(rows["t1"].duration_us, 1_200_000)
+        self.assertTrue(rows["t1"].has_error)
+        self.assertFalse(rows["t2"].has_error)
+
+    def test_services_count_the_collector_s_errors(self):
+        counted = {s.name: (s.span_count, s.error_count)
+                   for s in self.source.services(self.window, self.scope)}
+        self.assertEqual(counted, {"api-gateway": (2, 1), "payment-service": (1, 1),
+                                   "postgres": (1, 0), "auth-service": (1, 0),
+                                   "cron": (1, 0)})
+
+    def test_an_older_pipeline_s_spellings_are_searched_too(self):
+        """`to_span` reads `SPAN_KIND_SERVER`, `status_code` and
+        `duration_ns`, so the search asks for them beside the collector's."""
+        from tests.support import ModelledES
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        from wdash.hub.query import SORT_SLOWEST
+
+        def older(trace_id, seconds_ago, duration_ms, code):
+            doc = collector_span(trace_id, f"{trace_id}-root", "legacy",
+                                 seconds_ago=seconds_ago)
+            for key in ("duration", "status", "kind"):
+                doc.pop(key)
+            doc.update({"kind": "SPAN_KIND_SERVER", "status_code": code,
+                        "duration_ns": duration_ms * 1_000_000})
+            return doc
+
+        mapping = {k: v for k, v in COLLECTOR_SPAN_MAPPING.items()
+                   if k not in ("duration", "status")}
+        mapping.update({"duration_ns": {"type": "long"},
+                        "status_code": {"type": "keyword"}})
+        self.source = ElasticsearchTraceSource(ModelledES({"old-traces-1": (
+            mapping, [older("o2", 50, 20, "OK"), older("o1", 100, 700, "ERROR")])}))
+        self.assertEqual([t for t, _ in self.search()], ["o2", "o1"])
+        self.assertEqual([t for t, _ in self.search(only_errors=True)], ["o1"])
+        self.assertEqual([t for t, _ in self.search(min_duration_us=500_000)], ["o1"])
+        self.assertEqual([t for t, _ in self.search(sort=SORT_SLOWEST)], ["o1", "o2"])
+        self.assertEqual([t for t, _ in self.search(sort=SORT_SLOWEST, limit=1)],
+                         ["o1"])
 
 
 class FieldCandidateTest(unittest.TestCase):

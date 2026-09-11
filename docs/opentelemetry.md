@@ -120,6 +120,23 @@ rather than to a named index. WDash lists a data stream by its name, grants
 and searches it by that name, and shows which backing index holds a record in
 the raw view.
 
+The trace SEARCH was left behind. Its clauses for an entry span, a failure and
+a duration still asked for `SPAN_KIND_SERVER`, `status_code` and `duration_ns`,
+so on a collector-written index the trace list, errors-only, a minimum
+duration and "slowest" were empty, and every service had 0 errors — measured
+on the lab over 7 days, 0 rows and 0 errors in 13,537 spans where the APM copy
+of the same traces gave 25 rows and 171 errors. Nothing failed. Those clauses
+now live on the schema beside the reader (`entry_filter`, `error_filter`,
+`duration_filter`, `slowest_first`), so a change to one is a change to both,
+and they ask for the collector's spelling (`kind: Server`, `status.code:
+Error`, `duration`) beside the older one.
+
+A span index is also told apart from a log index. A collector writes
+`trace_id` and `span_id` onto a log record made inside a span, so the ids
+alone are not a span schema: `OtelSpanSchema` wants `kind` and a duration too,
+and refuses an index with log fields. A configured Elasticsearch trace source
+whose patterns are left blank reads `*traces*` and `*apm*`, not `*`.
+
 ## If you do want ingest one day
 
 Build it as a separate process (`wdash-ingest`) that shares the schema

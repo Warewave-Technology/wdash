@@ -25,18 +25,24 @@ from wdash.hub.models import STATUS_ERROR, STATUS_OK, SourceRef  # noqa: E402
 
 TS = "2026-08-04T10:00:00.000Z"
 
-# The same logical span, expressed in two different schemas
+# The same logical span, expressed in two different schemas. The OTel one as
+# the collector writes it (tests/test_otel_shapes.py): a root carries no
+# parent_span_id at all.
 OTEL_HIT = {
     "_index": "otel-traces-000001", "_id": "o1",
     "_source": {
         "@timestamp": TS,
-        "trace_id": "abc123", "span_id": "span1", "parent_span_id": None,
-        "name": "GET /checkout", "kind": "SPAN_KIND_SERVER",
-        "duration_ns": 145_000_000, "status_code": "OK",
-        "resource": {"service.name": "api-gateway", "service.version": "1.4.2"},
+        "trace_id": "abc123", "span_id": "span1",
+        "name": "GET /checkout", "kind": "Server",
+        "duration": 145_000_000, "status": {"code": "Ok"},
+        "resource": {"attributes": {"service.name": "api-gateway",
+                                    "service.version": "1.4.2"}},
         "attributes": {"http.request.method": "GET"},
     },
 }
+
+#: The mapping of an index the collector writes spans into.
+from tests.test_otel_shapes import COLLECTOR_SPAN_MAPPING  # noqa: E402
 
 APM_HIT = {
     "_index": "apm-traces-000001", "_id": "a1",
@@ -94,8 +100,10 @@ class SchemaEquivalenceTest(unittest.TestCase):
 
 class SchemaDetectionTest(unittest.TestCase):
     def test_detects_otel(self):
-        properties = {"trace_id": {"type": "keyword"}, "span_id": {"type": "keyword"}}
-        self.assertIsInstance(detect_schema(properties), OtelSpanSchema)
+        """The collector's mapping. This used two ids alone, which is also
+        what a collector log index holds once a record carries a span id —
+        the test held the rule that read log records as spans."""
+        self.assertIsInstance(detect_schema(COLLECTOR_SPAN_MAPPING), OtelSpanSchema)
 
     def test_detects_apm(self):
         properties = {"trace": {"properties": {"id": {"type": "keyword"}}},
@@ -722,10 +730,18 @@ class LiveSchemaEquivalenceTest(unittest.TestCase):
         "SPAN_KIND_SERVER". Pinning this to one of them made the helper return
         nothing the moment the lab started producing the real shape — and an
         empty list reads as a passing test right up until you index it.
+
+        Only the seeded traces have an APM copy. lab/otel/emit.py pushes
+        traces through the collector into the same index, tagged with the
+        `lab` environment, and one of those sampled here fails the
+        comparison for want of a copy rather than for a difference.
         """
         hits = LAB.search(
             index="otel-traces-000001", size=limit,
-            query={"terms": {"kind": ["Server", "SPAN_KIND_SERVER"]}}
+            query={"bool": {
+                "must": [{"terms": {"kind": ["Server", "SPAN_KIND_SERVER"]}}],
+                "must_not": [{"term": {
+                    "resource.attributes.deployment.environment": "lab"}}]}}
         )["hits"]["hits"]
         ids = [h["_source"]["trace_id"] for h in hits]
         self.assertTrue(ids, "no root spans in the lab; reseed it")
@@ -777,6 +793,40 @@ class LiveSchemaEquivalenceTest(unittest.TestCase):
         names = {s.name for s in services}
         self.assertIn("api-gateway", names)
         self.assertTrue(any(s.error_rate > 0 for s in services))
+
+    def test_the_otel_copy_is_searched_as_the_apm_copy_is(self):
+        """The lab holds every trace in both schemas, and the OTel copy's
+        search answered nothing: its entry, error and duration clauses named
+        fields no collector writes. Measured over 7 days before the fix:
+        0 rows, 0 errors-only rows, 0 slowest and 0 errors in 13,537 spans,
+        against 25, 25, 5 and 171 from the APM copy. The APM copy was
+        masking it wherever both were read."""
+        from wdash.hub.query import SORT_SLOWEST, TraceQuery
+        otel = ElasticsearchTraceSource(LAB, patterns=("otel-traces-*",))
+        apm = ElasticsearchTraceSource(LAB, patterns=("apm-traces-*",))
+        everything = Scope.unrestricted()
+        for label, query in (
+                ("recent", TraceQuery(window=self.window, limit=25)),
+                ("errors", TraceQuery(window=self.window, limit=25, only_errors=True)),
+                ("slow", TraceQuery(window=self.window, limit=25,
+                                    min_duration_us=1_000_000))):
+            rows = otel.search(query, everything)
+            self.assertTrue(rows, f"the OTel copy lists nothing for {label}")
+            self.assertEqual(bool(apm.search(query, everything)), True, label)
+        self.assertTrue(all(row.has_error for row in otel.search(
+            TraceQuery(window=self.window, limit=25, only_errors=True), everything)))
+
+        slowest = TraceQuery(window=self.window, limit=1, sort=SORT_SLOWEST)
+        self.assertGreaterEqual(otel.search(slowest, everything)[0].duration_us,
+                                apm.search(slowest, everything)[0].duration_us)
+
+        # Others may push spans through the collector into the OTel index, so
+        # the OTel counts are at least the APM ones rather than equal to them.
+        otel_errors = {s.name: s.error_count for s in otel.services(self.window, everything)}
+        apm_errors = {s.name: s.error_count for s in apm.services(self.window, everything)}
+        self.assertTrue(sum(apm_errors.values()))
+        for name, count in apm_errors.items():
+            self.assertGreaterEqual(otel_errors.get(name, 0), count, name)
 
     def test_log_source_respects_scope(self):
         source = ElasticsearchLogSource(LAB)
@@ -938,9 +988,8 @@ class ServiceFilterPushDownTest(unittest.TestCase):
             def indices(self):
                 class Indices:
                     def get_mapping(self, index=None, **kw):
-                        return {"otel-traces-000001": {"mappings": {"properties": {
-                            "trace_id": {"type": "keyword"},
-                            "span_id": {"type": "keyword"}}}}}
+                        return {"otel-traces-000001": {"mappings": {
+                            "properties": COLLECTOR_SPAN_MAPPING}}}
                 return Indices()
 
             @property
@@ -993,9 +1042,8 @@ class DuplicateSpanTest(unittest.TestCase):
             def indices(self):
                 class Indices:
                     def get_mapping(self, index=None, **kw):
-                        return {"otel-traces-000001": {"mappings": {"properties": {
-                            "trace_id": {"type": "keyword"},
-                            "span_id": {"type": "keyword"}}}}}
+                        return {"otel-traces-000001": {"mappings": {
+                            "properties": COLLECTOR_SPAN_MAPPING}}}
                 return Indices()
 
             @property

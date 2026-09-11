@@ -100,6 +100,38 @@
         return us + ' µs';
     }
 
+    /** A request that failed, with the server's reason under its message. */
+    function failed(data, fallback) {
+        return '<div class="p-3 text-danger"><small>' + esc(data.error || fallback) +
+            (data.details ? '<br><span class="text-muted">' + esc(data.details) +
+                            '</span>' : '') + '</small></div>';
+    }
+
+    /** What a partial answer is missing, above the rows it does have.
+     *
+     * A store that did not answer used to leave its rows out and say nothing,
+     * which is exactly what fewer traces look like.
+     */
+    function missing(data) {
+        if (!data.partial) return '';
+        const said = (data.warnings || []).map(esc).join('<br>');
+        return '<div class="alert alert-warning py-1 px-2 m-2 mb-0" style="font-size:0.78rem">' +
+            '<i class="fas fa-exclamation-triangle"></i> Part of this could not be loaded' +
+            (said ? ':<br>' + said : '.') + '</div>';
+    }
+
+    /** The line for an empty list: the server's reason when it gave one;
+     * when a store did not answer, that the others had nothing — not that
+     * nothing happened; otherwise the quiet line. */
+    function nothing(data, quiet) {
+        if (data.suggestion || !data.partial) {
+            return '<div class="p-3 text-muted"><small>' +
+                esc(data.suggestion || quiet) + '</small></div>';
+        }
+        return '<div class="p-3 text-muted"><small>Nothing from the sources that answered.' +
+            '</small></div>';
+    }
+
     // ---------------------------------------------------------------- services
 
     /** The chosen source, or nothing when there is no choice.
@@ -123,19 +155,18 @@
             const data = await res.json();
 
             if (!res.ok) {
-                box.innerHTML = '<div class="p-3 text-danger"><small>' + esc(data.error) + '</small></div>';
+                box.innerHTML = failed(data, 'Unable to load services.');
                 return;
             }
             if (!data.services.length) {
-                box.innerHTML = '<div class="p-3 text-muted"><small>' +
-                    esc(data.suggestion || 'No spans in this time range.') + '</small></div>';
+                box.innerHTML = missing(data) + nothing(data, 'No spans in this time range.');
                 return;
             }
 
             el('spanTotal').textContent = data.total_spans.toLocaleString() + ' spans';
             const max = Math.max(...data.services.map(s => s.span_count));
 
-            box.innerHTML = '<table class="table table-sm table-hover mb-0">' +
+            box.innerHTML = missing(data) + '<table class="table table-sm table-hover mb-0">' +
                 '<tbody>' + data.services.map(s => {
                     const pct = (s.span_count / max * 100).toFixed(0);
                     const err = s.error_rate > 0
@@ -191,16 +222,15 @@
             const data = await res.json();
 
             if (!res.ok) {
-                box.innerHTML = '<div class="p-3 text-danger"><small>' + esc(data.error) + '</small></div>';
+                box.innerHTML = failed(data, 'Unable to search traces.');
                 return;
             }
             if (!data.traces.length) {
-                box.innerHTML = '<div class="p-3 text-muted"><small>' +
-                    esc(data.suggestion || 'No traces match.') + '</small></div>';
+                box.innerHTML = missing(data) + nothing(data, 'No traces match.');
                 return;
             }
 
-            box.innerHTML = '<table class="table table-sm table-hover mb-0">' +
+            box.innerHTML = missing(data) + '<table class="table table-sm table-hover mb-0">' +
                 '<tbody>' + data.traces.map(t =>
                     '<tr class="trace-row" style="cursor:pointer" data-trace="' + esc(t.trace_id) + '"' +
                         (t.source ? ' data-source="' + esc(t.source) + '"' : '') + '>' +

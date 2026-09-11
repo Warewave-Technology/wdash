@@ -344,6 +344,23 @@ class Span:
         }
 
 
+class PartialList(list):
+    """Rows that can say they are not the whole answer.
+
+    Trace search and the service list answer with lists, and a list has
+    nowhere to say "one of the stores behind this did not answer". A failure
+    had two ways out, then: raise and lose what the others answered, or leave
+    the rows out and look exactly like a quieter hour. This is still a list —
+    whatever iterates, counts or indexes the answer works unchanged — with
+    the two things a LogPage carries for the same reason.
+    """
+
+    def __init__(self, rows=(), partial=False, warnings=()):
+        super().__init__(rows)
+        self.partial = bool(partial)
+        self.warnings = tuple(warnings)
+
+
 @dataclass
 class Trace:
     trace_id: str
@@ -352,6 +369,8 @@ class Trace:
     #: Spans the scope removed. Counted where they were dropped, so "some
     #: spans are hidden" is said when some were — not guessed from the rules.
     hidden: int = 0
+    #: What could not be read, when `partial`: which store, and why.
+    warnings: tuple = ()
 
     @property
     def root(self):
@@ -449,6 +468,7 @@ class Trace:
             "services": self.services,
             "has_error": self.has_error,
             "partial": self.partial,
+            "warnings": list(self.warnings),
         }
 
 

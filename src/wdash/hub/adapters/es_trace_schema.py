@@ -47,7 +47,14 @@ def parse_time(value):
 
 
 class SpanSchema(ABC):
-    """Strategy that converts one trace schema into the neutral Span model."""
+    """Strategy that converts one trace schema into the neutral Span model.
+
+    It also says how to ASK for spans in that schema — which are entry spans,
+    which failed, how long one took. Those clauses lived in the search, a
+    file away from the reader, and when the reader was corrected to what the
+    collector writes they were not: the search went on asking for field
+    names nothing writes. Beside the reader, the two are one change.
+    """
 
     name = "unknown"
 
@@ -56,6 +63,8 @@ class SpanSchema(ABC):
     #: Field to use for a terms aggregation on the service name
     service_field = "service.name"
     timestamp_field = "@timestamp"
+    #: Field holding the parent's span id; absent on a root span.
+    parent_field = "parent_span_id"
 
     @classmethod
     @abstractmethod
@@ -65,6 +74,22 @@ class SpanSchema(ABC):
     @abstractmethod
     def to_span(self, hit):
         """Elasticsearch hit -> Span, or None if it cannot be resolved."""
+
+    @abstractmethod
+    def entry_filter(self):
+        """A clause for spans that are work a service handled."""
+
+    @abstractmethod
+    def error_filter(self):
+        """A clause for spans that failed."""
+
+    @abstractmethod
+    def duration_filter(self, minimum_us):
+        """A clause for spans that took at least `minimum_us`."""
+
+    @abstractmethod
+    def slowest_first(self):
+        """A sort putting the longest spans first."""
 
     def _ref(self, hit):
         return SourceRef(backend="elasticsearch",
@@ -93,15 +118,55 @@ class OtelSpanSchema(SpanSchema):
     surfaced it.
 
     Both are read, so a store written by an older pipeline keeps working.
+
+    The search clauses below ask in the collector's spelling first. Measured
+    by pushing OTLP through the lab's collector (0.109.0) and reading back
+    what landed: `kind` is "Server", "Client", "Internal", "Producer",
+    "Consumer" or "Unspecified"; `status.code` is "Ok", "Error" or "Unset";
+    `duration` is nanoseconds; a root span has no `parent_span_id` at all.
+    The older spelling is asked for beside it, because `to_span` reads it.
     """
 
     name = "otel"
     trace_id_field = "trace_id"
     service_field = "resource.attributes.service.name"
 
+    #: Fields only a log record has. A collector writes `trace_id` and
+    #: `span_id` onto a log record made inside a span, so the ids alone said
+    #: "spans" of a log index — and the service list counted its records.
+    LOG_FIELDS = ("body_text", "body_structured", "severity_number",
+                  "severity_text")
+
     @classmethod
     def detect(cls, properties):
-        return "trace_id" in properties and "span_id" in properties
+        """Ids, a kind and a duration, which no log record carries; and none
+        of the fields only a log record carries, so an index holding both
+        signals is not read as spans."""
+        if any(name in properties for name in cls.LOG_FIELDS):
+            return False
+        return ("trace_id" in properties and "span_id" in properties
+                and "kind" in properties
+                and ("duration" in properties or "duration_ns" in properties))
+
+    def entry_filter(self):
+        return {"terms": {"kind": ["Server", "SPAN_KIND_SERVER"]}}
+
+    def error_filter(self):
+        return {"bool": {"should": [{"term": {"status.code": "Error"}},
+                                    {"term": {"status_code": "ERROR"}}],
+                         "minimum_should_match": 1}}
+
+    def duration_filter(self, minimum_us):
+        nanoseconds = int(minimum_us) * 1000
+        return {"bool": {"should": [{"range": {"duration": {"gte": nanoseconds}}},
+                                    {"range": {"duration_ns": {"gte": nanoseconds}}}],
+                         "minimum_should_match": 1}}
+
+    def slowest_first(self):
+        # `unmapped_type`: an index holds one spelling or the other, and a
+        # sort on a field an index does not map fails that index's shards.
+        return [{"duration": {"order": "desc", "unmapped_type": "long"}},
+                {"duration_ns": {"order": "desc", "unmapped_type": "long"}}]
 
     def to_span(self, hit):
         source = hit.get("_source") or {}
@@ -160,12 +225,25 @@ class ApmSpanSchema(SpanSchema):
     name = "apm"
     trace_id_field = "trace.id"
     service_field = "service.name"
+    parent_field = "parent.id"
 
     @classmethod
     def detect(cls, properties):
         trace = properties.get("trace") or {}
         has_trace_id = "id" in (trace.get("properties") or {})
         return has_trace_id and ("transaction" in properties or "processor" in properties)
+
+    def entry_filter(self):
+        return {"term": {"processor.event": "transaction"}}
+
+    def error_filter(self):
+        return {"term": {"event.outcome": "failure"}}
+
+    def duration_filter(self, minimum_us):
+        return {"range": {"transaction.duration.us": {"gte": minimum_us}}}
+
+    def slowest_first(self):
+        return [{"transaction.duration.us": {"order": "desc"}}]
 
     def to_span(self, hit):
         source = hit.get("_source") or {}

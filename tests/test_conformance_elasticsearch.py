@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from tests.conformance import (  # noqa: E402
     Harness, LogSourceConformance, TraceSourceConformance,
 )
+from tests.test_otel_shapes import COLLECTOR_SPAN_MAPPING, collector_span  # noqa: E402
 from wdash.hub.adapters import (  # noqa: E402
     ElasticsearchLogSource, ElasticsearchTraceSource,
 )
@@ -81,11 +82,7 @@ class FakeElasticsearch(Harness):
 
         class Indices:
             def get_mapping(self, index=None, **kwargs):
-                properties = ({"trace_id": {"type": "keyword"},
-                               "span_id": {"type": "keyword"},
-                               "resource": {"properties": {"attributes": {
-                                   "properties": {
-                                       "service.name": {"type": "keyword"}}}}}}
+                properties = (COLLECTOR_SPAN_MAPPING
                               if outer.trace_mode else
                               {"level": {"type": "keyword"},
                                "service": {"type": "keyword"},
@@ -306,3 +303,259 @@ class RequestBodyTest(unittest.TestCase):
                      and not l.strip().startswith("#")]
         direct = [l.strip() for l in lines if "_es.search(" in l or "es.search(" in l]
         self.assertEqual(len(direct), 1, direct)
+
+
+# ---------------------------------------------------------------------------
+# The trace source when part of the cluster cannot answer
+# ---------------------------------------------------------------------------
+
+from collections import Counter  # noqa: E402
+
+from tests.support import ModelledES  # noqa: E402
+from wdash.hub import Scope, TimeWindow  # noqa: E402
+from wdash.hub.query import TraceQuery  # noqa: E402
+
+OTEL, APM = "otel-traces-000001", "apm-traces-000001"
+
+APM_MAPPING = {"trace": {"properties": {"id": {"type": "keyword"}}},
+               "parent": {"properties": {"id": {"type": "keyword"}}},
+               "processor": {"properties": {"event": {"type": "keyword"}}},
+               "service": {"properties": {"name": {"type": "keyword"}}},
+               "transaction": {"properties": {"id": {"type": "keyword"}}}}
+
+
+def _apm_transaction(trace, span_id, service, parent=None, seconds_ago=60):
+    import datetime as dt
+    stamp = (dt.datetime.now(dt.timezone.utc)
+             - dt.timedelta(seconds=seconds_ago)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    doc = {"_id": span_id, "@timestamp": stamp, "trace": {"id": trace},
+           "service": {"name": service}, "event": {"outcome": "success"},
+           "processor": {"event": "transaction"},
+           "transaction": {"id": span_id, "name": f"{service} op",
+                           "duration": {"us": 1000}}}
+    if parent:
+        doc["parent"] = {"id": parent}
+    return doc
+
+
+class PartlyBrokenCluster(ModelledES):
+    """A cluster in which some indices refuse searches and a mapping can
+    fail to be read, the rest answering what they are asked."""
+
+    def __init__(self, indices, refusing=(), mapping_failures=None):
+        super().__init__(indices)
+        self.refusing = set(refusing)
+        self.mapping_failures = dict(mapping_failures or {})
+        self.mapping_calls = Counter()
+
+    @property
+    def indices(self):
+        outer, real = self, ModelledES.indices.fget(self)
+
+        class Indices:
+            def get_mapping(self, index=None, **kwargs):
+                outer.mapping_calls[index] += 1
+                if outer.mapping_failures.get(index, 0) > 0:
+                    outer.mapping_failures[index] -= 1
+                    raise ConnectionError(f"the mapping request timed out")
+                return real.get_mapping(index=index, **kwargs)
+        return Indices()
+
+    def search(self, index=None, **kwargs):
+        if set(str(index).split(",")) & self.refusing:
+            raise ConnectionError(f"{index}: connection reset")
+        return super().search(index=index, **kwargs)
+
+    def msearch(self, searches=None, **kwargs):
+        responses = []
+        for header, body in zip(searches[0::2], searches[1::2]):
+            if set(header["index"].split(",")) & self.refusing:
+                responses.append({"status": 503, "error": {
+                    "type": "search_phase_execution_exception",
+                    "reason": "all shards failed"}})
+            else:
+                responses.append(self.search(index=header["index"], **body))
+        return {"responses": responses}
+
+
+def _cluster(**broken):
+    """t1 in both schemas, t2 only in the APM copy."""
+    return PartlyBrokenCluster({
+        OTEL: (COLLECTOR_SPAN_MAPPING, [
+            collector_span("t1", "gw", "api-gateway", seconds_ago=120),
+            collector_span("t1", "pay", "payment-service", parent="gw",
+                           seconds_ago=119)]),
+        APM: (APM_MAPPING, [
+            _apm_transaction("t1", "gw", "api-gateway", seconds_ago=120),
+            _apm_transaction("t1", "pay", "payment-service", parent="gw",
+                             seconds_ago=119),
+            _apm_transaction("t2", "t2-gw", "api-gateway", seconds_ago=30)]),
+    }, **broken)
+
+
+class TraceSearchFailureTest(unittest.TestCase):
+    """A schema group whose search failed was skipped without a word.
+
+    Each group's request that failed came back as None and was passed over,
+    so an index refusing searches read as an index with nothing in it: the
+    list was shorter, the service counts lower, and a trace held only there
+    was "not found". Measured through a proxy that forwards the lab
+    cluster's catalogue and mappings and refuses every search: search [],
+    services [], a trace link 404.
+    """
+
+    def setUp(self):
+        self.window = TimeWindow.of("1h")
+        self.scope = Scope.unrestricted()
+
+    def _source(self, cluster):
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        return ElasticsearchTraceSource(cluster, name="es")
+
+    def test_a_refusing_index_beside_a_readable_one_is_named(self):
+        source = self._source(_cluster(refusing={APM}))
+        found = source.search(TraceQuery(window=self.window, limit=10), self.scope)
+        self.assertEqual([row.trace_id for row in found], ["t1"])
+        self.assertTrue(found.partial)
+        self.assertEqual(len(found.warnings), 1)
+        self.assertIn(APM, found.warnings[0])
+        self.assertIn("all shards failed", found.warnings[0])
+
+        services = source.services(self.window, self.scope)
+        self.assertEqual({s.name for s in services}, {"api-gateway", "payment-service"})
+        self.assertTrue(services.partial)
+        self.assertIn(APM, services.warnings[0])
+
+        trace = source.trace("t1", self.window, self.scope)
+        self.assertEqual(len(trace.spans), 2)
+        self.assertTrue(trace.partial)
+        self.assertIn(APM, trace.warnings[0])
+
+    def test_a_complete_answer_is_not_partial(self):
+        source = self._source(_cluster())
+        found = source.search(TraceQuery(window=self.window, limit=10), self.scope)
+        self.assertEqual(sorted(row.trace_id for row in found), ["t1", "t2"])
+        self.assertFalse(found.partial)
+        self.assertFalse(source.services(self.window, self.scope).partial)
+        trace = source.trace("t1", self.window, self.scope)
+        self.assertFalse(trace.partial)
+        self.assertEqual(trace.warnings, ())
+
+    def test_a_trace_only_the_refusing_index_may_hold_is_not_called_missing(self):
+        with self.assertRaises(RuntimeError) as caught:
+            self._source(_cluster(refusing={APM})).trace("t2", self.window, self.scope)
+        self.assertIn(APM, str(caught.exception))
+
+    def test_a_trace_nobody_holds_is_none_when_everything_answered(self):
+        self.assertIsNone(self._source(_cluster()).trace("nope", self.window,
+                                                         self.scope))
+
+    def test_every_index_refusing_raises(self):
+        source = self._source(_cluster(refusing={OTEL, APM}))
+        for call in (
+                lambda: source.search(TraceQuery(window=self.window), self.scope),
+                lambda: source.services(self.window, self.scope),
+                lambda: source.trace("t1", self.window, self.scope)):
+            with self.assertRaises(RuntimeError) as caught:
+                call()
+            self.assertIn("all shards failed", str(caught.exception))
+
+    def test_a_single_request_s_failure_carries_its_reason(self):
+        """One group goes as a plain search rather than a batch, and has its
+        own path for failing."""
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        cluster = _cluster(refusing={OTEL})
+        source = ElasticsearchTraceSource(cluster, patterns=("otel-*",))
+        with self.assertRaises(RuntimeError) as caught:
+            source.search(TraceQuery(window=self.window), self.scope)
+        self.assertIn("connection reset", str(caught.exception))
+
+
+class MappingFailureTest(unittest.TestCase):
+    """An index whose mapping could not be read once was gone for good.
+
+    The failure was taken for "no recognisable schema", that None was
+    cached, and the index dropped out of search, lookup and the service
+    list for the life of the process, with nothing logged. Measured: a
+    mapping request that failed once and then worked, three calls, the index
+    never came back and the mapping was asked for once.
+    """
+
+    def setUp(self):
+        self.window = TimeWindow.of("1h")
+        self.scope = Scope.unrestricted()
+
+    def _search(self, source):
+        return source.search(TraceQuery(window=self.window, limit=10), self.scope)
+
+    def test_a_mapping_that_failed_is_asked_for_again(self):
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        cluster = _cluster(mapping_failures={OTEL: 1})
+        source = ElasticsearchTraceSource(cluster, patterns=("otel-*",))
+        with self.assertRaises(RuntimeError) as caught:
+            self._search(source)
+        self.assertIn(OTEL, str(caught.exception))
+        self.assertIn("timed out", str(caught.exception))
+        self.assertEqual([row.trace_id for row in self._search(source)], ["t1"])
+        self.assertEqual(cluster.mapping_calls[OTEL], 2)
+
+    def test_the_failure_is_logged_with_the_index_it_cost(self):
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        source = ElasticsearchTraceSource(_cluster(mapping_failures={OTEL: 1}),
+                                          patterns=("otel-*",))
+        with self.assertLogs("wdash.hub.adapters.elasticsearch", "WARNING") as logged:
+            with self.assertRaises(RuntimeError):
+                self._search(source)
+        self.assertTrue(any(OTEL in line and "timed out" in line
+                            for line in logged.output), logged.output)
+
+    def test_a_failed_mapping_beside_a_readable_index_is_named(self):
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        source = ElasticsearchTraceSource(_cluster(mapping_failures={APM: 1}))
+        found = self._search(source)
+        self.assertEqual([row.trace_id for row in found], ["t1"])
+        self.assertTrue(found.partial)
+        self.assertIn(APM, found.warnings[0])
+        self.assertIn("mapping", found.warnings[0])
+
+    def test_an_index_that_is_no_trace_store_is_not_asked_on_every_request(self):
+        """Every other request would otherwise ask for its mapping again."""
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        cluster = _cluster()
+        cluster._indices["notes-traces-1"] = ({"message": {"type": "text"}}, [])
+        source = ElasticsearchTraceSource(cluster)
+        for _ in range(3):
+            self.assertFalse(self._search(source).partial)
+        self.assertEqual(cluster.mapping_calls["notes-traces-1"], 1)
+
+    def test_an_index_left_out_is_said_to_be_left_out_once(self):
+        """A pattern that reaches something other than spans is a
+        configuration to fix, and was invisible: the index was skipped and
+        nothing said so."""
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        cluster = _cluster()
+        cluster._indices["notes-traces-1"] = ({"message": {"type": "text"}}, [])
+        source = ElasticsearchTraceSource(cluster)
+        with self.assertLogs("wdash.hub.adapters.elasticsearch", "WARNING") as logged:
+            self._search(source)
+            self._search(source)
+            # Asked again once the answer is stale, and still not repeated.
+            source._UNRECOGNISED_TTL = 0
+            self._search(source)
+        self.assertEqual(cluster.mapping_calls["notes-traces-1"], 2)
+        said = [line for line in logged.output if "notes-traces-1" in line]
+        self.assertEqual(len(said), 1, logged.output)
+        self.assertIn("left out", said[0])
+
+    def test_an_index_listed_before_its_first_span_is_read_once_one_lands(self):
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        cluster = PartlyBrokenCluster({OTEL: ({}, [])})
+        source = ElasticsearchTraceSource(cluster)
+        self.assertEqual(self._search(source), [])
+        # The collector writes its first span; the index now has a mapping.
+        cluster._indices[OTEL] = (COLLECTOR_SPAN_MAPPING, [
+            {"_index": OTEL, "_id": "gw",
+             "_source": {k: v for k, v in collector_span(
+                 "t1", "gw", "api-gateway", seconds_ago=5).items() if k != "_id"}}])
+        source._UNRECOGNISED_TTL = 0
+        self.assertEqual([row.trace_id for row in self._search(source)], ["t1"])

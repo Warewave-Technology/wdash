@@ -449,3 +449,32 @@ class TraceSourceConformance(_SourceConformanceBase):
             self.assertGreaterEqual(service.span_count, 0)
             self.assertGreaterEqual(service.error_rate, 0.0)
             self.assertLessEqual(service.error_rate, 1.0)
+
+    # ---------- failure is not emptiness ----------
+
+    def test_a_backend_failure_is_not_reported_as_no_data(self):
+        """The log side has had this check; the trace side had none.
+
+        Every trace adapter answered a failure with what "nothing" looks
+        like — an empty list, or None, which the route reads as "not found in
+        the selected time range". A failure is raised, which the route turns
+        into a 503 the page shows, or it comes back marked partial with a
+        warning that says what is missing.
+        """
+        held = self.source.search(self._query(), Scope.unrestricted())
+        trace_id = held[0].trace_id if held else "a-trace-id"
+        for what, call in (
+                ("search", lambda: self.source.search(self._query(),
+                                                      Scope.unrestricted())),
+                ("services", lambda: self.source.services(self.window,
+                                                          Scope.unrestricted())),
+                ("trace", lambda: self.source.trace(trace_id, self.window,
+                                                    Scope.unrestricted()))):
+            self.harness.fail_next()
+            try:
+                answer = call()
+            except Exception:
+                continue
+            self.assertTrue(
+                getattr(answer, "partial", False) and getattr(answer, "warnings", ()),
+                f"a failed {what} came back looking like an answer: {answer!r}")

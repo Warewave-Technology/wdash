@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .aggregation import AggregationResult, Bucket
 from .models import (
     DOWN, FieldStat, FieldValue, LogPage, MonitorPage, MonitorPoint,
-    PartialCounts, Service, Trace,
+    PartialCounts, PartialList, Service, Trace,
 )
 from .source import Capability, LogSource, MonitorSource, TraceSource
 
@@ -520,14 +520,22 @@ class FanOutTraceSource(TraceSource):
         return sorted(seen)
 
     def trace(self, trace_id, window, scope):
-        """One trace, assembled from every backend that has part of it."""
+        """One trace, assembled from every backend that has part of it.
+
+        A member that failed makes the trace partial and is named. When
+        nothing was found and a member failed, the failure is raised rather
+        than answered None: the trace may be exactly what that member holds,
+        and None is "not found in the selected time range" on the page.
+        """
         spans, partial, found, hidden = [], False, False, 0
-        seen_spans = set()
+        seen_spans, warnings, failed = set(), [], []
 
         for source, trace, error in self._parallel(
                 lambda source: source.trace(trace_id, window, scope)):
             if error is not None:
                 partial = True
+                failed.append(source.name)
+                warnings.append(f"{source.name} failed: {error}")
                 logger.warning(f"{source.name} failed on trace {trace_id}: {error}")
                 continue
             if trace is None:
@@ -535,6 +543,8 @@ class FanOutTraceSource(TraceSource):
             found = True
             partial = partial or trace.partial
             hidden += getattr(trace, "hidden", 0)
+            warnings.extend(f"{source.name}: {warning}"
+                            for warning in getattr(trace, "warnings", ()) or ())
             for span in trace.spans:
                 # Dedup by span id: a span exported to two backends is one
                 # span, and drawing it twice reads as a retry.
@@ -544,49 +554,84 @@ class FanOutTraceSource(TraceSource):
                 spans.append(span)
 
         if not found and not spans:
+            if failed:
+                raise RuntimeError(f"trace {trace_id} could not be looked up in "
+                                   f"{', '.join(failed)}: " + "; ".join(warnings))
             return None
         return Trace(trace_id=trace_id, spans=spans, partial=partial,
-                     hidden=hidden)
+                     hidden=hidden, warnings=tuple(warnings))
+
+    def _gather(self, work, what):
+        """Every member's answer to `work`, as (rows, partial, warnings).
+
+        A member that failed is named in the warnings and its rows are
+        missing; a member's own partial answer carries through. When every
+        member failed there is no answer to give, and that is raised.
+        """
+        results = self._parallel(work)
+        rows, warnings, failed, partial = [], [], 0, False
+        for source, found, error in results:
+            if error is not None:
+                failed += 1
+                warnings.append(f"{source.name} failed: {error}")
+                logger.warning(f"{source.name} failed on {what}: {error}")
+                continue
+            partial = partial or bool(getattr(found, "partial", False))
+            warnings.extend(f"{source.name}: {warning}"
+                            for warning in getattr(found, "warnings", ()) or ())
+            rows.append((source, found or ()))
+        if failed and failed == len(results):
+            raise RuntimeError(f"no trace source could answer the {what}: "
+                               + "; ".join(warnings))
+        return rows, partial or bool(failed), warnings
 
     def services(self, window, scope):
         totals, errors = {}, {}
-        for source, services, error in self._parallel(
-                lambda source: source.services(window, scope)):
-            if error is not None:
-                logger.warning(f"{source.name} failed listing services: {error}")
-                continue
-            for service in services or ():
+        answered, partial, warnings = self._gather(
+            lambda source: source.services(window, scope), "service list")
+        for _, services in answered:
+            for service in services:
                 totals[service.name] = totals.get(service.name, 0) + service.span_count
                 errors[service.name] = (errors.get(service.name, 0)
                                         + service.error_count)
-        return sorted(
+        return PartialList(sorted(
             (Service(name=name, span_count=count,
                      error_count=errors.get(name, 0))
              for name, count in totals.items()),
-            key=lambda service: service.span_count, reverse=True)
+            key=lambda service: service.span_count, reverse=True),
+            partial=partial, warnings=warnings)
 
     def search(self, query, scope):
-        """Trace summaries from every backend, newest first.
+        """Trace summaries from every backend, in the order asked for.
 
         Summaries are NOT deduplicated across sources. Two backends returning
         the same trace id return different halves of it, and hiding one is how
         somebody concludes a service was not involved. The source is on each
         summary so the duplication is legible rather than confusing.
+
+        Merged in the query's own order. Each member sorted its rows by
+        duration for "slowest", and this sorted the lot by start time again
+        before cutting it to the limit: over the lab's Tempo and Jaeger, the
+        five slowest were Tempo's 34-minute traces and the merged five were
+        Jaeger's 69 ms ones.
         """
+        from .query import SORT_SLOWEST
         summaries = []
-        for source, found, error in self._parallel(
-                lambda source: source.search(query, scope)):
-            if error is not None:
-                logger.warning(f"{source.name} failed on trace search: {error}")
-                continue
-            for summary in found or ():
+        answered, partial, warnings = self._gather(
+            lambda source: source.search(query, scope), "trace search")
+        for source, found in answered:
+            for summary in found:
                 if getattr(summary, "source", None) is None:
                     summary.source = source.name
                 summaries.append(summary)
 
-        summaries.sort(key=lambda summary: summary.start or _EPOCH, reverse=True)
+        if getattr(query, "sort", None) == SORT_SLOWEST:
+            summaries.sort(key=lambda summary: summary.duration_us or 0, reverse=True)
+        else:
+            summaries.sort(key=lambda summary: summary.start or _EPOCH, reverse=True)
         limit = getattr(query, "limit", None)
-        return summaries[:limit] if limit else summaries
+        return PartialList(summaries[:limit] if limit else summaries,
+                           partial=partial, warnings=warnings)
 
 
 class FanOutMonitorSource(MonitorSource):

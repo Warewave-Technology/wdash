@@ -56,6 +56,29 @@ TRACE = {
     "warnings": None,
 }
 
+#: A second trace, through `payments` alone: older and faster than TRACE.
+PAYMENTS_TRACE = {
+    "traceID": "5b8aa5a2d2c872e8321cf37308d69df2",
+    "spans": [
+        {"traceID": "5b8aa5a2d2c872e8321cf37308d69df2",
+         "spanID": "aa01bb02cc03dd04",
+         "operationName": "POST /settle",
+         "references": [],
+         "startTime": 1785960100000000,
+         "duration": 50000,
+         "tags": [{"key": "span.kind", "type": "string", "value": "server"}],
+         "logs": [], "processID": "p1", "warnings": None},
+    ],
+    "processes": {"p1": {"serviceName": "payments", "tags": []}},
+    "warnings": None,
+}
+
+TRACES = (TRACE, PAYMENTS_TRACE)
+
+
+def _services_of(trace):
+    return {process["serviceName"] for process in trace["processes"].values()}
+
 
 class FakeResponse:
     def __init__(self, payload=None, status_code=200, text=""):
@@ -76,6 +99,7 @@ class FakeJaeger(Harness):
         self._requests = []
         self._fail_next = False
         self._trace_found = True
+        self._failing_services = set()
 
     # --- harness contract ---
 
@@ -97,6 +121,10 @@ class FakeJaeger(Harness):
 
     def no_trace(self):
         self._trace_found = False
+
+    def fail_service(self, name):
+        """Answer 503 to every search for one service."""
+        self._failing_services.add(name)
 
     def mentions(self, request, text):
         return text in json.dumps(request, default=str)
@@ -130,12 +158,13 @@ class FakeJaeger(Harness):
             # first version of this fake returned the fixture for ANY id —
             # which made "a missing trace is None" impossible to fail.
             requested = path.rsplit("/", 1)[-1]
-            if not self._trace_found or requested != TRACE["traceID"]:
+            held = [trace for trace in TRACES if trace["traceID"] == requested]
+            if not self._trace_found or not held:
                 return FakeResponse(
                     status_code=404,
                     payload={"data": None,
                              "errors": [{"code": 404, "msg": "trace not found"}]})
-            return FakeResponse({"data": [TRACE], "total": 1})
+            return FakeResponse({"data": held, "total": 1})
 
         if path.endswith("/api/traces"):
             service = (params or {}).get("service")
@@ -145,7 +174,12 @@ class FakeJaeger(Harness):
                 return FakeResponse(
                     status_code=400,
                     text="parameter 'service' is required")
-            return FakeResponse({"data": [TRACE], "total": 1})
+            if service in self._failing_services:
+                return FakeResponse(status_code=503, text="storage unavailable")
+            # Every trace with a span of that service, as Jaeger answers: a
+            # trace through two services comes back for each of them.
+            found = [trace for trace in TRACES if service in _services_of(trace)]
+            return FakeResponse({"data": found, "total": len(found)})
 
         return FakeResponse({"data": []})
 
@@ -311,10 +345,59 @@ class JaegerSpecificTest(unittest.TestCase):
                   permissions=frozenset({"traces:read"})))
         self.assertIsNone(trace)
 
-    def test_a_backend_error_does_not_take_the_page_down(self):
-        self.harness.fail_next()
-        self.assertEqual(self.source.services(self.window,
-                                              Scope.unrestricted()), [])
+    def test_a_backend_error_is_raised_rather_than_answered_as_nothing(self):
+        """This asserted `services(...) == []` after a 503, under the name
+        "does not take the page down". The route already turns a raise into
+        a 503 the page shows; the empty list was what made a down Jaeger
+        read as "No spans in this time range" and a trace link as "not
+        found, widen the time range"."""
+        from wdash.hub.adapters.jaeger import JaegerError
+        for call in (
+                lambda: self.source.services(self.window, Scope.unrestricted()),
+                lambda: self._search(),
+                lambda: self._search(service="billing-api"),
+                lambda: self.source.trace(TRACE["traceID"], self.window,
+                                          Scope.unrestricted())):
+            self.harness.fail_next()
+            with self.assertRaises(JaegerError):
+                call()
+
+    def test_an_unreachable_jaeger_raises_too(self):
+        class Refused:
+            def get(self, url, **kwargs):
+                raise ConnectionError("connection refused")
+
+        source = JaegerTraceSource("http://127.0.0.1:9", session=Refused())
+        for call in (lambda: source.services(self.window, Scope.unrestricted()),
+                     lambda: source.search(self._query(), Scope.unrestricted()),
+                     lambda: source.trace(TRACE["traceID"], self.window,
+                                          Scope.unrestricted())):
+            with self.assertRaises(ConnectionError):
+                call()
+
+    def test_a_service_whose_search_failed_is_named_beside_the_rest(self):
+        """One request per service, so one can fail alone. The others'
+        rows are the answer, and the answer says it is short."""
+        self.harness.fail_service("payments")
+        found = self._search()
+        self.assertEqual([s.trace_id for s in found], [TRACE["traceID"]])
+        self.assertTrue(found.partial)
+        self.assertEqual(len(found.warnings), 1)
+        self.assertIn("payments", found.warnings[0])
+        self.assertIn("503", found.warnings[0])
+
+    def test_a_complete_search_is_not_partial(self):
+        found = self._search()
+        self.assertFalse(found.partial)
+        self.assertEqual(found.warnings, ())
+
+    def test_a_search_every_service_failed_raises(self):
+        from wdash.hub.adapters.jaeger import JaegerError
+        for service in SERVICES:
+            self.harness.fail_service(service)
+        with self.assertRaises(JaegerError) as caught:
+            self._search()
+        self.assertIn("payments", str(caught.exception))
 
     def test_health_reports_the_reason(self):
         self.harness.fail_next()
@@ -352,9 +435,58 @@ class JaegerSpecificTest(unittest.TestCase):
 
     def test_the_merged_list_is_sorted_and_limited(self):
         """Each service's request honours the limit on its own, so the merged
-        list is as many times too long as there are services."""
+        list is as many times too long as there are services.
+
+        It asserted only that two rows came back, which the same trace twice
+        satisfied: TRACE runs through two of the three services."""
         found = self._search(limit=2)
-        self.assertEqual(len(found), 2)
+        self.assertEqual([s.trace_id for s in found],
+                         [TRACE["traceID"], PAYMENTS_TRACE["traceID"]])
+        self.assertEqual([s.trace_id for s in self._search(limit=1)],
+                         [TRACE["traceID"]])
+
+    # --- one row per trace ---
+
+    def test_a_trace_through_several_services_is_listed_once(self):
+        """Jaeger answers a service's search with every trace that has a span
+        of it, so a trace through three services came back three times.
+        Measured on the lab: 25 rows of the 24-hour "slowest" list held 5
+        traces, one of them 6 times."""
+        found = self._search()
+        ids = [s.trace_id for s in found]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        self.assertEqual(sorted(ids), sorted(t["traceID"] for t in TRACES))
+
+    def test_the_slowest_list_is_one_row_per_trace_too(self):
+        from wdash.hub.query import SORT_SLOWEST
+        found = self._search(limit=2, sort=SORT_SLOWEST)
+        self.assertEqual([(s.trace_id, s.duration_us) for s in found],
+                         [(TRACE["traceID"], 120001),
+                          (PAYMENTS_TRACE["traceID"], 50000)])
+
+    def test_the_row_kept_is_the_one_with_most_spans(self):
+        """The same trace asked about twice can come back grown by a span
+        that landed between the two requests."""
+        grown = json.loads(json.dumps(TRACE))
+        grown["spans"].append(dict(grown["spans"][1], spanID="c0ffee00c0ffee00",
+                                   references=[{"refType": "CHILD_OF",
+                                                "spanID": "b36502ca8950f78d"}]))
+        # Asked in name order, so the grown answer is the second one.
+        answers = {"billing-api": [TRACE], "edge-router": [grown],
+                   "payments": []}
+        original = self.harness.get
+
+        def get(url, params=None, **kwargs):
+            if url.endswith("/api/traces") and params:
+                original(url, params=params, **kwargs)
+                found = answers[params["service"]]
+                return FakeResponse({"data": found, "total": len(found)})
+            return original(url, params=params, **kwargs)
+
+        self.harness.get = get
+        found = self._search()
+        self.assertEqual([(s.trace_id, s.span_count) for s in found],
+                         [(TRACE["traceID"], 3)])
 
     # --- the store and service boundaries ---
 

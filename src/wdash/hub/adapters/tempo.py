@@ -34,7 +34,6 @@ access-controlled system must never round in.
 
 import base64
 import binascii
-import logging
 from datetime import datetime, timezone
 
 import requests
@@ -45,8 +44,6 @@ from ..models import (
 )
 from .. import patterns
 from ..source import Capability, TraceSource
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30
 
@@ -277,11 +274,9 @@ class TempoTraceSource(TraceSource):
         """
         if not self._granted(scope):
             return []
-        try:
-            names = self._service_names(scope, window)
-        except Exception as exc:
-            logger.error(f"Tempo service list failed: {exc}")
-            return []
+        # A failure is raised: an empty list is what a quiet hour looks like,
+        # and the route turns the raise into a 503 the page shows.
+        names = self._service_names(scope, window)
         return [Service(name=name, span_count=0, error_count=0)
                 for name in names]
 
@@ -290,11 +285,10 @@ class TempoTraceSource(TraceSource):
     def trace(self, trace_id, window, scope):
         if not self._granted(scope):
             return None
-        try:
-            body = self._get(f"/api/traces/{trace_id}")
-        except Exception as exc:
-            logger.error(f"Tempo trace lookup failed: {exc}")
-            return None
+        # Only a 404 is "no such trace", and `_get` answers None for it.
+        # Anything else is raised: caught here it became None as well, and
+        # the page said "not found, widen the time range" during an outage.
+        body = self._get(f"/api/traces/{trace_id}")
 
         if not body:
             return None
@@ -420,11 +414,7 @@ class TempoTraceSource(TraceSource):
         # trace-only role — got an empty page from Tempo and no error.
         if not self._granted(scope) or scope.services == ():
             return []
-        try:
-            names = self._selectable(query, scope)
-        except Exception as exc:
-            logger.error(f"Tempo service list failed: {exc}")
-            return []
+        names = self._selectable(query, scope)
         if names == []:
             return []
 
@@ -441,15 +431,9 @@ class TempoTraceSource(TraceSource):
             params["start"] = int(window.start.timestamp())
             params["end"] = int(window.end.timestamp())
 
-        try:
-            body = self._get("/api/search", params) or {}
-        except TempoQueryError as exc:
-            # Not swallowed: the caller asked for something TraceQL cannot
-            # express, and an empty list would read as "no traces match".
-            raise
-        except Exception as exc:
-            logger.error(f"Tempo search failed: {exc}")
-            return []
+        # Not swallowed, whether TraceQL refused the query or Tempo could not
+        # be reached: an empty list reads as "no traces match".
+        body = self._get("/api/search", params) or {}
 
         summaries = []
         only_errors = getattr(query, "only_errors", False)

@@ -5,6 +5,7 @@ Everything Elasticsearch-specific stops here. Outside this file, `hits`,
 `_source` and `aggregations` do not appear.
 """
 
+import logging
 import math
 import re
 import time
@@ -12,8 +13,8 @@ import time
 from ...utils import timerange
 from ..models import (
     FieldStat, FieldValue, LogContext, LogPage, LogRecord, PartialCounts,
-    Service, SourceRef, Span, Trace, TraceSummary, UNKNOWN_SEVERITY,
-    normalise_severity,
+    PartialList, Service, SourceRef, Span, Trace, TraceSummary,
+    UNKNOWN_SEVERITY, normalise_severity,
 )
 from ..aggregation import AggregationResult, Bucket, DateHistogram, Terms
 from ..query import DEFAULT_LOG_FIELDS, SORT_SLOWEST
@@ -23,6 +24,11 @@ from .es_log_schema import (
     field_candidates, match_candidates, schema_for_document, source_fields,
 )
 from .es_trace_schema import detect_schema, dig, parse_time
+
+logger = logging.getLogger(__name__)
+
+#: Where a trace source looks when nobody said: the indices named for traces.
+DEFAULT_TRACE_PATTERNS = ("*traces*", "*apm*")
 
 # Log fields mapped onto the neutral model. Everything else lands in attributes.
 _MAPPED_LOG_FIELDS = {"@timestamp", "message", "level", "service",
@@ -119,7 +125,7 @@ def _search(es, indices, body, **options):
     return es.search(index=index, **_as_keywords(body), **options)
 
 
-def _multi_search(es, requests, timeout="15s"):
+def _multi_search(es, requests, timeout="15s", reasons=None):
     """Run several searches in ONE round trip.
 
     Both sources need this: trace lookups fan out per schema, and comparing a
@@ -127,15 +133,20 @@ def _multi_search(es, requests, timeout="15s"):
     double the round trips for what Elasticsearch answers in a single batch.
 
     A per-query failure comes back as None so one bad request does not lose the
-    results of the others.
+    results of the others. `reasons`, when given, is a dict that receives why
+    each failed request failed, by position: a failure said without its
+    reason is half a warning.
     """
+    if reasons is None:
+        reasons = {}
     if not requests:
         return []
     if len(requests) == 1:
         indices, body = requests[0]
         try:
             return [_search(es, indices, body, timeout=timeout)]
-        except Exception:
+        except Exception as exc:
+            reasons[0] = str(exc)[:200]
             return [None]
 
     payload = []
@@ -144,13 +155,19 @@ def _multi_search(es, requests, timeout="15s"):
         payload.append(body)
     try:
         response = es.msearch(searches=payload)
-    except Exception:
+    except Exception as exc:
+        reasons.update(dict.fromkeys(range(len(requests)), str(exc)[:200]))
         return [None] * len(requests)
 
     out = []
-    for item in response.get("responses", []):
-        out.append(None if item.get("error") else item)
+    for position, item in enumerate(response.get("responses", [])):
+        error = item.get("error")
+        if error:
+            reasons[position] = str(error.get("reason") if isinstance(error, dict)
+                                    else error)[:200]
+        out.append(None if error else item)
     while len(out) < len(requests):
+        reasons[len(out)] = "no answer for this request in the batch"
         out.append(None)
     return out
 
@@ -1067,6 +1084,10 @@ class ElasticsearchLogSource(LogSource):
         return schema.to_record(hit, self.backend, self.name)
 
 
+class TraceSearchFailed(RuntimeError):
+    """Nothing this trace source was asked could be read."""
+
+
 class ElasticsearchTraceSource(TraceSource):
     """Exposes Elasticsearch indices as a neutral trace source.
 
@@ -1074,12 +1095,21 @@ class ElasticsearchTraceSource(TraceSource):
     schema is detected from its mapping, one query is issued per schema group,
     and the results are merged into a single neutral Trace. The caller never
     learns which span came from which schema.
+
+    A group that cannot answer is not an empty group. When some answered, the
+    answer is marked partial and names what is missing; when none did, the
+    failure is raised, and the route turns it into a 503 the page shows.
     """
 
     backend = "elasticsearch"
 
+    #: Seconds before an index whose mapping named no span schema is asked
+    #: again: it may be a trace index before its first span. A mapping that
+    #: could not be READ is not remembered at all.
+    _UNRECOGNISED_TTL = 60.0
+
     def __init__(self, client, name="elasticsearch-traces",
-                 patterns=("*traces*", "*apm*"), catalogue=None):
+                 patterns=DEFAULT_TRACE_PATTERNS, catalogue=None):
         self._es = client
         self.name = name
         self._patterns = tuple(patterns)
@@ -1114,30 +1144,67 @@ class ElasticsearchTraceSource(TraceSource):
         return sorted(scope.resolve_traces(matched, source=self.name))
 
     def _schema_for(self, index):
-        """Detect and cache the schema of an index."""
-        if index in self._schema_cache:
-            return self._schema_cache[index]
-        try:
-            mapping = self._es.indices.get_mapping(index=index)
-            properties = list(mapping.values())[0]["mappings"].get("properties", {})
-        except Exception:
-            properties = {}
-        schema = detect_schema(properties)
-        self._schema_cache[index] = schema
+        """The schema of an index, or None when its mapping names none.
+
+        Raises when the mapping could not be read. That used to be taken for
+        "no schema", and the None was cached for good: one timed-out mapping
+        request, or an index listed before its first span, and the index was
+        out of every search until the process restarted, with nothing said.
+        """
+        cached = self._schema_cache.get(index)
+        if cached is not None:
+            schema, seen = cached
+            if schema is not None or time.monotonic() - seen < self._UNRECOGNISED_TTL:
+                return schema
+        mapping = self._es.indices.get_mapping(index=index)
+        entry = next(iter(mapping.values()), None) or {}
+        schema = detect_schema((entry.get("mappings") or {}).get("properties") or {})
+        if schema is None and cached is None:
+            logger.warning(f"{self.name}: {index} matches the trace patterns but "
+                           f"its mapping is no span schema WDash reads; left out")
+        self._schema_cache[index] = (schema, time.monotonic())
         return schema
 
     def _grouped(self, scope):
-        """{schema: [index, ...]} — indices with an unrecognised schema are skipped."""
-        groups = {}
+        """({schema: [index, ...]}, [what could not be read, ...]).
+
+        An index whose mapping names no span schema is skipped: it is not a
+        trace store. One whose mapping could not be read is a store this
+        answer is missing, and says so.
+        """
+        groups, failures = {}, []
         for index in self.containers(scope):
-            schema = self._schema_for(index)
+            try:
+                schema = self._schema_for(index)
+            except Exception as exc:
+                logger.warning(f"{self.name}: the mapping of {index} could not be "
+                               f"read, so it was not searched: {exc}")
+                failures.append(f"{index}: its mapping could not be read ({exc})")
+                continue
             if schema:
                 groups.setdefault(type(schema), []).append(index)
-        return {schema_cls(): indices for schema_cls, indices in groups.items()}
+        return ({schema_cls(): indices for schema_cls, indices in groups.items()},
+                failures)
+
+    def _search_groups(self, groups, requests, failures):
+        """Each group's answer, None for one that failed — which `failures`
+        is told about, with the reason."""
+        reasons = {}
+        responses = _multi_search(self._es, requests, reasons=reasons)
+        for position, (_, indices) in enumerate(groups):
+            if responses[position] is None:
+                failures.append(f"{', '.join(indices)}: the search failed "
+                                f"({reasons.get(position, 'no reason given')})")
+        return responses
+
+    def _nothing_answered(self, failures):
+        return TraceSearchFailed(f"{self.name} could not be searched: "
+                                 + "; ".join(failures))
 
     def trace(self, trace_id, window, scope):
-        spans, partial = [], False
-        groups = list(self._grouped(scope).items())
+        spans = []
+        groups, failures = self._grouped(scope)
+        groups = list(groups.items())
 
         requests = [
             (indices, {
@@ -1158,9 +1225,9 @@ class ElasticsearchTraceSource(TraceSource):
         # would report zero time of its own.
         seen_spans, hidden = set(), set()
 
-        for (schema, _), response in zip(groups, _multi_search(self._es, requests)):
+        responses = self._search_groups(groups, requests, failures)
+        for (schema, _), response in zip(groups, responses):
             if response is None:
-                partial = True
                 continue
             for hit in response["hits"]["hits"]:
                 span = schema.to_span(hit)
@@ -1175,11 +1242,14 @@ class ElasticsearchTraceSource(TraceSource):
                 spans.append(span)
 
         if not spans:
+            # Not "not found" while a store that may hold it did not answer.
+            if failures:
+                raise self._nothing_answered(failures)
             return None
 
         spans.sort(key=lambda s: (s.start is None, s.start))
-        return Trace(trace_id=trace_id, spans=spans, partial=partial,
-                     hidden=len(hidden))
+        return Trace(trace_id=trace_id, spans=spans, partial=bool(failures),
+                     hidden=len(hidden), warnings=tuple(failures))
 
     def search(self, query, scope):
         """Find traces matching the query.
@@ -1205,8 +1275,9 @@ class ElasticsearchTraceSource(TraceSource):
         """
         summaries, seen = [], set()
         groups, requests = [], []
+        grouped, failures = self._grouped(scope)
 
-        for schema, indices in self._grouped(scope).items():
+        for schema, indices in grouped.items():
             must = [{"range": {schema.timestamp_field: query.window.as_es_range()}}]
 
             if query.service:
@@ -1216,7 +1287,7 @@ class ElasticsearchTraceSource(TraceSource):
 
             # Entry spans only: a service may emit many spans per trace and we
             # want one row per trace, describing work the service handled.
-            must.append(self._server_span_filter(schema))
+            must.append(schema.entry_filter())
 
             # Push the scope's service restriction INTO the query. Filtering
             # after the fact is wrong here: `collapse` returns the top N by
@@ -1231,7 +1302,7 @@ class ElasticsearchTraceSource(TraceSource):
             if not query.service and scope_filter is None:
                 # No service asked for, so show where each request entered.
                 must.append({"bool": {"must_not": [
-                    {"exists": {"field": self._parent_field(schema)}}]}})
+                    {"exists": {"field": schema.parent_field}}]}})
             elif not query.service:
                 # The root may be a span this role cannot see. Requiring it
                 # beside the service rule kept only the traces whose ROOT was
@@ -1243,26 +1314,31 @@ class ElasticsearchTraceSource(TraceSource):
                 collapse["inner_hits"] = {
                     "name": "entry", "size": 1,
                     "sort": [
-                        {self._parent_field(schema): {
+                        {schema.parent_field: {
                             "order": "asc", "missing": "_first",
                             "unmapped_type": "keyword"}},
                         {schema.timestamp_field: {"order": "asc"}}]}
 
             if query.only_errors:
-                must.append(self._error_filter(schema))
+                must.append(schema.error_filter())
             if query.min_duration_us:
-                must.append(self._duration_filter(schema, query.min_duration_us))
+                must.append(schema.duration_filter(query.min_duration_us))
 
-            groups.append(schema)
+            groups.append((schema, indices))
             requests.append((indices, {
                 "query": {"bool": {"must": must}},
                 "size": min(query.limit, 200),
                 # One row per trace without a terms aggregation.
                 "collapse": collapse,
-                "sort": self._trace_sort(schema, query.sort),
+                "sort": (schema.slowest_first() if query.sort == SORT_SLOWEST
+                         else [{schema.timestamp_field: {"order": "desc"}}]),
             }))
 
-        for schema, response in zip(groups, _multi_search(self._es, requests)):
+        responses = self._search_groups(groups, requests, failures)
+        if failures and not any(response is not None for response in responses):
+            raise self._nothing_answered(failures)
+
+        for (schema, _), response in zip(groups, responses):
             if response is None:
                 continue
             for hit in response["hits"]["hits"]:
@@ -1289,11 +1365,8 @@ class ElasticsearchTraceSource(TraceSource):
         summaries.sort(
             key=lambda t: t.duration_us if reverse else (t.start.timestamp() if t.start else 0),
             reverse=True)
-        return summaries[:query.limit]
-
-    @staticmethod
-    def _parent_field(schema):
-        return "parent_span_id" if schema.name == "otel" else "parent.id"
+        return PartialList(summaries[:query.limit], partial=bool(failures),
+                           warnings=failures)
 
     @staticmethod
     def _scope_service_filter(schema, scope, source_name):
@@ -1353,42 +1426,27 @@ class ElasticsearchTraceSource(TraceSource):
             query["bool"]["must_not"] = [clause(p) for p in deny]
         return query
 
-    @staticmethod
-    def _server_span_filter(schema):
-        """Restrict to spans representing work a service handled."""
-        if schema.name == "otel":
-            return {"term": {"kind": "SPAN_KIND_SERVER"}}
-        return {"term": {"processor.event": "transaction"}}
-
-    @staticmethod
-    def _duration_filter(schema, minimum_us):
-        if schema.name == "otel":
-            return {"range": {"duration_ns": {"gte": minimum_us * 1000}}}
-        return {"range": {"transaction.duration.us": {"gte": minimum_us}}}
-
-    @staticmethod
-    def _trace_sort(schema, sort):
-        if sort == SORT_SLOWEST:
-            field = "duration_ns" if schema.name == "otel" else "transaction.duration.us"
-            return [{field: {"order": "desc"}}]
-        return [{schema.timestamp_field: {"order": "desc"}}]
-
     def services(self, window, scope):
         totals, errors = {}, {}
         groups, requests = [], []
+        grouped, failures = self._grouped(scope)
 
-        for schema, indices in self._grouped(scope).items():
-            groups.append(schema)
+        for schema, indices in grouped.items():
+            groups.append((schema, indices))
             requests.append((indices, {
                 "size": 0,
                 "query": {"range": {schema.timestamp_field: window.as_es_range()}},
                 "aggs": {"services": {
                     "terms": {"field": schema.service_field, "size": 100},
-                    "aggs": {"failed": {"filter": self._error_filter(schema)}},
+                    "aggs": {"failed": {"filter": schema.error_filter()}},
                 }},
             }))
 
-        for response in _multi_search(self._es, requests):
+        responses = self._search_groups(groups, requests, failures)
+        if failures and not any(response is not None for response in responses):
+            raise self._nothing_answered(failures)
+
+        for response in responses:
             if response is None:
                 continue
             for bucket in response["aggregations"]["services"]["buckets"]:
@@ -1399,14 +1457,8 @@ class ElasticsearchTraceSource(TraceSource):
                 errors[name] = (errors.get(name, 0)
                                 + _count(bucket["failed"]["doc_count"]))
 
-        return sorted(
+        return PartialList(sorted(
             (Service(name=n, span_count=c, error_count=errors.get(n, 0))
              for n, c in totals.items()),
             key=lambda s: s.span_count, reverse=True,
-        )
-
-    @staticmethod
-    def _error_filter(schema):
-        if schema.name == "otel":
-            return {"term": {"status_code": "ERROR"}}
-        return {"term": {"event.outcome": "failure"}}
+        ), partial=bool(failures), warnings=failures)

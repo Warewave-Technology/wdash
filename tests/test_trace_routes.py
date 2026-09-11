@@ -13,7 +13,8 @@ import os
 import sys
 import unittest
 
-from tests.support import grant, use_role, search_body
+from tests.support import ModelledES, grant, use_role
+from tests.test_otel_shapes import COLLECTOR_SPAN_MAPPING, collector_span
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -27,66 +28,47 @@ RBAC = os.path.join(os.path.dirname(__file__), "..", "config", "rbac.yaml")
 APP_SERVICES = ["api-gateway", "auth-service", "payment-service"]
 INFRA_SERVICES = ["postgres", "redis"]
 
-OTEL_MAPPING = {
-    "otel-traces-000001": {"mappings": {"properties": {
-        "trace_id": {"type": "keyword"}, "span_id": {"type": "keyword"},
-    }}}
-}
+LOG_MAPPING = {"@timestamp": {"type": "date"}, "message": {"type": "text"},
+               "level": {"type": "keyword"}, "trace_id": {"type": "keyword"}}
 
 
-def _hit(span_id, service, parent=None, status="OK"):
-    return {
-        "_index": "otel-traces-000001", "_id": span_id,
-        "_source": {
-            "@timestamp": "2026-08-04T10:00:00.000Z",
-            "trace_id": "trace-1", "span_id": span_id, "parent_span_id": parent,
-            "name": f"{service} op", "kind": "SPAN_KIND_SERVER",
-            "duration_ns": 1_000_000, "status_code": status,
-            "resource": {"service.name": service}, "attributes": {},
-        },
-    }
+def _hit(span_id, service, parent=None, status="Ok"):
+    """One span of trace-1, in the shape the collector writes.
+
+    It was `kind: SPAN_KIND_SERVER`, `duration_ns`, `status_code` and a flat
+    `resource` — the shape no collector writes, which the trace search's
+    own clauses assumed, so the two agreed with each other here and with
+    nothing on a real cluster."""
+    kind = "Client" if service in INFRA_SERVICES else "Server"
+    return collector_span("trace-1", span_id, service, parent=parent, kind=kind,
+                          code=status, duration_ms=1, seconds_ago=600,
+                          name=f"{service} op")
 
 
-class FakeES:
-    """A fake cluster returning a fixed trace and service distribution."""
+class FakeES(ModelledES):
+    """The lab's topology, answering the query it is sent.
+
+    It returned every span whatever it was asked: the listing tests read the
+    fixture back, not what a search would find.
+    """
+
+    TRACES = "otel-traces-000001"
 
     def __init__(self):
-        self.spans = [_hit("root", "api-gateway")] + [
-            _hit(f"s{i}", svc, parent="root")
-            for i, svc in enumerate(APP_SERVICES[1:] + INFRA_SERVICES)
-        ]
-
-    def ping(self):
-        return True
-
-    @property
-    def cat(self):
-        class Cat:
-            def indices(self, **kw):
-                return [{"index": "otel-traces-000001"}, {"index": "app-logs-000001"}]
-        return Cat()
+        super().__init__({
+            self.TRACES: (COLLECTOR_SPAN_MAPPING, [_hit("root", "api-gateway")] + [
+                _hit(f"s{i}", svc, parent="root")
+                for i, svc in enumerate(APP_SERVICES[1:] + INFRA_SERVICES)]),
+            "app-logs-000001": (LOG_MAPPING, []),
+        })
 
     @property
-    def indices(self):
-        class Indices:
-            def get_mapping(self, index=None, **kw):
-                return OTEL_MAPPING
-        return Indices()
+    def spans(self):
+        return self._indices[self.TRACES][1]
 
-    def search(self, index=None, **kwargs):
-        body = search_body(kwargs)
-        if body.get("size") == 0:
-            # service aggregation
-            counts = {}
-            for hit in self.spans:
-                name = hit["_source"]["resource"]["service.name"]
-                counts[name] = counts.get(name, 0) + 1
-            return {"hits": {"total": {"value": 0}, "hits": []},
-                    "aggregations": {"services": {"buckets": [
-                        {"key": n, "doc_count": c, "failed": {"doc_count": 0}}
-                        for n, c in sorted(counts.items())
-                    ]}}}
-        return {"hits": {"hits": self.spans, "total": {"value": len(self.spans)}}, "took": 1}
+    @spans.setter
+    def spans(self, hits):
+        self._indices[self.TRACES][1][:] = hits
 
 
 class TestConfig(Config):
@@ -788,3 +770,190 @@ class ServiceRuleTest(unittest.TestCase):
         payload = self.client.get("/api/traces").get_json()
         self.assertEqual(payload["error_type"], "no_accessible_trace_stores")
         self.assertIn("no trace stores", payload["suggestion"])
+
+
+class _Refused:
+    """A requests session for a backend nothing answers on."""
+
+    def get(self, url, **kwargs):
+        raise ConnectionError(f"connection refused: {url}")
+
+
+class _SameApp(unittest.TestCase):
+    """TraceRouteTest's application and sign-in, without running its tests
+    again under another name."""
+
+    setUp = TraceRouteTest.setUp
+    login = TraceRouteTest.login
+
+
+class FailureReachesThePageTest(_SameApp):
+    """A trace backend that could not answer, as the page is told it.
+
+    Jaeger and Tempo caught their own failures and answered with what
+    nothing looks like, so the route's 503 could not fire. Measured with each
+    pointed at a closed port: the service list 200 [], the trace list 200 [],
+    and a trace link 404 "Trace not found in the selected time range" —
+    advice to widen a time range during an outage.
+    """
+
+    def _only(self, *sources):
+        from wdash.hub import Hub
+        hub = Hub()
+        for source in sources:
+            hub.add_traces(source)
+        self.app.hub = hub
+        self.login("admin")
+
+    @staticmethod
+    def _down():
+        from wdash.hub.adapters.jaeger import JaegerTraceSource
+        from wdash.hub.adapters.tempo import TempoTraceSource
+        return (JaegerTraceSource("http://127.0.0.1:9", name="down-jaeger",
+                                  session=_Refused()),
+                TempoTraceSource("http://127.0.0.1:9", name="down-tempo",
+                                 session=_Refused()))
+
+    def test_a_single_backend_that_is_down_is_a_503_everywhere(self):
+        for down in self._down():
+            self._only(down)
+            for path in ("/api/traces/services", "/api/traces",
+                         "/api/traces/0af7651916cd43dd8448eb211c80319c"):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 503, (down.name, path))
+                body = response.get_json()
+                self.assertEqual(body["error_type"], "trace_source_error")
+                self.assertIn("connection refused", body["details"])
+
+    def test_the_logs_of_a_trace_that_could_not_be_looked_up_are_a_503(self):
+        """The lookup ran outside any handler here: once the adapter
+        raised, the page would have had a 500 with no body to read."""
+        from wdash.hub.adapters import ElasticsearchLogSource
+        jaeger, _ = self._down()
+        self._only(jaeger)
+        self.app.hub.add_logs(ElasticsearchLogSource(FakeES()))
+        response = self.client.get(
+            "/api/traces/0af7651916cd43dd8448eb211c80319c/logs")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["error_type"], "trace_source_error")
+        self.assertIn("connection refused", response.get_json()["details"])
+
+    def _beside_a_live_source(self):
+        from wdash.hub.adapters import ElasticsearchTraceSource
+        live = ElasticsearchTraceSource(FakeES(), name="live")
+        jaeger, _ = self._down()
+        self._only(live, jaeger)
+
+    def test_a_merged_list_says_which_backend_is_missing(self):
+        self._beside_a_live_source()
+        for path, key in (("/api/traces/services?source=*", "services"),
+                          ("/api/traces?source=*", "traces")):
+            body = self.client.get(path).get_json()
+            self.assertTrue(body[key], path)
+            self.assertTrue(body["partial"], path)
+            self.assertTrue(any("down-jaeger" in w and "connection refused" in w
+                                for w in body["warnings"]), body["warnings"])
+
+    def test_a_complete_answer_says_it_is_complete(self):
+        self.login("admin")
+        for path in ("/api/traces/services", "/api/traces"):
+            body = self.client.get(path).get_json()
+            self.assertFalse(body["partial"], path)
+            self.assertEqual(body["warnings"], [], path)
+
+    def test_a_split_trace_with_a_backend_down_says_so(self):
+        self._beside_a_live_source()
+        body = self.client.get("/api/traces/trace-1").get_json()
+        self.assertEqual(len(body["spans"]), 5)
+        self.assertTrue(body["partial"])
+        self.assertTrue(any("down-jaeger" in w for w in body["warnings"]))
+
+    def test_a_trace_the_down_backend_may_hold_is_not_called_missing(self):
+        self._beside_a_live_source()
+        response = self.client.get("/api/traces/0af7651916cd43dd8448eb211c80319c")
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("down-jaeger", response.get_json()["details"])
+
+    def test_every_backend_down_is_a_503_not_an_empty_merge(self):
+        self._only(*self._down())
+        for path in ("/api/traces/services?source=*", "/api/traces?source=*",
+                     "/api/traces/0af7651916cd43dd8448eb211c80319c"):
+            self.assertEqual(self.client.get(path).status_code, 503, path)
+
+
+class MergedSlowestRouteTest(_SameApp):
+    def test_slowest_over_every_source_is_the_slowest(self):
+        """The picker's first choice is every source."""
+        import datetime as dt
+
+        from wdash.hub import Hub
+        from wdash.hub.models import TraceSummary
+        from tests.test_trace_fanout import StubTraceSource
+        now = dt.datetime.now(dt.timezone.utc)
+        slow = TraceSummary(trace_id="slow", service="batch", name="op",
+                            start=now - dt.timedelta(minutes=30),
+                            duration_us=9_000_000)
+        fast = TraceSummary(trace_id="fast", service="edge", name="op",
+                            start=now, duration_us=10)
+        hub = Hub()
+        hub.add_traces(StubTraceSource("m1", summaries=[slow]))
+        hub.add_traces(StubTraceSource("m2", summaries=[fast]))
+        self.app.hub = hub
+        self.login("admin")
+        body = self.client.get("/api/traces?source=*&sort=slowest&limit=1").get_json()
+        self.assertEqual([t["trace_id"] for t in body["traces"]], ["slow"])
+
+
+class CorrelatedLogFailureTest(_SameApp):
+    """The logs of a trace, when the log search could not run.
+
+    The adapter turns a failed search into a page marked partial with the
+    reason, and the route dropped both: 200 with no records, which the page
+    words as "No log records carry this trace id. Logs need a trace_id
+    field" — a failure explained as a missing field.
+    """
+
+    class _LogsDown(ModelledES):
+        def search(self, index=None, **kwargs):
+            raise ConnectionError("log cluster unreachable")
+
+    def setUp(self):
+        TraceRouteTest.setUp(self)
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource, ElasticsearchTraceSource
+        hub = Hub()
+        hub.add_traces(ElasticsearchTraceSource(FakeES()))
+        hub.add_logs(ElasticsearchLogSource(self._LogsDown(
+            {"app-logs-000001": (LOG_MAPPING, [])})))
+        self.app.hub = hub
+        self.login("admin")
+
+    def test_a_failed_log_search_says_it_failed(self):
+        body = self.client.get("/api/traces/trace-1/logs").get_json()
+        self.assertEqual(body["records"], [])
+        self.assertTrue(body["partial"])
+        self.assertTrue(any("log cluster unreachable" in w for w in body["warnings"]),
+                        body["warnings"])
+
+    def test_a_search_that_ran_is_not_partial(self):
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource, ElasticsearchTraceSource
+        hub = Hub()
+        hub.add_traces(ElasticsearchTraceSource(FakeES()))
+        hub.add_logs(ElasticsearchLogSource(StubLogCluster()))
+        self.app.hub = hub
+        body = self.client.get("/api/traces/trace-1/logs").get_json()
+        self.assertFalse(body["partial"])
+        self.assertEqual(body["warnings"], [])
+
+
+class StubLogCluster(ModelledES):
+    """A log index that answers, with no records: the query model knows no
+    `match`, which a log search sends, so the answer is fixed."""
+
+    def __init__(self):
+        super().__init__({"app-logs-000001": (LOG_MAPPING, [])})
+
+    def search(self, index=None, **kwargs):
+        return {"took": 1, "timed_out": False,
+                "hits": {"total": {"value": 0}, "hits": []}}

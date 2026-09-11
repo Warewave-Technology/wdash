@@ -55,6 +55,16 @@ def _members(source):
     return getattr(source, "sources", None) or [source]
 
 
+def _completeness(answer):
+    """Whether an answer is short of what was asked, and what it is missing.
+
+    Sent on every answer, so a page can tell "these are all the traces" from
+    "these are the traces the stores that answered hold".
+    """
+    return {"partial": bool(getattr(answer, "partial", False)),
+            "warnings": list(getattr(answer, "warnings", ()) or ())}
+
+
 def _services_narrowed(scope, sources):
     """Whether the service rules hide anything in any of these sources.
 
@@ -196,12 +206,14 @@ def api_services():
             "services": [],
             "error_type": "no_accessible_trace_stores",
             "suggestion": NO_STORE_SUGGESTION.format(source=source.name),
+            **_completeness(services),
         })
 
     return jsonify({
         "services": [s.to_dict() for s in services],
         "window": {"start": window.start.isoformat(), "end": window.end.isoformat()},
         "total_spans": sum(s.span_count for s in services),
+        **_completeness(services),
     })
 
 
@@ -288,6 +300,10 @@ def api_trace_logs(trace_id):
         "total": page.total,
         "window": {"start": log_window.start.isoformat(),
                    "end": log_window.end.isoformat()},
+        # A log source turns a failed search into a page marked partial with
+        # the reason. Dropped here, the page read the failure as "no record
+        # carries this trace id" and blamed a missing field.
+        **_completeness(page),
     })
 
 
@@ -352,7 +368,8 @@ def api_search_traces():
 
     if not traces and _reaches_no_store(source, scope):
         return jsonify({"traces": [], "error_type": "no_accessible_trace_stores",
-                        "suggestion": NO_STORE_SUGGESTION.format(source=source.name)})
+                        "suggestion": NO_STORE_SUGGESTION.format(source=source.name),
+                        **_completeness(traces)})
 
     # The fan-out stamps this; a single source does not know it is being
     # asked by name. Filled in here so "which store answered" is answerable
@@ -368,7 +385,8 @@ def api_search_traces():
                     # and "you are looking at the wrong store".
                     "multiple_sources": _multiple_trace_sources(),
                     "source": _requested_source(),
-                    "service": service, "sort": sort})
+                    "service": service, "sort": sort,
+                    **_completeness(traces)})
 
 
 @trace_bp.route("/api/traces/<trace_id>")

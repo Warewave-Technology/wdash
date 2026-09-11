@@ -397,10 +397,41 @@ class TempoSpecificTest(unittest.TestCase):
         self.assertFalse(healthy)
         self.assertIn("not ready", detail)
 
-    def test_a_backend_error_does_not_take_the_page_down(self):
+    def test_a_backend_error_is_raised_rather_than_answered_as_nothing(self):
+        """This asserted `services(...) == []` after a 503. Only a query
+        TraceQL refused was raised; every other failure was an empty list,
+        so a Tempo that was down read as a quiet hour on the list and as
+        "not found, widen the time range" on a trace link."""
+        from wdash.hub.adapters.tempo import TempoError
+        for call in (
+                lambda: self.source.services(self.window, Scope.unrestricted()),
+                lambda: self._search(),
+                lambda: self.source.trace(TRACE_ID, self.window,
+                                          Scope.unrestricted())):
+            self.harness.fail_next()
+            with self.assertRaises(TempoError):
+                call()
+
+    def test_a_failed_service_lookup_for_a_search_is_raised(self):
+        """A pattern grant asks Tempo for its service names first, and that
+        request failing was an empty page too."""
+        from wdash.hub.adapters.tempo import TempoError
         self.harness.fail_next()
-        self.assertEqual(self.source.services(self.window,
-                                              Scope.unrestricted()), [])
+        with self.assertRaises(TempoError):
+            self._search(scope=self._role(services=("billing-*",)))
+
+    def test_an_unreachable_tempo_raises_too(self):
+        class Refused:
+            def get(self, url, **kwargs):
+                raise ConnectionError("connection refused")
+
+        source = TempoTraceSource("http://127.0.0.1:9", session=Refused())
+        for call in (lambda: source.services(self.window, Scope.unrestricted()),
+                     lambda: source.search(self._query(), Scope.unrestricted()),
+                     lambda: source.trace(TRACE_ID, self.window,
+                                          Scope.unrestricted())):
+            with self.assertRaises(ConnectionError):
+                call()
 
     # --- the store boundary ---
 

@@ -39,8 +39,8 @@ from datetime import datetime, timezone
 import requests
 
 from ..models import (
-    STATUS_ERROR, STATUS_OK, STATUS_UNSET, Service, SourceRef, Span, Trace,
-    TraceSummary,
+    STATUS_ERROR, STATUS_OK, STATUS_UNSET, PartialList, Service, SourceRef,
+    Span, Trace, TraceSummary,
 )
 from ..source import Capability, TraceSource
 
@@ -184,11 +184,9 @@ class JaegerTraceSource(TraceSource):
         """
         if not self._granted(scope):
             return []
-        try:
-            names = self._service_names(scope)
-        except Exception as exc:
-            logger.error(f"Jaeger service list failed: {exc}")
-            return []
+        # A failure is raised: an empty list is what a quiet hour looks like,
+        # and the route turns the raise into a 503 the page shows.
+        names = self._service_names(scope)
         return [Service(name=name, span_count=0, error_count=0)
                 for name in names]
 
@@ -197,11 +195,10 @@ class JaegerTraceSource(TraceSource):
     def trace(self, trace_id, window, scope):
         if not self._granted(scope):
             return None
-        try:
-            body = self._get(f"/api/traces/{trace_id}")
-        except Exception as exc:
-            logger.error(f"Jaeger trace lookup failed: {exc}")
-            return None
+        # Only a 404 is "no such trace", and `_get` answers None for it.
+        # Anything else is raised: caught here it became None as well, and
+        # the page said "not found, widen the time range" during an outage.
+        body = self._get(f"/api/traces/{trace_id}")
 
         if not body:
             return None
@@ -287,32 +284,53 @@ class JaegerTraceSource(TraceSource):
         is fanned across the service list. Bounded, and the bound is reported:
         an installation with hundreds of services would otherwise turn one
         page load into hundreds of round trips.
+
+        Jaeger answers a service's search with every trace that has a span of
+        it, whole, so a trace through three services comes back three times.
+        It is one row here. Measured on the lab before that: the 24-hour
+        "slowest" list was 25 rows holding 5 traces, one of them 6 times.
+
+        A service whose search failed is named in the answer's warnings and
+        the rest are listed; when every one failed, the failure is raised.
         """
         wanted = getattr(query, "service", None)
         if not self._granted(scope):
             return []
-        try:
-            if wanted:
-                if not scope.allows_service(wanted, source=self.name):
-                    return []
-                services = [wanted]
-            else:
-                services = self._service_names(scope)[:self._service_fanout]
-        except Exception as exc:
-            logger.error(f"Jaeger service list failed: {exc}")
-            return []
+        if wanted:
+            if not scope.allows_service(wanted, source=self.name):
+                return []
+            services = [wanted]
+        else:
+            # A failure to list the services is raised, not an empty page.
+            services = self._service_names(scope)[:self._service_fanout]
 
         if not services:
             return []
 
-        summaries = []
+        by_trace, failures = {}, []
         for service in services:
-            summaries.extend(self._search_one(service, query, scope))
+            try:
+                found = self._search_one(service, query, scope)
+            except Exception as exc:
+                logger.error(f"Jaeger search failed for {service}: {exc}")
+                failures.append(f"the search for {service} failed: {exc}")
+                continue
+            for summary in found:
+                # The same trace asked about twice can have grown between the
+                # two answers; the fuller one is kept.
+                kept = by_trace.get(summary.trace_id)
+                if kept is None or summary.span_count > kept.span_count:
+                    by_trace[summary.trace_id] = summary
+
+        if failures and len(failures) == len(services):
+            raise JaegerError(f"{self.name} could not be searched: "
+                              + "; ".join(failures))
 
         # Sorted here rather than by Jaeger: with a service fan-out the merged
         # list is what the caller sees, and each backend request sorted its
         # own slice.
         from ..query import SORT_SLOWEST
+        summaries = list(by_trace.values())
         if getattr(query, "sort", None) == SORT_SLOWEST:
             summaries.sort(key=lambda s: s.duration_us, reverse=True)
         else:
@@ -320,7 +338,8 @@ class JaegerTraceSource(TraceSource):
                 tzinfo=timezone.utc), reverse=True)
 
         limit = getattr(query, "limit", None)
-        return summaries[:limit] if limit else summaries
+        return PartialList(summaries[:limit] if limit else summaries,
+                           partial=bool(failures), warnings=failures)
 
     def _search_one(self, service, query, scope):
         params = {"service": service, "limit": getattr(query, "limit", 20) or 20}
@@ -341,11 +360,7 @@ class JaegerTraceSource(TraceSource):
             # wrong ones.
             params["tags"] = json.dumps({"error": "true"})
 
-        try:
-            body = self._get("/api/traces", params) or {}
-        except Exception as exc:
-            logger.error(f"Jaeger search failed for {service}: {exc}")
-            return []
+        body = self._get("/api/traces", params) or {}
 
         out = []
         for entry in body.get("data") or ():

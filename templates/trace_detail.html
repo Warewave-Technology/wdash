@@ -138,7 +138,11 @@
                 '<i class="fas fa-filter"></i> Filtered by your role — some spans are hidden, ' +
                 'so timings below may be incomplete.</div>' : '') +
             (data.partial ? '<div class="alert alert-warning py-2 px-3" style="font-size:0.85rem">' +
-                '<i class="fas fa-exclamation-triangle"></i> Part of this trace could not be read.</div>' : '');
+                '<i class="fas fa-exclamation-triangle"></i> Part of this trace could not be read.' +
+                // Which store, and why: "part of it" alone sends somebody
+                // looking through every backend for the one that is down.
+                (data.warnings || []).map(w => '<br><small>' + esc(w) + '</small>').join('') +
+                '</div>' : '');
     }
 
     function renderBreakdown(data) {
@@ -277,6 +281,17 @@
             '<table class="table table-sm mb-0">' + rows.join('') + '</table></div>';
     }
 
+    /** Why the logs of this trace could not be looked up, as markup. */
+    function logFailure(res, data) {
+        if (data.error_type === 'no_source') {
+            return 'No log source is configured, so this trace\'s log records ' +
+                   'cannot be looked up.';
+        }
+        const reasons = (data.warnings || []).map(esc);
+        return 'The log search failed: ' + (reasons.length ? reasons.join('<br>')
+            : esc(data.details || data.error || data.error_type || ('HTTP ' + res.status)));
+    }
+
     async function loadLogs() {
         if (!CAN_READ_LOGS) return;
         const box = el('correlatedLogs');
@@ -284,14 +299,32 @@
             const res = await fetch('/api/traces/' + encodeURIComponent(TRACE_ID) +
                                     '/logs?' + sourceParams({ time_range: range() }));
             const data = await res.json();
-            if (!res.ok || !data.records.length) {
-                box.innerHTML = '<div class="p-3 text-muted"><small>' +
-                    'No log records carry this trace id. ' +
-                    'Logs need a <code>trace_id</code> field for this to work.</small></div>';
+            // A failure is said as one. Every answer but a list of records
+            // came out as "no record carries this trace id — logs need a
+            // trace_id field", a cluster that was down included.
+            if (!res.ok || (data.partial && !data.records.length)) {
+                box.innerHTML = '<div class="p-3 text-danger"><small>' +
+                    logFailure(res, data) + '</small></div>';
                 return;
             }
+            if (!data.records.length) {
+                // The source's own reason when it gave one ("the scope
+                // permits no containers"); the field hint only when not.
+                box.innerHTML = '<div class="p-3 text-muted"><small>' +
+                    ((data.warnings || []).length
+                        ? data.warnings.map(esc).join('<br>')
+                        : 'No log records carry this trace id. ' +
+                          'Logs need a <code>trace_id</code> field for this to work.') +
+                    '</small></div>';
+                return;
+            }
+            const short = data.partial
+                ? '<div class="alert alert-warning py-1 px-2 m-2 mb-0" style="font-size:0.78rem">' +
+                  '<i class="fas fa-exclamation-triangle"></i> Part of the log search failed:<br>' +
+                  (data.warnings || []).map(esc).join('<br>') + '</div>'
+                : '';
             el('logCount').textContent = data.records.length + ' of ' + data.total;
-            box.innerHTML = '<table class="table table-sm mb-0"><tbody>' +
+            box.innerHTML = short + '<table class="table table-sm mb-0"><tbody>' +
                 data.records.map(r =>
                     '<tr>' +
                         '<td class="text-nowrap" style="width:16%"><small class="text-muted">' +
@@ -316,6 +349,7 @@
             if (!res.ok) {
                 el('alerts').innerHTML = '<div class="alert alert-warning">' + esc(data.error) +
                     (data.suggestion ? '<br><small class="text-muted">' + esc(data.suggestion) + '</small>' : '') +
+                    (data.details ? '<br><small class="text-muted">' + esc(data.details) + '</small>' : '') +
                     '</div>';
                 el('waterfall').innerHTML = '';
                 el('breakdown').innerHTML = '';
