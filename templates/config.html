@@ -101,7 +101,7 @@
                       data-bs-toggle="modal" data-bs-target="#sourceModal">Edit</button>
               <form method="POST" class="d-inline"
                     action="{{ url_for('config.delete_source', source_id=source.id) }}"
-                    onsubmit="return confirm('Delete {{ source.name }}?')">
+                    data-confirm="Delete {{ source.name }}?">
                 <button class="btn btn-sm btn-outline-danger">Delete</button>
               </form>
             </td>
@@ -614,7 +614,7 @@
                   {% if role.name != current_user.role %}
                   <form method="POST" class="d-inline"
                         action="{{ url_for('config.delete_role', name=role.name) }}"
-                        onsubmit="return confirm('Delete role {{ role.name }}?')">
+                        data-confirm="Delete role {{ role.name }}?">
                     <button class="btn btn-sm btn-outline-danger">Delete</button>
                   </form>
                   {% endif %}

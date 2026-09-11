@@ -126,14 +126,23 @@ So that a report can say what it got past:
   the password is checked so a lockout also stops the guessing;
 * an append-only audit trail, not deletable from the UI, recording refused
   changes as well as accepted ones;
-* a Content-Security-Policy where `script-src` carries a per-request nonce
-  and no `unsafe-inline`, `connect-src` is `'self'` so an exfiltration
-  attempt has nowhere to send anything, and `frame-ancestors` is `'none'`.
+* a Content-Security-Policy where `script-src` is `'self'` and a
+  per-request nonce — no `unsafe-inline`, and no host: a CDN that serves
+  whatever anybody publishes, listed there, let one HTML injection load code
+  of the attacker's choosing through an iframe's `srcdoc`. `connect-src` is
+  `'self'` so an exfiltration attempt has nowhere to send anything, and
+  `frame-ancestors` is `'none'`.
   `style-src` DOES allow `'unsafe-inline'`, because a style attribute cannot
   carry a nonce — said plainly here rather than left for a reporter to
   discover;
 * Subresource Integrity on every third-party asset, so a substituted CDN
   fails closed rather than serving attacker code under a valid nonce;
+* values from logs, traces, monitor documents, agents and backends reach
+  the page as text: escaped for the context they land in — an attribute
+  needs its quotes escaped, which text escaping does not do — and numbers
+  a backend computes are read as numbers or reported as a failed answer;
+* failure screenshots kept and served only as the image their bytes say
+  they are, whatever type the agent sent, with a policy of their own;
 * `X-Frame-Options: DENY`, and HSTS when served over TLS;
 * `X-Forwarded-For` ignored unless `TRUSTED_PROXY_COUNT` says how many
   proxies to count in from the right — an unconfigured deployment cannot be

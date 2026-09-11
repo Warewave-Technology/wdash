@@ -96,6 +96,61 @@ class WDash {
     }
 
     /**
+     * For a value inside a quoted attribute.
+     *
+     * `escapeHtml` is right for text and wrong here: it leaves quotes as
+     * they are, so a severity of `x" style="position:fixed…` closed the
+     * class attribute it was put in and wrote its own, on every row that
+     * showed it. It stays as it is for text — `highlightJson` finds strings
+     * by their quotes.
+     */
+    static escapeAttr(value) {
+        return String(value == null ? '' : value).replace(/[&<>"']/g, c =>
+            ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+    }
+
+    /**
+     * A number from the server, as a number.
+     *
+     * Totals, timings and bucket counts are Elasticsearch's own, and a
+     * string where one was expected went into the page as markup: whoever
+     * answered as Elasticsearch — anything on a plain-http link to it —
+     * chose what every reader's browser ran. `toLocaleString` on a string
+     * returns the string.
+     */
+    static count(value) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : 0;
+    }
+
+    /**
+     * A value as a quoted string in the query language, whatever it holds.
+     *
+     * A click that filters by a value wrote it between quotes and escaped
+     * nothing, so a value holding a quote closed the string and the rest was
+     * query: `x" OR service:"hr-salaries` clicked in the sidebar widened the
+     * search it was meant to narrow, and a Windows path ending in a
+     * backslash was a syntax error.
+     */
+    static quoted(value) {
+        return '"' + String(value == null ? '' : value)
+            .replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+    }
+
+    /**
+     * The class a level badge wears. The stylesheet colours the normalised
+     * levels and two raw names of its own — SUCCESS and NOTICE, which
+     * normalise to UNSPECIFIED and INFO — so those keep their chip; anything
+     * else is the level. Never the raw text as it came: a severity of
+     * `x" style="…` closed the attribute it was put in.
+     */
+    static levelClass(record) {
+        const raw = String((record && record.severity_text) || '').toUpperCase();
+        return WDash.escapeAttr(['SUCCESS', 'NOTICE'].includes(raw) ? raw
+            : ((record && record.severity) || 'INFO').toUpperCase());
+    }
+
+    /**
      * Colour a JSON document without changing a character of it.
      *
      * One pass over tokens rather than a chain of independent replaces. The
@@ -178,10 +233,14 @@ class WDash {
         const alertDiv = document.createElement('div');
         alertDiv.className = `alert alert-${type} alert-dismissible fade show position-fixed`;
         alertDiv.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
-        alertDiv.innerHTML = `
-            ${message}
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        `;
+        // Text, not markup: every caller passes a sentence, and one of them
+        // passes a name the user typed.
+        alertDiv.append(document.createTextNode(String(message)));
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'btn-close';
+        close.setAttribute('data-bs-dismiss', 'alert');
+        alertDiv.append(close);
         
         document.body.appendChild(alertDiv);
         
@@ -611,7 +670,7 @@ class LogSearch {
                             : '') +
                         esc(source.name) +
                     '</span>' +
-                    '<span class="badge bg-secondary">' + (source.count || 0) + '</span>' +
+                    '<span class="badge bg-secondary">' + WDash.count(source.count) + '</span>' +
                 '</div>' +
                 '<div class="progress mt-1" style="height:3px">' +
                     '<div class="progress-bar ' +
@@ -722,11 +781,11 @@ class LogSearch {
                 // is worth knowing.
                 const shown = (item.value === '' || item.value === null)
                     ? '(none)' : item.value;
-                const filterQ = stat.field + ':"' + item.value + '"';
+                const filterQ = stat.field + ':' + WDash.quoted(item.value);
                 html += '<div class="field-stat-item">' +
                     '<span class="field-stat-value text-truncate" title="' + attr(shown) + '">' +
                         esc(shown) + '</span>' +
-                    '<span class="field-stat-count">' + item.count.toLocaleString() + '</span>' +
+                    '<span class="field-stat-count">' + WDash.count(item.count).toLocaleString() + '</span>' +
                     '<span class="field-stat-filter field-action" data-sidebar-filter="' +
                         attr(filterQ) + '" title="Filter">&#128269;</span>' +
                     '</div>';
@@ -783,10 +842,10 @@ class LogSearch {
             var html = '';
             searches.forEach(function(s) {
                 html += '<div class="d-flex align-items-center px-2 py-1 saved-search-item">';
-                html += '<a href="#" class="dropdown-item py-1 px-2 flex-grow-1 text-truncate saved-search-apply" data-query="' + s.query.replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" data-time="' + WDash.escapeHtml(s.time_range) + '">';
+                html += '<a href="#" class="dropdown-item py-1 px-2 flex-grow-1 text-truncate saved-search-apply" data-query="' + s.query.replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" data-time="' + WDash.escapeAttr(s.time_range) + '">';
                 html += '<small>' + WDash.escapeHtml(s.name) + '</small><br><code style="font-size:0.7rem" class="text-muted">' + WDash.escapeHtml(s.query) + '</code>';
                 html += '</a>';
-                html += '<button class="btn btn-sm btn-link text-danger p-0 ms-1 saved-search-delete" data-id="' + s.id + '" title="Delete"><i class="fas fa-trash-alt" style="font-size:0.7rem"></i></button>';
+                html += '<button class="btn btn-sm btn-link text-danger p-0 ms-1 saved-search-delete" data-id="' + WDash.escapeAttr(s.id) + '" title="Delete"><i class="fas fa-trash-alt" style="font-size:0.7rem"></i></button>';
                 html += '</div>';
             });
             listEl.innerHTML = html;
@@ -850,7 +909,8 @@ class LogSearch {
 
     async _deleteSavedSearch(id) {
         try {
-            var response = await fetch('/api/saved-searches/' + id, {method: 'DELETE'});
+            var response = await fetch('/api/saved-searches/' + encodeURIComponent(id),
+                                       {method: 'DELETE'});
             if (response.ok) {
                 WDash.showNotification('Search deleted', 'success');
                 this._loadSavedSearches();
@@ -890,7 +950,10 @@ class LogSearch {
         
         errorAlert.className = `alert ${alertClass} alert-dismissible fade show`;
         
-        let content = `<h6><i class="${icon}"></i> ${this.getErrorTitle(errorType)}</h6><p>${message}</p>`;
+        // The message is the server's, and it can quote the query back — a
+        // /logs?query= link put its own markup into this box.
+        let content = `<h6><i class="${icon}"></i> ${this.getErrorTitle(errorType)}</h6>` +
+            `<p>${WDash.escapeHtml(message)}</p>`;
         
         // Add helpful suggestions based on error type
         const suggestions = this.getErrorSuggestions(errorType, data);
@@ -934,7 +997,13 @@ class LogSearch {
                 let suggestions = '<strong>What you can do:</strong><ul class="mt-2 mb-0">';
                 suggestions += '<li>Contact your administrator to request access to log indices</li>';
                 if (data.available_indices && data.available_indices.length > 0) {
-                    suggestions += `<li>Available indices: <code>${data.available_indices.slice(0, 5).join(', ')}</code>${data.available_indices.length > 5 ? '...' : ''}</li>`;
+                    // Loki and VictoriaLogs container names are label values,
+                    // and a label value can be anything.
+                    suggestions += `<li>Available indices: <code>${WDash.escapeHtml(data.available_indices.slice(0, 5).join(', '))}</code>${data.available_indices.length > 5 ? '...' : ''}</li>`;
+                } else if (data.total_containers) {
+                    // Everybody but an administrator is told how many, not
+                    // which: the names are what the boundary holds back.
+                    suggestions += `<li>${WDash.count(data.total_containers)} exist that your role cannot read</li>`;
                 }
                 suggestions += '<li>Ask to be assigned a role with broader permissions</li></ul>';
                 return suggestions;
@@ -1083,7 +1152,7 @@ class LogSearch {
         this.showSources = Boolean(data.multiple_sources);
         this.showSearchWarnings(data);
 
-        this.totalResults = data.total;
+        this.totalResults = WDash.count(data.total);
         const logEntries = document.getElementById('logEntries');
         const resultsInfo = document.getElementById('resultsInfo');
         const emptyState = document.getElementById('emptyState');
@@ -1099,8 +1168,9 @@ class LogSearch {
         const endResult = Math.min(startResult + data.records.length - 1, this.totalResults);
         
         let infoText = `Showing ${startResult}-${endResult} of ${this.totalResults.toLocaleString()} results`;
-        if (data.took_ms) {
-            infoText += ` (${data.took_ms}ms)`;
+        const took = WDash.count(data.took_ms);
+        if (took) {
+            infoText += ` (${took}ms)`;
         }
         if (data.partial) {
             infoText += ' <span class="badge bg-warning">Timed Out</span>';
@@ -1154,7 +1224,7 @@ class LogSearch {
         div.innerHTML = `
             <div class="d-flex justify-content-between align-items-start mb-2">
                 <div>
-                    <span class="log-level ${esc(severity.toUpperCase())}">${esc(severity)}</span>
+                    <span class="log-level ${WDash.levelClass(record)}">${esc(severity)}</span>
                     <span class="ms-2 fw-bold">${esc(service)}</span>
                     ${host ? `<span class="ms-2 text-muted">${esc(host)}</span>` : ''}
                     ${record.trace_id ? `<span class="badge bg-info ms-2" title="Correlated with a trace"><i class="fas fa-project-diagram"></i></span>` : ''}
@@ -1169,7 +1239,7 @@ class LogSearch {
                 <small class="text-muted">
                     ${this.showSources && record.source
                         ? `<span class="badge bg-secondary-subtle text-secondary me-1"
-                                 title="Answered by the '${esc(record.source)}' source"
+                                 title="Answered by the '${WDash.escapeAttr(record.source)}' source"
                                  style="font-size:.65rem">${esc(record.source)}</span>`
                         : ''}
                     Index: ${esc(container)}
@@ -1208,7 +1278,7 @@ class LogSearch {
         const message = record.body || '';
 
         modalTitle.innerHTML =
-            '<span class="log-level ' + esc((record.severity || 'INFO').toUpperCase()) +
+            '<span class="log-level ' + WDash.levelClass(record) +
                 ' me-2">' + esc(severity) + '</span>' +
             '<strong>' + esc(service) + '</strong>' +
             '<small class="text-muted ms-2">' + esc(WDash.formatTimestamp(record.timestamp)) +
@@ -1308,7 +1378,7 @@ class LogSearch {
         // adapter translates them to backend fields, so nothing is needed here.
         const queryKey = key;
         const filterQuery = (typeof value === 'string')
-            ? queryKey + ':"' + value.replace(/"/g, '\\"') + '"'
+            ? queryKey + ':' + WDash.quoted(value)
             : queryKey + ':' + value;
         const attr = (q) => q.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 
@@ -1362,7 +1432,13 @@ class LogSearch {
 
         const current = (input.value || '').trim();
         if (current && current !== '*' && current.indexOf(clause) === -1) {
-            input.value = current + ' AND ' + clause;
+            // Grouped when it holds an OR: `level:ERROR OR level:WARN` with a
+            // clause added was `level:ERROR OR (level:WARN AND …)`, the
+            // clause binding to the last term only. The parser takes `or` in
+            // any case, and not inside quotes.
+            const unquoted = current.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+            input.value = (/(^|[\s()])or(?=[\s()]|$)/i.test(unquoted)
+                ? '(' + current + ')' : current) + ' AND ' + clause;
         } else if (!current || current === '*') {
             input.value = clause;
         }
@@ -1561,7 +1637,7 @@ class LogSearch {
         const severity = record.severity_text || record.severity || 'INFO';
         const message = record.body || '';
         return '<div class="' + (isCurrent ? 'context-log current' : 'context-log') + '">' +
-            '<span class="log-level ' + esc((record.severity || 'INFO').toUpperCase()) +
+            '<span class="log-level ' + WDash.levelClass(record) +
                 '" style="font-size:0.65rem;padding:2px 6px;">' + esc(severity) + '</span> ' +
             '<small class="text-muted">' + esc(WDash.formatTimestamp(record.timestamp)) + '</small> ' +
             '<small class="fw-bold">' + esc(record.service || '') + '</small> ' +

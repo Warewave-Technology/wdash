@@ -66,6 +66,26 @@ SCREENSHOT_RETENTION_SETTING = "monitoring.screenshot_retention_days"
 #: is the backstop for one that does not.
 MAX_SCREENSHOT_BYTES = 512 * 1024
 
+#: The pictures a failure screenshot may be, told by their first bytes.
+_IMAGE_SIGNATURES = ((b"\xff\xd8\xff", "image/jpeg", "jpg"),
+                     (b"\x89PNG\r\n\x1a\n", "image/png", "png"))
+
+
+def image_type(data):
+    """(content type, extension) of an image these bytes are, or None.
+
+    From the bytes, never from what the sender said. The type an agent sent
+    was stored and served back inline from WDash's own origin, so a result
+    carrying `text/html` — any holder of an agent token can send one — was
+    a page that ran in every viewer's session, admins' included.
+    """
+    for signature, kind, extension in _IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return kind, extension
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    return None
+
 #: How long results are kept, unless an operator says otherwise. Thirty days
 #: because a monitoring page is used to answer "when did this start", and a
 #: week cannot answer it for anything that started a fortnight ago.
@@ -837,12 +857,15 @@ class ResultRepository:
                 f"screenshot; the ceiling is "
                 f"{MAX_SCREENSHOT_BYTES // 1024}KB")
             return None
+        kind = image_type(image)
+        if kind is None:
+            logger.warning(f"monitor {monitor_id} sent a screenshot that is "
+                           f"not a JPEG, PNG or WebP image; it was not kept")
+            return None
         row = {
             "id": str(uuid.uuid4()), "monitor_id": monitor_id,
             "captured_at": _now(),
-            "content_type": (shot.get("content_type")
-                             if isinstance(shot, dict) else None)
-                            or "image/jpeg",
+            "content_type": kind[0],
             "bytes": len(image), "image": image,
         }
         try:

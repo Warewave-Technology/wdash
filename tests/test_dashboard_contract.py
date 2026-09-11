@@ -535,6 +535,17 @@ class SharedViewTest(DashboardContractTest):
         self.assertIn("ERROR", rendered, "the dashboard's own query was dropped")
         self.assertIn("api", rendered, "the filter was not applied")
 
+    def test_a_filter_cannot_close_the_group_it_is_put_in(self):
+        """Joined as text, `service:none) OR (*` closed the parenthesis
+        around it: `(level:ERROR) AND (service:none) OR (*)` counts
+        everything, and the filter replaced the dashboard's query instead of
+        narrowing it."""
+        self.app.dashboard_manager.dashboards[DASH_ID].query = "level:ERROR"
+        response = self.get("data", q="service%3Anone)%20OR%20(*")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Invalid filter", response.get_json()["error"])
+        self.assertEqual(self.es.searches, [])
+
     def test_the_effective_query_is_echoed(self):
         payload = self.get("data", q='service:"api"').get_json()
         self.assertEqual(payload["filter"], 'service:"api"')

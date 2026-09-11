@@ -155,6 +155,18 @@ class ThirdPartyAssetTest(HeaderTestCase):
         for tag in self._tags():
             self.assertIn("crossorigin=", tag, f"unchecked asset: {tag[:90]}")
 
+    def test_scripts_are_admitted_by_the_nonce_and_by_no_host(self):
+        """A host in script-src stays in force beside a nonce. jsdelivr
+        serves whatever anybody publishes, so listing it let one HTML
+        injection load code of the attacker's choosing through an iframe's
+        srcdoc, which inherits this policy and not the nonce."""
+        directive = next(part.strip() for part in self.policy().split(";")
+                         if part.strip().startswith("script-src"))
+        sources = directive.split()[1:]
+        self.assertEqual(sources[0], "'self'")
+        self.assertEqual(len(sources), 2)
+        self.assertRegex(sources[1], r"^'nonce-[A-Za-z0-9_-]+'$")
+
     def test_every_allowed_origin_is_one_that_is_used(self):
         """A source list longer than the assets is a hole nobody notices."""
         from wdash.security import SCRIPT_SOURCES
@@ -425,3 +437,39 @@ class DevelopmentServerTest(unittest.TestCase):
         """gunicorn binds 0.0.0.0 in the Dockerfile, and must: a container
         that only listens on loopback publishes nothing."""
         self.assertIn("0.0.0.0:5000", self._source("Dockerfile"))
+
+
+class TemplatesKeepToThePolicyTest(unittest.TestCase):
+    """What the policy refuses, a template must not rely on.
+
+    `onsubmit="return confirm(…)"` on the configuration page's Delete buttons
+    was an inline handler, which a script-src without 'unsafe-inline' does
+    not run: the confirmation never appeared, and Delete deleted on the
+    first click. And `|safe` switches autoescape off for whatever it is
+    applied to — the one on the audit page was bound, by Jinja's filter
+    precedence, to a literal dash rather than to the address beside it.
+    """
+
+    TEMPLATES = os.path.join(os.path.dirname(__file__), "..", "templates")
+
+    def _templates(self):
+        for name in sorted(os.listdir(self.TEMPLATES)):
+            if name.endswith(".html"):
+                with open(os.path.join(self.TEMPLATES, name), encoding="utf-8") as handle:
+                    yield name, handle.read()
+
+    def test_no_inline_event_handlers(self):
+        offenders = [(name, match.group(0)) for name, body in self._templates()
+                     for match in re.finditer(r"<[^>]*\son[a-z]+\s*=", body)]
+        self.assertEqual(offenders, [])
+
+    def test_no_javascript_urls(self):
+        offenders = [name for name, body in self._templates()
+                     if re.search(r"""(?:href|src|action)\s*=\s*["']\s*javascript:""",
+                                  body, re.I)]
+        self.assertEqual(offenders, [])
+
+    def test_autoescape_is_never_switched_off(self):
+        offenders = [name for name, body in self._templates()
+                     if re.search(r"\|\s*safe\b|autoescape\s+false", body)]
+        self.assertEqual(offenders, [])

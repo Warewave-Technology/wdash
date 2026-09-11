@@ -344,6 +344,95 @@ class RolledOverIndexTest(unittest.TestCase):
         self.assertEqual(self.es.listings, listed)
 
 
+class MalformedAnswerTest(unittest.TestCase):
+    """Elasticsearch's own numbers — a total, a `took`, a bucket count — are
+    read as numbers or not at all.
+
+    The page put them into its HTML as they came, so a string in one of them
+    was markup that whoever answered as Elasticsearch — its operator, or
+    anything on a plain-http link to it — had every reader's browser run.
+    """
+
+    class Answering(FakeES):
+        def __init__(self, took=5, total=3, count=2):
+            super().__init__()
+            self.took, self.total, self.count = took, total, count
+
+        @property
+        def indices(self):
+            class Indices:
+                def get_mapping(self, index=None, **kw):
+                    return {}
+            return Indices()
+
+        def msearch(self, searches=None, **kw):
+            return {"responses": [self.search(**body) for body in searches[1::2]]}
+
+        def search(self, **kw):
+            self.searches.append(kw)
+            return {"took": self.took, "timed_out": False,
+                    "hits": {"hits": [], "total": {"value": self.total}},
+                    "aggregations": {"timeline": {"buckets": [
+                        {"key": 0, "key_as_string": TS,
+                         "doc_count": self.count}]}}}
+
+    def search(self, **answer):
+        source = ElasticsearchLogSource(self.Answering(**answer))
+        return source.search(LogQuery(window=TimeWindow.of("1h"), histogram=True),
+                             Scope(principal="dev", containers=("app-*",)))
+
+    def test_a_well_formed_answer_reads(self):
+        page = self.search()
+        self.assertEqual((page.total, page.took_ms, page.partial), (3, 5, False))
+        self.assertEqual(page.histogram[0]["count"], 2)
+
+    def test_a_count_that_is_not_a_number_is_a_failure_said_as_one(self):
+        for answer in ({"took": "<img src=x>"}, {"total": "<img src=x>"},
+                       {"count": "<img src=x>"}, {"total": True}):
+            page = self.search(**answer)
+            self.assertTrue(page.partial, answer)
+            self.assertIn("not a number", " ".join(page.warnings), answer)
+            self.assertNotIn("<img", str(page.to_dict()), answer)
+
+    def test_nan_and_infinity_are_not_numbers_either(self):
+        """The client's JSON parser accepts both literals, and int() of
+        either raised something no handler here caught — a 500."""
+        for answer in ({"took": float("nan")}, {"total": float("inf")},
+                       {"count": float("nan")}):
+            page = self.search(**answer)
+            self.assertTrue(page.partial, answer)
+
+    def test_the_dashboard_s_batched_aggregations_read_the_same_way(self):
+        from wdash.hub.aggregation import DateHistogram
+        query = LogQuery(window=TimeWindow.of("1h"))
+        scope = Scope(principal="dev", containers=("app-*",))
+        for answer, failed in (({}, False), ({"total": "<img src=x>"}, True)):
+            results = ElasticsearchLogSource(self.Answering(**answer)).multi_aggregate(
+                [(query, [DateHistogram(name="timeline")]),
+                 (query, [DateHistogram(name="timeline")])], scope)
+            self.assertEqual([r.failed for r in results], [failed, failed], answer)
+
+    def test_the_histogram_endpoint_reads_the_same_way(self):
+        source = ElasticsearchLogSource(self.Answering(count="<img src=x>"))
+        self.assertEqual(
+            source.histogram(LogQuery(window=TimeWindow.of("1h")),
+                             Scope(principal="dev", containers=("app-*",))), [])
+        good = ElasticsearchLogSource(self.Answering())
+        self.assertEqual(
+            good.histogram(LogQuery(window=TimeWindow.of("1h")),
+                           Scope(principal="dev", containers=("app-*",)))[0]["count"], 2)
+
+    def test_an_aggregation_answer_is_read_the_same_way(self):
+        from wdash.hub.aggregation import DateHistogram
+        scope = Scope(principal="dev", containers=("app-*",))
+        for answer, failed in (({}, False), ({"total": "<img src=x>"}, True),
+                               ({"count": "<img src=x>"}, True)):
+            source = ElasticsearchLogSource(self.Answering(**answer))
+            result = source.aggregate(LogQuery(window=TimeWindow.of("1h")),
+                                      [DateHistogram(name="timeline")], scope)
+            self.assertEqual(result.failed, failed, answer)
+
+
 class ScopeEnforcementTest(unittest.TestCase):
     """Prove that an empty scope issues no query.
 

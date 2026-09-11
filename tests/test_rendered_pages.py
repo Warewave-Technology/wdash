@@ -226,3 +226,34 @@ class EveryScreenTest(unittest.TestCase):
             browser.close()
 
         self.assertEqual(faults, [], "\n".join([""] + faults))
+
+    def test_the_cdn_scripts_still_load_under_the_policy(self):
+        """script-src names no host now: the nonce admits the tags WDash
+        writes, and their integrity hashes admit only their bytes. Measured
+        rather than assumed — a script the policy refuses leaves its global
+        undefined and says so only on the console, and the log page's
+        histogram quietly skips itself when Chart is missing."""
+        from playwright.sync_api import sync_playwright
+
+        base = f"http://127.0.0.1:{PORT}"
+        refused, loaded = [], {}
+        with sync_playwright() as play:
+            browser = play.chromium.launch()
+            page = browser.new_context().new_page()
+            page.on("console", lambda m: refused.append(m.text)
+                    if "Content Security Policy" in m.text else None)
+            page.goto(f"{base}/auth/login", wait_until="networkidle")
+            page.fill("input[name=username]", "admin")
+            page.fill("input[name=password]", PASSWORD)
+            page.click("button[type=submit]")
+            page.wait_for_load_state("networkidle")
+            for url in ("/logs", "/dashboards"):
+                page.goto(base + url, wait_until="networkidle")
+                loaded[url] = page.evaluate(
+                    "({chart: typeof Chart, bootstrap: typeof bootstrap,"
+                    "  flatpickr: typeof flatpickr})")
+            browser.close()
+
+        self.assertEqual(refused, [])
+        for url, globals_ in loaded.items():
+            self.assertNotIn("undefined", globals_.values(), f"{url}: {globals_}")

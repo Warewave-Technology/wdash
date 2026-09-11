@@ -349,6 +349,27 @@ class SourceTest(ConfigTestCase):
         self.assertFalse(response.get_json()["ok"])
 
 
+class DeleteAsksFirstTest(ConfigTestCase):
+    """The listener in config.js asks before a form with `data-confirm` is
+    sent. The attribute has to be on the forms the page renders, or the
+    listener binds to nothing and Delete deletes on the first click — what
+    the inline onsubmit it replaced did, because the policy refuses those."""
+
+    def test_every_delete_form_carries_its_question(self):
+        import re
+        self.add_source(name="lab-es")
+        self.app.store.roles.upsert("auditor", permissions=["logs:read"],
+                                    containers=["*"], trace_containers=[])
+        page = self.client.get("/admin/config").get_data(as_text=True)
+        forms = [tag for tag in re.findall(r"<form[^>]*>", page, re.S)
+                 if re.search(r'action="[^"]*/delete"', tag)]
+        self.assertGreaterEqual(len(forms), 2, "no delete forms rendered")
+        for tag in forms:
+            self.assertIn("data-confirm=", tag, tag)
+        self.assertTrue(any("Delete lab-es?" in tag for tag in forms))
+        self.assertTrue(any("Delete role auditor?" in tag for tag in forms))
+
+
 class AuthSettingsTest(ConfigTestCase):
     def save_oidc(self, **overrides):
         form = {"provider": "oidc", "client_id": "wdash",

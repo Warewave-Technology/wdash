@@ -321,6 +321,12 @@ def _effective_query(dashboard, narrow=None):
     narrow = (narrow or "").strip()
     if not narrow or narrow == "*":
         return base or "*"
+    # Parsed on its own first. Joined as text, `service:none) OR (*` closed
+    # the parenthesis around it and replaced the dashboard's query rather
+    # than narrowing it. A filter that parses by itself has balanced
+    # parentheses — the tokeniser makes each one a token and escapes none
+    # outside quotes — so it cannot leave the group it is put in.
+    parse(narrow)
     if not base or base == "*":
         return narrow
     return f"({base}) AND ({narrow})"

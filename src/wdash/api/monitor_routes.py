@@ -18,14 +18,51 @@ configured sources report; a deployment that needs finer separation runs a
 second source.
 """
 
+from urllib.parse import quote
+
 from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, url_for
 from flask_login import current_user, login_required
+from werkzeug.routing import BaseConverter
 
 from ..hub.models import DOWN, UNKNOWN, UP, MonitorPage
 from ..hub.query import TimeWindow
 from ..hub.source import Capability
 
 monitor_bp = Blueprint("monitors", __name__)
+
+
+class MonitorIdConverter(BaseConverter):
+    """A monitor id in a URL, whatever the id holds.
+
+    Heartbeat and Synthetics take ids from the documents, and `url_for` left
+    `/` and `..` in them as they were: an id of `../../admin/config` made the
+    monitor list link to the configuration page. Everything but letters,
+    digits and `-._~` is encoded, so an id is one segment the browser cannot
+    resolve against its neighbours. The pattern stays one segment: matching
+    slashes as well took `/monitors/<id>/delete` for a detail page.
+
+    Except an id that is `.` or `..` and nothing else: that is a dot segment
+    however it is encoded — browsers read `%2E` as a dot too — so `..`
+    linked to the home page. Those two are written `~.` and `~..`, with `~`
+    as the escape character and a literal `~` written `~7E`.
+    """
+
+    def to_python(self, value):
+        if value in ("~.", "~.."):
+            value = value[1:]
+        return value.replace("~7E", "~")
+
+    def to_url(self, value):
+        text = str(value).replace("~", "~7E")
+        if text in (".", ".."):
+            text = "~" + text
+        return quote(text, safe="")
+
+
+# Before the routes below: they are registered in the order they were
+# recorded, and theirs need the converter.
+monitor_bp.record_once(lambda state: state.app.url_map.converters.setdefault(
+    "monitor", MonitorIdConverter))
 
 #: Below this many days the certificate row is a warning rather than a fact.
 #: Thirty is the number every certificate authority sends its first renewal
@@ -468,7 +505,7 @@ def monitors_json():
     return jsonify(_payload(source.monitors(window, _scope()), certificates))
 
 
-@monitor_bp.route("/api/monitors/<monitor_id>/history")
+@monitor_bp.route("/api/monitors/<monitor:monitor_id>/history")
 @login_required
 def monitor_history(monitor_id):
     if not _require():
@@ -493,7 +530,7 @@ def monitor_history(monitor_id):
         for c in checks]})
 
 
-@monitor_bp.route("/monitors/<monitor_id>")
+@monitor_bp.route("/monitors/<monitor:monitor_id>")
 @login_required
 def monitor_detail(monitor_id):
     """One monitor: its response time over the window and its recent runs.
@@ -840,10 +877,22 @@ def journey_screenshot(screenshot_id):
                 "to look at a failure, short enough not to fill the database "
                 "with pictures of pages that were fine.", 404)
 
-    response = current_app.response_class(image["image"],
-                                          mimetype=image["content_type"])
+    # What the bytes are, not what was stored beside them: a row kept before
+    # the type was checked can hold any type an agent chose, text/html
+    # included, and this route served it inline from WDash's own origin.
+    from ..store.monitoring import image_type
+    kind = image_type(image["image"])
+    if kind is None:
+        return ("That screenshot is not an image and is not served.", 404)
+
+    response = current_app.response_class(image["image"], mimetype=kind[0])
     # Immutable: the id is content, not a name that gets reused.
     response.headers["Cache-Control"] = "private, max-age=86400, immutable"
     response.headers["Content-Disposition"] = (
-        f'inline; filename="journey-{screenshot_id[:8]}.jpg"')
+        f'inline; filename="journey-{screenshot_id[:8]}.{kind[1]}"')
+    # An image needs nothing, and if a browser were ever talked into
+    # rendering it as something else, nothing is what it would get — bar the
+    # inline styles Chromium's own image viewer applies to centre it.
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'unsafe-inline'; sandbox")
     return response

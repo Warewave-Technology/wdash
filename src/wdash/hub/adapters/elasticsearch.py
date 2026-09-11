@@ -5,6 +5,7 @@ Everything Elasticsearch-specific stops here. Outside this file, `hits`,
 `_source` and `aggregations` do not appear.
 """
 
+import math
 import time
 
 from ...utils import timerange
@@ -26,6 +27,29 @@ _RESOURCE_FIELDS = ("host", "environment", "container", "pod", "namespace")
 
 
 from ..patterns import matches as _pattern_matches  # noqa: F401
+
+
+class MalformedResponse(ValueError):
+    """The cluster answered with something Elasticsearch does not send."""
+
+
+def _count(value, what="a count"):
+    """An integer Elasticsearch computed: a total, a `took`, a doc_count.
+
+    Only a number passes. These went to the page as they came, and the page
+    put them into its HTML: a string where a number belonged was markup that
+    whoever answered as Elasticsearch — its operator, anything on a plain-http
+    link to it — had every reader's browser run. A total is `{"value": n}` or
+    a bare number, depending on the version.
+    """
+    if isinstance(value, dict):
+        value = value.get("value")
+    # NaN and Infinity too: the client's JSON parser accepts both, and int()
+    # of either raised something other than this.
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))):
+        raise MalformedResponse(f"{what} in the answer is not a number")
+    return int(value)
 
 
 def _wildcard_literal(text):
@@ -270,27 +294,33 @@ class ElasticsearchLogSource(LogSource):
                            warnings=(f"search failed: {exc}",))
 
         hits = response["hits"]["hits"]
-        total = response["hits"]["total"]
-        total = total["value"] if isinstance(total, dict) else total
-
-        histogram = []
-        timeline = (response.get("aggregations") or {}).get("timeline")
-        if timeline:
-            for bucket in timeline.get("buckets", []):
-                by_severity = {}
-                for sub in (bucket.get("severity") or {}).get("buckets", []):
-                    by_severity[normalise_severity(sub["key"])] = sub["doc_count"]
-                histogram.append({
-                    "timestamp": bucket.get("key_as_string"),
-                    "key": bucket.get("key"),
-                    "count": bucket.get("doc_count", 0),
-                    "by_severity": by_severity,
-                })
+        try:
+            total = _count(response["hits"]["total"], "the total")
+            took_ms = _count(response.get("took", 0), "took")
+            histogram = []
+            timeline = (response.get("aggregations") or {}).get("timeline")
+            if timeline:
+                for bucket in timeline.get("buckets", []):
+                    by_severity = {}
+                    for sub in (bucket.get("severity") or {}).get("buckets", []):
+                        by_severity[normalise_severity(sub["key"])] = _count(
+                            sub["doc_count"])
+                    histogram.append({
+                        "timestamp": bucket.get("key_as_string"),
+                        "key": bucket.get("key"),
+                        "count": _count(bucket.get("doc_count", 0)),
+                        "by_severity": by_severity,
+                    })
+        except MalformedResponse as exc:
+            # A failure, said as one — not an empty page.
+            return LogPage(partial=True, containers=tuple(targets),
+                           warnings=(f"the cluster's answer could not be read: "
+                                     f"{exc}",))
 
         return LogPage(
             records=[self._to_record(h) for h in hits],
             total=total,
-            took_ms=response.get("took", 0),
+            took_ms=took_ms,
             cursor=hits[-1].get("sort") if hits else None,
             containers=tuple(targets),
             partial=bool(response.get("timed_out")),
@@ -373,13 +403,21 @@ class ElasticsearchLogSource(LogSource):
             return []
 
         stats = []
-        for name in discovered:
-            buckets = (response.get("aggregations") or {}).get(name, {}).get("buckets", [])
-            if buckets:
-                stats.append(FieldStat(
-                    field=name,
-                    values=[FieldValue(value=b["key"], count=b["doc_count"]) for b in buckets],
-                ))
+        try:
+            for name in discovered:
+                buckets = ((response.get("aggregations") or {}).get(name, {})
+                           .get("buckets", []))
+                if buckets:
+                    stats.append(FieldStat(
+                        field=name,
+                        values=[FieldValue(value=b["key"],
+                                           count=_count(b["doc_count"]))
+                                for b in buckets],
+                    ))
+        except MalformedResponse:
+            # Treated as the failed search above is. Neither is shown as a
+            # failure yet; that is the silent-failure work of phase 4.
+            return []
         return stats
 
     def aggregate(self, query, aggregations, scope):
@@ -413,16 +451,17 @@ class ElasticsearchLogSource(LogSource):
             return AggregationResult(warnings=tuple(warnings) + (str(exc)[:200],),
                                      failed=True)
 
-        total = response["hits"]["total"]
-        total = total["value"] if isinstance(total, dict) else total
         raw = response.get("aggregations") or {}
-
-        return AggregationResult(
-            total=total,
-            buckets={agg.name: self._read_buckets(raw.get(agg.name), agg)
-                     for agg in aggregations if agg.name in raw},
-            warnings=tuple(warnings),
-        )
+        try:
+            return AggregationResult(
+                total=_count(response["hits"]["total"], "the total"),
+                buckets={agg.name: self._read_buckets(raw.get(agg.name), agg)
+                         for agg in aggregations if agg.name in raw},
+                warnings=tuple(warnings),
+            )
+        except MalformedResponse as exc:
+            return AggregationResult(warnings=tuple(warnings) + (str(exc),),
+                                     failed=True)
 
     def multi_aggregate(self, requests, scope):
         targets = None
@@ -455,14 +494,16 @@ class ElasticsearchLogSource(LogSource):
                 out.append(AggregationResult(
                     warnings=tuple(warnings) + ("query failed",), failed=True))
                 continue
-            total = response["hits"]["total"]
-            total = total["value"] if isinstance(total, dict) else total
             raw = response.get("aggregations") or {}
-            out.append(AggregationResult(
-                total=total,
-                buckets={agg.name: self._read_buckets(raw.get(agg.name), agg)
-                         for agg in aggregations if agg.name in raw},
-                warnings=tuple(warnings)))
+            try:
+                out.append(AggregationResult(
+                    total=_count(response["hits"]["total"], "the total"),
+                    buckets={agg.name: self._read_buckets(raw.get(agg.name), agg)
+                             for agg in aggregations if agg.name in raw},
+                    warnings=tuple(warnings)))
+            except MalformedResponse as exc:
+                out.append(AggregationResult(
+                    warnings=tuple(warnings) + (str(exc),), failed=True))
         return out
 
     def _translate_agg(self, agg, targets, query, warnings):
@@ -516,7 +557,8 @@ class ElasticsearchLogSource(LogSource):
             return []
         out = []
         for raw in node.get("buckets") or []:
-            bucket = Bucket(key=raw.get("key"), count=raw.get("doc_count", 0),
+            bucket = Bucket(key=raw.get("key"),
+                            count=_count(raw.get("doc_count", 0)),
                             key_text=raw.get("key_as_string"))
             for child in agg.sub or ():
                 if child.name in raw:
@@ -561,8 +603,11 @@ class ElasticsearchLogSource(LogSource):
                                timeout="15s", request_cache=True)
         except Exception:
             return []
-        return [{"timestamp": b["key_as_string"], "count": b["doc_count"]}
-                for b in response["aggregations"]["timeline"]["buckets"]]
+        try:
+            return [{"timestamp": b["key_as_string"], "count": _count(b["doc_count"])}
+                    for b in response["aggregations"]["timeline"]["buckets"]]
+        except MalformedResponse:
+            return []
 
     # ---------- internals ----------
 
@@ -1142,8 +1187,9 @@ class ElasticsearchTraceSource(TraceSource):
                 name = bucket["key"]
                 if not scope.allows_service(name, source=self.name):
                     continue
-                totals[name] = totals.get(name, 0) + bucket["doc_count"]
-                errors[name] = errors.get(name, 0) + bucket["failed"]["doc_count"]
+                totals[name] = totals.get(name, 0) + _count(bucket["doc_count"])
+                errors[name] = (errors.get(name, 0)
+                                + _count(bucket["failed"]["doc_count"]))
 
         return sorted(
             (Service(name=n, span_count=c, error_count=errors.get(n, 0))

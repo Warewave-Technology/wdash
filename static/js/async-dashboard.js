@@ -37,6 +37,26 @@ function paletteColour(name) {
 }
 
 
+/**
+ * A chart value as a quoted string in the query language. Bucket keys are
+ * whatever a log writer put in the document, and they went into the Logs
+ * query between quotes with nothing escaped — a level of
+ * `x OR service:hr-salaries` clicked on the Payments dashboard showed every
+ * hr-salaries record as that slice of it.
+ */
+function quoted(value) {
+    return '"' + String(value == null ? '' : value)
+        .replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
+
+/** Bare when the parser reads it as itself, quoted otherwise. Levels were
+ *  written bare, and a bare level stays what it was. */
+function queryValue(value) {
+    const text = String(value == null ? '' : value);
+    return /^[A-Za-z0-9_.@][A-Za-z0-9_.@-]*$/.test(text) && !/^(and|or|not)$/i.test(text)
+        ? text : quoted(text);
+}
+
 class AsyncDashboard {
     constructor(dashboardId, dashboardQuery) {
         this.dashboardId = dashboardId;
@@ -629,8 +649,8 @@ class AsyncDashboard {
         // widen the result set past what is on screen.
         const base = (this.lastData?.effective_query || this.dashboardQuery || '*').trim();
         if (base && base !== '*') clauses.push(`(${base})`);
-        if (level) clauses.push(`level:${level}`);
-        if (service) clauses.push(`service:"${service}"`);
+        if (level) clauses.push(`level:${queryValue(level)}`);
+        if (service) clauses.push(`service:${quoted(service)}`);
         // Any other field a panel groups by, already quoted by fieldFilter.
         if (extra) clauses.push(extra);
 
@@ -889,7 +909,7 @@ class AsyncDashboard {
         if (!field || value === null || value === undefined) return {};
         if (field === 'severity') return { level: value };
         if (field === 'service') return { service: value };
-        return { extra: `${field}:"${value}"` };
+        return { extra: `${field}:${quoted(value)}` };
     }
 
     /**

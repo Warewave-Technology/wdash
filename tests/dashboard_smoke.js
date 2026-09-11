@@ -277,6 +277,32 @@ async function main() {
     palette.document.documentElement.style.setProperty(
         '--chart-series', '#111111, #222222, #333333');
 
+    // A drill-down puts chart values into the Logs query. They are bucket
+    // keys — whatever a log writer put in the document — and were written
+    // between quotes with nothing escaped, or with no quotes at all.
+    {
+        const w = makeDashboard(jsonResponse({}));
+        const dashboard = new w.AsyncDashboard('d1');
+        dashboard.lastData = { effective_query: 'service:payments' };
+        const opened = [];
+        w.open = (url) => opened.push(new URL(url, 'http://localhost')
+                                         .searchParams.get('query'));
+        dashboard.openLogs({ level: 'x OR service:hr-salaries' });
+        dashboard.openLogs({ service: 'x" OR service:"hr-salaries' });
+        dashboard.openLogs(dashboard.fieldFilter('host', 'h1" OR service:"hr'));
+        dashboard.openLogs({ level: 'ERROR' });
+        check('a chart value is one value in the query it opens', () => {
+            assert(opened[0] === '(service:payments) AND level:"x OR service:hr-salaries"',
+                   opened[0]);
+            assert(opened[1] === '(service:payments) AND service:"x\\" OR service:\\"hr-salaries"',
+                   opened[1]);
+            assert(opened[2] === '(service:payments) AND host:"h1\\" OR service:\\"hr"',
+                   opened[2]);
+        });
+        check('an ordinary level is written as it always was', () =>
+            assert(opened[3] === '(service:payments) AND level:ERROR', opened[3]));
+    }
+
     check('a severity takes its colour from the palette', () =>
         assert(palette.AsyncDashboard.seriesColour('ERROR', 0) === '#abcdef',
                `got ${palette.AsyncDashboard.seriesColour('ERROR', 0)}`));

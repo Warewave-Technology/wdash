@@ -12,7 +12,7 @@
   <div class="d-flex align-items-center gap-2">
     <span class="badge bg-secondary">{{ "{:,}".format(total) }} entries</span>
     <a class="btn btn-sm btn-outline-secondary"
-       href="{{ url_for('config.audit_export', **request.args) }}">
+       href="{{ url_for('config.audit_export', **filters) }}">
       <i class="fas fa-download"></i> Export
     </a>
     <a class="btn btn-sm btn-outline-secondary"
@@ -125,7 +125,7 @@
             </td>
             <td><code>{{ entry.actor }}</code></td>
             <td class="text-muted">
-              <small>{{ entry.address or '&mdash;' | safe }}</small>
+              <small>{{ entry.address or '—' }}</small>
             </td>
             <td>
               {% if 'refused' in entry.action or 'blocked' in entry.action %}

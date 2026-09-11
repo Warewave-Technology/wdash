@@ -212,49 +212,50 @@ document.getElementById('testQuery').addEventListener('click', function() {
     const testResults = document.getElementById('testResults');
     testResults.innerHTML = '<div class="spinner-border spinner-border-sm" role="status"></div> Testing query...';
     
-    // Get selected index patterns
-    const indexPatterns = Array.from(document.getElementById('index_patterns').selectedOptions)
-                               .map(option => option.value);
-    
+    // Last 24 hours: the search API refuses a query without a time range,
+    // and this sent none, so every test answered "A time range is required".
+    const end = new Date();
+    const start = new Date(end.getTime() - 24 * 3600 * 1000);
     const params = new URLSearchParams({
-        q: query,
-        size: 5
+        q: query, size: 5,
+        start_time: start.toISOString(), end_time: end.toISOString()
     });
-    
-    // Add index patterns to the test (if not using wildcard)
-    if (indexPatterns.length > 0 && !indexPatterns.includes('*')) {
-        indexPatterns.forEach(pattern => params.append('indices', pattern));
-    }
-    
+
     fetch('/api/search?' + params.toString())
         .then(response => response.json())
         .then(data => {
+            // Everything from the server is text here. The error can quote
+            // the query and the role's name back, and a record's index and
+            // body are whatever was written.
             if (data.error) {
-                testResults.innerHTML = `<div class="alert alert-danger">Error: ${data.error}</div>`;
-            } else {
-                const indexInfo = indexPatterns.includes('*') ? 'all accessible indices' : 
-                                 `indices: ${indexPatterns.join(', ')}`;
-                testResults.innerHTML = `
-                    <div class="alert alert-success">
-                        <strong>Query test successful!</strong><br>
-                        Found ${data.total} matching logs from ${indexInfo} (showing first 5)
-                    </div>
-                    <div class="mt-2">
-                        ${data.hits.slice(0, 3).map(hit => {
-                            const source = hit._source;
-                            const timestamp = source['@timestamp'] || new Date().toISOString();
-                            const message = (source.message || JSON.stringify(source)).substring(0, 100);
-                            return `<div class="border-start border-3 border-primary ps-2 mb-2">
-                                <small class="text-muted">${new Date(timestamp).toLocaleString()} | Index: ${hit._index}</small><br>
-                                <small>${escapeHtml(message)}${message.length > 100 ? '...' : ''}</small>
-                            </div>`;
-                        }).join('')}
-                    </div>
-                `;
+                testResults.innerHTML = '<div class="alert alert-danger">Error: ' +
+                    escapeHtml(data.error) + '</div>';
+                return;
             }
+            const records = data.records || [];
+            const total = Number(data.total);
+            testResults.innerHTML = `
+                <div class="alert alert-success">
+                    <strong>Query test successful!</strong><br>
+                    ${Number.isFinite(total) ? total.toLocaleString() : 0} matching
+                    records in the last 24 hours, across the indices your role
+                    can read. The dashboard's index patterns narrow this further.
+                </div>
+                <div class="mt-2">
+                    ${records.slice(0, 3).map(record => {
+                        const message = String(record.body || '').substring(0, 100);
+                        const index = String(record.ref || '').split(':')[1] || '';
+                        return `<div class="border-start border-3 border-primary ps-2 mb-2">
+                            <small class="text-muted">${escapeHtml(new Date(record.timestamp).toLocaleString())} | Index: ${escapeHtml(index)}</small><br>
+                            <small>${escapeHtml(message)}${message.length >= 100 ? '...' : ''}</small>
+                        </div>`;
+                    }).join('')}
+                </div>
+            `;
         })
         .catch(error => {
-            testResults.innerHTML = `<div class="alert alert-danger">Test failed: ${error.message}</div>`;
+            testResults.innerHTML = '<div class="alert alert-danger">Test failed: ' +
+                escapeHtml(error.message) + '</div>';
         });
 });
 
@@ -313,6 +314,14 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// For a value inside a quoted attribute, which escapeHtml does not cover:
+// it leaves quotes as they are. Replacing only `"` left `&` alone, so a title
+// holding the text `&quot;` came back as a quote.
+function escapeAttr(value) {
+    return String(value).replace(/[&<>"']/g, c =>
+        ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 }
 </script>
 
@@ -379,7 +388,7 @@ function panelRow(panel, index) {
         <div class="col-md-4">
           <label class="form-label small mb-0">Title</label>
           <input type="text" class="form-control form-control-sm"
-                 data-key="title" value="${(panel.title || '').replace(/"/g, '&quot;')}">
+                 data-key="title" value="${escapeAttr(panel.title || '')}">
         </div>
         ${specific}
         <div class="col-md-2">

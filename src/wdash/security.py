@@ -28,10 +28,14 @@ a single HTML injection into a full script hijack even under a nonce policy.
 
 import secrets
 
-#: Where the front end's third-party code comes from. Listing them explicitly
-#: is the point: anything not on this list cannot load, including a CDN that
-#: gets substituted for another one somewhere down the line.
-SCRIPT_SOURCES = ("https://cdn.jsdelivr.net",)
+#: Hosts scripts may load from beyond the nonce: none. It listed
+#: cdn.jsdelivr.net, which serves any npm package or GitHub file anybody
+#: publishes, and a host in script-src stays in force beside a nonce. So one
+#: HTML injection was one `<iframe srcdoc>` away from running code of the
+#: attacker's choosing on WDash's origin — measured in Chromium. The CDN
+#: scripts WDash does load carry the nonce, which admits them wherever they
+#: come from, and their integrity hashes, which admit only their bytes.
+SCRIPT_SOURCES = ()
 STYLE_SOURCES = ("https://cdn.jsdelivr.net", "https://cdnjs.cloudflare.com")
 FONT_SOURCES = ("https://cdnjs.cloudflare.com", "data:")
 
@@ -39,7 +43,7 @@ FONT_SOURCES = ("https://cdnjs.cloudflare.com", "data:")
 def _policy(nonce):
     return "; ".join((
         "default-src 'self'",
-        f"script-src 'self' 'nonce-{nonce}' " + " ".join(SCRIPT_SOURCES),
+        " ".join(("script-src", "'self'", f"'nonce-{nonce}'") + SCRIPT_SOURCES),
         # See the module docstring: style attributes cannot carry a nonce.
         "style-src 'self' 'unsafe-inline' " + " ".join(STYLE_SOURCES),
         "font-src 'self' " + " ".join(FONT_SOURCES),

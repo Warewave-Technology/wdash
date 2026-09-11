@@ -388,7 +388,12 @@
                                 <td class="text-muted" style="width:2rem">
                                     {{ step.index }}</td>
                                 <td>
-                                    <span class="journey-step {{ step.status }}"
+                                    {# The class from the statuses the stylesheet
+                                       knows, the text as it came: Elastic's
+                                       step status passes through when it is
+                                       none of them, and a class list is not
+                                       the place for a document's words. #}
+                                    <span class="journey-step {{ step.status if step.status in ('passed', 'failed', 'skipped') else 'other' }}"
                                     >{{ step.status }}</span>
                                 </td>
                                 <td><code style="font-size:.75rem"

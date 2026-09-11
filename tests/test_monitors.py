@@ -2197,3 +2197,91 @@ class TheDetailPageSaysWhereTest(unittest.TestCase):
         self.assertEqual(self._run_table_shape(self._page()), (4, 4))
         self._probe("frankfurt")
         self.assertEqual(self._run_table_shape(self._page()), (5, 5))
+
+
+class DocumentValuesOnThePageTest(unittest.TestCase):
+    """Heartbeat and Synthetics documents write monitor ids and step
+    statuses, and whoever writes to those data streams writes them."""
+
+    def setUp(self):
+        from datetime import datetime, timezone
+        from tests.support import claim, grant
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.hub.models import MonitorCheck, StepResult
+
+        database = os.path.join(tempfile.mkdtemp(), "page.db")
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "document-values"
+            DATABASE_URL = f"sqlite:///{database}"
+
+        now = datetime.now(timezone.utc)
+
+        class Source:
+            name = "lab"
+            capabilities = frozenset({"monitor_list", "monitor_history"})
+
+            def supports(self, capability):
+                return capability in self.capabilities
+
+            def monitors(self, window, scope, series=False):
+                return MonitorPage(monitors=[
+                    Monitor(id="../../admin/config", name="Planted", status=UP,
+                            source="lab"),
+                    Monitor(id="..", name="DoubleDot", status=UP, source="lab"),
+                    Monitor(id=".", name="SingleDot", status=UP, source="lab"),
+                    Monitor(id="journey", name="Journey", status=DOWN,
+                            source="lab")], sources=("lab",))
+
+            def history(self, monitor_id, window, scope, limit=None):
+                return [MonitorCheck(timestamp=now, status=DOWN, steps=(
+                    StepResult(index=1, description="open",
+                               status='x" data-planted="1'),))]
+
+            def series(self, monitor_id, window, scope, points=120):
+                return []
+
+            def certificates(self, window, scope):
+                return []
+
+            def health(self):
+                return True, "ok"
+
+            def containers(self, scope):
+                return []
+
+        self.app = create_app(TestConfig)
+        self.app.hub.replace_all(monitors=[Source()])
+        claim(self.app)
+        grant(self.app, "u", ["monitors:read"])
+        self.client = self.app.test_client()
+        with self.client.session_transaction() as session:
+            session["user_data"] = {"id": "1", "email": "u@x", "username": "u",
+                                    "groups": []}
+            session["_user_id"] = "1"
+
+    def test_an_id_cannot_step_out_of_its_segment(self):
+        """`url_for` left `/` and `..` in an id as they were, so a monitor
+        called `../../admin/config` linked to the configuration page."""
+        page = self.client.get("/monitors?window=1h").get_data(as_text=True)
+        self.assertIn('/monitors/..%2F..%2Fadmin%2Fconfig?', page)
+        self.assertNotIn('/monitors/../../admin/config', page)
+
+    def test_an_id_that_is_all_dots_reaches_its_own_page(self):
+        """A dot segment however it is encoded — browsers read %2E as a dot
+        — so `..` linked to the home page. Written `~..`, and read back."""
+        page = self.client.get("/monitors?window=1h").get_data(as_text=True)
+        self.assertIn('href="/monitors/~..?', page)
+        self.assertIn('href="/monitors/~.?', page)
+        detail = self.client.get("/monitors/~..?window=1h")
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("DoubleDot", detail.get_data(as_text=True))
+
+    def test_a_status_the_stylesheet_does_not_know_is_not_a_class(self):
+        """Autoescape already kept the quote inside the attribute; what the
+        status could still do is add classes of its own."""
+        page = self.client.get("/monitors/journey?window=1h").get_data(as_text=True)
+        self.assertIn('class="journey-step other"', page)
+        self.assertNotIn('class="journey-step x', page)

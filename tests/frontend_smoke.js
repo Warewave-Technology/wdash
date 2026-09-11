@@ -53,6 +53,10 @@ function makeWindow(fetchImpl) {
           <div id="customStartGroup"></div><div id="customEndGroup"></div>
         </form>
         <div id="resultsInfo"></div><div id="pagination"></div>
+        <div id="errorDisplay" class="d-none"><div id="errorAlert">
+          <div id="errorContent"></div></div></div>
+        <div id="logEntries"></div><div id="emptyState"></div>
+        <div id="savedSearchList"></div>
         <div id="searchResults"></div>
         <div class="card d-none" id="sourceBreakdownCard">
           <div id="sourceBreakdownContent"></div>
@@ -208,6 +212,137 @@ check('the Raw tab fetches only when opened, and only once', () => {
     w.document.getElementById('tabSource').dispatchEvent(new w.Event('click'));
     assertEqual(calls.filter(u => u.endsWith('/raw')).length, 1,
                 're-opening the tab must not re-fetch');
+});
+
+// --- what the server and the logs say is text ----------------------------
+//
+// Each of these went into the page as markup. The error box echoed the
+// query a /logs?query= link carried; Elasticsearch's own numbers — a total,
+// a `took`, a bucket count — came through as whatever the answer held; and
+// `escapeHtml`, correct for text, was used inside quoted attributes, where
+// it leaves the quotes alone.
+
+check('an error and the index names in it are shown as text', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.showError('bad query <img src=x id=planted1>', 'no_accessible_containers',
+                     { available_indices: ['app-<b id=planted2>x</b>'] });
+    const box = w.document.getElementById('errorContent');
+    assert(!w.document.getElementById('planted1')
+           && !w.document.getElementById('planted2'), box.innerHTML);
+    assert(box.textContent.includes('bad query <img src=x id=planted1>'),
+           box.textContent);
+});
+
+check('a role that may not see the index names is told how many', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.showError('none', 'no_accessible_containers', { total_containers: 3 });
+    const text = w.document.getElementById('errorContent').textContent;
+    assert(text.includes('3 exist that your role cannot read'), text);
+});
+
+check("Elasticsearch's numbers are shown as numbers", () => {
+    const w = makeWindow();
+    const search = new w.__LogSearch();
+    search.displayResults({ records: [], total: '<img id=planted3>',
+                            took_ms: '<img id=planted4>', accessible_containers: [] });
+    search.renderFieldStats({ fields: [{ field: 'level', values: [
+        { value: 'INFO', count: '<img id=planted5>' }] }] });
+    search.renderSourceBreakdown({ sources: [
+        { name: 'a', count: '<img id=planted6>', total: 1 },
+        { name: 'b', count: 1, total: 1 }] });
+    ['planted3', 'planted4', 'planted5', 'planted6'].forEach(id =>
+        assert(!w.document.getElementById(id), `${id} became an element`));
+});
+
+check('a notification is text', () => {
+    const w = makeWindow();
+    w.__WDash.showNotification('Search saved: <img id=planted7>', 'success');
+    assert(!w.document.getElementById('planted7'), 'the name became markup');
+    assert(w.document.body.textContent.includes('Search saved: <img id=planted7>'),
+           'the text is missing');
+});
+
+check('values inside attributes cannot close them', () => {
+    const w = makeWindow();
+    const search = new w.__LogSearch();
+    search.showSources = true;
+    const record = { ...RECORD, severity: 'x" data-planted-a="1',
+                     severity_text: 'x" style="position:fixed" data-planted-b="1',
+                     source: 'es" data-planted-c="1' };
+    const row = search.createLogEntry(record);
+    const level = row.querySelector('.log-level');
+    assert(level && level.getAttribute('style') === null, level && level.outerHTML);
+    ['data-planted-a', 'data-planted-b', 'data-planted-c'].forEach(name =>
+        assert(!row.querySelector(`[${name}]`), `${name} was written: ${row.innerHTML}`));
+
+    Object.create(w.__LogSearch.prototype).showLogModal(record);
+    assert(!w.document.querySelector('#logModalTitle [data-planted-a]'),
+           w.document.getElementById('logModalTitle').innerHTML);
+
+    const holder = w.document.createElement('div');
+    holder.innerHTML = search._renderContextLog(record, false);
+    assert(!holder.querySelector('[data-planted-a]'), holder.innerHTML);
+});
+
+check('a value clicked in the sidebar is one value in the query', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.renderFieldStats({ fields: [{ field: 'service', values: [
+        { value: 'x" OR service:"hr-salaries', count: 1 },
+        { value: 'C:\\temp\\', count: 1 }] }] });
+    const filters = [...w.document.querySelectorAll('[data-sidebar-filter]')]
+        .map(el => el.dataset.sidebarFilter);
+    assertEqual(filters[0], 'service:"x\\" OR service:\\"hr-salaries"',
+                'the quote closed the string');
+    assertEqual(filters[1], 'service:"C:\\\\temp\\\\"',
+                'the backslash escaped the closing quote');
+});
+
+check("a record's field value is one value in the query too", () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.showLogModal({ ...RECORD, resource: { host: 'C:\\temp\\' } });
+    const clause = [...w.document.querySelectorAll('[data-filter]')]
+        .map(el => el.dataset.filter).find(q => q.startsWith('host:'));
+    assertEqual(clause, 'host:"C:\\\\temp\\\\"', 'the backslash was left bare');
+});
+
+check('a filter added to a query with OR applies to all of it', () => {
+    for (const [query, expected] of [
+            ['level:ERROR OR level:WARN', '(level:ERROR OR level:WARN) AND service:"api"'],
+            ['level:ERROR or level:WARN', '(level:ERROR or level:WARN) AND service:"api"'],
+            ['body:"this or that"', 'body:"this or that" AND service:"api"'],
+            ['vendor:oracle', 'vendor:oracle AND service:"api"']]) {
+        const w = makeWindow();
+        w.document.getElementById('query').value = query;
+        const search = Object.create(w.__LogSearch.prototype);
+        search.performSearch = () => {};
+        search._applyFieldFilter('service:"api"');
+        assertEqual(w.document.getElementById('query').value, expected, query);
+    }
+});
+
+check('SUCCESS and NOTICE keep the chips the stylesheet gives them', () => {
+    const w = makeWindow();
+    const search = new w.__LogSearch();
+    for (const [text, level, expected] of [['SUCCESS', 'UNSPECIFIED', 'SUCCESS'],
+                                           ['notice', 'INFO', 'NOTICE'],
+                                           ['warning-ish', 'WARN', 'WARN']]) {
+        const row = search.createLogEntry({ ...RECORD, severity: level,
+                                            severity_text: text });
+        assertEqual(row.querySelector('.log-level').className,
+                    'log-level ' + expected, `${text} / ${level}`);
+    }
+});
+
+check('the log level class comes from the level, not the text beside it', () => {
+    const w = makeWindow();
+    const row = new w.__LogSearch().createLogEntry(
+        { ...RECORD, severity: 'WARN', severity_text: 'warning-ish' });
+    assertEqual(row.querySelector('.log-level').className, 'log-level WARN',
+                'the class followed the raw text');
 });
 
 // --- field statistics that a source cannot provide -----------------------
@@ -545,6 +680,22 @@ check('highlighting never changes the text it colours', () => {
         assertEqual(built[1].data.datasets[0].backgroundColor, '#555555',
                     'the bars kept the old red');
     });
+
+    // The saved-search list: its attributes too.
+    {
+        const w = makeWindow(() => Promise.resolve({ ok: true, json: () =>
+            Promise.resolve([{ id: 'y" data-planted-d="1', name: 'n', query: 'q',
+                               time_range: 'x" data-planted-e="1' }]) }));
+        const search = Object.create(w.__LogSearch.prototype);
+        await search._loadSavedSearches();
+        check('a saved search cannot write its own attributes', () => {
+            const list = w.document.getElementById('savedSearchList');
+            assert(!list.querySelector('[data-planted-d]')
+                   && !list.querySelector('[data-planted-e]'), list.innerHTML);
+            assertEqual(list.querySelector('.saved-search-apply').dataset.time,
+                        'x" data-planted-e="1', 'the time range did not survive');
+        });
+    }
 
     console.log(failures.length
         ? `\n${failures.length} failure(s)`

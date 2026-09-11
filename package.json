@@ -6,7 +6,7 @@
   "license": "MIT",
   "scripts": {
     "build": "terser static/js/wdash.js -o static/js/wdash.min.js --compress --mangle",
-    "test": "node tests/frontend_smoke.js && node tests/config_smoke.js && node tests/dashboard_smoke.js && node tests/traces_smoke.js",
+    "test": "node tests/frontend_smoke.js && node tests/config_smoke.js && node tests/dashboard_smoke.js && node tests/traces_smoke.js && node tests/dashboard_form_smoke.js",
     "check": "npm run build && npm test"
   },
   "devDependencies": {

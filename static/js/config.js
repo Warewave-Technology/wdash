@@ -203,14 +203,17 @@ document.getElementById('testSourceBtn')?.addEventListener('click', async () => 
         const icon = result.ok ? 'check' : 'triangle-exclamation';
         const detail = typeof result.details === 'string' && !result.ok
             ? `<div class="mt-1" style="font-size:.75rem;opacity:.8">${
-                  result.details.replace(/[&<>]/g, c =>
-                      ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]))}</div>`
+                  escapeHtml(result.details)}</div>`
             : '';
+        // The message quotes the far end — "Connected to <distribution>
+        // <version> (<cluster name>)" — and the far end is whatever the URL
+        // points at, over plain http as often as not. Only the details
+        // were escaped.
         target.innerHTML = `<div class="alert alert-${tone} py-2 mb-0">` +
-            `<i class="fas fa-${icon}"></i> ${result.message || result.error}${detail}</div>`;
+            `<i class="fas fa-${icon}"></i> ${escapeHtml(result.message || result.error)}${detail}</div>`;
     } catch (error) {
         target.innerHTML = '<div class="alert alert-danger py-2 mb-0">' +
-            'The test could not be run: ' + error.message + '</div>';
+            'The test could not be run: ' + escapeHtml(error.message) + '</div>';
     } finally {
         button.disabled = false;
     }
@@ -251,6 +254,16 @@ function fillRole(role) {
     // property of editing rather than of the role.
     if (typeof schedulePreview === 'function') schedulePreview();
 }
+
+// Delete asks first. It was `onsubmit="return confirm(…)"`, an inline
+// handler, which a script-src without 'unsafe-inline' refuses to run — so it
+// never asked, and Delete deleted on the first click. The text comes from
+// the attribute, as text.
+document.querySelectorAll('form[data-confirm]').forEach(form => {
+    form.addEventListener('submit', event => {
+        if (!window.confirm(form.dataset.confirm)) event.preventDefault();
+    });
+});
 
 document.getElementById('addRoleBtn')?.addEventListener('click', () => fillRole(null));
 

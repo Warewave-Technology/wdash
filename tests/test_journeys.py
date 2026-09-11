@@ -770,7 +770,7 @@ class JourneyPageTest(unittest.TestCase):
 
     # ---------- reading a run ----------
 
-    def _report(self, failed=True):
+    def _report(self, failed=True, screenshot=None):
         from datetime import datetime, timezone
         self._save()
         journey = self._journey()
@@ -802,7 +802,7 @@ class JourneyPageTest(unittest.TestCase):
                      else "",
             "steps": steps}
         if failed:
-            result["screenshot"] = {
+            result["screenshot"] = screenshot or {
                 "base64": base64.b64encode(
                     b"\xff\xd8\xff" + b"x" * 3000).decode()}
         self.client.post("/api/agent/results",
@@ -844,6 +844,58 @@ class JourneyPageTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Content-Type"], "image/jpeg")
         self.assertEqual(response.data[:3], b"\xff\xd8\xff")
+
+    def _screenshot_url(self, journey):
+        import re
+        page = self.client.get(
+            f"/monitors/{journey['id']}?window=1h").get_data(as_text=True)
+        found = re.search(r"/monitors/screenshot/([0-9a-f-]{36})", page)
+        return found.group(0) if found else None
+
+    def test_a_screenshot_that_is_not_an_image_is_not_kept(self):
+        """The type the agent sent was stored and served back inline from
+        WDash's own origin. Any agent-token holder could send `text/html`,
+        and the page it made ran in the session of whoever opened it."""
+        journey = self._report(screenshot={
+            "base64": base64.b64encode(
+                b"<html><script>alert(document.cookie)</script>").decode(),
+            "content_type": "text/html"})
+        self.assertIsNone(self._screenshot_url(journey))
+
+    def test_the_type_served_is_the_bytes_not_the_senders_word(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        journey = self._report(screenshot={
+            "base64": base64.b64encode(png).decode(),
+            "content_type": "text/html"})
+        url = self._screenshot_url(journey)
+        # Stored as what it is, so nothing that reads the row later is told
+        # what the sender claimed.
+        stored = self.app.store.results.screenshot(url.rsplit("/", 1)[-1])
+        self.assertEqual(stored["content_type"], "image/png")
+        response = self.client.get(url)
+        self.assertEqual(response.headers["Content-Type"], "image/png")
+        self.assertIn(".png", response.headers["Content-Disposition"])
+        self.assertEqual(response.headers["Content-Security-Policy"],
+                         "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+
+    def test_a_row_kept_before_the_check_is_not_served(self):
+        """Rows stored before the type was checked hold whatever an agent
+        chose; the route looks at the bytes as well."""
+        import uuid
+        from datetime import datetime, timezone
+        from sqlalchemy import insert
+        from wdash.store.schema import journey_screenshots
+        journey = self._report(failed=False)
+        planted = str(uuid.uuid4())
+        with self.app.store.results._engine.begin() as connection:
+            connection.execute(insert(journey_screenshots).values(
+                id=planted, monitor_id=journey["id"],
+                captured_at=datetime.now(timezone.utc),
+                content_type="text/html", bytes=40,
+                image=b"<html><script>alert(1)</script></html>"))
+        response = self.client.get(f"/monitors/screenshot/{planted}")
+        self.assertEqual(response.status_code, 404)
+        self.assertNotIn(b"<script>", response.data)
 
     def test_a_missing_screenshot_is_a_404_not_a_redirect(self):
         """This is an <img> target. A redirect to a page renders as a broken

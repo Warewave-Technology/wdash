@@ -137,6 +137,21 @@ class ContentTest(AuditTestCase):
         self.assertIn("failure", body)
 
 
+class ExportLinkTest(AuditTestCase):
+    """The Export link passed the whole query string to url_for, and Flask
+    reads `_method`, `_scheme`, `_external` and `_anchor` from it itself."""
+
+    def test_url_for_s_own_arguments_in_the_address_are_not_its_arguments(self):
+        response = self.client.get("/admin/audit?_method=POST")
+        self.assertEqual(response.status_code, 200)
+        page = self.client.get(
+            "/admin/audit?_external=1&_scheme=https&_anchor=planted&action=x"
+        ).get_data(as_text=True)
+        self.assertNotIn("#planted", page)
+        self.assertNotIn("https://localhost/admin/audit/export", page)
+        self.assertIn("/admin/audit/export?", page)
+
+
 class FilterTest(AuditTestCase):
     def setUp(self):
         super().setUp()

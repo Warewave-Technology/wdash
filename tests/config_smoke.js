@@ -68,6 +68,10 @@ function build() {
       <div class="modal fade show" id="roleModal"></div>
 
       <select id="sourceKind"><option value="elasticsearch">es</option></select>
+      <input id="sourceId"><input id="sourceUrl"><input id="sourceUsername">
+      <input id="sourcePassword"><input type="checkbox" id="sourceVerify">
+      <button id="testSourceBtn"></button><div id="sourceTestResult"></div>
+      <form id="deleteForm" data-confirm="Delete lab-&lt;b&gt;es&lt;/b&gt;?"></form>
       <div class="form-check" data-signal="logs">
         <input type="checkbox" name="signals" value="logs" id="sourceSignalLogs">
       </div>
@@ -490,6 +494,45 @@ function type(w, id, value) {
           unexcludedSaid.includes('stops excluding services')
           && unexcludedSaid.includes('-payments')
           && unexcludedSaid.includes('widens'), unexcludedSaid);
+
+    // The connection test quotes the far end back — "Connected to
+    // <distribution> <version> (<cluster name>)" — and only its details
+    // were escaped.
+    const probed = build().w;
+    probed.fetch = () => Promise.resolve({ json: () => Promise.resolve({
+        ok: true, message: 'Connected to es <img src=x id=planted-probe>' }) });
+    probed.document.getElementById('testSourceBtn').click();
+    await settle();
+    const probeSaid = probed.document.getElementById('sourceTestResult');
+    check('a connection test result is text',
+          !probed.document.getElementById('planted-probe')
+          && probeSaid.textContent.includes('Connected to es <img'),
+          probeSaid.innerHTML);
+
+    const failedProbe = build().w;
+    failedProbe.fetch = () => Promise.reject(new Error('<img id=planted-error>'));
+    failedProbe.document.getElementById('testSourceBtn').click();
+    await settle();
+    check('a failed connection test is text too',
+          !failedProbe.document.getElementById('planted-error'),
+          failedProbe.document.getElementById('sourceTestResult').innerHTML);
+
+    // Delete asks first. onsubmit="return confirm(…)" is an inline handler,
+    // which the policy refuses to run, so it never asked.
+    const deleting = build().w;
+    const asked = [];
+    deleting.confirm = (text) => { asked.push(text); return false; };
+    const form = deleting.document.getElementById('deleteForm');
+    const refused = new deleting.Event('submit', { cancelable: true });
+    form.dispatchEvent(refused);
+    deleting.confirm = (text) => { asked.push(text); return true; };
+    const agreed = new deleting.Event('submit', { cancelable: true });
+    form.dispatchEvent(agreed);
+    check('delete asks, and stops when the answer is no',
+          refused.defaultPrevented && !agreed.defaultPrevented
+          && asked[0] === 'Delete lab-<b>es</b>?',
+          JSON.stringify({ asked, refused: refused.defaultPrevented,
+                           agreed: agreed.defaultPrevented }));
 
     // The server's warnings reach the page, as text. It sent them — a
     // source it could not list, a colon that names no source — and nothing
