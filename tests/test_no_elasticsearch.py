@@ -296,6 +296,34 @@ class EnvironmentIsolationTest(unittest.TestCase):
         self.assertNotEqual(Fresh.DATABASE_URL, DEFAULT_DATABASE_URL)
         self.assertEqual(Fresh.DATABASE_URL, "sqlite:///:memory:")
 
+    def _somebodys_checkout(self):
+        """A working directory holding what a developer's does: a metadata
+        store and a dashboards file under data/, beside the tracked config.
+
+        The classifier resolves a relative path against the working
+        directory, so these tests read whatever this machine happens to
+        have. A clean clone has an empty data/, and there both tests of a
+        relative path failed — while the scan below passed without looking
+        at anything, because nothing it could have flagged existed. Both are
+        now judged against this, which is the same on every machine.
+        """
+        import contextlib
+        import tempfile
+
+        @contextlib.contextmanager
+        def inside():
+            folder = tempfile.mkdtemp()
+            for name in ("data/wdash.db", "data/dashboards.json", "config/rbac.yaml"):
+                os.makedirs(os.path.join(folder, os.path.dirname(name)), exist_ok=True)
+                open(os.path.join(folder, name), "w").close()
+            previous = os.getcwd()
+            os.chdir(folder)
+            try:
+                yield
+            finally:
+                os.chdir(previous)
+        return inside()
+
     def test_no_configured_value_a_test_can_reach_points_at_something_real(self):
         """The guard that missed the second instance, rewritten.
 
@@ -323,11 +351,12 @@ class EnvironmentIsolationTest(unittest.TestCase):
             pass
 
         accounted = set(FORCED) | set(PROTECTED_BY_THE_APP) | set(INERT)
-        unaccounted = {
-            name: getattr(Fresh, name)
-            for name in dir(Fresh)
-            if not name.startswith("_") and name not in accounted
-            and points_at_something_real(getattr(Fresh, name))}
+        with self._somebodys_checkout():
+            unaccounted = {
+                name: getattr(Fresh, name)
+                for name in dir(Fresh)
+                if not name.startswith("_") and name not in accounted
+                and points_at_something_real(getattr(Fresh, name))}
         self.assertEqual(
             unaccounted, {},
             "these resolve to something real and are on none of the three "
@@ -345,9 +374,10 @@ class EnvironmentIsolationTest(unittest.TestCase):
         """
         from tests import points_at_something_real
 
-        self.assertTrue(points_at_something_real("data/dashboards.json"))
-        self.assertTrue(points_at_something_real("config/rbac.yaml"))
-        self.assertFalse(points_at_something_real("data/not-a-file.json"))
+        with self._somebodys_checkout():
+            self.assertTrue(points_at_something_real("data/dashboards.json"))
+            self.assertTrue(points_at_something_real("config/rbac.yaml"))
+            self.assertFalse(points_at_something_real("data/not-a-file.json"))
 
     def test_an_address_counts_even_though_nothing_is_listening(self):
         """`http://localhost:9200` was real on the day somebody started the
@@ -365,9 +395,10 @@ class EnvironmentIsolationTest(unittest.TestCase):
         somebody deletes it."""
         from tests import points_at_something_real
 
-        self.assertTrue(points_at_something_real("sqlite:///data/wdash.db"))
-        self.assertFalse(points_at_something_real("sqlite:///:memory:"))
-        self.assertFalse(points_at_something_real("sqlite:///data/gone.db"))
+        with self._somebodys_checkout():
+            self.assertTrue(points_at_something_real("sqlite:///data/wdash.db"))
+            self.assertFalse(points_at_something_real("sqlite:///:memory:"))
+            self.assertFalse(points_at_something_real("sqlite:///data/gone.db"))
 
     def test_what_the_application_refuses_is_covered_by_a_named_test(self):
         """`PROTECTED_BY_THE_APP` is the one list that can hide something.

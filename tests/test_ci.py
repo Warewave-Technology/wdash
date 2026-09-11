@@ -444,3 +444,23 @@ class TheBrowserJobRunsEveryBrowserSuiteTest(unittest.TestCase):
         for module in self.BROWSER_SUITES:
             with self.subTest(module=module):
                 self.assertIn(module, guard)
+
+
+class NoCountIsWrittenDownTest(unittest.TestCase):
+    """A number of tests in prose is wrong by the next commit.
+
+    The workflow said 1,868, the README 1,885, and the suite measured 2,080
+    on the day anybody counted — and "nineteen skip, thirteen of them in the
+    browser job" had drifted the same way. Where a count matters, the job
+    prints it; nowhere else says one.
+    """
+
+    COUNT = re.compile(r"\b\d[\d,]*\s+(?:journey\s+)?tests?\b|\b(?:nineteen|thirteen)\b",
+                       re.IGNORECASE)
+
+    def test_the_workflow_and_the_readme_state_no_test_count(self):
+        for path in (WORKFLOW, os.path.join(ROOT, "README.md")):
+            with open(path, encoding="utf-8") as handle:
+                found = self.COUNT.findall(handle.read())
+            with self.subTest(path=os.path.basename(path)):
+                self.assertEqual(found, [])

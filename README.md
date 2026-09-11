@@ -594,9 +594,9 @@ different things depending on what is installed beside it:
 
 | Job | What it adds | What it closes |
 |---|---|---|
-| `suite` | Python 3.11–3.14, node | the 1,885 tests, on every supported version |
-| `browser` | Playwright and Chromium | 13 journey tests that otherwise skip |
-| `live-schema` | a seeded Elasticsearch | 6 tests that read both trace schemas |
+| `suite` | Python 3.11–3.14, node | the whole suite, on every supported version, from a clean checkout |
+| `browser` | Playwright and Chromium | the journey and rendered-page tests that otherwise skip |
+| `live-schema` | a seeded Elasticsearch | the tests that read both trace schemas |
 | `image` | Docker | that the Dockerfile still builds |
 
 The last two refuse to pass by skipping — `WDASH_REQUIRE_LAB=1` turns "no

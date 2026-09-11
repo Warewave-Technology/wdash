@@ -1,6 +1,6 @@
 # What runs before anything is merged.
 #
-# The suite is 1,868 tests, and a good half of them are guards written after
+# The suite is a couple of thousand tests, and a good half of them are guards written after
 # a specific mistake: a colour outside the palette, a template naming a
 # theme, a dependency under a licence this project will not take, a test
 # reaching the developer's own database. Every one of those is worth exactly
@@ -10,9 +10,10 @@
 # Several jobs rather than one, because the suite means different things
 # depending on what is installed beside it:
 #
-#   suite         no browser, no cluster — 19 tests skip and say so
-#   browser       + Playwright and Chromium — 13 of those 19
-#   live-schema   + a seeded Elasticsearch — the other 6
+#   suite         no browser, no cluster — the tests that need one skip,
+#                 and say so
+#   browser       + Playwright and Chromium — the journeys and rendered pages
+#   live-schema   + a seeded Elasticsearch — the two trace schemas
 #   image         the Dockerfile, which no test touches
 #   manifests     the Kubernetes objects, against the real API schemas
 #
@@ -74,9 +75,11 @@ jobs:
       - run: npm ci
 
       - name: The suite
-        # Not verbose: 1,868 lines of test names bury the one that failed.
-        # The specialised jobs below are where a SKIP is a failure; here
-        # nineteen of them are expected and the count is printed at the end.
+        # Not verbose: two thousand lines of test names bury the one that
+        # failed. The specialised jobs below are where a SKIP is a failure;
+        # here the ones that need a browser or a lab are expected, and the
+        # count is printed at the end. No number is written down here: every
+        # one that was had drifted from what the suite measured.
         run: python -m unittest discover -s tests -t .
 
       - name: The front-end suites, on their own as well
