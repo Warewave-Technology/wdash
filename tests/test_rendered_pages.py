@@ -268,3 +268,124 @@ class EveryScreenTest(unittest.TestCase):
         self.assertEqual(refused, [])
         for url, globals_ in loaded.items():
             self.assertNotIn("undefined", globals_.values(), f"{url}: {globals_}")
+
+
+@unittest.skipUnless(_playwright(), "playwright is not installed")
+class TheAgentRowIsOneRowHighTest(unittest.TestCase):
+    """The agents table drew one agent two rows high.
+
+    Its last column is 12rem and its two buttons — "Rotate token" and the
+    delete one — take 171 px of that plus the space between them, in the
+    monospaced face this theme sets. The cell was allowed to wrap, so the
+    delete button dropped onto a line of its own underneath: the one
+    control on the row nobody wants to reach by accident, given a line to
+    itself under a wide one. Two other cells on this same page already say
+    `text-nowrap`; this one did not.
+
+    `tests/test_contrast.py` cannot see this and neither can the audit
+    above: every colour was right and nothing threw. What was wrong is
+    WHERE the two buttons are painted, so that is what this measures — at
+    three widths, because it is decided by a handful of pixels, and in
+    both themes, because the face a theme picks decides how much room the
+    words take.
+    """
+
+    #: Narrow first. The wrap needs the column to be tight, which is where
+    #: a browser window usually is.
+    WIDTHS = (900, 1024, 1500)
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.support import grant, serve_in_background
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.secrets import SecretBox
+        from werkzeug.serving import make_server
+
+        database = os.path.join(tempfile.mkdtemp(), "agent-row.db")
+
+        class RowConfig(Config):
+            SECRET_KEY = "agent-row"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = SecretBox.generate_key()
+            ELASTICSEARCH_URL = ""
+            DASHBOARD_STORAGE = "database"
+
+        cls.app = create_app(RowConfig)
+        cls.app.test_client().post("/setup", data={"username": "admin",
+                                                   "password": PASSWORD,
+                                                   "confirm": PASSWORD})
+        grant(cls.app, "admin", ["system:admin", "monitors:read"])
+        cls.app.store.settings.set("rbac.user_roles", {"admin": "test-role"})
+        cls.app.store.rbac.invalidate()
+        # A name as long as the ones people give their agents. The column is
+        # the one being measured; the name column takes the slack.
+        cls.app.store.agents.create("frankfurt-office")
+
+        cls.server = serve_in_background(
+            make_server("127.0.0.1", 0, cls.app, threaded=True))
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def test_the_buttons_of_an_agent_sit_on_one_line(self):
+        from playwright.sync_api import sync_playwright
+
+        measured = {}
+        with sync_playwright() as play:
+            browser = play.chromium.launch()
+            for width in self.WIDTHS:
+                page = browser.new_context(
+                    viewport={"width": width, "height": 900}).new_page()
+                page.goto(f"{self.base}/auth/login", wait_until="networkidle")
+                page.fill("input[name=username]", "admin")
+                page.fill("input[name=password]", PASSWORD)
+                page.click("button[type=submit]")
+                page.wait_for_load_state("networkidle")
+                page.goto(f"{self.base}/admin/config#tab-monitors",
+                          wait_until="networkidle")
+                page.wait_for_selector(
+                    "#agentsTable tbody tr td:last-child button")
+                for theme in ("dark", "light"):
+                    page.evaluate(f"window.wdashTheme.set('{theme}')")
+                    page.wait_for_timeout(200)
+                    measured[f"{width}px {theme}"] = page.evaluate(
+                        MEASURE_AGENT_ROW)
+                page.close()
+            browser.close()
+
+        for theme, seen in measured.items():
+            with self.subTest(where=theme):
+                self.assertEqual(len(seen["tops"]), 2,
+                                 f"{theme}: {seen}")
+                self.assertLessEqual(
+                    abs(seen["tops"][0] - seen["tops"][1]), 1,
+                    f"{theme}: the two buttons start on different lines: {seen}")
+                self.assertLess(
+                    seen["rowHeight"], seen["buttonHeight"] * 2,
+                    f"{theme}: the row is two buttons high: {seen}")
+                # Room made by widening the column, not by pushing the
+                # button out of a box that scrolls sideways.
+                self.assertEqual(seen["overflow"], 0, f"{theme}: {seen}")
+                self.assertLessEqual(seen["rights"][1], seen["visibleRight"],
+                                     f"{theme}: {seen}")
+
+
+#: Where the two buttons of an agent row are actually painted.
+MEASURE_AGENT_ROW = """() => {
+  const table = document.querySelector('#agentsTable');
+  const cell = table.querySelector('tbody tr td:last-child');
+  const buttons = [...cell.querySelectorAll('button')]
+      .map(b => b.getBoundingClientRect());
+  const scroller = table.closest('.table-responsive');
+  return {
+    tops: buttons.map(b => Math.round(b.top)),
+    rights: buttons.map(b => Math.round(b.right)),
+    buttonHeight: Math.round(buttons[0] ? buttons[0].height : 0),
+    rowHeight: Math.round(cell.closest('tr').getBoundingClientRect().height),
+    visibleRight: Math.round(scroller.getBoundingClientRect().right),
+    overflow: scroller.scrollWidth - scroller.clientWidth,
+  };
+}"""

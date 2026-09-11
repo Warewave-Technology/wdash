@@ -329,7 +329,8 @@
     </div>
     {% else %}
     <div class="table-responsive">
-      <table class="table table-hover mb-0" style="font-size:.85rem">
+      <table class="table table-hover mb-0" id="agentsTable"
+             style="font-size:.85rem">
         <thead><tr>
           <th>Agent</th><th style="width:9rem">Last seen</th>
           <th style="width:6rem">Version</th><th style="width:12rem"></th>
@@ -352,7 +353,7 @@
             {% endif %}
           </td>
           <td><small class="text-muted">{{ agent.version or '—' }}</small></td>
-          <td class="text-end">
+          <td class="text-end text-nowrap">
             <form method="post" class="d-inline"
                   action="{{ url_for('config.rotate_agent', agent_id=agent.id) }}">
               <button class="btn btn-sm btn-outline-secondary"
