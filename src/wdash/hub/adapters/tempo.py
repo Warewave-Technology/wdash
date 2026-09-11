@@ -379,10 +379,10 @@ class TempoTraceSource(TraceSource):
         if wanted:
             allowed = scope.allows_service(wanted, source=self.name)
             return [wanted] if allowed else []
-        if not patterns.narrows(scope.services, self.name):
+        if not patterns.narrows(scope.services, self.name, scope.sources):
             return None
         allow, _ = patterns.partition(
-            patterns.for_source(scope.services, self.name))
+            patterns.for_source(scope.services, self.name, scope.sources))
         if not any("*" in name for name in allow):
             # Exact grants: nothing else can be allowed, and the check
             # applies every exclusion.

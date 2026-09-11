@@ -20,6 +20,7 @@ from flask_login import current_user, login_required
 
 from datetime import timedelta
 
+from .access import request_scope
 from ..hub import (
     Capability, DateHistogram, LogQuery, Scope, Terms, TimeWindow,
 )
@@ -77,7 +78,7 @@ class SourceMissing(RuntimeError):
 
 
 def _scope():
-    return Scope.from_user(current_user)
+    return request_scope()
 
 
 def _manager():

@@ -18,6 +18,7 @@ from flask import (
 )
 from flask_login import current_user, login_required
 
+from .access import request_scope
 from ..hub import LogQuery, Scope, SourceRef, TimeWindow, TraceQuery, patterns
 from ..hub.query import SORT_RECENT, SORT_SLOWEST
 from ..hub.source import Capability
@@ -28,7 +29,7 @@ DEFAULT_RANGE = "24h"
 
 
 def _scope():
-    return Scope.from_user(current_user)
+    return request_scope()
 
 
 def _denied(message="Access denied: you do not have permission to view traces."):
@@ -61,7 +62,7 @@ def _services_narrowed(scope, sources):
     spans were hidden (`Trace.hidden`), because a rule that could hide some
     and did are different claims.
     """
-    return any(patterns.narrows(scope.services, source.name)
+    return any(patterns.narrows(scope.services, source.name, scope.sources)
                for source in sources)
 
 

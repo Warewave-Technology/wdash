@@ -519,6 +519,18 @@ class TempoSpecificTest(unittest.TestCase):
         self.assertFalse([r for r in self.harness._requests
                           if "/search/tag/" in r["path"]])
 
+    def test_a_granted_name_with_a_colon_is_pushed_as_a_name(self):
+        """No source is called `unknown_service`, so the colon is part of
+        the name — which only the configured names can tell."""
+        scope = Scope(principal="p", containers=(), trace_containers=("*",),
+                      services=("unknown_service:java", "billing-api"),
+                      sources=frozenset({"tempo"}))
+        self._search(scope=scope)
+        self.assertEqual(
+            self._traceql(),
+            '{ (resource.service.name = "billing-api" || '
+            'resource.service.name = "unknown_service:java") }')
+
     def test_the_matched_spans_are_asked_for(self):
         self._search()
         search = next(r for r in self.harness._requests

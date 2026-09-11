@@ -1055,9 +1055,9 @@ class ElasticsearchTraceSource(TraceSource):
         which is a short page rather than a boundary in the query.
         """
         from ...hub.patterns import for_source, narrows
-        if not narrows(scope.services, source_name):
+        if not narrows(scope.services, source_name, scope.sources):
             return None
-        applicable = for_source(scope.services, source_name)
+        applicable = for_source(scope.services, source_name, scope.sources)
         if not applicable:
             # An empty allowlist means nothing is visible.
             return {"match_none": {}}

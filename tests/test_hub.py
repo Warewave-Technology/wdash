@@ -172,6 +172,21 @@ class ScopeTest(unittest.TestCase):
         self.assertFalse(scope.allows_service("payments", source="lab-jaeger"))
         self.assertFalse(scope.allows_service("payments"))
 
+    def test_the_configured_names_decide_what_a_colon_means(self):
+        class Named:
+            username = "u"
+            allowed_indices = ["*"]
+            allowed_trace_indices = ["*"]
+            allowed_services = ["unknown_service:java"]
+            permissions = []
+
+        scope = Scope.from_user(Named(), sources=["lab-tempo"])
+        self.assertEqual(scope.sources, frozenset({"lab-tempo"}))
+        self.assertTrue(scope.allows_service("unknown_service:java",
+                                             source="lab-tempo"))
+        self.assertFalse(Scope.from_user(Named()).allows_service(
+            "unknown_service:java", source="lab-tempo"))
+
     def test_a_service_exclusion_for_one_source_holds_where_it_is_unknown(self):
         scope = Scope(containers=("*",), services=("*", "-lab-tempo:payments"))
         self.assertFalse(scope.allows_service("payments", source="lab-tempo"))
@@ -807,6 +822,17 @@ class ServiceFilterPushDownTest(unittest.TestCase):
                     es_query_matches(clause, _service_doc(field, name)),
                     scope.allows_service(name or "", source=self.SOURCE),
                     f"{services} {name}: {clause}")
+
+    def test_a_granted_name_with_a_colon_is_in_the_query(self):
+        from tests.support import es_query_matches
+        field = OtelSpanSchema().service_field
+        clause = ElasticsearchTraceSource._scope_service_filter(
+            OtelSpanSchema(),
+            Scope(containers=("*",), services=("unknown_service:java",),
+                  sources=frozenset({self.SOURCE})),
+            self.SOURCE)
+        self.assertTrue(es_query_matches(
+            clause, _service_doc(field, "unknown_service:java")))
 
     def test_an_exclusion_beside_the_wildcard_is_in_the_query(self):
         """It returned early on `*` and left `-payments` to the filter on the

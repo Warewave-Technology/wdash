@@ -212,6 +212,22 @@ def validate(kind, signals, config):
     return cleaned
 
 
+def _check_name(name):
+    """A name a role's rule can point at.
+
+    Not blank: a source called "" matches no rule written for it. And no
+    colon: a rule's colon separates a source's name from a pattern, so a
+    source called `eu:prod` could not be named by one — `-eu:prod:secret-*`
+    read as a rule for a source called `eu`.
+    """
+    if not name:
+        raise SourceError("A name is required.")
+    if ":" in name:
+        raise SourceError(
+            "A source name cannot contain ':'. In a role's rules the colon "
+            "separates a source's name from the pattern for it.")
+
+
 class SourceRepository:
     def __init__(self, engine, secret_box=None):
         self._engine = engine
@@ -300,8 +316,7 @@ class SourceRepository:
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
         }
-        if not record["name"]:
-            raise SourceError("A name is required.")
+        _check_name(record["name"])
         try:
             with self._engine.begin() as connection:
                 connection.execute(sources.insert().values(**record))
@@ -326,8 +341,7 @@ class SourceRepository:
             # configuration page refuses for any other name went through for
             # this one — a role's exclusions for the source stopped excluding.
             changes["name"] = name.strip()
-            if not changes["name"]:
-                raise SourceError("A name is required.")
+            _check_name(changes["name"])
         if signals is not None:
             changes["signals"] = normalise_signals(existing["kind"], signals)
             changes["signal"] = changes["signals"][0]

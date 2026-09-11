@@ -396,6 +396,14 @@ async function runPreview() {
             'valid choice, and it is also what a mistyped pattern looks like.</div>');
     }
 
+    // What the server could not settle — a source it could not list, a
+    // colon that names no source. It sent these and nothing showed them.
+    (result.warnings || []).forEach(warning => {
+        parts.push('<div class="alert alert-warning py-2 mb-2" style="font-size:.8rem">' +
+            '<i class="fas fa-triangle-exclamation"></i> ' +
+            escapeHtml(warning) + '</div>');
+    });
+
     const change = result.change;
     if (change && CHANGE_KEYS.some(key => (change[key] || []).length)) {
         parts.push(renderChange(change));

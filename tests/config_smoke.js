@@ -491,6 +491,26 @@ function type(w, id, value) {
           && unexcludedSaid.includes('-payments')
           && unexcludedSaid.includes('widens'), unexcludedSaid);
 
+    // The server's warnings reach the page, as text. It sent them — a
+    // source it could not list, a colon that names no source — and nothing
+    // showed them.
+    const warned = build().w;
+    warned.fetch = (url) => Promise.resolve({ json: () => Promise.resolve(
+        url.includes('/preview')
+            ? { logs: [], traces: [], services: 'every service', permissions: [],
+                warnings: ["'staging:*' is read as a name: <b id=planted>x</b>"],
+                reaches_nothing: false,
+                reaches_everything: { logs: false, traces: false, services: true },
+                change: null }
+            : { logs: [], traces: [], services: [] }) });
+    type(warned, 'roleContainers', 'staging:*');
+    await settle();
+    const warnedSaid = warned.document.getElementById('rolePreview');
+    check('the server\'s warnings are shown, as text',
+          warnedSaid.textContent.includes("'staging:*' is read as a name")
+          && !warned.document.getElementById('planted'),
+          warnedSaid.innerHTML);
+
     console.log(failures.length ? `\n${failures.length} failure(s)`
                                 : '\nall role editor checks passed');
     process.exit(failures.length ? 1 : 0);

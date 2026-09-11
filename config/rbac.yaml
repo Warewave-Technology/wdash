@@ -10,7 +10,8 @@
 #
 # Every list takes the same patterns: `*`, `prefix*`, `*suffix`, `*middle*`,
 # `-pattern` to exclude (an exclusion beats every inclusion), and
-# `source-name:pattern` to hold a rule to one source.
+# `source-name:pattern` to hold a rule to one source — when a source has that
+# name; otherwise the colon is part of the name (`unknown_service:java`).
 #
 # Important: these controls live in the APPLICATION layer. Elasticsearch's
 # Basic licence has no document-level security, so WDash must be the only door

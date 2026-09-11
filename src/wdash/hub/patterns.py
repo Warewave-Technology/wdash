@@ -133,15 +133,14 @@ QUALIFIER = ":"
 
 
 def split_qualifier(pattern):
-    """Return (source_or_None, pattern).
+    """Return (source_or_None, pattern), splitting at the first colon.
 
     A bare pattern keeps meaning exactly what it always did — every source —
     so no existing role changes behaviour. Qualifying is opt-in precision for
     deployments where "app-* everywhere" is too much.
 
-    A container name containing a colon is not a thing in Elasticsearch or
-    Loki, so the separator is unambiguous in practice; if that ever stops being
-    true this is the one place that has to change.
+    This is only the split. Whether the part before the colon IS a qualifier
+    depends on whether a source has that name — see `parse`.
     """
     if QUALIFIER not in (pattern or ""):
         return None, pattern
@@ -151,8 +150,18 @@ def split_qualifier(pattern):
     return source, rest
 
 
-def parse(pattern):
+def parse(pattern, sources=None):
     """Return (is_denial, source_or_None, bare) — the one reading of a rule.
+
+    The part before the first colon qualifies the rule only when a source
+    has that name (`sources`, the configured names; None reads every colon
+    as a qualifier, for callers that do not know them). Names have colons:
+    OpenTelemetry's default service name is `unknown_service:java`, and
+    Loki's labels and service names take them too. Read as a qualifier,
+    `unknown_service:java` granted a service in a source called
+    `unknown_service` — nothing — and `*` with `-unknown_service:*` hid
+    nothing. A colon that names no source is part of the name, and a rule
+    that does not mention a real source never changes meaning.
 
     The marker may come before the qualifier or after it: `-primary:secret-*`
     and `primary:-secret-*` are the same exclusion. Read the second way as a
@@ -162,13 +171,15 @@ def parse(pattern):
     """
     is_denial, rest = split_deny(pattern)
     qualifier, bare = split_qualifier(rest)
+    if qualifier is not None and sources is not None and qualifier not in sources:
+        return is_denial, None, rest
     if qualifier is not None:
         inner_denial, bare = split_deny(bare)
         is_denial = is_denial or inner_denial
     return is_denial, qualifier, bare
 
 
-def for_source(patterns, source_name):
+def for_source(patterns, source_name, sources=None):
     """The patterns that apply to one source, with their qualifiers removed.
 
     For an adapter pushing a boundary into its backend's own query language:
@@ -178,14 +189,14 @@ def for_source(patterns, source_name):
     """
     applicable = []
     for pattern in patterns or ():
-        is_denial, qualifier, bare = parse(pattern)
+        is_denial, qualifier, bare = parse(pattern, sources)
         if qualifier is not None and qualifier != source_name:
             continue
         applicable.append((DENY if is_denial else "") + bare)
     return applicable
 
 
-def narrows(patterns, source_name):
+def narrows(patterns, source_name, sources=None):
     """Whether these rules hide anything in this source. None hides nothing.
 
     A `*` that applies here grants everything, so only an exclusion beside
@@ -194,11 +205,11 @@ def narrows(patterns, source_name):
     """
     if patterns is None:
         return False
-    allow, deny = partition(for_source(patterns, source_name))
+    allow, deny = partition(for_source(patterns, source_name, sources))
     return bool(deny) or "*" not in allow
 
 
-def matches_for_source(patterns, name, source_name=None):
+def matches_for_source(patterns, name, source_name=None, sources=None):
     """Does `name` satisfy the rules, given which source it came from?
 
     A qualified pattern applies only to its named source; a bare one applies
@@ -218,7 +229,7 @@ def matches_for_source(patterns, name, source_name=None):
     """
     allowed = False
     for pattern in patterns or ():
-        is_denial, qualifier, bare = parse(pattern)
+        is_denial, qualifier, bare = parse(pattern, sources)
         if qualifier is not None and qualifier != source_name:
             if source_name is None and is_denial and matches(bare, name):
                 return False

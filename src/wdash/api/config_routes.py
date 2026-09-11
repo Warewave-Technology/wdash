@@ -30,6 +30,7 @@ from flask_login import current_user, login_required
 from ..dashboard.invariants import (
     refuses_mapping_save, refuses_role_delete, refuses_role_save,
 )
+from .access import source_names
 from ..hub import Scope, TimeWindow
 from ..permissions import grouped as permission_groups
 from ..permissions import normalise as normalise_permissions
@@ -320,6 +321,20 @@ def save_source():
                 return redirect(url_for("config.config_page"))
             _audit("source updated", name=saved["name"], id=source_id)
         else:
+            new_name = (form.get("name") or "").strip()
+            naming = _roles_naming_source(store, new_name) if new_name else []
+            if naming:
+                # A colon qualifies a rule only when a source has that name,
+                # so these rules are plain names today. A source called this
+                # would make them rules for it: a grant of `staging:*` would
+                # hand over everything in it.
+                flash(f"These roles have rules starting '{new_name}:': "
+                      f"{', '.join(naming)}. A source called '{new_name}' "
+                      f"would turn them from names into rules for it. Change "
+                      f"those patterns first. Nothing was saved.", "error")
+                _audit("source creation refused", subject=f"source:{new_name}",
+                       state={"name": new_name, "roles": naming})
+                return redirect(url_for("config.config_page"))
             saved = store.sources.create(
                 name=form.get("name"), signal=signals,
                 kind=form.get("kind"), config=config, secret=password,
@@ -332,6 +347,26 @@ def save_source():
         flash(str(exc), "error")
 
     return redirect(url_for("config.config_page"))
+
+
+def _unqualified(rules, names):
+    """A warning for each rule whose colon names no source.
+
+    Such a rule is a plain name — `unknown_service:java` — which is right
+    when that is the service's name and a typo when a source was meant.
+    Only the person writing it knows which, so it is said, not guessed.
+    """
+    from ..hub.patterns import parse
+    said, out = set(), []
+    for rule in rules:
+        qualifier = parse(rule)[1]
+        if qualifier is None or qualifier in names or qualifier in said:
+            continue
+        said.add(qualifier)
+        out.append(f"'{rule}' is read as a name: no source is called "
+                   f"'{qualifier}'. A colon holds a rule to one source only "
+                   f"when a source has that name.")
+    return out
 
 
 #: Sources whose one trace store is the source itself, matched by its name.
@@ -569,11 +604,12 @@ def _service_change(before, after):
         return [], [EVERY_SERVICE], [], []
 
     from ..hub.patterns import parse
+    names = source_names()
 
     def split(rules):
         grants, exclusions = set(), set()
         for rule in rules:
-            (exclusions if parse(rule)[0] else grants).add(rule)
+            (exclusions if parse(rule, names)[0] else grants).add(rule)
         return grants, exclusions
 
     grants_before, exclusions_before = split(before)
@@ -599,7 +635,8 @@ def _describe_change(previous, scope, logs, traces, groups=None):
         trace_containers=tuple(previous.get("trace_containers") or ()),
         services=(tuple(previous["services"])
                   if previous.get("services") is not None else None),
-        permissions=frozenset(previous.get("permissions") or ()))
+        permissions=frozenset(previous.get("permissions") or ()),
+        sources=source_names())
 
     before_logs = _reachable(before_scope, hub.log_sources if hub else [])
     before_traces = _reachable(before_scope, hub.trace_sources if hub else [],
@@ -671,10 +708,14 @@ def preview_role():
         # Blank means unrestricted on the trace side; the form says so, and the
         # preview has to agree with the form or it teaches the wrong thing.
         services=None if not services else tuple(services),
-        permissions=frozenset(payload.get("permissions") or ()))
+        permissions=frozenset(payload.get("permissions") or ()),
+        sources=source_names())
 
     hub = getattr(current_app, "hub", None)
     logs, traces, warnings = [], [], []
+    warnings.extend(_unqualified(
+        list(scope.containers) + list(scope.trace_containers)
+        + list(scope.services or ()), scope.sources))
 
     for source in (hub.log_sources if hub else []):
         try:

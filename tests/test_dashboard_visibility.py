@@ -180,6 +180,43 @@ class ListingTest(unittest.TestCase):
         self.assertIn(b"not shown", page)
 
 
+class ColonNameTest(unittest.TestCase):
+    """A dashboard over `unknown_service:*` is visible to a role granted
+    `unknown_service:*`: no source has that name, so the colon is part of
+    it — and the dashboards' routes have to know the configured names to
+    read it that way."""
+
+    def setUp(self):
+        handle, self.database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        database = self.database
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "visibility"
+            DATABASE_URL = f"sqlite:///{database}"
+
+        from tests.support import StubLogSource
+        from wdash.hub import Hub
+        self.app = create_app(TestConfig)
+        hub = Hub()
+        hub.add_logs(StubLogSource(containers=("unknown_service:java",
+                                               "logs-app")))
+        self.app.hub = hub
+        self.app.store.users.create_first_admin("setup", "a-long-enough-pw")
+        self.app.dashboard_manager.create_dashboard(
+            "UnnamedBoard", "", "*", "alice", ["unknown_service:*"])
+
+    def tearDown(self):
+        if os.path.exists(self.database):
+            os.unlink(self.database)
+
+    def test_it_is_listed_for_a_role_granted_those_names(self):
+        client = ListingTest.client_for(self, "bob", ["unknown_service:*"])
+        self.assertIn(b"UnnamedBoard", client.get("/dashboards").data)
+
+
 class ApiIsNotTheWayAroundTest(ListingTest):
     """A rule applied only to the list is not a boundary, it is a speed bump."""
 

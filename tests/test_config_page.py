@@ -179,6 +179,42 @@ class SourceTest(ConfigTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"already exists", response.data)
 
+    def test_a_source_name_cannot_hold_a_colon(self):
+        """In a rule the colon separates a source's name from its pattern,
+        so a source called `eu:prod` could not be named by one:
+        `-eu:prod:secret-*` read as a rule for a source called `eu`."""
+        response = self.add_source(name="eu:prod")
+        self.assertIn(b"cannot contain", response.data)
+        self.assertEqual(self.app.store.sources.all(), [])
+
+    def test_nor_can_a_renamed_one(self):
+        self.add_source(name="lab-es")
+        response = self.rename(self.app.store.sources.all()[0], "eu:prod")
+        self.assertIn(b"cannot contain", response.data)
+        self.assertEqual([s["name"] for s in self.app.store.sources.all()],
+                         ["lab-es"])
+
+    def test_a_source_cannot_be_created_under_a_name_rules_already_use(self):
+        """A colon qualifies a rule only when a source has that name, so
+        `staging:*` is a plain name today. Creating a source called
+        `staging` would make it a grant of everything in it."""
+        self.app.store.roles.upsert(
+            "contractor", permissions=["logs:read"],
+            containers=["staging:*"], trace_containers=[])
+        response = self.add_source(name="staging")
+        self.assertIn(b"would turn them from names into rules", response.data)
+        self.assertEqual(self.app.store.sources.all(), [])
+        refused = [row for row in self.app.store.audit.recent()
+                   if row["action"] == "source creation refused"]
+        self.assertEqual(refused[0]["state"]["roles"], ["contractor"])
+
+    def test_a_service_rule_counts_for_that_too(self):
+        self.app.store.roles.upsert(
+            "tracers", permissions=["traces:read"], containers=[],
+            trace_containers=["*"], services=["*", "-staging:payments"])
+        self.add_source(name="staging")
+        self.assertEqual(self.app.store.sources.all(), [])
+
     def test_a_rename_nothing_depends_on_goes_through(self):
         self.add_source(name="lab-es")
         source = self.app.store.sources.all()[0]
@@ -461,6 +497,19 @@ class ChangePreviewTest(ConfigTestCase):
         return self.client.post("/admin/api/roles/preview",
                                 json=payload).get_json()["change"]
 
+    def test_a_colon_that_names_no_source_is_pointed_out(self):
+        """It is right when that is the name and a typo when a source was
+        meant; only the person writing it knows which."""
+        result = self.client.post("/admin/api/roles/preview", json={
+            "name": "auditor", "permissions": ["logs:read"],
+            "containers": ["staging:*", "lab:app-*"],
+            "trace_containers": [], "services": ["unknown_service:java"],
+        }).get_json()
+        said = " ".join(result["warnings"])
+        self.assertIn("no source is called 'staging'", said)
+        self.assertIn("no source is called 'unknown_service'", said)
+        self.assertNotIn("'lab'", said)
+
     def test_a_new_role_has_nothing_to_compare_against(self):
         self.assertIsNone(self.preview(name="brand-new"))
 
@@ -545,6 +594,14 @@ class ChangePreviewTest(ConfigTestCase):
         change = self.preview(services=["*"])
         self.assertEqual(change["exclusions_removed"], ["lab:-payments"])
         self.assertTrue(change["widens"])
+
+    def test_a_marker_after_a_colon_that_names_no_source_is_a_name(self):
+        """`x:-y` with no source called x is the name "x:-y": taking it off
+        removes a grant, not an exclusion."""
+        self._with_services(["*", "x:-y"])
+        change = self.preview(services=["*"])
+        self.assertEqual(change["services_removed"], ["x:-y"])
+        self.assertEqual(change["exclusions_removed"], [])
 
     def test_adding_a_group_widens(self):
         """A group is who gets the role: adding one hands everything it

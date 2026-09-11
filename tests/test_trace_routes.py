@@ -590,6 +590,9 @@ def _apm_cluster():
                  seconds_ago=age - 3),
             _apm(trace, f"{trace}-redis", "redis", f"{trace}-pay", entry=False,
                  seconds_ago=age - 3),
+            # OpenTelemetry's name for a service that set none.
+            _apm(trace, f"{trace}-unnamed", "unknown_service:java", root,
+                 seconds_ago=age - 4),
         ]
     from tests.support import ModelledES
     return ModelledES({"apm-traces-000001": (APM_PROPERTIES, docs)})
@@ -662,6 +665,20 @@ class ServiceRuleTest(unittest.TestCase):
         self.assertEqual({t["trace_id"] for t in rows}, {"trace-1", "trace-2"})
         self.assertEqual({t["service"] for t in rows}, {"payment-service"})
 
+    def test_a_service_name_with_a_colon_is_granted_by_its_name(self):
+        """A colon qualifies a rule only when a source has that name, and no
+        source is called `unknown_service`. The route has to pass the
+        configured names for that to be known."""
+        self.as_role(services=["unknown_service:java"])
+        self.assertEqual(self.listed(), {"unknown_service:java"})
+        self.assertEqual({t["service"] for t in self.rows()},
+                         {"unknown_service:java"})
+
+    def test_such_names_are_excluded_by_their_name_too(self):
+        self.as_role(services=["*", "-unknown_service:*"])
+        self.assertNotIn("unknown_service:java", self.listed())
+        self.assertIn("redis", self.listed())
+
     # --- a trace whose root the role cannot see ---
 
     def test_a_trace_entering_through_a_hidden_service_is_listed(self):
@@ -719,6 +736,11 @@ class ServiceRuleTest(unittest.TestCase):
         page = self.client.get("/traces").data
         self.assertIn(b"Your role can see spans from", page)
         self.assertIn(b"-postgres", page)
+
+    def test_the_page_says_an_exclusion_of_colon_names_narrows_it(self):
+        self.as_role(services=["*", "-unknown_service:*"])
+        self.assertIn(b"Your role can see spans from",
+                      self.client.get("/traces").data)
 
     def test_the_page_says_so_when_the_role_sees_no_service(self):
         self.as_role(services=[])

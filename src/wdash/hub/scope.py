@@ -43,6 +43,10 @@ class Scope:
     #: Visible services. None = unrestricted, () = none at all.
     services: Optional[tuple] = None
     permissions: frozenset = field(default_factory=frozenset)
+    #: The configured source names: a colon in a rule qualifies it only when
+    #: the part before it is one of these. None reads every colon as a
+    #: qualifier — for scopes built without a configuration to hand.
+    sources: Optional[frozenset] = None
 
     # ---------- constructors ----------
 
@@ -59,7 +63,7 @@ class Scope:
                    trace_containers=(), services=())
 
     @classmethod
-    def from_user(cls, user):
+    def from_user(cls, user, sources=None):
         """Bridge from models.User to a Scope.
 
         The difference between an empty list and a missing attribute is
@@ -83,6 +87,7 @@ class Scope:
             trace_containers=() if trace_raw is None else tuple(trace_raw),
             services=None if services_raw is None else tuple(services_raw),
             permissions=frozenset(getattr(user, "permissions", None) or ()),
+            sources=None if sources is None else frozenset(sources),
         )
 
     # ---------- queries ----------
@@ -94,10 +99,11 @@ class Scope:
         pattern still applies to every source, so no existing role changes
         meaning — qualifying is opt-in precision, not a new requirement.
         """
-        return matches_for_source(self.containers, name, source)
+        return matches_for_source(self.containers, name, source, self.sources)
 
     def allows_trace_container(self, name, source=None):
-        return matches_for_source(self.trace_containers, name, source)
+        return matches_for_source(self.trace_containers, name, source,
+                                  self.sources)
 
     def allows_service(self, name, source=None):
         """Are spans from this service permitted?
@@ -111,7 +117,7 @@ class Scope:
         """
         if self.services is None:
             return True
-        return matches_for_source(self.services, name, source)
+        return matches_for_source(self.services, name, source, self.sources)
 
     def has(self, permission):
         return permission in self.permissions

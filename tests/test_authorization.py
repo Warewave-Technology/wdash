@@ -130,6 +130,56 @@ class PatternTest(unittest.TestCase):
                             matches_for_source(chosen, name, source),
                             f"{chosen} {source} {name}")
 
+    def test_a_colon_that_names_no_source_is_part_of_the_name(self):
+        """OpenTelemetry's default service name is `unknown_service:java`.
+        Read as a qualifier it granted a service in a source called
+        `unknown_service`, which does not exist — nothing."""
+        names = {"lab-tempo"}
+        self.assertTrue(matches_for_source(
+            ["unknown_service:java"], "unknown_service:java", "lab-tempo", names))
+        self.assertTrue(matches_for_source(
+            ["unknown_service:*"], "unknown_service:python", "lab-tempo", names))
+
+    def test_an_exclusion_of_such_names_excludes_them(self):
+        """`*` with `-unknown_service:*` hid nothing: it was an exclusion for
+        a source of that name. On an upgrade, that is a rule that opens."""
+        rules = ["*", "-unknown_service:*"]
+        self.assertFalse(matches_for_source(
+            rules, "unknown_service:java", "lab-tempo", {"lab-tempo"}))
+        self.assertTrue(matches_for_source(rules, "billing", "lab-tempo",
+                                           {"lab-tempo"}))
+
+    def test_a_colon_that_names_a_source_still_qualifies(self):
+        rules = ["*", "-primary:secret-*"]
+        names = {"primary", "secondary"}
+        self.assertFalse(matches_for_source(rules, "secret-1", "primary", names))
+        self.assertTrue(matches_for_source(rules, "secret-1", "secondary", names))
+
+    def test_the_marker_after_a_colon_is_a_marker_only_after_a_source(self):
+        """`x:-y` with no source called x is the name "x:-y", not an
+        exclusion of y."""
+        self.assertTrue(matches_for_source(["*", "x:-y"], "y", "s", {"s"}))
+        self.assertFalse(matches_for_source(["*", "s:-y"], "y", "s", {"s"}))
+
+    def test_what_is_pushed_down_is_what_is_allowed_whatever_the_names(self):
+        from wdash.hub.patterns import for_source
+        rules = ["*", "app-*", "-primary:app-*", "unknown_service:*",
+                 "-unknown_service:java", "secondary:-*-pii-*", "x:-y"]
+        names = ["app-1", "unknown_service:java", "unknown_service:go",
+                 "db-pii-2", "y", "x:-y"]
+        for sources in (None, {"primary"}, {"primary", "secondary"},
+                        {"primary", "secondary", "unknown_service", "x"}):
+            for size in range(len(rules) + 1):
+                for start in range(len(rules)):
+                    chosen = (rules[start:] + rules[:start])[:size]
+                    for source in ("primary", "secondary", "unknown_service"):
+                        for name in names:
+                            self.assertEqual(
+                                matches_any(for_source(chosen, source, sources),
+                                            name),
+                                matches_for_source(chosen, name, source, sources),
+                                f"{chosen} {source} {name} {sources}")
+
     def test_a_glob_keeps_only_the_outer_stars_as_wildcards(self):
         from wdash.hub.patterns import glob
 
@@ -247,6 +297,50 @@ class GateTestCase(unittest.TestCase):
             "admin", permissions=["system:admin"], containers=["*"],
             trace_containers=["*"])
         self.app.store.rbac.invalidate()
+
+
+class ColonNameTest(GateTestCase):
+    """Loki's labels and OpenTelemetry's service names carry colons. A role
+    rule's colon qualifies it only when a source has that name, and the
+    routes have to say which names those are."""
+
+    def setUp(self):
+        super().setUp()
+        from tests.support import with_stub_logs
+        self.logs = with_stub_logs(
+            self.app, containers=("unknown_service:java", "logs-app"))
+
+    def reads(self, containers):
+        self.app.store.roles.upsert(
+            "admin", permissions=["logs:read"], containers=containers,
+            trace_containers=[])
+        self.app.store.rbac.invalidate()
+        response = self.client.get(
+            "/api/search?q=*&start_time=2026-08-04T09:00:00Z"
+            "&end_time=2026-08-04T10:00:00Z")
+        return response.status_code, (response.get_json() or {}).get("containers")
+
+    def test_a_container_with_a_colon_is_granted_by_its_name(self):
+        self.assertEqual(self.reads(["unknown_service:*"]),
+                         (200, ["unknown_service:java"]))
+
+    def test_and_excluded_by_it(self):
+        self.assertEqual(self.reads(["*", "-unknown_service:*"]),
+                         (200, ["logs-app"]))
+
+    def test_a_rule_for_the_source_itself_still_qualifies(self):
+        self.assertEqual(self.reads(["stub-logs:logs-*"]), (200, ["logs-app"]))
+
+    def test_a_rule_for_a_switched_off_source_stays_its_rule(self):
+        """A source that is configured and switched off is not in the hub,
+        but a rule written for it is still for it. Read as a plain name,
+        `lab-old:*` would grant `lab-old:x` in every other source."""
+        self.logs._containers = ("lab-old:x", "logs-app")
+        self.app.store.sources.create(
+            name="lab-old", signal="logs", kind="loki",
+            config={"url": "http://loki.invalid:3100"}, enabled=False)
+        status, _ = self.reads(["lab-old:*"])
+        self.assertEqual(status, 403)
 
 
 class EveryRouteIsGatedTest(GateTestCase):

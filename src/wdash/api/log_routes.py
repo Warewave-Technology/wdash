@@ -21,6 +21,7 @@ from flask import (
 )
 from flask_login import current_user, login_required
 
+from .access import request_scope
 from ..hub import Capability, LogQuery, Scope, SourceRef, TimeWindow
 from ..hub.query_language import QueryError
 from ..hub.query import DEFAULT_LOG_FIELDS
@@ -110,7 +111,7 @@ def _source_choices():
 
 
 def _scope():
-    return Scope.from_user(current_user)
+    return request_scope()
 
 
 def _source_count():

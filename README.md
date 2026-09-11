@@ -240,6 +240,15 @@ every boundary, services included. A bare pattern applies to **every configured
 source**, so adding a source widens what existing roles reach; write
 `source-name:pattern` to hold one to a single source.
 
+The colon qualifies a rule **only when a source has that name**. Names have
+colons — OpenTelemetry's default service name is `unknown_service:java` — and
+a colon that names no source is part of the name, so `unknown_service:java`
+grants that service and `-unknown_service:*` hides every one of them. The role
+preview says when a rule's colon names no source. A source's name cannot
+contain a colon, and a source cannot be created or renamed with a name that
+roles already write before a colon: that would turn their names into rules for
+it.
+
 A pattern prefixed with `-` is an exclusion, and **an exclusion beats every
 inclusion** regardless of the order they are written in — a role is a set, not
 a program, and a rule whose meaning depends on typing order is not reviewable
