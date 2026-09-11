@@ -389,13 +389,19 @@ def _did_not_run(result):
     Its zeros are not an answer, and served as one they draw a quiet hour: a
     VictoriaLogs query holding a range used to raise out of the adapter and
     reach the page as an HTML 500, which at least looked broken; answered as
-    a failure it came back 200 with every count at zero. The page shows the
-    error it is given, and the warnings say why.
+    a failure it came back 200 with every count at zero.
+
+    The page prints this above the panel grid, warnings and all. It used to
+    hand the message to a toast manager no page defines, so the reader got
+    "Failed to load" and a grid saying the panels could not be loaded, with
+    the reason nowhere on screen — which is why the warnings travel as a
+    list of their own rather than only joined into the sentence.
     """
     if not result.failed or result.buckets:
         return None
     return {"error": "; ".join(result.warnings) or "The query did not run.",
-            "error_type": "query_failed"}
+            "error_type": "query_failed",
+            "warnings": list(result.warnings)}
 
 
 # --------------------------------------------------------------------------

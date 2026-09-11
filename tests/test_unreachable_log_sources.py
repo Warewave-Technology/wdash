@@ -89,11 +89,16 @@ class UnreachableLokiTest(_Installation):
         self.assertEqual(payload["error_type"], "elasticsearch_connection")
         self.assertIn(self.NAME, payload["error"])
         self.assertNotIn("Elasticsearch", payload["error"])
+        # The client draws the suggestions beside this message, and it used
+        # to advise checking Elasticsearch whatever the backend was. The name
+        # is in the payload rather than only inside the sentence.
+        self.assertEqual(payload["source"], self.NAME)
 
     def test_the_container_listing_is_a_connection_error_too(self):
         response = self.client.get("/api/indices")
         self.assertEqual(response.status_code, 503)
         self.assertIn(self.NAME, response.get_json()["error"])
+        self.assertEqual(response.get_json()["source"], self.NAME)
 
     def test_the_role_preview_says_it_could_not_check(self):
         """A correct pattern was reported as matching nothing, which is what a
@@ -239,7 +244,11 @@ class VictoriaLogsDashboardTest(unittest.TestCase):
         self.assertGreaterEqual(response.status_code, 400,
                                 "zeros for a query that did not run read as "
                                 "a quiet hour")
-        self.assertIn("VictoriaLogs cannot express", response.get_json()["error"])
+        payload = response.get_json()
+        self.assertIn("VictoriaLogs cannot express", payload["error"])
+        # The page prints these under the message. Without them the reader
+        # gets a reason for the first refusal only.
+        self.assertIn("VictoriaLogs cannot express", " ".join(payload["warnings"]))
 
     def test_so_is_a_stored_query_it_cannot_express(self):
         self.dashboard.query = "host:w?b"

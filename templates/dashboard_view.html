@@ -134,6 +134,12 @@
 </div>
 <div class="text-muted mb-4" style="font-size:.75rem" id="baselineNote"></div>
 
+<!-- Whatever the server could not do, above the panels it is about: a query
+     the backend refused, a source that did not answer, a count it could not
+     make. This used to be handed to a toast manager that no page defines, so
+     it reached nobody. -->
+<div id="dashboardMessage" class="alert d-none" role="alert"></div>
+
 <!-- Panels are built by the client from the /data response: the dashboard
      owns the list, so hardcoding cards here would put the layout in two places
      that must agree. -->

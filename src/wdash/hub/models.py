@@ -92,6 +92,28 @@ def severity_spellings(value):
         if target == canonical))
 
 
+def severity_from(values, fields):
+    """(severity, raw) from the first of `fields` `values` carries.
+
+    ONE rule, in one place, because three things have to agree about which
+    field decides: the record reader, the filter an adapter renders for
+    `level:ERROR`, and the panel that counts by level. They did not. The
+    readers had always looked at several fields — Loki's `level`, `severity`
+    and `detected_level`, VictoriaLogs' `level`, `severity`, `log.level` and
+    `severity_text` — while the filter and the panels looked only at the
+    first. A line written by an OTel collector was therefore drawn as ERROR,
+    not found by `level:ERROR`, and counted under UNSPECIFIED.
+
+    A field that is absent or empty is not carried: Loki drops an empty label
+    at ingestion, and both backends match a missing field with `=""`, so the
+    two states are one state everywhere this is used.
+    """
+    for field in fields:
+        if values.get(field):
+            return normalise_severity(values[field]), values[field]
+    return UNKNOWN_SEVERITY, ""
+
+
 @dataclass(frozen=True)
 class SourceRef:
     """A backend-specific handle for a record.

@@ -1060,8 +1060,16 @@ class LogSearch {
             case 'timeout':
                 return '<strong>Try:</strong><ul class="mt-2 mb-0"><li>Use a more specific search query</li><li>Narrow the time range</li><li>Search fewer indices</li></ul>';
                 
-            case 'elasticsearch_connection':
-                return '<strong>Possible solutions:</strong><ul class="mt-2 mb-0"><li>Check if Elasticsearch is running</li><li>Verify network connectivity</li><li>Contact your system administrator</li></ul>';
+            case 'elasticsearch_connection': {
+                // Whichever backend this source is. /api/search answers with
+                // this type for Loki and VictoriaLogs too, so the box that
+                // says "Unable to connect to loki-down" went on to advise
+                // going and checking Elasticsearch.
+                const check = data.source
+                    ? `Check if ${WDash.escapeHtml(data.source)} is running and accessible`
+                    : 'Check if the log source is running and accessible';
+                return `<strong>Possible solutions:</strong><ul class="mt-2 mb-0"><li>${check}</li><li>Verify network connectivity</li><li>Contact your system administrator</li></ul>`;
+            }
                 
             case 'no_indices':
                 return '<strong>This might mean:</strong><ul class="mt-2 mb-0"><li>No logs have been ingested yet</li><li>Elasticsearch is empty</li><li>Log shipping is not configured</li></ul>';

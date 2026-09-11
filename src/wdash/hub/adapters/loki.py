@@ -39,7 +39,7 @@ import requests
 from ..aggregation import AggregationResult, Bucket, DateHistogram, Terms
 from ..models import (
     KNOWN_SEVERITY_SPELLINGS, LogPage, LogRecord, SourceRef,
-    normalise_severity, severity_spellings,
+    normalise_severity, severity_from, severity_spellings,
 )
 from ..source import Capability, LogSource
 from .. import query_language as ql
@@ -84,20 +84,61 @@ def _literal(value):
     return _REGEX_SYNTAX.sub(r"\\\1", str(value))
 
 
-def _severity_matcher(value):
-    """(operator, regex) for a label matcher that finds `value` as a level.
+def _severity_stage(value):
+    """A label filter stage keeping the lines the page calls `value`.
 
     Every spelling that normalises the way `value` does, without regard to
     case: `level:ERROR` has to find the `error` and `ERR` lines, because
     those are the lines the record calls ERROR and the level panel counts as
     ERROR. Loki anchors a label regex at both ends — measured, `(?i)err`
-    kept only `ERR` — so the alternation is whole values. UNSPECIFIED is the
-    level that is none of the known spellings, absent included.
+    kept only `ERR` — so the alternation is whole values.
+
+    Over EVERY label a record's level is read from, in the same order
+    `_to_records` reads them. Matching `level` alone was right only for a
+    pipeline that writes `level`: on a stream carrying `severity` — what an
+    OTel collector writes — or only Loki's own `detected_level`, `level:ERROR`
+    found none of the lines the page draws as ERROR, and said nothing.
+    Measured on the lab's Loki 3.1.1 over one stream per shape:
+    `| level=~"(?i)(error|err)"` kept 6 of the 18 ERROR lines, and
+    `| severity=~"(?i)(error|err)"` kept 0 of them, because an absent label
+    matches nothing under `=~`.
+
+    The order is the point, not a detail. A stream carrying both `level=info`
+    and `severity=error` is INFO — `level` is what the record read — so a
+    plain or-chain over the three would answer `level:ERROR` with a line the
+    page draws as INFO. Each clause therefore requires the labels ahead of it
+    to be absent, which Loki spells `label=""`: measured, `level=""` kept
+    exactly the 18 lines of the streams carrying no `level`, and `and` binds
+    tighter than `or`, so the clauses need no parentheses.
+
+    UNSPECIFIED is the level that is none of the known spellings, absent
+    included — and it is the direction that quietly returns MORE, because an
+    absent label matches EVERYTHING under `!~`. Rendered as `!~` over the
+    first label alone it kept every line of a level-less stream, ERROR lines
+    included.
     """
     spellings = severity_spellings(value)
-    alternation = "|".join(_literal(spelling) for spelling
-                           in spellings or KNOWN_SEVERITY_SPELLINGS)
-    return ("=~" if spellings else "!~"), f"(?i)({alternation})"
+    pattern = _escape("(?i)({})".format("|".join(
+        _literal(spelling) for spelling
+        in spellings or KNOWN_SEVERITY_SPELLINGS)))
+
+    clauses = []
+    for index, label in enumerate(_SEVERITY_LABELS):
+        last = index == len(_SEVERITY_LABELS) - 1
+        # Loki drops a label with an empty value, so `absent` and `empty` are
+        # one state here — the same state `_to_records` skips over.
+        terms = [f'{earlier}=""' for earlier in _SEVERITY_LABELS[:index]]
+        if spellings:
+            terms.append(f'{label}=~"{pattern}"')
+        else:
+            # "this label decided, and what it says is no known spelling".
+            # The last needs no presence test: absent satisfies `!~` too, and
+            # a line with none of the three labels IS UNSPECIFIED.
+            if not last:
+                terms.append(f'{label}!=""')
+            terms.append(f'{label}!~"{pattern}"')
+        clauses.append(" and ".join(terms))
+    return " | " + " or ".join(clauses)
 
 
 def _nanoseconds(moment):
@@ -290,9 +331,8 @@ class LokiLogSource(LogSource):
 
         if (isinstance(node, (ql.Term, ql.Phrase))
                 and node.field in ("severity", "severity_text")):
-            operator, pattern = _severity_matcher(
+            return _severity_stage(
                 node.value if isinstance(node, ql.Term) else node.text)
-            return f' | {self._label_for(node.field)}{operator}"{_escape(pattern)}"'
 
         if isinstance(node, (ql.Term, ql.Phrase)):
             field = getattr(node, "field", None)
@@ -396,9 +436,7 @@ class LokiLogSource(LogSource):
         records = []
         for stream in (body.get("data") or {}).get("result") or []:
             labels = stream.get("stream") or {}
-            severity_label = next(
-                (labels[name] for name in _SEVERITY_LABELS if name in labels),
-                None)
+            level, severity_label = severity_from(labels, _SEVERITY_LABELS)
             service = next(
                 (labels[name] for name in _SERVICE_LABELS if name in labels), "")
 
@@ -410,8 +448,11 @@ class LokiLogSource(LogSource):
                     timestamp=datetime.fromtimestamp(
                         int(timestamp_ns) / 1_000_000_000, tz=timezone.utc),
                     body=line,
-                    severity=normalise_severity(
-                        severity_label or (structured or {}).get("level")),
+                    # A level inside a JSON line is not a label, so no
+                    # filter here can match it; the fallback stays because a
+                    # record with a level is better than one without.
+                    severity=(level if severity_label else normalise_severity(
+                        (structured or {}).get("level"))),
                     severity_text=str(severity_label or ""),
                     service=service,
                     # Labels ARE the resource: they are what Loki indexes and
@@ -512,26 +553,36 @@ class LokiLogSource(LogSource):
         is what it did, until the note: Loki answers `sum by (host)` over
         streams with no `host` label with one series whose labels are empty.
         """
-        label = self._label_for(aggregation.field)
-        window = int(query.window.duration_seconds) or 1
-        expression = (f"sum by ({label}) (count_over_time("
-                      f"{self._log_query(query, targets)}[{window}s]))")
-
         # Severity buckets are normalised, because the neutral model promises
         # normalised severity everywhere and Loki labels are lower case. Two
         # sources answering the same panel with "ERROR" and "error" would draw
         # two bars for one thing — and colour only one of them red.
         normalise = aggregation.field in ("severity", "severity_text")
 
+        # And a level is counted over every label it may have been written
+        # in, grouped together so the FIRST one a stream carries decides —
+        # the same rule the record reader and the filter use. Grouped by
+        # `level` alone, a panel over the 18 ERROR lines a search now returns
+        # reported ERROR 6 and said nothing about the rest.
+        labels = (list(_SEVERITY_LABELS) if normalise
+                  else [self._label_for(aggregation.field)])
+        window = int(query.window.duration_seconds) or 1
+        expression = (f"sum by ({', '.join(labels)}) (count_over_time("
+                      f"{self._log_query(query, targets)}[{window}s]))")
+
         counts, unlabelled = {}, False
         for series in self._instant(expression, query):
-            key = (series.get("metric") or {}).get(label)
-            if key is None:
-                unlabelled = True
-                continue
-            value = series.get("value") or [0, "0"]
+            metric = series.get("metric") or {}
             if normalise:
-                key = normalise_severity(key)
+                # A series carrying none of them is not an unlabelled series
+                # to skip: those lines have no level, which IS a level.
+                key = severity_from(metric, _SEVERITY_LABELS)[0]
+            else:
+                key = metric.get(labels[0])
+                if key is None:
+                    unlabelled = True
+                    continue
+            value = series.get("value") or [0, "0"]
             counts[key] = counts.get(key, 0) + int(float(value[1]))
 
         if unlabelled and not counts:

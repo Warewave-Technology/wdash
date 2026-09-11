@@ -46,6 +46,7 @@ function makeDashboard(responder) {
         <span id="lastUpdated"></span>
         <select id="timeRange"><option value="1h" selected>1h</option></select>
         <input id="dashboardFilter" value="">
+        <div id="dashboardMessage" class="alert d-none"></div>
         <div id="panelGrid"></div>
         <template id="panelTemplate">
             <div class="col-md-6 panel-slot">
@@ -90,7 +91,6 @@ function makeDashboard(responder) {
     // throws and every panel case below would fail for the wrong reason.
     ChartStub.defaults = { color: null, borderColor: null };
     w.Chart = global.Chart = ChartStub;
-    w.toastManager = { success() {}, warning() {}, error() {} };
 
     // jsdom has no canvas. Chart.js only ever asks for a 2d context, and the
     // stub above ignores it — but an unstubbed getContext THROWS, which would
@@ -229,6 +229,72 @@ async function main() {
         const filter = rejected.document.getElementById('dashboardFilter');
         assert(filter.classList.contains('is-invalid'),
                'the filter box was not marked, so a typo reads as a broken dashboard');
+    });
+
+    // The REASON, which never reached the reader. showLoadError handed the
+    // message to window.toastManager, and nothing in static/ or templates/
+    // defines one — the stub that used to sit in this file was the only
+    // toastManager anywhere, so this suite could not see the gap. A dashboard
+    // over a query the backend cannot express drew "Failed to load" above a
+    // grid saying the panels could not be loaded, and said no more than that.
+    const REFUSAL = 'Range has no LogsQL equivalent; VictoriaLogs cannot ' +
+        'express this query';
+    // The sentence and the warnings are deliberately different text: the
+    // warnings travel on the body, which the thrown error used to discard,
+    // so a check that accepted either would pass without them.
+    const refused = await loadWith(
+        { error: 'The query did not run.', error_type: 'query_failed',
+          warnings: [REFUSAL] },
+        { ok: false, status: 502 });
+    check('a refused query says why, on the page', () => {
+        const box = refused.document.getElementById('dashboardMessage');
+        assert(/The query did not run/.test(box.textContent),
+               `the page said "${refused.document.body.textContent.trim()}"`);
+        assert(!box.classList.contains('d-none'), 'the message box stayed hidden');
+    });
+    check('and the reason travels with it', () => {
+        const items = [...refused.document.querySelectorAll('#dashboardMessage li')]
+            .map(item => item.textContent);
+        assert(items.some(text => /VictoriaLogs cannot express/.test(text)),
+               `the warnings on screen were ${JSON.stringify(items)}`);
+    });
+
+    // And it has to go away again: a message left standing over a good load
+    // describes a page that is no longer on screen.
+    global.fetch = refused.fetch = jsonResponse({
+        total_hits: 3,
+        panels: [{ ...PANEL, buckets: [{ key: 'ERROR', count: 3 }] }],
+    });
+    await refused.dashboard.load();
+    await settle(refused.dashboard);
+    check('a later good load clears the message', () => {
+        const box = refused.document.getElementById('dashboardMessage');
+        assert(box.classList.contains('d-none'),
+               `it still said "${box.textContent.trim()}"`);
+    });
+
+    // A 200 carrying an explanation instead of data: not an error, but the
+    // reader still has to be told, and this went to the same toast manager.
+    const explainedAloud = await loadWith(
+        { error: 'No accessible indices for this dashboard.', panels: [] });
+    check('an explained empty response says so on the page', () => {
+        const text = explainedAloud.document
+            .getElementById('dashboardMessage').textContent;
+        assert(/No accessible indices/.test(text), `the page said "${text}"`);
+    });
+
+    // A partial answer: panels drawn, with a note about what could not be
+    // counted. The note reached the browser and stopped there.
+    const noted = await loadWith({
+        total_hits: 5,
+        warnings: ["'host' is not a Loki label on these streams"],
+        panels: [{ ...PANEL, buckets: [{ key: 'ERROR', count: 5 }] }],
+    });
+    check('a partial answer shows its warnings beside the panels', () => {
+        const text = noted.document.getElementById('dashboardMessage').textContent;
+        assert(/not a Loki label/.test(text), `the page said "${text}"`);
+        assert(noted.document.querySelectorAll('.panel-slot').length === 1,
+               'the panels that did answer were thrown away');
     });
 
     // The case the first-load error test cannot reach: panels are ON SCREEN

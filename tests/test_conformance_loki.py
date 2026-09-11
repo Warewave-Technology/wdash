@@ -45,27 +45,63 @@ def _selects(selector, values):
     return {value for value in values if pattern.fullmatch(value)}
 
 
-def _label_stage_selects(stage, label, values):
-    """Which of `values` a single LogQL label filter stage keeps.
+def _label_stage_keeps(stage, streams):
+    """Which of `streams` a LogQL label filter stage keeps.
 
-    ` | l="v"` and ` | l!="v"` compare whole values; ` | l=~"re"` and
-    ` | l!~"re"` are regular expressions that Loki anchors at both ends,
-    measured on the lab's Loki 3.1.1: `level=~"(?i)rr"` kept none of the
-    `error` lines and `level=~"(?i)err"` kept only `ERR`. The string layer is
-    undone first, as Loki's parser does.
+    `streams` is {name: {label: value}}, so a stage can be judged against the
+    LABEL SETS Loki holds rather than against one label's values — which is
+    the whole question for severity, where a level may be written as `level`,
+    `severity` or `detected_level` and the record reads whichever comes first.
+
+    LogQL's label filter semantics, every one of them measured on the lab's
+    Loki 3.1.1 over this area's own wdash-b-rev-* streams:
+
+      * a label the stream does not carry reads as the empty string, so
+        `level=""` kept the 18 lines of the three streams without one;
+      * `and` binds tighter than `or` — `level=~"(?i)(error|err)" or
+        level="" and severity=~"(?i)(error|err)"` kept 12 (the `level` and
+        the `severity` stream), not the 6 the other grouping gives;
+      * `=~` and `!~` are anchored at both ends: `level=~"(?i)rr"` kept none
+        of the `error` lines and `level=~"(?i)err"` kept only `ERR`.
+
+    Anything else in the stage is a test failure, not a guess.
     """
     import re
 
-    match = re.fullmatch(
-        rf' \| {re.escape(label)}(=~|!~|!=|=)"((?:[^"\\]|\\.)*)"', stage)
-    if not match:
-        raise AssertionError(f"not a single label filter on {label}: {stage!r}")
-    operator, body = match.group(1), re.sub(r"\\(.)", r"\1", match.group(2))
-    if operator in ("=", "!="):
-        kept = {value for value in values if value == body}
-    else:
-        kept = {value for value in values if re.fullmatch(body, value)}
-    return kept if operator in ("=", "=~") else set(values) - kept
+    predicate = re.compile(r'(\w+)(=~|!~|!=|=)"((?:[^"\\]|\\.)*)"')
+
+    def holds(text, labels):
+        text = text.strip()
+        match = predicate.fullmatch(text)
+        if not match:
+            raise AssertionError(f"not a label predicate: {text!r}")
+        label, operator, body = match.group(1), match.group(2), match.group(3)
+        body = re.sub(r"\\(.)", r"\1", body)
+        value = labels.get(label, "")
+        if operator in ("=", "!="):
+            kept = value == body
+        else:
+            kept = re.fullmatch(body, value) is not None
+        return kept if operator in ("=", "=~") else not kept
+
+    if not stage.startswith(" | "):
+        raise AssertionError(f"not a label filter stage: {stage!r}")
+    body = stage[3:]
+    return {name for name, labels in streams.items()
+            # `and` first, then `or`: the grouping Loki was measured to use.
+            if any(all(holds(term, labels) for term in clause.split(" and "))
+                   for clause in body.split(" or "))}
+
+
+def _by_level(stage, values):
+    """`_label_stage_keeps` over streams whose only label is `level`.
+
+    The severity checks below were written against one label's values, and
+    they still say what they said: `""` is a stream carrying no `level` at
+    all, which is how Loki reports a missing label.
+    """
+    streams = {value: ({"level": value} if value else {}) for value in values}
+    return _label_stage_keeps(stage, streams)
 
 
 def _line_filters_keep(pipeline, lines):
@@ -508,32 +544,27 @@ class LokiSpecificTest(unittest.TestCase):
                       'level:"ERROR"', "severity:error"):
             with self.subTest(typed=typed):
                 self.assertEqual(
-                    _label_stage_selects(self._severity_stage(typed), "level",
-                                         self.SPELLINGS),
+                    _by_level(self._severity_stage(typed), self.SPELLINGS),
                     {"error", "ERROR", "err", "Err"})
 
     def test_warn_matches_every_spelling_it_was_counted_from(self):
         self.assertEqual(
-            _label_stage_selects(self._severity_stage("level:WARN"), "level",
-                                 self.SPELLINGS),
+            _by_level(self._severity_stage("level:WARN"), self.SPELLINGS),
             {"warn", "WARN", "warning", "Warning"})
         self.assertEqual(
-            _label_stage_selects(self._severity_stage("level:INFO"), "level",
-                                 self.SPELLINGS),
+            _by_level(self._severity_stage("level:INFO"), self.SPELLINGS),
             {"info", "INFO", "notice"})
 
     def test_a_level_that_is_no_severity_still_ignores_case_and_nothing_else(self):
         self.assertEqual(
-            _label_stage_selects(self._severity_stage("level:Custom"), "level",
-                                 self.SPELLINGS),
+            _by_level(self._severity_stage("level:Custom"), self.SPELLINGS),
             {"custom", "CUSTOM"})
 
     def test_unspecified_is_every_level_no_severity_is_spelled_as(self):
         """UNSPECIFIED is what normalisation calls a missing or unknown level,
         so as a filter it is "none of the known spellings", not a word."""
         self.assertEqual(
-            _label_stage_selects(self._severity_stage("level:UNSPECIFIED"),
-                                 "level", self.SPELLINGS),
+            _by_level(self._severity_stage("level:UNSPECIFIED"), self.SPELLINGS),
             {"terror", "errors", "warn2", "custom", "CUSTOM", ""})
 
     def test_a_severity_filter_reaches_loki_as_the_same_stage(self):
@@ -541,15 +572,81 @@ class LokiSpecificTest(unittest.TestCase):
         self._search(text="level:ERROR")
         query = self.harness.requests()[0]["params"]["query"]
         stage = query[query.index("}") + 1:]
-        self.assertEqual(_label_stage_selects(stage, "level", self.SPELLINGS),
+        self.assertEqual(_by_level(stage, self.SPELLINGS),
                          {"error", "ERROR", "err", "Err"})
 
     def test_a_regex_character_in_a_level_is_a_character(self):
         """The typed value ends up inside a regular expression."""
         self.assertEqual(
-            _label_stage_selects(self._severity_stage('level:"a.b"'), "level",
-                                 ["a.b", "A.B", "aXb"]),
+            _by_level(self._severity_stage('level:"a.b"'), ["a.b", "A.B", "aXb"]),
             {"a.b", "A.B"})
+
+    #: One stream per shape of severity label. `_to_records` reads a record's
+    #: severity from the FIRST of level, severity, detected_level the stream
+    #: carries — so these are ERROR, ERROR, ERROR, INFO and UNSPECIFIED.
+    SHAPES = {
+        "level": {"level": "error"},
+        "severity": {"severity": "error"},
+        "detected": {"detected_level": "error"},
+        "both": {"level": "info", "severity": "error"},
+        "none": {},
+    }
+
+    def _severity_of(self, labels):
+        """What the page calls a line from a stream with these labels."""
+        body = {"data": {"result": [{"stream": dict(labels),
+                                     "values": [["1754309400000000000", "x"]]}]}}
+        return self.source._to_records(body)[0].severity
+
+    def test_a_level_filter_finds_the_lines_the_page_calls_that_level(self):
+        """The filter read `level` and nothing else, while the record reads
+        `level`, `severity` or `detected_level`, whichever the stream has.
+
+        On an OTel pipeline — which writes `severity`, and is the shape this
+        whole finding is about — every line the page showed as ERROR was
+        invisible to `level:ERROR`, with no warning. Measured on the lab's
+        Loki 3.1.1 over this area's own streams: `| level=~"(?i)(error|err)"`
+        kept 6 of the 18 ERROR lines, `| severity=~"(?i)(error|err)"` 0 of
+        them, because an absent label matches nothing under `=~`.
+
+        The filter and the record reader have to agree line for line, or the
+        level panel is one nobody can drill into.
+        """
+        for level in ("ERROR", "INFO", "UNSPECIFIED"):
+            with self.subTest(level=level):
+                self.assertEqual(
+                    _label_stage_keeps(self._severity_stage(f"level:{level}"),
+                                       self.SHAPES),
+                    {name for name, labels in self.SHAPES.items()
+                     if self._severity_of(labels) == level})
+
+    def test_unspecified_does_not_sweep_up_a_stream_with_no_level_label(self):
+        """The negation is the direction that quietly returns MORE.
+
+        `| level!~"(?i)(...)"` keeps every line of a stream that has no
+        `level` at all — an absent label matches nothing under `=~` and
+        EVERYTHING under `!~`, measured on the lab: `severity!~"(?i)(error)"`
+        kept all 40 lines of streams carrying no `severity`. So
+        `level:UNSPECIFIED` answered with lines the page draws as ERROR.
+        """
+        kept = _label_stage_keeps(self._severity_stage("level:UNSPECIFIED"),
+                                  self.SHAPES)
+        self.assertEqual(kept, {"none"})
+        for name in ("severity", "detected"):
+            self.assertNotIn(name, kept,
+                             f"{name} is an ERROR stream on the page")
+
+    def test_the_label_that_decides_is_the_one_the_record_read(self):
+        """A stream carrying both is INFO, because `level` comes first — so
+        an or-chain over the three labels would have answered `level:ERROR`
+        with a line the page draws as INFO."""
+        self.assertEqual(self._severity_of(self.SHAPES["both"]), "INFO")
+        self.assertNotIn(
+            "both", _label_stage_keeps(self._severity_stage("level:ERROR"),
+                                       self.SHAPES))
+        self.assertIn(
+            "both", _label_stage_keeps(self._severity_stage("level:INFO"),
+                                       self.SHAPES))
 
     # --- negation ---
 
@@ -659,6 +756,38 @@ class LokiSpecificTest(unittest.TestCase):
                          [("api", 7), ("web", 5)])
         self.assertEqual(result.warnings, ())
 
+    def test_a_level_panel_counts_what_the_page_calls_that_level(self):
+        """The panel grouped by `level` alone while a record's level is read
+        from the first of three labels it carries, so the panel and the
+        search answered different questions about the same lines. Measured on
+        the lab over one stream per shape: a search for level:ERROR returned
+        18 records and the panel beside it reported ERROR 6.
+
+        The series below are the lab's own answer to
+        `sum by (level, severity, detected_level) (count_over_time(...))`.
+        """
+        from wdash.hub.aggregation import Terms
+        self.harness.vector = [
+            {"metric": {}, "value": [0, "6"]},
+            {"metric": {"detected_level": "error"}, "value": [0, "6"]},
+            {"metric": {"level": "error", "detected_level": "error"},
+             "value": [0, "6"]},
+            {"metric": {"severity": "error", "detected_level": "error"},
+             "value": [0, "6"]},
+            {"metric": {"level": "info", "severity": "error",
+                        "detected_level": "info"}, "value": [0, "6"]},
+        ]
+        result = self._aggregate("*", Terms(name="levels", field="severity"))
+        self.assertEqual(
+            sorted((bucket.key, bucket.count)
+                   for bucket in result.get("levels")),
+            [("ERROR", 18), ("INFO", 6), ("UNSPECIFIED", 6)])
+        self.assertIn("sum by (level, severity, detected_level)",
+                      self._sent_instant()[0])
+        # A stream carrying none of the three has no level, which is an
+        # answer — not a field Loki cannot count.
+        self.assertEqual(result.warnings, ())
+
     def test_a_field_that_is_not_a_label_says_so_rather_than_drawing_nothing(self):
         """Loki answers `sum by (host)` over streams with no `host` label with
         one series whose labels are empty. That was skipped, and the panel
@@ -719,9 +848,9 @@ class LokiSpecificTest(unittest.TestCase):
             self.assertEqual(_line_filters_keep(
                 inner[selector_end:inner.index(" | level")],
                 ["GET session", "POST other"]), ["GET session"], query)
-            self.assertEqual(_label_stage_selects(
-                inner[inner.index(" | level"):], "level", self.SPELLINGS),
-                {"error", "ERROR", "err", "Err"}, query)
+            self.assertEqual(_by_level(inner[inner.index(" | level"):],
+                                       self.SPELLINGS),
+                             {"error", "ERROR", "err", "Err"}, query)
 
     def test_a_filter_loki_cannot_express_fails_the_panel_rather_than_dropped(self):
         """Dropped, it counts MORE than was asked for — the one direction the

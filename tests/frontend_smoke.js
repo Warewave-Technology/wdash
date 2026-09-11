@@ -234,6 +234,30 @@ check('an error and the index names in it are shown as text', () => {
            box.textContent);
 });
 
+// The logs page now names the source it could not reach — "Unable to connect
+// to loki-down" — and then advised, in the same box, going to check
+// Elasticsearch. /api/search returns error_type elasticsearch_connection for
+// every backend, Loki and VictoriaLogs included.
+check('a source that is down is not blamed on Elasticsearch', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.showError('Unable to connect to loki-down. Please check the connection.',
+                     'elasticsearch_connection', { source: 'loki-down' });
+    const text = w.document.getElementById('errorContent').textContent;
+    assert(text.includes('Check if loki-down is running'),
+           `the box advised: ${text}`);
+    assert(!text.includes('Elasticsearch'),
+           `a Loki user was sent to Elasticsearch: ${text}`);
+});
+
+check('a connection error with no source named still suggests something', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.showError('Unable to connect.', 'elasticsearch_connection', {});
+    const text = w.document.getElementById('errorContent').textContent;
+    assert(/log source is running/i.test(text), `the box advised: ${text}`);
+});
+
 check('a role that may not see the index names is told how many', () => {
     const w = makeWindow();
     const search = Object.create(w.__LogSearch.prototype);

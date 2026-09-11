@@ -68,32 +68,92 @@ def _selects(selector, field, values):
     return chosen
 
 
-def _field_filter_selects(expression, field, values):
-    """Which of `values` a LogsQL filter on one field keeps.
+def _filter_keeps(expression, rows):
+    """Which of `rows` a LogsQL filter keeps.
 
-    `field:"phrase"` is the phrase filter (the words anywhere in the value);
-    `field:~"re"` is the regexp filter, which LogsQL does NOT anchor —
-    measured on the lab's VictoriaLogs v1.9.1: `level:~"(?i)rr"` kept all 13
-    `error` and `ERR` lines — and `NOT (...)` inverts. The string layer is
-    undone first, the way LogsQL's parser does.
+    `rows` is {name: {field: value}}, so a filter can be judged against the
+    RECORDS VictoriaLogs holds rather than against one field's values — which
+    is the whole question for severity, where a level may be written as
+    `level`, `severity`, `log.level` or `severity_text` and the record reads
+    whichever comes first.
+
+    LogsQL's semantics, measured on the lab's VictoriaLogs v1.9.1 over this
+    area's own wdash-b-rev-* rows:
+
+      * `field:""` matches a row whose field is missing or empty — it kept
+        the 24 lines of the four shapes without a `level`;
+      * `field:~"re"` is the regexp filter, which LogsQL does NOT anchor
+        (`level:~"(?i)rr"` kept all 13 `error` and `ERR` lines), and
+        `field:"phrase"` matches the words anywhere in the value;
+      * `AND`, `OR`, `NOT` and parentheses group as written, and a `NOT`
+        over a parenthesised group inverts it.
+
+    Anything else is a test failure, not a guess.
     """
     import re
 
     string = r'"((?:[^"\\]|\\.)*)"'
     unquote = lambda text: re.sub(r"\\(.)", r"\1", text)  # noqa: E731
-    negated = re.fullmatch(r"NOT \((.*)\)", expression)
-    if negated:
-        return set(values) - _field_filter_selects(negated.group(1), field,
-                                                    values)
-    regexp = re.fullmatch(rf"{re.escape(field)}:~{string}", expression)
-    phrase = re.fullmatch(rf"{re.escape(field)}:{string}", expression)
-    if regexp:
-        pattern = re.compile(unquote(regexp.group(1)))
-        return {value for value in values if pattern.search(value)}
-    if phrase:
-        words = re.compile(rf"(?<!\w){re.escape(unquote(phrase.group(1)))}(?!\w)")
-        return {value for value in values if words.search(value)}
-    raise AssertionError(f"not a filter on {field}: {expression!r}")
+    name = r'(?:"[\w.]+"|[\w.]+)'
+
+    def split(text, token):
+        """Top-level occurrences of ` <token> ` only, parentheses respected."""
+        parts, depth, start = [], 0, 0
+        index = 0
+        while index < len(text):
+            character = text[index]
+            if character == '"':
+                index = re.compile(string).match(text, index).end()
+                continue
+            depth += (character == "(") - (character == ")")
+            if depth == 0 and text.startswith(f" {token} ", index):
+                parts.append(text[start:index])
+                index += len(token) + 2
+                start = index
+                continue
+            index += 1
+        parts.append(text[start:])
+        return parts
+
+    def holds(text, row):
+        text = text.strip()
+        # One pair of parentheses around the whole thing: a top-level split
+        # finds nothing outside them, so they can come off.
+        if (text.startswith("(") and text.endswith(")")
+                and len(split(text, "OR")) == 1
+                and len(split(text, "AND")) == 1):
+            return holds(text[1:-1], row)
+        clauses = split(text, "OR")
+        if len(clauses) > 1:
+            return any(holds(clause, row) for clause in clauses)
+        terms = split(text, "AND")
+        if len(terms) > 1:
+            return all(holds(term, row) for term in terms)
+        if text.startswith("NOT "):
+            return not holds(text[4:], row)
+        match = re.fullmatch(rf"({name}):(~?){string}", text)
+        if not match:
+            raise AssertionError(f"not a LogsQL filter: {text!r}")
+        field = match.group(1).strip('"')
+        body, value = unquote(match.group(3)), row.get(field, "")
+        if match.group(2) == "~":
+            return re.search(body, value) is not None
+        if body == "":
+            return value == ""
+        return re.search(rf"(?<!\w){re.escape(body)}(?!\w)", value) is not None
+
+    return {key for key, row in rows.items() if holds(expression, row)}
+
+
+def _by_level(expression, values):
+    """`_filter_keeps` over rows whose only field is `level`.
+
+    The severity checks below were written against one field's values, and
+    they still say what they said: `""` is a row carrying no `level` at all,
+    which is what VictoriaLogs reports for a missing field.
+    """
+    rows = {value: ({"level": value} if value else {}) for value in values}
+    return _filter_keeps(expression, rows)
 
 
 class FakeResponse:
@@ -189,6 +249,13 @@ class FakeVictoriaLogs(Harness):
                 {"fields": {"level": "error"},
                  "timestamps": ["2026-08-04T11:59:00Z"],
                  "values": [2], "total": 2}]})
+
+        if "| stats by (" in ((data or {}).get("query") or ""):
+            # `stats by` returns one row per combination of the grouped
+            # fields, with the fields a row does not carry simply absent.
+            return FakeResponse(text="\n".join(json.dumps(row) for row in [
+                {"level": "info", "hits": "7"},
+                {"level": "error", "hits": "2"}]))
 
         return FakeResponse(text="\n".join(json.dumps(row) for row in ROWS))
 
@@ -464,6 +531,44 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
         self.assertEqual({bucket.key for bucket in result.buckets["levels"]},
                          {"INFO", "ERROR"})
 
+    def test_a_level_panel_counts_what_the_page_calls_that_level(self):
+        """The panel asked `field_values` for `level` alone, while a record's
+        level is read from the first of four fields it carries. Measured on
+        the lab over one row shape per field: a panel over the 24 rows the
+        page draws as ERROR reported ERROR 6 and drew the other 18 as
+        UNSPECIFIED — a level nobody wrote.
+
+        The rows below are the lab's own answer to `| stats by (level,
+        severity, "log.level", severity_text) count()`.
+        """
+        from wdash.hub import Scope
+        from wdash.hub.aggregation import Terms
+
+        original = self.harness.post
+
+        def stats(url, data=None, **kwargs):
+            if "| stats by (" in ((data or {}).get("query") or ""):
+                return FakeResponse(text="\n".join(json.dumps(row) for row in [
+                    {"level": "error", "hits": "6"},
+                    {"hits": "6"},
+                    {"level": "info", "severity": "error", "hits": "6"},
+                    {"severity": "error", "hits": "6"},
+                    {"log.level": "error", "hits": "6"},
+                    {"severity_text": "error", "hits": "6"}]))
+            return original(url, data=data, **kwargs)
+
+        self.harness.post = stats
+        try:
+            result = self.source.aggregate(
+                self._query(), [Terms(name="levels", field="severity")],
+                Scope.unrestricted())
+        finally:
+            self.harness.post = original
+
+        self.assertEqual(
+            sorted((bucket.key, bucket.count) for bucket in result.get("levels")),
+            [("ERROR", 24), ("INFO", 6), ("UNSPECIFIED", 6)])
+
     def test_two_spellings_of_one_level_merge_rather_than_double(self):
         """Normalising can map two keys onto one; two buckets with the same
         key render as two bars each showing half the number."""
@@ -507,8 +612,7 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
         # is a filter on `level` that keeps the errors and nothing else.
         self._search(text="level:error")
         clause = self._sent()["params"]["query"].split(" AND ", 1)[1]
-        self.assertEqual(_field_filter_selects(clause, "level",
-                                               ["error", "ERR", "warn", "info"]),
+        self.assertEqual(_by_level(clause, ["error", "ERR", "warn", "info"]),
                          {"error", "ERR"})
         self._search(text="host:api-gateway-1")
         self.assertIn('host:"api-gateway-1"', self._sent()["params"]["query"])
@@ -587,34 +691,29 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
                       'level:"ERROR"', "severity:error"):
             with self.subTest(typed=typed):
                 self.assertEqual(
-                    _field_filter_selects(self._level_filter(typed), "level",
-                                          self.SPELLINGS),
+                    _by_level(self._level_filter(typed), self.SPELLINGS),
                     {"error", "ERROR", "err", "Err"})
 
     def test_a_level_filter_matches_whole_values_only(self):
         """The regexp filter is not anchored in LogsQL. `level:~"err"` would
         keep `terror`, `errors` and `an error` too."""
-        kept = _field_filter_selects(self._level_filter("level:WARN"), "level",
-                                     self.SPELLINGS)
+        kept = _by_level(self._level_filter("level:WARN"), self.SPELLINGS)
         self.assertEqual(kept, {"warn", "WARN", "warning", "Warning"})
 
     def test_a_level_that_is_no_severity_still_ignores_case_and_nothing_else(self):
         self.assertEqual(
-            _field_filter_selects(self._level_filter("level:Custom"), "level",
-                                  self.SPELLINGS),
+            _by_level(self._level_filter("level:Custom"), self.SPELLINGS),
             {"custom", "CUSTOM"})
 
     def test_unspecified_is_every_level_no_severity_is_spelled_as(self):
         self.assertEqual(
-            _field_filter_selects(self._level_filter("level:UNSPECIFIED"),
-                                  "level", self.SPELLINGS),
+            _by_level(self._level_filter("level:UNSPECIFIED"), self.SPELLINGS),
             {"terror", "errors", "an error", "warn2", "custom", "CUSTOM", ""})
 
     def test_negating_a_level_keeps_everything_else(self):
         """`-level:ERROR` kept all 40 lab lines, `error` ones included."""
         self.assertEqual(
-            _field_filter_selects(self._level_filter("-level:ERROR"), "level",
-                                  self.SPELLINGS),
+            _by_level(self._level_filter("-level:ERROR"), self.SPELLINGS),
             set(self.SPELLINGS) - {"error", "ERROR", "err", "Err"})
 
     def test_a_sidebar_row_filters_to_the_rows_it_counted(self):
@@ -642,15 +741,81 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
         self._search(text=f'{stats[0].field}:"{row.value}"')
         query = self._sent()["params"]["query"]
         clause = query.split(" AND ", 1)[1]
-        self.assertEqual(_field_filter_selects(clause, "level",
-                                               ["warn", "warning", "info"]),
+        self.assertEqual(_by_level(clause, ["warn", "warning", "info"]),
                          {"warn", "warning"})
 
     def test_a_regex_character_in_a_level_is_a_character(self):
         self.assertEqual(
-            _field_filter_selects(self._level_filter('level:"a.b"'), "level",
-                                  ["a.b", "A.B", "aXb"]),
+            _by_level(self._level_filter('level:"a.b"'), ["a.b", "A.B", "aXb"]),
             {"a.b", "A.B"})
+
+    #: One row per shape of severity field. `_to_record` reads a record's
+    #: severity from the FIRST of level, severity, log.level, severity_text
+    #: the row carries — so these are ERROR four times, then INFO and
+    #: UNSPECIFIED.
+    SHAPES = {
+        "level": {"level": "error"},
+        "severity": {"severity": "error"},
+        "dotted": {"log.level": "error"},
+        "text": {"severity_text": "error"},
+        "both": {"level": "info", "severity": "error"},
+        # An empty field is not a field the row carries: the record reader
+        # skips it, and both backends match it with `field:""`. So this row
+        # is ERROR, decided by `severity`.
+        "empty": {"level": "", "severity": "error"},
+        "none": {},
+    }
+
+    def _severity_of(self, fields):
+        """What the page calls a row carrying these fields."""
+        row = {"_time": "2026-08-04T11:59:00.000000Z", "_msg": "x",
+               "service": "api-gateway", **fields}
+        return self.source._to_record(row).severity
+
+    def test_a_level_filter_finds_the_rows_the_page_calls_that_level(self):
+        """The filter read `level` and nothing else, while the record reads
+        `level`, `severity`, `log.level` or `severity_text`, whichever the row
+        has. An OTel pipeline writes `severity`, so every row the page showed
+        as ERROR was invisible to `level:ERROR`, with no warning.
+        """
+        for level in ("ERROR", "INFO", "UNSPECIFIED"):
+            with self.subTest(level=level):
+                self.assertEqual(
+                    _filter_keeps(self._level_filter(f"level:{level}"),
+                                  self.SHAPES),
+                    {name for name, fields in self.SHAPES.items()
+                     if self._severity_of(fields) == level})
+
+    def test_unspecified_does_not_sweep_up_a_row_with_no_level_field(self):
+        """`NOT (level:~"...")` keeps every row without a `level` field, so
+        `level:UNSPECIFIED` answered with rows the page draws as ERROR."""
+        kept = _filter_keeps(self._level_filter("level:UNSPECIFIED"),
+                             self.SHAPES)
+        self.assertEqual(kept, {"none"})
+
+    def test_the_field_that_decides_is_the_one_the_record_read(self):
+        """A row carrying both is INFO, because `level` comes first."""
+        self.assertEqual(self._severity_of(self.SHAPES["both"]), "INFO")
+        self.assertNotIn("both", _filter_keeps(self._level_filter("level:ERROR"),
+                                               self.SHAPES))
+        self.assertIn("both", _filter_keeps(self._level_filter("level:INFO"),
+                                            self.SHAPES))
+
+    def test_negating_a_level_keeps_every_row_that_is_not_it(self):
+        """`-level:ERROR` over the shapes: everything the page does not draw
+        as ERROR, which includes the rows with no level at all."""
+        self.assertEqual(
+            _filter_keeps(self._level_filter("-level:ERROR"), self.SHAPES),
+            {"both", "none"})
+
+    def test_an_empty_field_is_not_a_field_the_row_carries(self):
+        """`absent` and `empty` are one state — Loki drops an empty label at
+        ingestion and LogsQL matches both with `field:""` — so the reader has
+        to skip an empty one and let the next field decide, exactly as the
+        rendered filter does."""
+        self.assertEqual(self._severity_of(self.SHAPES["empty"]), "ERROR")
+        self.assertIn("empty", _filter_keeps(self._level_filter("level:ERROR"),
+                                             self.SHAPES))
 
     # --- aggregations LogsQL cannot express ---
 

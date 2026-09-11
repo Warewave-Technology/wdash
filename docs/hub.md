@@ -373,10 +373,14 @@ the interesting ones:
   returns MORE than was asked for, the one direction an access-controlled
   system must never round in. That holds for dashboard panels too: they count
   over the same pipeline a search runs, not over the bare streams.
-- **A level is matched however it was written.** `level:ERROR` becomes a
-  case-insensitive match on every spelling that normalises to ERROR (`error`,
-  `err`), because that is how records and panels count it. VictoriaLogs does
-  the same with an anchored regexp filter.
+- **A level is matched however, and wherever, it was written.** `level:ERROR`
+  becomes a case-insensitive match on every spelling that normalises to ERROR
+  (`error`, `err`), because that is how records and panels count it.
+  VictoriaLogs does the same with an anchored regexp filter. It is matched
+  over every label the record's level is read from — Loki's `level`,
+  `severity` and `detected_level` — in that order, each clause requiring the
+  labels ahead of it to be absent: a stream carrying `level=info` and
+  `severity=error` is INFO, so it is not an answer to `level:ERROR`.
 - **Fewer capabilities, declared honestly.** No `FIELD_STATS` (Loki has no
   field mappings), no `CONTEXT` or `RAW_DOCUMENT` (no document to fetch by id).
   `fetch` returns None rather than guessing: a stream plus a nanosecond is not

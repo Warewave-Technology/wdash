@@ -44,7 +44,7 @@ from .. import query_language as ql
 from ..aggregation import AggregationResult, Bucket, DateHistogram, Terms
 from ..models import (
     KNOWN_SEVERITY_SPELLINGS, LogPage, LogRecord, SourceRef,
-    normalise_severity, severity_spellings,
+    normalise_severity, severity_from, severity_spellings,
 )
 from ..source import Capability, LogSource
 
@@ -80,7 +80,15 @@ def _quote(value):
 _REGEX_SYNTAX = re.compile(r"([\\.+*?()|\[\]{}^$])")
 
 
-def _severity_filter(field, value):
+def _field_name(name):
+    """A field name as LogsQL reads it: quoted unless it is a bare word.
+
+    `log.level` is a field name with a dot in it, not a path.
+    """
+    return name if re.fullmatch(r"\w+", name) else _quote(name)
+
+
+def _severity_filter(value):
     """A filter that finds `value` as a level, however it was written.
 
     Every spelling that normalises the way `value` does, without regard to
@@ -89,13 +97,46 @@ def _severity_filter(field, value):
     `warning` into one WARN row — built a filter that matched neither. The
     regexp filter is NOT anchored in LogsQL (measured: `(?i)rr` kept every
     `error` line), so the alternation is pinned to the whole value.
-    UNSPECIFIED is the level that is none of the known spellings.
+
+    Over EVERY field a record's level is read from, in the same order
+    `_to_record` reads them: a row written by an OTel collector carries
+    `severity` or `severity_text`, not `level`, and every one of those rows
+    was drawn as ERROR on the page while `level:ERROR` found none of them.
+
+    The order decides, so each clause requires the fields ahead of it to be
+    absent — `field:""`, which LogsQL matches for a missing or empty field
+    (measured on the lab: it kept exactly the 24 rows carrying no `level`).
+    A row with `level=info` and `severity=error` is INFO, because `level` is
+    what the record read, and a plain OR over the four would have answered
+    `level:ERROR` with it.
+
+    UNSPECIFIED is the level that is none of the known spellings, absent
+    included — the direction that quietly returns MORE, since `NOT` over one
+    field keeps every row that simply has no such field.
     """
     spellings = severity_spellings(value)
-    alternation = "|".join(_REGEX_SYNTAX.sub(r"\\\1", spelling) for spelling
-                           in spellings or KNOWN_SEVERITY_SPELLINGS)
-    matcher = f"{field}:~{_quote(f'(?i)^({alternation})$')}"
-    return matcher if spellings else f"NOT ({matcher})"
+    pattern = _quote("(?i)^({})$".format("|".join(
+        _REGEX_SYNTAX.sub(r"\\\1", spelling) for spelling
+        in spellings or KNOWN_SEVERITY_SPELLINGS)))
+
+    clauses = []
+    for index, field in enumerate(_SEVERITY_FIELDS):
+        last = index == len(_SEVERITY_FIELDS) - 1
+        matcher = f"{_field_name(field)}:~{pattern}"
+        terms = [f'{_field_name(earlier)}:""'
+                 for earlier in _SEVERITY_FIELDS[:index]]
+        if spellings:
+            terms.append(matcher)
+        else:
+            # "this field decided, and what it says is no known spelling".
+            # The last needs no presence test: a row with none of the four
+            # fields IS UNSPECIFIED.
+            if not last:
+                terms.append(f'NOT {_field_name(field)}:""')
+            terms.append(f"NOT {matcher}")
+        clauses.append(terms[0] if len(terms) == 1
+                       else "(" + " AND ".join(terms) + ")")
+    return "(" + " OR ".join(clauses) + ")"
 
 
 def _rfc3339(moment):
@@ -312,7 +353,6 @@ class VictoriaLogsSource(LogSource):
         if (isinstance(node, (ql.Term, ql.Phrase))
                 and node.field in ("severity", "severity_text")):
             return _severity_filter(
-                self._field_for(node.field),
                 node.value if isinstance(node, ql.Term) else node.text)
 
         if isinstance(node, (ql.Term, ql.Phrase)):
@@ -439,8 +479,7 @@ class VictoriaLogsSource(LogSource):
         return int(float(result[0]["value"][1]))
 
     def _to_record(self, row):
-        severity = next((row[field] for field in _SEVERITY_FIELDS
-                         if row.get(field)), None)
+        _, severity = severity_from(row, _SEVERITY_FIELDS)
         resource, attributes = {}, {}
         for key, value in row.items():
             if key in _RESERVED or key in _SEVERITY_FIELDS:
@@ -626,6 +665,8 @@ class VictoriaLogsSource(LogSource):
         return result.get("timeline")
 
     def _terms(self, expression, query, aggregation):
+        if aggregation.field in ("severity", "severity_text"):
+            return self._severity_terms(expression, query, aggregation)
         field = self._field_for(aggregation.field)
         body = self._json("/select/logsql/field_values", {
             "query": expression, "field": field,
@@ -635,6 +676,27 @@ class VictoriaLogsSource(LogSource):
             (self._bucket_key(aggregation.field, entry.get("value")),
              int(entry.get("hits") or 0))
             for entry in body.get("values") or ())
+
+    def _severity_terms(self, expression, query, aggregation):
+        """Levels counted over every field one may have been written in.
+
+        `field_values` counts ONE field, so a panel on `level` counted the
+        rows that carry a `level` and called the rest UNSPECIFIED: on the lab,
+        a panel over 24 rows the page draws as ERROR reported ERROR 6 and
+        UNSPECIFIED 18. `stats by` returns one row per combination of the
+        fields — a row carrying none of them comes back with none of them set
+        — so the first field present can decide here exactly as it does in
+        the record and in the filter.
+        """
+        fields = ", ".join(_field_name(field) for field in _SEVERITY_FIELDS)
+        rows = self._lines("/select/logsql/query", {
+            "query": f"{expression} | stats by ({fields}) count() as hits",
+            **self._window(query)})
+        size = getattr(aggregation, "size", 10) or 10
+        return _merge_buckets(
+            (severity_from(row, _SEVERITY_FIELDS)[0],
+             int(float(row.get("hits") or 0)))
+            for row in rows)[:size]
 
     def _bucket_key(self, neutral_field, value):
         """The key as the neutral model promises it.

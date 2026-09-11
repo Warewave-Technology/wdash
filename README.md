@@ -457,9 +457,11 @@ Elasticsearch field names are accepted as aliases, so `level:ERROR` and
 before execution — syntax errors are reported with a position, before the query
 reaches the cluster.
 
-On Loki and VictoriaLogs a level matches however the source wrote it:
-`level:WARN` finds `warn`, `warning` and `WARN` alike, which is how the records
-and the level panels already count them.
+On Loki and VictoriaLogs a level matches however the source wrote it, and
+wherever it was written: `level:WARN` finds `warn`, `warning` and `WARN` alike,
+in Loki's `level`, `severity` or `detected_level` and in VictoriaLogs' `level`,
+`severity`, `log.level` or `severity_text` — the same fields, read in the same
+order, that a record's own level is read from.
 
 ## Sources and signals
 

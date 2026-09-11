@@ -263,6 +263,11 @@ def api_search():
         return jsonify({"error": f"Unable to connect to {source.name}. Please "
                                  f"check the connection.",
                         "error_type": "elasticsearch_connection",
+                        # Named as a field, not only inside the sentence: the
+                        # page draws its own suggestions beside this message,
+                        # and it used to advise checking Elasticsearch
+                        # whichever backend had gone away.
+                        "source": source.name,
                         "details": str(exc)}), 503
 
     if not allowed:
@@ -597,6 +602,7 @@ def api_indices():
         current_app.logger.error(f"Error getting indices: {exc}")
         return jsonify({"error": f"Unable to retrieve containers from {source.name}.",
                         "error_type": "elasticsearch_connection",
+                        "source": source.name,
                         "details": str(exc)}), 503
 
     return jsonify({"containers": allowed,

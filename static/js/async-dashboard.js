@@ -205,30 +205,23 @@ class AsyncDashboard {
         const lastUpdatedEl = document.getElementById('lastUpdated');
         if (lastUpdatedEl && !quiet) lastUpdatedEl.textContent = 'Loading...';
 
-        const startTime = performance.now();
-
         try {
             const data = await this.loadAll();
 
-            // With no accessible indices the server returns empty data plus an
-            // explanation. That is not an error, but it needs saying.
-            if (data.error) {
-                this.render(data);
-                if (window.toastManager) window.toastManager.warning(data.error, 5000);
-            } else {
-                this.render(data);
-            }
+            // With no accessible indices the server returns empty data plus
+            // an explanation, and a partial answer returns data plus
+            // warnings. Neither is an error, and both need saying — on the
+            // page, which is where the reader is looking.
+            this.render(data);
+            this.showMessage(data.error || '', data.warnings,
+                             data.error ? 'warning' : 'info');
 
-            const elapsed = performance.now() - startTime;
             if (lastUpdatedEl) lastUpdatedEl.textContent = new Date().toLocaleString();
-            if (!quiet && window.toastManager) {
-                window.toastManager.success(
-                    `Dashboard loaded in ${(elapsed / 1000).toFixed(1)}s`, 2000);
-            }
         } catch (error) {
             console.error('Dashboard load failed:', error);
             if (lastUpdatedEl) lastUpdatedEl.textContent = 'Failed to load';
-            this.showLoadError(error.message || 'Failed to load dashboard');
+            this.showLoadError(error.message || 'Failed to load dashboard',
+                               error.payload);
         } finally {
             this.loading = false;
         }
@@ -284,7 +277,11 @@ class AsyncDashboard {
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.error || `HTTP ${response.status}`);
+            const failure = new Error(data.error || `HTTP ${response.status}`);
+            // The body says more than the sentence does — the warnings behind
+            // a refused query, for one — and it was thrown away here.
+            failure.payload = data;
+            throw failure;
         }
         return data;
     }
@@ -450,7 +447,7 @@ class AsyncDashboard {
     /**
      * Clear every panel when loading fails.
      */
-    showLoadError(message) {
+    showLoadError(message, payload = {}) {
         ['totalHits', 'errorCount', 'warnCount', 'infoCount'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.textContent = '-';
@@ -471,9 +468,58 @@ class AsyncDashboard {
                 '<div class="mt-2"><small>Panels could not be loaded.</small></div></div>';
         }
 
-        if (window.toastManager) {
-            window.toastManager.error(message, 5000);
+        this.showMessage(message, (payload || {}).warnings, 'danger');
+    }
+
+    /**
+     * Say something above the panels, where the reader is already looking.
+     *
+     * Every one of these used to go to `window.toastManager`, which nothing
+     * in static/ or templates/ has ever defined — the only one that existed
+     * was a stub inside the dashboard's own jsdom suite, so the suite could
+     * not see the gap either. A dashboard over a query the backend refused
+     * showed "Failed to load" and "Panels could not be loaded.", and the
+     * reason — the one sentence that says what to do next — reached nobody.
+     *
+     * Built with textContent rather than innerHTML: every line here is the
+     * server's, and a warning can quote the query back.
+     */
+    showMessage(message, warnings = [], tone = 'danger') {
+        const box = document.getElementById('dashboardMessage');
+        if (!box) return;
+
+        const lines = (warnings || []).filter(Boolean);
+        if (!message && !lines.length) {
+            this.clearMessage();
+            return;
         }
+
+        box.className = `alert alert-${tone}`;
+        box.textContent = '';
+        if (message) {
+            const sentence = document.createElement('div');
+            sentence.textContent = message;
+            box.appendChild(sentence);
+        }
+        if (lines.length) {
+            const list = document.createElement('ul');
+            list.className = 'mb-0 mt-1';
+            lines.forEach(line => {
+                const item = document.createElement('li');
+                item.textContent = line;
+                list.appendChild(item);
+            });
+            box.appendChild(list);
+        }
+    }
+
+    /** A message left standing over a good load describes a page that is no
+     *  longer on screen. */
+    clearMessage() {
+        const box = document.getElementById('dashboardMessage');
+        if (!box) return;
+        box.className = 'alert d-none';
+        box.textContent = '';
     }
 
     getQueryParams() {
