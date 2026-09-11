@@ -377,7 +377,25 @@ def _panel(dashboard_id, aggregations, empty):
     except QueryError as exc:
         return {"error": f"Invalid dashboard query: {exc}",
                 "error_type": "invalid_query"}, 400
-    return _logs(dashboard).aggregate(query, aggregations, scope), None
+    result = _logs(dashboard).aggregate(query, aggregations, scope)
+    if _did_not_run(result):
+        return _did_not_run(result), 502
+    return result, None
+
+
+def _did_not_run(result):
+    """The error for an aggregation that produced nothing at all, or None.
+
+    Its zeros are not an answer, and served as one they draw a quiet hour: a
+    VictoriaLogs query holding a range used to raise out of the adapter and
+    reach the page as an HTML 500, which at least looked broken; answered as
+    a failure it came back 200 with every count at zero. The page shows the
+    error it is given, and the warnings say why.
+    """
+    if not result.failed or result.buckets:
+        return None
+    return {"error": "; ".join(result.warnings) or "The query did not run.",
+            "error_type": "query_failed"}
 
 
 # --------------------------------------------------------------------------
@@ -781,6 +799,8 @@ def api_dashboard_data(dashboard_id):
 
     results = _logs(dashboard).multi_aggregate(batch, scope)
     result = results[0]
+    if _did_not_run(result):
+        return jsonify(_did_not_run(result)), 502
     previous = _compare(result, results[1], baseline_query) if len(results) > 1 else None
 
     counts = _level_counts(result.get("_levels"))

@@ -68,6 +68,34 @@ def _selects(selector, field, values):
     return chosen
 
 
+def _field_filter_selects(expression, field, values):
+    """Which of `values` a LogsQL filter on one field keeps.
+
+    `field:"phrase"` is the phrase filter (the words anywhere in the value);
+    `field:~"re"` is the regexp filter, which LogsQL does NOT anchor —
+    measured on the lab's VictoriaLogs v1.9.1: `level:~"(?i)rr"` kept all 13
+    `error` and `ERR` lines — and `NOT (...)` inverts. The string layer is
+    undone first, the way LogsQL's parser does.
+    """
+    import re
+
+    string = r'"((?:[^"\\]|\\.)*)"'
+    unquote = lambda text: re.sub(r"\\(.)", r"\1", text)  # noqa: E731
+    negated = re.fullmatch(r"NOT \((.*)\)", expression)
+    if negated:
+        return set(values) - _field_filter_selects(negated.group(1), field,
+                                                    values)
+    regexp = re.fullmatch(rf"{re.escape(field)}:~{string}", expression)
+    phrase = re.fullmatch(rf"{re.escape(field)}:{string}", expression)
+    if regexp:
+        pattern = re.compile(unquote(regexp.group(1)))
+        return {value for value in values if pattern.search(value)}
+    if phrase:
+        words = re.compile(rf"(?<!\w){re.escape(unquote(phrase.group(1)))}(?!\w)")
+        return {value for value in values if words.search(value)}
+    raise AssertionError(f"not a filter on {field}: {expression!r}")
+
+
 class FakeResponse:
     def __init__(self, text="", status_code=200, payload=None):
         self.status_code = status_code
@@ -474,8 +502,16 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
     # --- query rendering ---
 
     def test_a_field_query_reaches_the_backend_as_a_field_filter(self):
+        # It pinned `level:"error"` — the case-sensitive phrase filter that
+        # found none of the ERR or ERROR lines. What has to reach the backend
+        # is a filter on `level` that keeps the errors and nothing else.
         self._search(text="level:error")
-        self.assertIn('level:"error"', self._sent()["params"]["query"])
+        clause = self._sent()["params"]["query"].split(" AND ", 1)[1]
+        self.assertEqual(_field_filter_selects(clause, "level",
+                                               ["error", "ERR", "warn", "info"]),
+                         {"error", "ERR"})
+        self._search(text="host:api-gateway-1")
+        self.assertIn('host:"api-gateway-1"', self._sent()["params"]["query"])
 
     def test_a_bare_word_searches_the_message(self):
         self._search(text="timeout")
@@ -531,6 +567,138 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
         self.harness.fail_next()
         page = self._search()
         self.assertTrue(page.warnings)
+
+    # --- severity is matched the way it is normalised ---
+
+    SPELLINGS = ["error", "ERROR", "err", "Err", "warn", "WARN", "warning",
+                 "Warning", "info", "INFO", "notice", "terror", "errors",
+                 "an error", "warn2", "custom", "CUSTOM", ""]
+
+    def _level_filter(self, text):
+        from wdash.hub import query_language as ql
+        return self.source._filter(ql.parse(text))
+
+    def test_the_documented_upper_case_level_matches_lower_case_values(self):
+        """`level:ERROR` is the example on the logs page, and the data says
+        `error`. LogsQL phrase filters match case, so on the lab's
+        VictoriaLogs, over 40 lines of which 13 are `error` or `ERR`, it
+        found none, with no warning."""
+        for typed in ("level:ERROR", "level:error", "level:Err",
+                      'level:"ERROR"', "severity:error"):
+            with self.subTest(typed=typed):
+                self.assertEqual(
+                    _field_filter_selects(self._level_filter(typed), "level",
+                                          self.SPELLINGS),
+                    {"error", "ERROR", "err", "Err"})
+
+    def test_a_level_filter_matches_whole_values_only(self):
+        """The regexp filter is not anchored in LogsQL. `level:~"err"` would
+        keep `terror`, `errors` and `an error` too."""
+        kept = _field_filter_selects(self._level_filter("level:WARN"), "level",
+                                     self.SPELLINGS)
+        self.assertEqual(kept, {"warn", "WARN", "warning", "Warning"})
+
+    def test_a_level_that_is_no_severity_still_ignores_case_and_nothing_else(self):
+        self.assertEqual(
+            _field_filter_selects(self._level_filter("level:Custom"), "level",
+                                  self.SPELLINGS),
+            {"custom", "CUSTOM"})
+
+    def test_unspecified_is_every_level_no_severity_is_spelled_as(self):
+        self.assertEqual(
+            _field_filter_selects(self._level_filter("level:UNSPECIFIED"),
+                                  "level", self.SPELLINGS),
+            {"terror", "errors", "an error", "warn2", "custom", "CUSTOM", ""})
+
+    def test_negating_a_level_keeps_everything_else(self):
+        """`-level:ERROR` kept all 40 lab lines, `error` ones included."""
+        self.assertEqual(
+            _field_filter_selects(self._level_filter("-level:ERROR"), "level",
+                                  self.SPELLINGS),
+            set(self.SPELLINGS) - {"error", "ERROR", "err", "Err"})
+
+    def test_a_sidebar_row_filters_to_the_rows_it_counted(self):
+        """The sidebar merges `warn` and `warning` into one WARN row, which
+        is right, and clicking it asked for `level:"WARN"`, which matched
+        neither: on the lab every sidebar row — WARN 14, INFO 13, ERROR 13 —
+        led to 0 results."""
+        from wdash.hub import Scope
+
+        def values(url, data=None, **kwargs):
+            if "field_values" in url:
+                return FakeResponse(payload={"values": [
+                    {"value": "warn", "hits": 948},
+                    {"value": "warning", "hits": 1},
+                    {"value": "info", "hits": 4602}]})
+            return FakeResponse(payload={"values": []})
+
+        original = self.harness.post
+        self.harness.post = values
+        stats = self.source.field_stats(self._query(), Scope.unrestricted(),
+                                        fields=["level"])
+        self.harness.post = original
+        row = next(value for value in stats[0].values if value.count == 949)
+
+        self._search(text=f'{stats[0].field}:"{row.value}"')
+        query = self._sent()["params"]["query"]
+        clause = query.split(" AND ", 1)[1]
+        self.assertEqual(_field_filter_selects(clause, "level",
+                                               ["warn", "warning", "info"]),
+                         {"warn", "warning"})
+
+    def test_a_regex_character_in_a_level_is_a_character(self):
+        self.assertEqual(
+            _field_filter_selects(self._level_filter('level:"a.b"'), "level",
+                                  ["a.b", "A.B", "aXb"]),
+            {"a.b", "A.B"})
+
+    # --- aggregations LogsQL cannot express ---
+
+    def test_an_aggregation_logsql_cannot_express_fails_rather_than_raises(self):
+        """search turned these into a warning; aggregate let the exception
+        out, and every dashboard over VictoriaLogs whose query or filter held
+        a range, an inner wildcard or NOT * answered with Flask's HTML 500."""
+        from wdash.hub import Scope
+        from wdash.hub.aggregation import Terms
+
+        for text in ("status:[500 TO 599]", "host:w?b", "NOT *"):
+            with self.subTest(text=text):
+                self.harness.reset()
+                aggregations = [Terms(name="t", field="severity")]
+                result = self.source.aggregate(self._query(text=text),
+                                               aggregations, Scope.unrestricted())
+                self.assertTrue(result.failed)
+                self.assertIn("VictoriaLogs cannot express", " ".join(result.warnings))
+                # Only the catalogue lookup (`*`) may have gone out: anything
+                # else is a query sent without the clause it could not render.
+                self.assertEqual(
+                    [request["path"] for request in self.harness._requests
+                     if request["params"].get("query") != "*"], [])
+                batched = self.source.multi_aggregate(
+                    [(self._query(text=text), aggregations),
+                     (self._query(), aggregations)], Scope.unrestricted())
+                self.assertTrue(batched[0].failed)
+                self.assertFalse(batched[1].failed,
+                                 "one query it cannot express failed the batch")
+
+    # --- the catalogue ---
+
+    def test_a_catalogue_that_cannot_be_read_is_an_error_and_not_an_empty_list(self):
+        from wdash.hub import Scope
+        from wdash.hub.adapters.victorialogs import VictoriaLogsError
+        self.harness.fail_next()
+        with self.assertRaises(VictoriaLogsError) as caught:
+            self.source.containers(Scope.unrestricted())
+        self.assertIn("429", str(caught.exception))
+
+    def test_the_catalogue_is_one_lookup_however_often_a_request_asks(self):
+        from wdash.hub import Scope
+        self.harness.reset()
+        self.source.containers(Scope.unrestricted())
+        self.source.containers(Scope(principal="p", containers=("api-*",)))
+        lookups = [request for request in self.harness._requests
+                   if "field_values" in request["path"]]
+        self.assertEqual(len(lookups), 1)
 
 
 if __name__ == "__main__":

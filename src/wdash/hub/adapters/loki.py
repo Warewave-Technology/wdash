@@ -37,7 +37,10 @@ from datetime import datetime, timezone
 import requests
 
 from ..aggregation import AggregationResult, Bucket, DateHistogram, Terms
-from ..models import LogPage, LogRecord, SourceRef, normalise_severity
+from ..models import (
+    KNOWN_SEVERITY_SPELLINGS, LogPage, LogRecord, SourceRef,
+    normalise_severity, severity_spellings,
+)
 from ..source import Capability, LogSource
 from .. import query_language as ql
 
@@ -79,6 +82,22 @@ def _literal(value):
     turned a grant of `team-a-*` into every stream Loki holds.
     """
     return _REGEX_SYNTAX.sub(r"\\\1", str(value))
+
+
+def _severity_matcher(value):
+    """(operator, regex) for a label matcher that finds `value` as a level.
+
+    Every spelling that normalises the way `value` does, without regard to
+    case: `level:ERROR` has to find the `error` and `ERR` lines, because
+    those are the lines the record calls ERROR and the level panel counts as
+    ERROR. Loki anchors a label regex at both ends — measured, `(?i)err`
+    kept only `ERR` — so the alternation is whole values. UNSPECIFIED is the
+    level that is none of the known spellings, absent included.
+    """
+    spellings = severity_spellings(value)
+    alternation = "|".join(_literal(spelling) for spelling
+                           in spellings or KNOWN_SEVERITY_SPELLINGS)
+    return ("=~" if spellings else "!~"), f"(?i)({alternation})"
 
 
 def _nanoseconds(moment):
@@ -162,8 +181,12 @@ class LokiLogSource(LogSource):
         try:
             values = self._label_values(window)
         except Exception as exc:
-            logger.error(f"Loki label values could not be read: {exc}")
-            return []
+            # Raised, not answered with []. Every caller reads an empty list
+            # as "nothing is here" — the logs page said "No log indices
+            # found" and "your role has no access", the role editor said a
+            # correct pattern matched nothing — while Loki was down. The
+            # routes had the connection error written; it could not fire.
+            raise LokiError(f"stream labels could not be read: {exc}") from exc
         return scope.resolve(values, source=self.name)
 
     #: How far back to look when nobody named a window. Loki's own default is
@@ -183,17 +206,22 @@ class LokiLogSource(LogSource):
         if window is None:
             end = dt.datetime.now(dt.timezone.utc)
             start = end - self.CATALOGUE_WINDOW
+            # One slot for the catalogue. Keyed by its own `now`, it missed
+            # on every call: a page view asked Loki twice and a search three
+            # times, and a Loki that answered the first and not the second
+            # failed half way through one request.
+            key = "catalogue"
         else:
             start, end = window.start, window.end
+            key = (_nanoseconds(start), _nanoseconds(end))
 
-        key = (_nanoseconds(start), _nanoseconds(end))
         now = time.monotonic()
         cached = self._label_cache.get(key)
         if cached is not None and (now - cached[1]) < ttl:
             return cached[0]
 
         body = self._get(f"/loki/api/v1/label/{self._stream_label}/values",
-                         {"start": key[0], "end": key[1]})
+                         {"start": _nanoseconds(start), "end": _nanoseconds(end)})
         values = sorted(body.get("data") or [])
         # Bounded: one entry per distinct window, and the windows come from a
         # time picker with a handful of choices. Cleared wholesale rather than
@@ -260,6 +288,12 @@ class LokiLogSource(LogSource):
         if isinstance(node, ql.FullText):
             return f' |= "{_escape(node.text)}"'
 
+        if (isinstance(node, (ql.Term, ql.Phrase))
+                and node.field in ("severity", "severity_text")):
+            operator, pattern = _severity_matcher(
+                node.value if isinstance(node, ql.Term) else node.text)
+            return f' | {self._label_for(node.field)}{operator}"{_escape(pattern)}"'
+
         if isinstance(node, (ql.Term, ql.Phrase)):
             field = getattr(node, "field", None)
             value = getattr(node, "value", None) or getattr(node, "text", "")
@@ -274,19 +308,29 @@ class LokiLogSource(LogSource):
             return "".join(self._pipeline(clause) for clause in node.clauses)
 
         if isinstance(node, ql.Not):
-            inner = self._pipeline(node.clause)
-            if inner.startswith(' |= "'):
-                return ' !=' + inner[3:]
+            # Decided by WHAT is negated, never by how it rendered. A group
+            # of words renders as a chain of line filters, which starts with
+            # one too, and turning only that first stage round made
+            # NOT (a b) — NOT a OR NOT b — into NOT a AND b: fewer lines than
+            # asked for, and nothing said. A chain cannot say OR.
+            clause = node.clause
+            if isinstance(clause, ql.FullText) or (
+                    isinstance(clause, (ql.Term, ql.Phrase))
+                    and clause.field in ("body", "message", None)):
+                return ' !=' + self._pipeline(clause)[3:]
             raise LokiError("Loki cannot express this negation")
 
         raise LokiError(
             f"{type(node).__name__} has no LogQL equivalent; "
             f"Loki cannot express this query")
 
-    @staticmethod
-    def _label_for(neutral_name):
+    def _label_for(self, neutral_name):
+        # `service` is whatever label this source was told names a stream.
+        # It was `service_name` whatever the configuration said, so a source
+        # set up with `app` grouped its services panel by a label its streams
+        # did not have, and drew nothing.
         return {"severity": "level", "severity_text": "level",
-                "service": "service_name"}.get(neutral_name, neutral_name)
+                "service": self._stream_label}.get(neutral_name, neutral_name)
 
     # ---------- search ----------
 
@@ -325,6 +369,12 @@ class LokiLogSource(LogSource):
                            warnings=(f"search failed: {exc}",))
 
         records = self._to_records(body)
+        # One timeline. Loki answers stream by stream — each in the direction
+        # asked for, the streams one after another — and the page was drawn
+        # in that order. Which lines come back is right (the limit is applied
+        # across streams); only their order has to be made here.
+        records.sort(key=lambda record: record.timestamp,
+                     reverse=not query.ascending)
         return LogPage(
             records=records,
             # Loki reports no total for a range query: it returns up to `limit`
@@ -412,9 +462,18 @@ class LokiLogSource(LogSource):
                 if isinstance(aggregation, DateHistogram):
                     buckets[aggregation.name] = self._histogram_buckets(
                         query, targets, aggregation)
+                    if getattr(aggregation, "sub", None):
+                        # Counted whole: the split is not done here, and a
+                        # series drawn unsplit under a split legend is a
+                        # breakdown nobody asked Loki for.
+                        warnings.append(
+                            f"{aggregation.name}: Loki does not split this "
+                            f"series; it is the total")
                 elif isinstance(aggregation, Terms):
-                    rows = self._terms_buckets(query, targets, aggregation)
+                    rows, note = self._terms_buckets(query, targets, aggregation)
                     buckets[aggregation.name] = rows
+                    if note:
+                        warnings.append(note)
                     total = max(total, sum(row.count for row in rows))
                 else:
                     warnings.append(
@@ -433,17 +492,30 @@ class LokiLogSource(LogSource):
         })
         return (body.get("data") or {}).get("result") or []
 
+    def _log_query(self, query, targets):
+        """The log query a metric counts over: the streams AND the filter.
+
+        The filter used to be left out, so every panel on a Loki dashboard
+        counted every line in its streams whatever the dashboard's query or
+        the filter box said — more than was asked for, and drawn as the
+        answer. A filter Loki cannot express raises here, as it does for a
+        search, rather than being dropped.
+        """
+        return self._selector(targets) + self._pipeline(query.filter)
+
     def _terms_buckets(self, query, targets, aggregation):
-        """`sum by (label) (count_over_time(...))`.
+        """`sum by (label) (count_over_time(...))`, and a note or None.
 
         Only works for values Loki has as LABELS. A field that lives inside the
         line is not aggregatable without a parser stage, and pretending
-        otherwise would return an empty chart that looks like no data.
+        otherwise would return an empty chart that looks like no data — which
+        is what it did, until the note: Loki answers `sum by (host)` over
+        streams with no `host` label with one series whose labels are empty.
         """
         label = self._label_for(aggregation.field)
         window = int(query.window.duration_seconds) or 1
         expression = (f"sum by ({label}) (count_over_time("
-                      f"{self._selector(targets)}[{window}s]))")
+                      f"{self._log_query(query, targets)}[{window}s]))")
 
         # Severity buckets are normalised, because the neutral model promises
         # normalised severity everywhere and Loki labels are lower case. Two
@@ -451,25 +523,31 @@ class LokiLogSource(LogSource):
         # two bars for one thing — and colour only one of them red.
         normalise = aggregation.field in ("severity", "severity_text")
 
-        counts = {}
+        counts, unlabelled = {}, False
         for series in self._instant(expression, query):
             key = (series.get("metric") or {}).get(label)
             if key is None:
+                unlabelled = True
                 continue
             value = series.get("value") or [0, "0"]
             if normalise:
                 key = normalise_severity(key)
             counts[key] = counts.get(key, 0) + int(float(value[1]))
 
+        if unlabelled and not counts:
+            return [], (f"{aggregation.name}: '{aggregation.field}' is not a "
+                        f"Loki label on these streams and cannot be counted "
+                        f"by value")
+
         rows = [Bucket(key=key, count=count) for key, count in counts.items()]
         rows.sort(key=lambda bucket: bucket.count, reverse=True)
-        return rows[:aggregation.size]
+        return rows[:aggregation.size], None
 
     def _histogram_buckets(self, query, targets, aggregation):
         step = _step_seconds(aggregation.interval,
                              query.window.duration_seconds)
         expression = (f"sum(count_over_time("
-                      f"{self._selector(targets)}[{step}s]))")
+                      f"{self._log_query(query, targets)}[{step}s]))")
 
         body = self._get("/loki/api/v1/query_range", {
             "query": expression,

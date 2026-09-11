@@ -42,7 +42,10 @@ import requests
 
 from .. import query_language as ql
 from ..aggregation import AggregationResult, Bucket, DateHistogram, Terms
-from ..models import LogPage, LogRecord, SourceRef, normalise_severity
+from ..models import (
+    KNOWN_SEVERITY_SPELLINGS, LogPage, LogRecord, SourceRef,
+    normalise_severity, severity_spellings,
+)
 from ..source import Capability, LogSource
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,29 @@ def _quote(value):
     """
     escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+#: What RE2 reads as syntax rather than as the character itself — the set
+#: the Loki adapter escapes, for the same engine.
+_REGEX_SYNTAX = re.compile(r"([\\.+*?()|\[\]{}^$])")
+
+
+def _severity_filter(field, value):
+    """A filter that finds `value` as a level, however it was written.
+
+    Every spelling that normalises the way `value` does, without regard to
+    case. LogsQL's phrase filter matches case, so `level:ERROR` found none
+    of the `error` lines, and the sidebar — which merges `warn` and
+    `warning` into one WARN row — built a filter that matched neither. The
+    regexp filter is NOT anchored in LogsQL (measured: `(?i)rr` kept every
+    `error` line), so the alternation is pinned to the whole value.
+    UNSPECIFIED is the level that is none of the known spellings.
+    """
+    spellings = severity_spellings(value)
+    alternation = "|".join(_REGEX_SYNTAX.sub(r"\\\1", spelling) for spelling
+                           in spellings or KNOWN_SEVERITY_SPELLINGS)
+    matcher = f"{field}:~{_quote(f'(?i)^({alternation})$')}"
+    return matcher if spellings else f"NOT ({matcher})"
 
 
 def _rfc3339(moment):
@@ -193,8 +219,10 @@ class VictoriaLogsSource(LogSource):
         try:
             values = self._container_values(window)
         except Exception as exc:
-            logger.error(f"VictoriaLogs field values could not be read: {exc}")
-            return []
+            # Raised, not answered with []: see the Loki adapter. An empty
+            # catalogue is what every caller shows as "nothing is here".
+            raise VictoriaLogsError(
+                f"field values could not be read: {exc}") from exc
         return scope.resolve(values, source=self.name)
 
     def _container_values(self, window=None, ttl=30.0):
@@ -206,10 +234,13 @@ class VictoriaLogsSource(LogSource):
         if window is None:
             end = datetime.now(timezone.utc)
             start = end - self.CATALOGUE_WINDOW
+            # One slot for the catalogue; keyed by its own `now` it missed on
+            # every call. See the Loki adapter.
+            key = "catalogue"
         else:
             start, end = window.start, window.end
+            key = (_rfc3339(start), _rfc3339(end))
 
-        key = (_rfc3339(start), _rfc3339(end))
         now = time.monotonic()
         cached = self._container_cache.get(key)
         if cached is not None and (now - cached[1]) < ttl:
@@ -217,7 +248,7 @@ class VictoriaLogsSource(LogSource):
 
         body = self._json("/select/logsql/field_values", {
             "query": "*", "field": self._stream_field,
-            "start": key[0], "end": key[1], "limit": 1000})
+            "start": _rfc3339(start), "end": _rfc3339(end), "limit": 1000})
         values = sorted(entry.get("value") for entry in body.get("values") or ()
                         if entry.get("value"))
 
@@ -277,6 +308,12 @@ class VictoriaLogsSource(LogSource):
 
         if isinstance(node, ql.FullText):
             return _quote(node.text)
+
+        if (isinstance(node, (ql.Term, ql.Phrase))
+                and node.field in ("severity", "severity_text")):
+            return _severity_filter(
+                self._field_for(node.field),
+                node.value if isinstance(node, ql.Term) else node.text)
 
         if isinstance(node, (ql.Term, ql.Phrase)):
             field = getattr(node, "field", None)
@@ -546,7 +583,13 @@ class VictoriaLogsSource(LogSource):
                 ("the scope permits no containers",) if existed
                 else ("no containers reported any data in this time range",)))
 
-        expression = self._expression(query, targets)
+        try:
+            expression = self._expression(query, targets)
+        except VictoriaLogsError as exc:
+            # The refusal search makes, made here too. Raised from here it
+            # reached no handler, and a dashboard whose query held a range,
+            # an inner wildcard or NOT * answered with Flask's HTML 500.
+            return AggregationResult(failed=True, warnings=(str(exc),))
         buckets, warnings, total = {}, [], 0
         failed = False
 

@@ -857,11 +857,20 @@ def preview_role():
         list(scope.containers) + list(scope.trace_containers)
         + list(scope.services or ()), scope.sources))
 
+    def unlisted(source, exc):
+        # Kept, and marked. Left out, a source nobody could list read the
+        # same as one whose containers the pattern matched none of — "matches
+        # nothing on this installation" under a correct pattern, whose
+        # obvious fix is a wider one.
+        warnings.append(f"{source.name} could not be listed: {exc}")
+        return {"source": source.name, "containers": [], "count": 0,
+                "total": 0, "error": str(exc)[:200]}
+
     for source in (hub.log_sources if hub else []):
         try:
             reachable = source.containers(scope)
         except Exception as exc:
-            warnings.append(f"{source.name} could not be listed: {exc}")
+            logs.append(unlisted(source, exc))
             continue
         try:
             everything = source.containers(Scope.unrestricted())
@@ -875,7 +884,7 @@ def preview_role():
             everything = source.containers(Scope.unrestricted())
             reachable = scope.resolve_traces(everything, source=source.name)
         except Exception as exc:
-            warnings.append(f"{source.name} could not be listed: {exc}")
+            traces.append(unlisted(source, exc))
             continue
         traces.append({"source": source.name, "containers": reachable,
                        "count": len(reachable), "total": len(everything)})
@@ -886,10 +895,13 @@ def preview_role():
     # direction: `*` typed where `app-*` was meant looks like a working
     # pattern, saves cleanly, and grants the whole cluster. Nothing said so.
     def covers_all(entries, patterns):
-        if not patterns:
+        # Judged on the sources that answered: one that could not be listed
+        # must not hide `*` granting everything on the rest.
+        answered = [entry for entry in entries if "error" not in entry]
+        if not patterns or not answered:
             return False
         return all(entry["count"] == entry["total"] and entry["total"]
-                   for entry in entries)
+                   for entry in answered)
 
     # What CHANGES, not just what the result is.
     #
@@ -916,8 +928,10 @@ def preview_role():
                      else list(scope.services)),
         "permissions": sorted(scope.permissions),
         "warnings": warnings,
-        "reaches_nothing": not any(entry["count"] for entry in logs)
-                           and not any(entry["count"] for entry in traces),
+        # Not knowable while a source could not be listed; its warning says
+        # so instead.
+        "reaches_nothing": not any(entry["count"] for entry in logs + traces)
+                           and not any("error" in entry for entry in logs + traces),
         "reaches_everything": {
             "logs": covers_all(logs, scope.containers),
             "traces": covers_all(traces, scope.trace_containers),

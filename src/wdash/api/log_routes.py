@@ -161,10 +161,11 @@ def logs_page():
         allowed = source.containers(scope)
     except Exception as exc:
         current_app.logger.error(f"Error loading logs page: {exc}")
-        flash("Unable to connect to Elasticsearch. Please check the connection "
-              "and try again.", "error")
+        flash(f"Unable to connect to {source.name}. Please check the "
+              f"connection and try again.", "error")
         return render_template("logs.html", indices=[], user_role=current_user.role,
-                               elasticsearch_error=True, source_choices=choices)
+                               elasticsearch_error=True, source_name=source.name,
+                               source_choices=choices)
 
     if not allowed:
         if not all_indices:
@@ -256,14 +257,14 @@ def api_search():
     # range check so error responses carry the index metadata too.
     try:
         all_indices = source.containers(Scope.unrestricted())
+        allowed = source.containers(scope)
     except Exception as exc:
-        current_app.logger.error(f"Failed to get indices from Elasticsearch: {exc}")
-        return jsonify({"error": "Unable to connect to Elasticsearch. Please check "
-                                 "the connection.",
+        current_app.logger.error(f"Failed to get containers from {source.name}: {exc}")
+        return jsonify({"error": f"Unable to connect to {source.name}. Please "
+                                 f"check the connection.",
                         "error_type": "elasticsearch_connection",
                         "details": str(exc)}), 503
 
-    allowed = source.containers(scope)
     if not allowed:
         if not all_indices:
             return jsonify({"error": "No log indices found in Elasticsearch.",
@@ -594,7 +595,7 @@ def api_indices():
         allowed = source.containers(scope)
     except Exception as exc:
         current_app.logger.error(f"Error getting indices: {exc}")
-        return jsonify({"error": "Unable to retrieve indices from Elasticsearch.",
+        return jsonify({"error": f"Unable to retrieve containers from {source.name}.",
                         "error_type": "elasticsearch_connection",
                         "details": str(exc)}), 503
 

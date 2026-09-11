@@ -333,7 +333,17 @@ function showVerdict(id, entries, everything, isServices) {
 
     const total = entries.reduce((sum, e) => sum + (e.total || 0), 0);
     const matched = entries.reduce((sum, e) => sum + (e.count || 0), 0);
+    // A source the server could not list is not one the pattern matched
+    // nothing in. Said as "matches nothing", a correct pattern read as a
+    // typo whenever a backend was down.
+    const unlisted = entries.filter(e => e.error).map(e => e.source);
 
+    if (!matched && unlisted.length) {
+        holder.innerHTML = '<div class="text-warning" style="font-size:.75rem">' +
+            '<i class="fas fa-circle-question"></i> could not be checked: ' +
+            escapeHtml(unlisted.join(', ')) + ' did not answer</div>';
+        return;
+    }
     if (!matched) {
         // Usually a typo, and it was invisible until somebody complained.
         holder.innerHTML = '<div class="text-danger" style="font-size:.75rem">' +

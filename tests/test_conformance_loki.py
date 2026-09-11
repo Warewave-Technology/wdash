@@ -45,6 +45,47 @@ def _selects(selector, values):
     return {value for value in values if pattern.fullmatch(value)}
 
 
+def _label_stage_selects(stage, label, values):
+    """Which of `values` a single LogQL label filter stage keeps.
+
+    ` | l="v"` and ` | l!="v"` compare whole values; ` | l=~"re"` and
+    ` | l!~"re"` are regular expressions that Loki anchors at both ends,
+    measured on the lab's Loki 3.1.1: `level=~"(?i)rr"` kept none of the
+    `error` lines and `level=~"(?i)err"` kept only `ERR`. The string layer is
+    undone first, as Loki's parser does.
+    """
+    import re
+
+    match = re.fullmatch(
+        rf' \| {re.escape(label)}(=~|!~|!=|=)"((?:[^"\\]|\\.)*)"', stage)
+    if not match:
+        raise AssertionError(f"not a single label filter on {label}: {stage!r}")
+    operator, body = match.group(1), re.sub(r"\\(.)", r"\1", match.group(2))
+    if operator in ("=", "!="):
+        kept = {value for value in values if value == body}
+    else:
+        kept = {value for value in values if re.fullmatch(body, value)}
+    return kept if operator in ("=", "=~") else set(values) - kept
+
+
+def _line_filters_keep(pipeline, lines):
+    """Which of `lines` a chain of ` |= "x"` / ` != "x"` stages keeps.
+
+    Anything else in the chain is a test failure, not a guess.
+    """
+    import re
+
+    stages = re.findall(r' (\|=|!=) "((?:[^"\\]|\\.)*)"', pipeline)
+    if "".join(f' {op} "{text}"' for op, text in stages) != pipeline:
+        raise AssertionError(f"not a chain of line filters: {pipeline!r}")
+    kept = []
+    for line in lines:
+        if all((re.sub(r"\\(.)", r"\1", text) in line) == (op == "|=")
+               for op, text in stages):
+            kept.append(line)
+    return kept
+
+
 class FakeResponse:
     def __init__(self, payload, status_code=200, text=""):
         self._payload = payload
@@ -63,6 +104,12 @@ class FakeLoki(Harness):
         self._fail_next = False
         #: Windows Loki has data for. None means "every window".
         self._labels_present = None
+        #: What a log query answers with, stream by stream, in Loki's own
+        #: shape. None means the default single stream.
+        self.streams = None
+        #: What an instant metric query answers with. None means the default
+        #: per-level vector.
+        self.vector = None
 
     # --- harness contract ---
 
@@ -122,6 +169,9 @@ class FakeLoki(Harness):
             return {"status": "success", "data": {"resultType": "matrix",
                                                   "result": [{
                 "metric": {}, "values": [[1754305800, "7"], [1754305860, "3"]]}]}}
+        if self.streams is not None:
+            return {"status": "success", "data": {"resultType": "streams",
+                                                  "result": self.streams}}
         return {"status": "success", "data": {"resultType": "streams", "result": [{
             "stream": {"service_name": "api-gateway", "level": "info",
                        "namespace": "prod"},
@@ -131,6 +181,9 @@ class FakeLoki(Harness):
         }]}}
 
     def _instant(self):
+        if self.vector is not None:
+            return {"status": "success", "data": {"resultType": "vector",
+                                                  "result": self.vector}}
         return {"status": "success", "data": {"resultType": "vector", "result": [
             {"metric": {"level": "info"}, "value": [1754305800, "12"]},
             {"metric": {"level": "error"}, "value": [1754305800, "3"]},
@@ -356,13 +409,19 @@ class LokiSpecificTest(unittest.TestCase):
         self.assertEqual(record.service, "api-gateway")
         self.assertEqual(record.resource.get("namespace"), "prod")
 
+    # Picked by content, not by position: these took records[0] and [1] in
+    # the order the fake's one stream listed them, which was the unsorted
+    # stream order the page used to show.
+
     def test_a_structured_line_yields_attributes_and_a_trace_id(self):
-        record = self._search().records[0]
+        record = next(record for record in self._search().records
+                      if record.body.startswith("{"))
         self.assertEqual(record.trace_id, "abc")
         self.assertEqual(record.attributes.get("msg"), "hello")
 
     def test_a_plain_line_is_kept_as_the_body_without_invented_structure(self):
-        record = self._search().records[1]
+        record = next(record for record in self._search().records
+                      if not record.body.startswith("{"))
         self.assertEqual(record.body, "plain text line")
         self.assertEqual(record.attributes, {})
 
@@ -424,6 +483,292 @@ class LokiSpecificTest(unittest.TestCase):
         for absent in (Capability.FIELD_STATS, Capability.CONTEXT,
                        Capability.RAW_DOCUMENT):
             self.assertNotIn(absent, self.source.capabilities)
+
+    # --- severity is matched the way it is normalised ---
+
+    def _severity_stage(self, text):
+        from wdash.hub import query_language as ql
+        return self.source._pipeline(ql.parse(text))
+
+    SPELLINGS = ["error", "ERROR", "err", "Err", "warn", "WARN", "warning",
+                 "Warning", "info", "INFO", "notice", "fatal", "crit",
+                 "terror", "errors", "warn2", "custom", "CUSTOM", ""]
+
+    def test_the_documented_upper_case_level_matches_lower_case_labels(self):
+        """`level:ERROR` is the example on the logs page, and Loki pipelines
+        write `error`. The filter compared the two exactly: on the lab's Loki,
+        over 40 lines of which 13 are `error` or `ERR`, it found none — with
+        no warning, which reads as a quiet day.
+
+        Every spelling that normalises to ERROR is an ERROR: the records say
+        so and the level panel counts them so. A filter that matches fewer
+        of them than the panel counted is a panel nobody can drill into.
+        """
+        for typed in ("level:ERROR", "level:error", "level:Err",
+                      'level:"ERROR"', "severity:error"):
+            with self.subTest(typed=typed):
+                self.assertEqual(
+                    _label_stage_selects(self._severity_stage(typed), "level",
+                                         self.SPELLINGS),
+                    {"error", "ERROR", "err", "Err"})
+
+    def test_warn_matches_every_spelling_it_was_counted_from(self):
+        self.assertEqual(
+            _label_stage_selects(self._severity_stage("level:WARN"), "level",
+                                 self.SPELLINGS),
+            {"warn", "WARN", "warning", "Warning"})
+        self.assertEqual(
+            _label_stage_selects(self._severity_stage("level:INFO"), "level",
+                                 self.SPELLINGS),
+            {"info", "INFO", "notice"})
+
+    def test_a_level_that_is_no_severity_still_ignores_case_and_nothing_else(self):
+        self.assertEqual(
+            _label_stage_selects(self._severity_stage("level:Custom"), "level",
+                                 self.SPELLINGS),
+            {"custom", "CUSTOM"})
+
+    def test_unspecified_is_every_level_no_severity_is_spelled_as(self):
+        """UNSPECIFIED is what normalisation calls a missing or unknown level,
+        so as a filter it is "none of the known spellings", not a word."""
+        self.assertEqual(
+            _label_stage_selects(self._severity_stage("level:UNSPECIFIED"),
+                                 "level", self.SPELLINGS),
+            {"terror", "errors", "warn2", "custom", "CUSTOM", ""})
+
+    def test_a_severity_filter_reaches_loki_as_the_same_stage(self):
+        self.harness.reset()
+        self._search(text="level:ERROR")
+        query = self.harness.requests()[0]["params"]["query"]
+        stage = query[query.index("}") + 1:]
+        self.assertEqual(_label_stage_selects(stage, "level", self.SPELLINGS),
+                         {"error", "ERROR", "err", "Err"})
+
+    def test_a_regex_character_in_a_level_is_a_character(self):
+        """The typed value ends up inside a regular expression."""
+        self.assertEqual(
+            _label_stage_selects(self._severity_stage('level:"a.b"'), "level",
+                                 ["a.b", "A.B", "aXb"]),
+            {"a.b", "A.B"})
+
+    # --- negation ---
+
+    LINES = ["GET session", "GET other", "POST session", "POST other"]
+
+    def test_a_negated_group_is_refused_rather_than_half_negated(self):
+        """NOT (a b) is NOT a OR NOT b. It was rendered as `!= "a" |= "b"`,
+        which is NOT a AND b: on the lab's Loki, NOT (GET session) over 40
+        lines kept 10 where 30 match, and said nothing.
+
+        A chain of line filters cannot say OR, so the only honest answer is
+        a refusal the page can show.
+        """
+        from wdash.hub import query_language as ql
+        from wdash.hub.adapters.loki import LokiError
+
+        for text in ("NOT (GET session)", "-(GET AND session)",
+                     "NOT (GET -session)", "NOT (GET level:error)",
+                     "NOT (level:error GET)", "NOT NOT GET",
+                     "NOT level:error", "-host:web"):
+            with self.subTest(text=text):
+                with self.assertRaises(LokiError):
+                    self.source._pipeline(ql.parse(text))
+                self.harness.reset()
+                page = self._search(text=text)
+                self.assertTrue(page.partial)
+                self.assertIn("negation", " ".join(page.warnings))
+                self.assertEqual(self.harness.requests(), [],
+                                 "a query went out for a negation Loki "
+                                 "cannot express")
+
+    def test_one_negated_word_or_phrase_is_still_a_line_filter(self):
+        from wdash.hub import query_language as ql
+
+        for text, kept in (("NOT GET", ["POST session", "POST other"]),
+                           ("-session", ["GET other", "POST other"]),
+                           ('NOT "GET session"',
+                            ["GET other", "POST session", "POST other"]),
+                           ('-message:"POST other"',
+                            ["GET session", "GET other", "POST session"]),
+                           ("GET -session", ["GET other"])):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    _line_filters_keep(self.source._pipeline(ql.parse(text)),
+                                       self.LINES), kept)
+
+    # --- one timeline from several streams ---
+
+    @staticmethod
+    def _stream(service, level, *entries):
+        return {"stream": {"service_name": service, "level": level},
+                "values": [[f"17543058{second:02d}000000000", body]
+                           for second, body in entries]}
+
+    def test_several_streams_come_back_as_one_timeline_newest_first(self):
+        """Loki answers stream by stream, each in the direction asked for,
+        and the page drew them in that order: on the lab's Loki, 40 lines
+        written round-robin into six streams came back as six runs, one
+        stream after another, with nothing sorting them on the way to the
+        screen.
+        """
+        self.harness.streams = [
+            self._stream("api-gateway", "info", (3, "a3"), (1, "a1")),
+            self._stream("payment-service", "error", (4, "b4"), (2, "b2"))]
+        page = self._search()
+        self.assertEqual([record.body for record in page.records],
+                         ["b4", "a3", "b2", "a1"])
+
+    def test_ascending_is_oldest_first_across_streams_too(self):
+        self.harness.streams = [
+            self._stream("api-gateway", "info", (1, "a1"), (3, "a3")),
+            self._stream("payment-service", "error", (2, "b2"), (4, "b4"))]
+        page = self._search(ascending=True)
+        self.assertEqual([record.body for record in page.records],
+                         ["a1", "b2", "a3", "b4"])
+
+    # --- terms over labels ---
+
+    def _terms(self, field, source=None):
+        import datetime as dt
+
+        from wdash.hub import LogQuery, Scope, TimeWindow
+        from wdash.hub.aggregation import Terms
+        now = dt.datetime(2026, 8, 4, 12, tzinfo=dt.timezone.utc)
+        self.harness.reset()
+        return (source or self.source).aggregate(
+            LogQuery(window=TimeWindow.exact(now - dt.timedelta(hours=1), now),
+                     text="*"),
+            [Terms(name="t", field=field)], Scope.unrestricted())
+
+    def _sent_instant(self):
+        return [request["params"]["query"] for request in self.harness.requests()
+                if request["path"].endswith("/query")]
+
+    def test_the_service_panel_groups_by_the_label_this_source_was_given(self):
+        """`stream_label` is configurable, and `service` was mapped to
+        `service_name` whatever it said. A source configured with `app` was
+        asked `sum by (service_name)`, which Loki answers with one series and
+        no label: the services panel came back empty, with no warning."""
+        source = LokiLogSource("http://loki:3100", name="loki",
+                               stream_label="app", session=self.harness)
+        self.harness.vector = [{"metric": {"app": "api"}, "value": [0, "7"]},
+                               {"metric": {"app": "web"}, "value": [0, "5"]}]
+        result = self._terms("service", source)
+        self.assertIn("sum by (app)", self._sent_instant()[0])
+        self.assertEqual([(bucket.key, bucket.count) for bucket in result.get("t")],
+                         [("api", 7), ("web", 5)])
+        self.assertEqual(result.warnings, ())
+
+    def test_a_field_that_is_not_a_label_says_so_rather_than_drawing_nothing(self):
+        """Loki answers `sum by (host)` over streams with no `host` label with
+        one series whose labels are empty. That was skipped, and the panel
+        was an empty chart that reads as "no hosts logged anything" — the
+        very thing the docstring said it avoided."""
+        self.harness.vector = [{"metric": {}, "value": [0, "12"]}]
+        result = self._terms("host")
+        self.assertEqual(result.get("t"), [])
+        said = " ".join(result.warnings)
+        self.assertIn("host", said)
+        self.assertIn("not a Loki label", said)
+
+    def test_a_label_only_some_streams_carry_is_counted_where_it_is(self):
+        """Streams without the label come back as one unlabelled series.
+        That is not "not a label" — the rest carry it — and the buckets are
+        the answer."""
+        self.harness.vector = [{"metric": {"host": "web-1"}, "value": [0, "3"]},
+                               {"metric": {}, "value": [0, "9"]}]
+        result = self._terms("host")
+        self.assertEqual([(bucket.key, bucket.count) for bucket in result.get("t")],
+                         [("web-1", 3)])
+        self.assertEqual(result.warnings, ())
+
+    def test_a_label_with_nothing_in_the_window_is_empty_and_nothing_more(self):
+        """The other empty: the label exists and nothing was logged. That is
+        a real answer, and a warning on it would be noise."""
+        self.harness.vector = []
+        result = self._terms("host")
+        self.assertEqual(result.get("t"), [])
+        self.assertEqual(result.warnings, ())
+
+    def _aggregate(self, text, *aggregations):
+        import datetime as dt
+
+        from wdash.hub import LogQuery, Scope, TimeWindow
+        now = dt.datetime(2026, 8, 4, 12, tzinfo=dt.timezone.utc)
+        self.harness.reset()
+        return self.source.aggregate(
+            LogQuery(window=TimeWindow.exact(now - dt.timedelta(hours=1), now),
+                     text=text),
+            list(aggregations), Scope.unrestricted())
+
+    def test_a_panel_counts_what_the_query_selects_not_the_whole_stream(self):
+        """count_over_time was built over the stream selector alone, so every
+        panel on a Loki dashboard counted every line in its streams whatever
+        the dashboard's query or the filter box said: on the lab's Loki, a
+        level panel over `GET session` counted all 40 lines, where 10 match.
+        """
+        from wdash.hub.aggregation import DateHistogram, Terms
+        self._aggregate("GET level:ERROR", Terms(name="levels", field="severity"),
+                        DateHistogram(name="timeline"))
+        sent = [request["params"]["query"] for request in self.harness.requests()]
+        self.assertEqual(len(sent), 2, sent)
+        for query in sent:
+            inner = query[query.index("count_over_time(") + len("count_over_time("):
+                          query.rindex("[")]
+            selector_end = inner.index("}") + 1
+            self.assertEqual(_line_filters_keep(
+                inner[selector_end:inner.index(" | level")],
+                ["GET session", "POST other"]), ["GET session"], query)
+            self.assertEqual(_label_stage_selects(
+                inner[inner.index(" | level"):], "level", self.SPELLINGS),
+                {"error", "ERROR", "err", "Err"}, query)
+
+    def test_a_filter_loki_cannot_express_fails_the_panel_rather_than_dropped(self):
+        """Dropped, it counts MORE than was asked for — the one direction the
+        search refuses to round in, and the panels rounded that way."""
+        from wdash.hub.aggregation import Terms
+        result = self._aggregate("service:a OR service:b",
+                                 Terms(name="levels", field="severity"))
+        self.assertTrue(result.failed)
+        self.assertIn("Loki cannot express", " ".join(result.warnings))
+        self.assertEqual(self.harness.requests(), [])
+
+    def test_a_split_loki_does_not_make_is_said(self):
+        """A timeline split by level came back as one unsplit series."""
+        from wdash.hub.aggregation import DateHistogram, Terms
+        result = self._aggregate("*", DateHistogram(
+            name="timeline", sub=(Terms(name="split", field="severity"),)))
+        self.assertTrue(result.get("timeline"))
+        self.assertIn("does not split", " ".join(result.warnings))
+        plain = self._aggregate("*", DateHistogram(name="timeline"))
+        self.assertEqual(plain.warnings, ())
+
+    # --- the catalogue ---
+
+    def test_a_catalogue_that_cannot_be_read_is_an_error_and_not_an_empty_list(self):
+        """It answered [] and logged the error. Every caller then told the
+        person what [] means — 'No log indices found', 'your role has no
+        access to any log indices', 'this pattern matches nothing on this
+        installation' — while their Loki was down."""
+        from wdash.hub import Scope
+        from wdash.hub.adapters.loki import LokiError
+        self.harness.fail_next()
+        with self.assertRaises(LokiError) as caught:
+            self.source.containers(Scope.unrestricted())
+        self.assertIn("503", str(caught.exception))
+
+    def test_the_catalogue_is_one_lookup_however_often_a_request_asks(self):
+        """Keyed by `now`, the window-less catalogue missed its cache on every
+        call: the logs page asked Loki twice per view and a search three
+        times, and a Loki that answered the first and not the second failed
+        half way through a page."""
+        from wdash.hub import Scope
+        self.harness.reset()
+        self.source.containers(Scope.unrestricted())
+        self.source.containers(Scope(principal="p", containers=("api-*",)))
+        label_calls = [request for request in self.harness._requests
+                       if "/label/" in request["path"]]
+        self.assertEqual(len(label_calls), 1)
 
 
 if __name__ == "__main__":

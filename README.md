@@ -457,6 +457,10 @@ Elasticsearch field names are accepted as aliases, so `level:ERROR` and
 before execution — syntax errors are reported with a position, before the query
 reaches the cluster.
 
+On Loki and VictoriaLogs a level matches however the source wrote it:
+`level:WARN` finds `warn`, `warning` and `WARN` alike, which is how the records
+and the level panels already count them.
+
 ## Sources and signals
 
 WDash reads from whatever sources are configured. It never collects.
@@ -876,7 +880,10 @@ Stated plainly, because they affect whether this fits your deployment:
   document ids. Those are declared absent rather than returning something
   thinner than the name. Capabilities intersect across a merged search, so
   configuring Loki removes the field-statistics panel from "All sources". The
-  source breakdown beside it does not come from a capability and stays.
+  source breakdown beside it does not come from a capability and stays. A
+  negated group such as `NOT (a b)` is refused with a warning — a chain of line
+  filters cannot say OR — and a panel counted by a field that is not a Loki
+  label says so rather than drawing an empty chart.
 - **WDash does not collect telemetry**, deliberately. Run an OpenTelemetry
   Collector and point WDash at the storage behind it — see
   [docs/opentelemetry.md](docs/opentelemetry.md).

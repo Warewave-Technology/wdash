@@ -24,13 +24,14 @@
 </div>
 {% elif elasticsearch_error %}
 <div class="alert alert-danger" role="alert">
-    <h4 class="alert-heading"><i class="fas fa-exclamation-circle"></i> Elasticsearch Connection Error</h4>
-    <p>Unable to connect to Elasticsearch to retrieve log data.</p>
+    {% set unreachable = source_name or 'Elasticsearch' %}
+    <h4 class="alert-heading"><i class="fas fa-exclamation-circle"></i> Connection Error</h4>
+    <p>Unable to connect to {{ unreachable }} to retrieve log data.</p>
     <hr>
     <p class="mb-0">
         <strong>Possible solutions:</strong>
         <ul class="mt-2">
-            <li>Check if Elasticsearch is running and accessible</li>
+            <li>Check if {{ unreachable }} is running and accessible</li>
             <li>Verify network connectivity</li>
             <li>Contact your system administrator</li>
         </ul>

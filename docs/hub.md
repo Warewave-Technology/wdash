@@ -371,7 +371,12 @@ the interesting ones:
   is enforced, for the same reason it is pushed into the Elasticsearch query.
 - **A query it cannot express is refused, not trimmed.** Dropping a clause
   returns MORE than was asked for, the one direction an access-controlled
-  system must never round in.
+  system must never round in. That holds for dashboard panels too: they count
+  over the same pipeline a search runs, not over the bare streams.
+- **A level is matched however it was written.** `level:ERROR` becomes a
+  case-insensitive match on every spelling that normalises to ERROR (`error`,
+  `err`), because that is how records and panels count it. VictoriaLogs does
+  the same with an anchored regexp filter.
 - **Fewer capabilities, declared honestly.** No `FIELD_STATS` (Loki has no
   field mappings), no `CONTEXT` or `RAW_DOCUMENT` (no document to fetch by id).
   `fetch` returns None rather than guessing: a stream plus a nanosecond is not

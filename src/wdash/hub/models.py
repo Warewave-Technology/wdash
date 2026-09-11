@@ -63,6 +63,35 @@ def normalise_severity(value):
     return _SEVERITY_ALIASES.get(text, UNKNOWN_SEVERITY)
 
 
+#: Every spelling `normalise_severity` recognises, lower case.
+KNOWN_SEVERITY_SPELLINGS = tuple(sorted(
+    {name.lower() for name in SEVERITIES}
+    | {alias.lower() for alias in _SEVERITY_ALIASES}))
+
+
+def severity_spellings(value):
+    """The raw spellings, lower case, that normalise the way `value` does.
+
+    For filtering a backend that stores what was written. A record's level
+    is normalised and a panel counts it normalised, so a filter that matched
+    only the spelling typed found none of the `error` lines for ERROR, and
+    none of anything for the sidebar's merged WARN row. ERROR is
+    ('error', 'err'); a value that is no severity is only itself, to be
+    matched without regard to case. UNSPECIFIED is spelled by nothing — it
+    is what a missing or unknown level becomes — so it gives (), and a
+    filter for it is "none of KNOWN_SEVERITY_SPELLINGS".
+    """
+    text = str(value).strip()
+    if text.upper() == UNKNOWN_SEVERITY:
+        return ()
+    canonical = normalise_severity(text)
+    if canonical == UNKNOWN_SEVERITY:
+        return (text.lower(),)
+    return (canonical.lower(),) + tuple(sorted(
+        alias.lower() for alias, target in _SEVERITY_ALIASES.items()
+        if target == canonical))
+
+
 @dataclass(frozen=True)
 class SourceRef:
     """A backend-specific handle for a record.

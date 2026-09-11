@@ -554,6 +554,47 @@ function type(w, id, value) {
           && !warned.document.getElementById('planted'),
           warnedSaid.innerHTML);
 
+    // A source that could not be listed is not a pattern that matched
+    // nothing. The verdict said "matches nothing on this installation" under
+    // a correct pattern whenever the backend was down — which is what a typo
+    // looks like, and the obvious fix for a typo is a wider pattern.
+    const unlisted = build().w;
+    const down = { source: 'loki-<b id=planted-source>down</b>', containers: [],
+                   count: 0, total: 0, error: 'connection refused' };
+    const answering = { source: 'es', containers: [], count: 0, total: 4 };
+    let entries = [down];
+    unlisted.fetch = (url) => Promise.resolve({ json: () => Promise.resolve(
+        url.includes('/preview')
+            ? { logs: entries, traces: [], services: 'every service',
+                permissions: [], warnings: ['loki-down could not be listed'],
+                reaches_nothing: false,
+                reaches_everything: { logs: false, traces: false, services: true },
+                change: null }
+            : { logs: [], traces: [], services: [] }) });
+    type(unlisted, 'roleContainers', 'app-*');
+    await settle();
+    let unlistedSaid = verdict(unlisted, 'roleContainers');
+    check('a source that did not answer is "could not be checked", not "matches nothing"',
+          /could not be checked/i.test(unlistedSaid)
+          && unlistedSaid.includes('loki-<b id=planted-source>down</b>')
+          && !/matches nothing/i.test(unlistedSaid)
+          && !unlisted.document.getElementById('planted-source'), unlistedSaid);
+
+    entries = [answering, down];
+    type(unlisted, 'roleContainers', 'app-* ');
+    await settle();
+    unlistedSaid = verdict(unlisted, 'roleContainers');
+    check('and says which source it could not check beside one that answered',
+          /could not be checked/i.test(unlistedSaid)
+          && !/matches nothing/i.test(unlistedSaid), unlistedSaid);
+
+    entries = [answering];
+    type(unlisted, 'roleContainers', 'app-*  ');
+    await settle();
+    check('a source that answered with nothing still matches nothing',
+          /matches nothing/i.test(verdict(unlisted, 'roleContainers')),
+          verdict(unlisted, 'roleContainers'));
+
     console.log(failures.length ? `\n${failures.length} failure(s)`
                                 : '\nall role editor checks passed');
     process.exit(failures.length ? 1 : 0);
