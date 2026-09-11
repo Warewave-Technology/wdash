@@ -52,10 +52,14 @@ def main(argv=None):
         # `force`, because a fresh agent staggers its monitors over the next
         # few seconds. Without it this ran whichever single check happened to
         # be first and reported "1 check" for a configuration of fifty.
-        ran = agent.run_due(force=True)
+        # `wait`, because the loop's checks are started rather than waited
+        # for: without it this would flush an empty spool and print zero for a
+        # configuration that was about to answer.
+        ran = agent.run_due(force=True, wait=True)
         accepted = agent.flush()
         print(f"ran {ran} check(s), {accepted} accepted, "
               f"{agent.spool.pending()} still spooled")
+        agent.close()
         return 0
 
     # SIGTERM is how a container is asked to stop. Without this the loop is

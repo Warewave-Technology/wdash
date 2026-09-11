@@ -823,10 +823,11 @@ docker run -d wdash-browser \
 - **Two images, and the small one is the default.** The browser is most of the
   second one and nothing in the first needs it. Anybody running a probe for
   http and tcp checks should use `wdash`.
-- **A journey needs a browser agent.** Assign the journey to one. On an agent
-  without a browser it reports down, with the reason "this agent has no
-  browser" — so a journey left unassigned, while plain agents run, is down on
-  each of them.
+- **A journey needs a browser agent.** Assign the journey to one. An agent
+  with no browser reports nothing for it and says so in its own log, so the
+  journey reads `unknown` — "no agent has reported a result for this check" —
+  rather than down. A probe that cannot look is not evidence that a checkout
+  is broken.
 - **Two journeys run at a time per agent.** A Chromium is a few hundred
   megabytes of resident memory, and the agent's normal limit of sixteen
   concurrent checks would be five gigabytes on a host sized for a Python

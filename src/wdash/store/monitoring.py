@@ -811,6 +811,36 @@ def _steps_of(result):
     return out or None
 
 
+def _whole_number(value):
+    """An integer column's value, or None. Never a string or a dictionary.
+
+    A number sent as text would reach the database as one and be refused
+    there, which fails the whole batch over one field nobody reads.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+#: Largest certificate an agent may attach to a result. `_describe` builds ten
+#: short fields — a few hundred bytes — and this is the backstop for an agent
+#: that does not, the way `_steps_of` is for its steps. Measured before it: a
+#: five-megabyte `tls` value was stored whole, in a JSON column, per result.
+MAX_TLS_BYTES = 16 * 1024
+
+
+def _certificate_of(monitor_id, result):
+    """The certificate an agent attached, trimmed to what is storable."""
+    tls = result.get("tls")
+    if not isinstance(tls, dict) or not tls:
+        return None
+    if len(json.dumps(tls, default=str)) > MAX_TLS_BYTES:
+        logger.warning(f"monitor {monitor_id} sent a certificate over "
+                       f"{MAX_TLS_BYTES // 1024}KB; it was not kept")
+        return None
+    return tls
+
+
 class ResultRepository:
     def __init__(self, engine):
         self._engine = engine
@@ -822,6 +852,16 @@ class ResultRepository:
         than stored: an ingest endpoint that accepts anything is a way to
         paint the whole board green, and a compromised agent should be able to
         lie about its own checks and nothing else.
+
+        One unreadable result costs itself and nothing else. Everything here
+        arrives over an ingest endpoint, so every field is a claim rather than
+        a value: a `started_at` that is not a time, a `monitor_id` that is a
+        list, a result that is not even a dictionary used to raise out of the
+        loop — the endpoint answered 500, the agent kept the batch and sent it
+        again, and each attempt left the good results' screenshots behind
+        because those were stored before the rows were built. Measured: three
+        results, a bad one last, stored 0 results and 2 more orphan images per
+        attempt, for ever.
         """
         if not results:
             return 0
@@ -829,33 +869,26 @@ class ResultRepository:
         allowed = {m["id"] for m in MonitorRepository(self._engine)
                    .for_agent(agent_id)}
         received = _now()
-        rows = []
-        for result in results:
-            monitor_id = result.get("monitor_id")
-            if monitor_id not in allowed:
-                logger.warning(
-                    f"agent {agent_id} reported for monitor {monitor_id}, "
-                    f"which it does not run")
-                continue
-            started = result.get("started_at")
-            if isinstance(started, str):
-                started = datetime.fromisoformat(started.replace("Z", "+00:00"))
-            rows.append({
-                "monitor_id": monitor_id,
-                "agent_id": agent_id,
-                "started_at": started or received,
-                "received_at": received,
-                "status": "down" if result.get("status") == "down" else "up",
-                "duration_us": result.get("duration_us"),
-                "error": (result.get("error") or "")[:2000] or None,
-                "http_status": result.get("http_status"),
-                "tls": result.get("tls"),
-                "steps": _steps_of(result),
-                "screenshot_id": self._keep_screenshot(monitor_id, result),
-            })
-        if not rows:
-            return 0
         with self._engine.begin() as connection:
+            rows = []
+            for result in results:
+                try:
+                    row = self._row(agent_id, result, allowed, received)
+                except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                    logger.warning(
+                        f"agent {agent_id} sent a result that could not be "
+                        f"read ({type(exc).__name__}: {exc}); it was skipped")
+                    continue
+                if row is None:
+                    continue
+                # After the row is known to be storable, and in the same
+                # transaction as it: an image kept for a row that never
+                # arrives is a megabyte nothing points at.
+                row["screenshot_id"] = self._keep_screenshot(
+                    connection, row["monitor_id"], result)
+                rows.append(row)
+            if not rows:
+                return 0
             # Chunked. A single multi-VALUES insert binds eleven parameters
             # per row, and SQLite refuses the statement past its limit —
             # "too many SQL variables", which says nothing about the batch
@@ -868,7 +901,42 @@ class ResultRepository:
                     insert(monitor_results).values(rows[start:start + INSERT_CHUNK]))
         return len(rows)
 
-    def _keep_screenshot(self, monitor_id, result):
+    def _row(self, agent_id, result, allowed, received):
+        """One result as a row, or None when this agent may not report it.
+
+        Raises TypeError, ValueError, KeyError or AttributeError on anything
+        it cannot read, which the caller turns into "this one is skipped".
+        """
+        monitor_id = result.get("monitor_id")
+        if not isinstance(monitor_id, str) or monitor_id not in allowed:
+            logger.warning(
+                f"agent {agent_id} reported for monitor {monitor_id!r}, "
+                f"which it does not run")
+            return None
+
+        started = result.get("started_at")
+        if isinstance(started, str):
+            started = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        elif not isinstance(started, datetime):
+            # A number, a dictionary, nothing at all: the one time we know is
+            # ours, and `received_at` beside it says it is not the agent's.
+            started = None
+        return {
+            "monitor_id": monitor_id,
+            "agent_id": agent_id,
+            "started_at": started or received,
+            "received_at": received,
+            "status": "down" if result.get("status") == "down" else "up",
+            "duration_us": _whole_number(result.get("duration_us")),
+            # `str` before the slice: an error that arrived as a dictionary
+            # raised TypeError on the slice and took the whole batch with it.
+            "error": str(result.get("error") or "")[:2000] or None,
+            "http_status": _whole_number(result.get("http_status")),
+            "tls": _certificate_of(monitor_id, result),
+            "steps": _steps_of(result),
+        }
+
+    def _keep_screenshot(self, connection, monitor_id, result):
         """Store the failure screenshot, if the agent sent one usable.
 
         Returns its id, or None. Never raises: a picture that could not be
@@ -906,7 +974,11 @@ class ResultRepository:
             "bytes": len(image), "image": image,
         }
         try:
-            with self._engine.begin() as connection:
+            # A savepoint inside the caller's transaction: an image that will
+            # not store must not cost the results it came with, and on
+            # Postgres a failed statement poisons the transaction it is in
+            # unless it is rolled back to one.
+            with connection.begin_nested():
                 connection.execute(insert(journey_screenshots).values(**row))
         except Exception as exc:
             logger.warning(f"could not store a screenshot: {exc}")

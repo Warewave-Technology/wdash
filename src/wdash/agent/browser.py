@@ -93,6 +93,11 @@ def run_journey(monitor, secrets=None, launcher=None, now=None):
             failure, shot = _walk(page, steps, plan, secrets, hidden, budget,
                                   clock)
     except ImportError:
+        # Reached by a Playwright that is on the path and will not import — a
+        # half-installed one, a missing shared object. An agent that has no
+        # Playwright at all never gets here: the runner asks before it starts
+        # the check and reports nothing, so the journey reads `unknown` rather
+        # than this agent's limitation dressed up as a broken site.
         return _result(monitor, started, "down",
                        "this agent has no browser — a journey needs an agent "
                        "built on the browser image", 0, plan)
@@ -111,32 +116,52 @@ def run_journey(monitor, secrets=None, launcher=None, now=None):
 class _chromium:
     """Playwright, opened and closed. Separate so tests can pass their own."""
 
+    def __init__(self):
+        # Set before anything can fail, so that closing down knows what got
+        # as far as existing.
+        self._playwright = self._browser = self._context = None
+
     def __enter__(self):
         from playwright.sync_api import sync_playwright
-        self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(
-            args=["--disable-dev-shm-usage"])
-        self._context = self._browser.new_context(
-            viewport=VIEWPORT,
-            # A journey signs in. Carrying a profile between runs would mean
-            # the second run never exercises the login, and the check quietly
-            # stops testing the thing it was written for.
-            ignore_https_errors=False)
-        return self._context.new_page()
+        try:
+            self._playwright = sync_playwright().start()
+            self._browser = self._playwright.chromium.launch(
+                args=["--disable-dev-shm-usage"])
+            self._context = self._browser.new_context(
+                viewport=VIEWPORT,
+                # A journey signs in. Carrying a profile between runs would
+                # mean the second run never exercises the login, and the check
+                # quietly stops testing the thing it was written for.
+                ignore_https_errors=False)
+            return self._context.new_page()
+        except BaseException:
+            # Python does not call `__exit__` when `__enter__` raises, and
+            # `start()` has already spawned the node driver as a child
+            # process. So a Chromium that would not launch — no sandbox, no
+            # shared library, a full disk — leaked one driver per attempt,
+            # every interval, for the life of the agent; and the next attempt
+            # on the same pool thread then failed with "Sync API inside the
+            # asyncio loop", because the leaked driver poisons that thread.
+            self.__exit__(None, None, None)
+            raise
 
     def __exit__(self, *exc):
         for closing in (self._context, self._browser):
+            if closing is None:
+                continue
             try:
                 closing.close()
             except Exception:
                 pass
-        try:
-            self._playwright.stop()
-        except Exception:
-            # A browser that will not close is a leaked process, and saying so
-            # is the only way anybody finds out before the probe runs out of
-            # memory.
-            logger.warning("the browser did not shut down cleanly")
+        if self._playwright is not None:
+            try:
+                self._playwright.stop()
+            except Exception:
+                # A browser that will not close is a leaked process, and
+                # saying so is the only way anybody finds out before the probe
+                # runs out of memory.
+                logger.warning("the browser did not shut down cleanly")
+        self._playwright = self._browser = self._context = None
         return False
 
 

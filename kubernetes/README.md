@@ -125,9 +125,9 @@ docker build -t <registry>/wdash-browser:2.4.1 --target browser .
 
 Raise the agent's memory limit with it: Chromium needs gigabytes, not the
 256Mi the plain agent is given. The manifest already mounts a writable `/tmp`,
-which Chromium cannot start without on a read-only root filesystem. A journey
-given to an agent with no browser reports down, with the reason "this agent
-has no browser".
+which Chromium cannot start without on a read-only root filesystem. An agent
+with no browser reports nothing for a journey — it says so in its own log —
+so the journey reads unknown rather than down.
 
 ## More than one replica
 

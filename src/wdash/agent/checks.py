@@ -86,6 +86,15 @@ def _http_with(client, monitor):
     timeout = monitor.get("timeout_seconds") or 10
     assertions = monitor.get("assertions") or {}
 
+    # The monitor's timeout bounds the whole exchange, not each socket read.
+    # What `requests` is given is the wait for the NEXT byte, so a target that
+    # sends one inside every window never times out: measured against a server
+    # trickling five bytes every 0.2s, a check with `timeout_seconds=1` was
+    # still running after 6s and ended only when the server stopped, at 20.2s,
+    # reporting `up`. Behind it the agent's round, and with it the heartbeat,
+    # waited the same 20s.
+    deadline = clock + timeout
+
     request = monitor.get("request") or {}
     headers = {"User-Agent": USER_AGENT}
     headers.update(request.get("headers") or {})
@@ -114,10 +123,14 @@ def _http_with(client, monitor):
                        tls=_certificate(monitor["target"], timeout))
 
     body = b""
+    overran = False
     try:
         if assertions.get("body_contains"):
             for chunk in response.iter_content(8192):
                 body += chunk
+                if time.monotonic() > deadline:
+                    overran = True
+                    break
                 if len(body) >= MAX_BODY:
                     break
         else:
@@ -125,7 +138,9 @@ def _http_with(client, monitor):
             # to be consumed or the timing measures the headers alone — and a
             # server that answers instantly then stalls would look fast.
             for _ in response.iter_content(8192):
-                pass
+                if time.monotonic() > deadline:
+                    overran = True
+                    break
     except Exception as exc:
         elapsed = int((time.monotonic() - clock) * 1_000_000)
         return _result(monitor, started, "down",
@@ -136,6 +151,14 @@ def _http_with(client, monitor):
         response.close()
 
     elapsed = int((time.monotonic() - clock) * 1_000_000)
+    if overran:
+        # Down, and named for what happened: the target answered and then did
+        # not finish. No second connection for the certificate — the budget is
+        # already spent, and a slow body says nothing about the certificate.
+        return _result(monitor, started, "down",
+                       f"the response did not finish within {timeout}s",
+                       duration_us=elapsed,
+                       http_status=response.status_code)
     certificate = _certificate(monitor["target"], timeout)
     failure = _assert_http(response, body, elapsed, assertions)
     return _result(monitor, started, "down" if failure else "up", failure,

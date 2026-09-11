@@ -14,6 +14,7 @@ into `unknown` rather than `down`, because "nobody looked" is not "it is
 broken".
 """
 
+import importlib.util
 import logging
 import threading
 import time
@@ -69,6 +70,44 @@ BROWSER_CONCURRENCY = 2
 BACKOFF = (1, 2, 5, 10, 30, 60)
 
 
+def _answer(response, what):
+    """The JSON object in an answer, or None when there is not one.
+
+    A 200 is not proof that WDash answered it. An SSO or authenticating proxy
+    in front of the server redirects `/api/agent/*` to its own sign-in page,
+    `requests` follows the redirect, and the agent reads a 200 of HTML. That
+    used to raise out of `fetch_config` on the first poll and out of `flush`
+    AFTER the batch had been dropped: the container crash-looped, its monitors
+    went unknown, and one spooled batch was gone.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        logger.warning(f"{what} was answered with something that is not a "
+                       f"JSON object — is a proxy or a sign-in page "
+                       f"intercepting /api/agent?")
+        return None
+    return payload
+
+
+def _has_browser():
+    """Whether this image can run a journey at all.
+
+    The browser is a separate image — 1.77GB against 260MB — and the plain one
+    has no Playwright. Asked before the check rather than discovered inside
+    it, because the answer decides whether to report AT ALL rather than what
+    to report: see `_run_one`.
+    """
+    try:
+        return importlib.util.find_spec("playwright") is not None
+    except (ImportError, ValueError):
+        # A `playwright` that is on the path and broken, or blocked in
+        # `sys.modules`. Either way this agent cannot run a journey.
+        return False
+
+
 def _within(results, limit):
     """The oldest results whose JSON fits in `limit` bytes, and at least one."""
     import json
@@ -97,6 +136,16 @@ class Agent:
         self._monitors = {}
         self._browsers = threading.Semaphore(BROWSER_CONCURRENCY)
         self._config_version = None
+
+        #: One pool for the life of the agent, and the ids running in it. A
+        #: pool per round meant the round ended together — see `run_due`.
+        self._pool = None
+        self._running = set()
+        self._overrunning = set()
+        self._lock = threading.Lock()
+        #: Monitors this agent has already said it cannot run, so that saying
+        #: so does not become a line a minute for ever.
+        self._unrunnable = set()
 
     # ---------- HTTP to WDash ----------
 
@@ -131,7 +180,9 @@ class Agent:
                            f"{response.status_code}")
             return False
 
-        payload = response.json()
+        payload = _answer(response, "the configuration request")
+        if payload is None:
+            return False
         if payload.get("version") == self._config_version:
             return False
 
@@ -208,8 +259,18 @@ class Agent:
             self.spool.drop(len(batch))
             return 0
 
+        # Read BEFORE the spool is dropped. A 200 whose body is not JSON is
+        # not an acceptance — it is the sign-in page a proxy answered with —
+        # and dropping first meant the batch was gone before anybody found
+        # out.
+        payload = _answer(response, f"a delivery of {len(batch)} result(s)")
+        if payload is None:
+            return 0
+
         self.spool.drop(len(batch))
-        accepted = (response.json() or {}).get("accepted", len(batch))
+        accepted = payload.get("accepted", len(batch))
+        if not isinstance(accepted, int):
+            accepted = len(batch)
         if accepted < len(batch):
             logger.warning(f"{len(batch) - accepted} result(s) were not "
                            f"stored — is this agent still assigned them?")
@@ -224,20 +285,33 @@ class Agent:
                                                         key=lambda kv: kv[1])
                 if when <= now and i in self._monitors]
 
-    def run_due(self, force=False):
-        """Run whatever is due, spool the results. Returns how many ran.
+    def run_due(self, force=False, wait=False):
+        """Start whatever is due, spooling each result as it lands. Returns
+        how many checks were started.
 
-        `force` runs everything regardless of the schedule. That is what
-        `--once` needs: a fresh agent staggers its monitors over the next few
-        seconds so fifty of them do not open fifty connections at the same
-        instant, which is right for a daemon and useless for "let me test this
-        configuration" — it would run one check and exit.
+        STARTED, not finished. A round that waited for its slowest check held
+        the loop behind it — the configuration poll, the flush, and the flush
+        IS the heartbeat, so an agent with one slow monitor went `unknown` on
+        the server and took every monitor it ran with it. Measured before
+        this, with one check that took 5s and a second on a 1s interval: the
+        fast one ran at 0.0s, 6.0s and 11.5s, and the first heartbeat was held
+        until 11.0s. A check still running from its last turn is skipped
+        rather than started again, so a target slower than its own interval
+        cannot fill the pool with copies of itself.
+
+        `force` runs everything regardless of the schedule, and `wait` waits
+        for it. That is what `--once` needs: a fresh agent staggers its
+        monitors over the next few seconds so fifty of them do not open fifty
+        connections at the same instant, which is right for a daemon and
+        useless for "let me test this configuration" — it would run one check
+        and exit.
         """
         due = list(self._monitors.values()) if force else self.due_now()
         if not due:
             return 0
 
         now = time.monotonic()
+        started = []
         for monitor in due:
             # Rescheduled BEFORE running, from the time it was due rather than
             # from now. Otherwise every check's duration is added to its own
@@ -245,16 +319,74 @@ class Agent:
             interval = monitor.get("interval_seconds") or 60
             previous = self._due.get(monitor["id"], now)
             self._due[monitor["id"]] = max(now, previous + interval)
+            if not self._claim(monitor):
+                continue
+            started.append(self._pool_for().submit(self._run_and_spool,
+                                                   monitor))
 
-        workers = min(MAX_CONCURRENCY, len(due))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(self._run_one, due))
-        self.spool.add([r for r in results if r])
-        return len(results)
+        for future in (started if wait else ()):
+            future.result()
+        return len(started)
+
+    def _pool_for(self):
+        """The checking pool, made on first use and kept."""
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENCY,
+                                            thread_name_prefix="wdash-check")
+        return self._pool
+
+    def _claim(self, monitor):
+        """Take this monitor's turn, unless its last one is still running.
+
+        Said once per overrun rather than once per round: a journey with ten
+        minutes of patience and a one-minute interval would otherwise write
+        nine identical lines before it finished.
+        """
+        with self._lock:
+            if monitor["id"] in self._running:
+                if monitor["id"] not in self._overrunning:
+                    self._overrunning.add(monitor["id"])
+                    logger.warning(f"check '{monitor.get('name')}' has not "
+                                   f"finished its last turn; skipping it "
+                                   f"until it does")
+                return False
+            self._running.add(monitor["id"])
+            return True
+
+    def _run_and_spool(self, monitor):
+        """One check, on a pool thread, spooled the moment it is done.
+
+        One at a time rather than a round at a time, because the round no
+        longer ends together — and a result held in memory until its
+        neighbours finish is a result an agent crash loses.
+        """
+        try:
+            result = self._run_one(monitor)
+            if result:
+                self.spool.add([result])
+        except Exception:
+            logger.exception(f"check '{monitor.get('name')}' could not be "
+                             f"spooled")
+        finally:
+            with self._lock:
+                self._running.discard(monitor["id"])
+                self._overrunning.discard(monitor["id"])
 
     def _run_one(self, monitor):
         try:
             if (monitor.get("kind") or "").lower() == "browser":
+                if not _has_browser():
+                    # Nothing is reported, and that is the point: this agent
+                    # did not look. Reporting `down` would be this agent's
+                    # limitation dressed up as a fact about the site — and a
+                    # journey left unassigned goes to EVERY agent, so one
+                    # plain probe was enough to call a working checkout down
+                    # every interval and page whoever holds a monitor_down
+                    # rule. Unrun, the journey reads `unknown` with "no agent
+                    # has reported a result for this check", which is what the
+                    # README and the manifest promise.
+                    self._cannot_run(monitor)
+                    return None
                 # Queued behind the browser limit rather than the pool's. A
                 # journey waiting here still holds a pool worker, which is
                 # right: the alternative is running it late and reporting a
@@ -272,23 +404,65 @@ class Agent:
             return _result(monitor, _now(), "down",
                            f"the agent could not run this check: {exc}")
 
+    def _cannot_run(self, monitor):
+        """Say once, per monitor, that this agent is the wrong image for it.
+
+        Once rather than every interval: a sentence a minute for the life of
+        the pod is a sentence nobody reads.
+        """
+        if monitor["id"] in self._unrunnable:
+            return
+        self._unrunnable.add(monitor["id"])
+        logger.warning(
+            f"journey '{monitor.get('name')}' needs an agent built on the "
+            f"browser image; this one has no browser, so it is reporting "
+            f"nothing for it and the journey will read as unknown until a "
+            f"browser agent runs it")
+
+    def _guarded(self, work, what):
+        """Run one part of the round. A failure costs that part and no more.
+
+        Nothing between here and the process exit used to catch anything —
+        `__main__` calls `run_forever` and that is all — so one unreadable
+        answer ended the agent. In Kubernetes the pod restarts, the spool
+        survives on its emptyDir, and it meets the same answer again: a
+        crash loop, and every monitor it ran reading `unknown`.
+
+        One guard per part rather than one around the round, because a
+        configuration that cannot be read must not stop the results that have
+        already been measured from being delivered.
+        """
+        try:
+            return work()
+        except Exception:
+            logger.exception(what)
+            return None
+
     def run_forever(self):
         logger.info(f"agent starting against {self.server}")
-        self.fetch_config()
+        self._guarded(self.fetch_config, "the first configuration request "
+                                         "failed")
 
         last_config = last_flush = time.monotonic()
         failures = 0
         while not self._stop.is_set():
             now = time.monotonic()
+            # Each clock is moved BEFORE the work it schedules, so that
+            # something which keeps failing is retried on its own interval
+            # rather than on every turn of the loop.
             if now - last_config >= CONFIG_INTERVAL:
-                self.fetch_config()
                 last_config = now
+                self._guarded(self.fetch_config,
+                              "the configuration could not be read; the agent "
+                              "keeps the one it has")
 
-            self.run_due()
+            self._guarded(self.run_due, "a round of checks could not start")
 
             if now - last_flush >= FLUSH_INTERVAL:
-                shipped = self.flush()
-                pending = self.spool.pending()
+                last_flush = now
+                shipped = self._guarded(self.flush, "a delivery failed") or 0
+                pending = self._guarded(self.spool.pending,
+                                        "the spool could not be read") or 0
                 if pending and not shipped:
                     failures += 1
                     wait = BACKOFF[min(failures, len(BACKOFF) - 1)]
@@ -297,13 +471,21 @@ class Agent:
                     last_flush = now + wait - FLUSH_INTERVAL
                 else:
                     failures = 0
-                    last_flush = now
 
             # A short sleep rather than sleeping until the next due time: the
             # configuration can change under us, and a long sleep would keep
             # running the old schedule until it woke.
             self._stop.wait(0.5)
+        self.close()
         logger.info("agent stopping")
 
     def stop(self):
         self._stop.set()
+
+    def close(self):
+        """Let the checking threads go. Whatever is still running is
+        abandoned, not waited for: a stop signal has a deadline, and a journey
+        may have ten minutes left on its own."""
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
