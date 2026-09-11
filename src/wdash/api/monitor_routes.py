@@ -701,6 +701,25 @@ def monitor_detail(monitor_id):
 CHECKS_PER_PAGE = 25
 
 
+class _Rows(list):
+    """A page of checks, and what could not be read beside them.
+
+    `reversed()` and a slice each answer with a plain list, so the warnings
+    the source had put on its own answer were dropped on the way here and the
+    page's read of them could never say anything. A deep page is a second,
+    narrower query: a member of a fan-out that fails on that one alone is
+    named on the page because of this.
+    """
+    warnings = ()
+
+
+def _page_of(rows, answer):
+    """`rows`, carrying whatever `answer` said it could not read."""
+    page = _Rows(rows)
+    page.warnings = tuple(getattr(answer, "warnings", ()))
+    return page
+
+
 def _checks_page(source, monitor_id, window, page_number, window_history=None):
     """One page of checks, newest first, and how many there are in total.
 
@@ -720,7 +739,8 @@ def _checks_page(source, monitor_id, window, page_number, window_history=None):
         total = getattr(window_history, "total", len(window_history))
         if len(window_history) >= total:
             newest = list(reversed(window_history))
-            return newest[offset:offset + CHECKS_PER_PAGE], total
+            return (_page_of(newest[offset:offset + CHECKS_PER_PAGE],
+                             window_history), total)
 
     try:
         rows = source.history(monitor_id, window, _scope(),
@@ -732,12 +752,12 @@ def _checks_page(source, monitor_id, window, page_number, window_history=None):
         rows = source.history(monitor_id, window, _scope())
         total = len(rows)
         newest = list(reversed(rows))
-        return newest[offset:offset + CHECKS_PER_PAGE], total
+        return _page_of(newest[offset:offset + CHECKS_PER_PAGE], rows), total
 
     total = getattr(rows, "total", len(rows))
     # `history` returns oldest-first for the chart; the table reads newest
     # first, which is the order somebody looking for "what just broke" wants.
-    return list(reversed(rows)), total
+    return _page_of(reversed(rows), rows), total
 
 
 def _pager(page_number, total):

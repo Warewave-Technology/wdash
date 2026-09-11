@@ -79,11 +79,16 @@
     </div>
     {% endfor %}
 </div>
+{# What the figures above were computed from, when that is not the window.
+   Not "and did not count the rest": several sources CAN count the rest — the
+   total beside the pager is their own — and have no merged window to take
+   percentiles from. The sentence was telling the reader the opposite of what
+   had happened. #}
 {% if summary.sample %}
 <p class="text-muted small" style="margin-top:-1rem">
     From the newest {{ "{:,}".format(summary.sample.used) }} of
     {{ "{:,}".format(summary.sample.of) }} checks in this window: the source
-    returns no more at once and did not count the rest.
+    returns no more at once, and the figures above are what those rows hold.
 </p>
 {% endif %}
 

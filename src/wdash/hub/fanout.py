@@ -53,6 +53,14 @@ MAX_PARALLEL = 8
 #: the merge, because one malformed record must not lose the whole page.
 _EPOCH = dt.datetime.fromtimestamp(0, tz=dt.timezone.utc)
 
+#: Rounds of paging one deep page of a merged history may take. A round asks
+#: every member that has more for its next chunk, and a chunk is as large as
+#: the page still needs, so two members and page forty is two rounds. The cap
+#: is here so that a member with a small ceiling and a large count cannot turn
+#: one page into an unbounded number of searches; past it the page says it
+#: could not be built, which is the one thing it must not do quietly.
+MAX_MERGE_ROUNDS = 12
+
 
 class FanOutLogSource(LogSource):
     """Every configured log source, behind one."""
@@ -779,11 +787,40 @@ class FanOutMonitorSource(MonitorSource):
                     warnings + list(getattr(page, "warnings", ()))))
                 return result
 
+        def fetch(source, at, size):
+            """One member's checks `at`..`at + size`, newest first."""
+            try:
+                rows = source.history(monitor_id, window, scope, offset=at,
+                                      limit=size)
+            except TypeError:
+                # Written against the three-argument interface: it answers
+                # with the whole window, and its page is cut here.
+                whole = list(reversed(source.history(monitor_id, window,
+                                                     scope)))
+                return whole[at:at + size]
+            return list(reversed(rows))
+
+        short = {source.name for source, checks in answered
+                 if len(checks) < min(wanted or total_of(checks),
+                                      total_of(checks))}
+        if wanted is not None and len(answered) > 1 and short:
+            # A page of the merge cannot be cut out of each member's newest
+            # `offset + limit` once a member has run out of them: what comes
+            # back is the newest rows of each, not rows 976 to 1,000 of the
+            # merge. Measured on two clusters holding 1,000 and 700 checks of
+            # one monitor, page 40 held no row that belonged on it — the
+            # newest row shown was eleven hours older than the newest the
+            # pager named. So the merge is walked instead.
+            walked = _CountedChecks(
+                self._walk(fetch, answered, offset, int(limit)))
+            walked.total = sum(total_of(checks) for _, checks in answered)
+            walked.warnings = tuple(dict.fromkeys(warnings))
+            return walked
+
         merged = []
         for source, checks in answered:
             merged.extend(checks)
-            if len(answered) > 1 and len(checks) < min(
-                    wanted or total_of(checks), total_of(checks)):
+            if len(answered) > 1 and source.name in short:
                 warnings.append(
                     f"{source.name}: only its newest {len(checks):,} of "
                     f"{total_of(checks):,} checks could be merged")
@@ -802,6 +839,73 @@ class FanOutMonitorSource(MonitorSource):
             result.whole_window = getattr(answered[0][1], "whole_window",
                                           None)
         return result
+
+    def _walk(self, fetch, answered, offset, limit):
+        """Rows `offset`..`offset + limit` of the merge, walked in order.
+
+        Each member is a stream sorted by time that pages by its own offset
+        and returns at most its own ceiling — 500 on Elasticsearch. Each round
+        keeps only the rows newer than every truncated member's oldest
+        returned row: those are the ones no unread row can come between. Then
+        every member that has more is asked for it, from where it left off.
+
+        Walked rather than fetched whole because the alternative is holding a
+        day of checks from every member in memory to show twenty-five of them.
+        Two members and page forty is two rounds.
+
+        Raises rather than returning a short page: rows shown under a range
+        they do not belong to are the fault this exists to fix, and so is a
+        table quietly missing the rows a member could not reach.
+        """
+        wanted = offset + limit
+        totals = {source.name: (getattr(checks, "total", None) or len(checks))
+                  for source, checks in answered}
+        taken = {source.name: 0 for source, _ in answered}
+        held = {source.name: list(reversed(checks))
+                for source, checks in answered}
+
+        collected, rounds = [], 0
+        while len(collected) < wanted:
+            rows, boundary = [], None
+            for source, _ in answered:
+                chunk = held.get(source.name) or []
+                rows.extend((check, source.name) for check in chunk)
+                if chunk and taken[source.name] + len(chunk) < totals[
+                        source.name]:
+                    # This member is holding back rows older than these, so
+                    # nothing older than its oldest can be placed yet.
+                    oldest = chunk[-1].timestamp
+                    if oldest is not None and (boundary is None
+                                               or oldest > boundary):
+                        boundary = oldest
+            rows.sort(key=lambda pair: pair[0].timestamp or _EPOCH,
+                      reverse=True)
+            if boundary is not None:
+                rows = [pair for pair in rows
+                        if (pair[0].timestamp or _EPOCH) > boundary]
+            if not rows:
+                break
+            for _, name in rows:
+                taken[name] += 1
+            collected.extend(check for check, _ in rows)
+            rounds += 1
+            if len(collected) >= wanted or rounds >= MAX_MERGE_ROUNDS:
+                break
+            held = {source.name: (
+                fetch(source, taken[source.name], wanted - len(collected))
+                if taken[source.name] < totals[source.name] else [])
+                for source, _ in answered}
+
+        behind = [f"{name} has {totals[name] - taken[name]:,} more of its "
+                  f"{totals[name]:,} checks than it would return"
+                  for name in sorted(totals) if taken[name] < totals[name]]
+        if len(collected) < wanted and behind:
+            raise MonitorSourceError(
+                f"{self.name}: these checks could not be put in one order — "
+                + "; ".join(behind)
+                + ". A shorter window holds fewer, and reaches them.")
+        # Oldest first, the order every source answers in.
+        return list(reversed(collected[offset:offset + limit]))
 
     def series(self, monitor_id, window, scope, points=120):
         """The detail chart, merged across sources.
@@ -849,9 +953,21 @@ class FanOutMonitorSource(MonitorSource):
 
     @staticmethod
     def _on_one_grid(collected, window, points):
-        """Every member's buckets, put where their time says they go."""
-        points = max(1, int(points))
-        width = max(1.0, (window.end - window.start).total_seconds()) / points
+        """Every member's buckets, put where their time says they go.
+
+        On a grid no finer than the widest member's own buckets, which is not
+        the same as `points` of them. Elasticsearch will not bucket below 30 s
+        (es_monitors._bucket_interval) and the route asks for 120 points
+        however short the window is: a quarter of an hour is a cell every
+        7.5 s, so each member's buckets landed in every fourth one and no two
+        values were ever side by side. The chart draws no line across a gap on
+        purpose — a gap is an agent that stopped — so the card rendered with
+        its axes, no line, no points, and a header saying 116 check(s).
+        """
+        span = max(1.0, (window.end - window.start).total_seconds())
+        width = max(span / max(1, int(points)), _widest_bucket(collected))
+        points = max(1, min(int(points), int(span // width)))
+        width = span / points
         cells = [[] for _ in range(points)]
         for series in collected:
             for point in series:
@@ -905,6 +1021,25 @@ class _CountedChecks(list):
 class _CountedPoints(list):
     """A merged chart, and the members that could not be asked for theirs."""
     warnings = ()
+
+
+def _widest_bucket(collected):
+    """The coarsest resolution any member answered at, in seconds.
+
+    Measured off the buckets a member returned rather than assumed: its
+    smallest positive step, because a series whose empty buckets were dropped
+    has gaps that are multiples of its own width. Zero when nobody returned
+    two buckets to measure between.
+    """
+    widest = 0.0
+    for series in collected:
+        stamps = sorted(point.timestamp for point in series if point.timestamp)
+        steps = [(later - earlier).total_seconds()
+                 for earlier, later in zip(stamps, stamps[1:])]
+        steps = [step for step in steps if step > 0]
+        if steps:
+            widest = max(widest, min(steps))
+    return widest
 
 
 def _named(source, error):

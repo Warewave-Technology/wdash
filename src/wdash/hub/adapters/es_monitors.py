@@ -67,7 +67,28 @@ MAX_MONITORS = 500
 #: service offers about a dozen locations. The cap keeps the listing inside
 #: the cluster's bucket limit (65,536 by default): 500 monitors, this many
 #: places each and a sparkline each come to about 38,000.
+#:
+#: What it drops, a terms aggregation drops silently — and a monitor whose
+#: dropped place is the one that is down reads up, with no error and no note.
+#: `sum_other_doc_count` is what the cluster says about that, and the listing
+#: says it too rather than showing a row it cannot stand behind.
 MAX_LOCATIONS = 25
+
+#: How many of a place's own check intervals may pass before its last check
+#: stops speaking for the monitor NOW.
+#:
+#: Heartbeat writes `monitor.timespan` as the range one check is valid for —
+#: from its own timestamp until the next one is due — so the schedule is
+#: measured off the document rather than configured here. A probe that is
+#: removed, restarted or renamed leaves its last check behind; taken as the
+#: monitor's current state, a down one kept a healthy endpoint down for as
+#: long as it stayed in the window, which for the alert runner is an hour.
+#:
+#: Ten rather than one: a check is missed for reasons that are not an outage
+#: — a run longer than its schedule, a restart, a clock — and one missed
+#: check must not clear a real down state. Ten in a row is a probe that has
+#: stopped, which is what the store already calls a silent agent.
+STALE_AFTER_INTERVALS = 10
 
 #: How many past checks a history returns.
 MAX_HISTORY = 500
@@ -178,6 +199,29 @@ def _status(source):
     if value in (UP, DOWN):
         return value
     return UNKNOWN
+
+
+def _stopped_reporting(source, when):
+    """Whether this check has stopped speaking for its place by `when`.
+
+    Measured from `monitor.timespan`, which Heartbeat writes as a date_range
+    from the check's own timestamp to when the next one is due: the schedule
+    comes from the document rather than from a guess here. Stale after
+    `STALE_AFTER_INTERVALS` of them.
+
+    False when there is no timespan. An agent that does not write one has not
+    said how often it checks, and inventing an interval for it would be the
+    same mistake in the other direction — a live place dropped because
+    somebody's exporter omits a field.
+    """
+    stamp = _parse_time(source.get("@timestamp"))
+    due = _parse_time(_dig(source, "monitor.timespan.lt"))
+    if stamp is None or due is None:
+        return False
+    schedule = (due - stamp).total_seconds()
+    if schedule <= 0:
+        return False
+    return (when - stamp).total_seconds() > STALE_AFTER_INTERVALS * schedule
 
 
 def _certificate(source):
@@ -316,6 +360,8 @@ class ElasticsearchMonitorSource(MonitorSource):
         return f"{step}s"
 
     def monitors(self, window, scope, series=False):
+        newest_check = {"top_hits": {
+            "size": 1, "sort": [{"@timestamp": {"order": "desc"}}]}}
         aggregations = {
             # The most recent check from EACH place the monitor runs from. A
             # terms aggregation alone would give counts, and a count cannot
@@ -332,9 +378,21 @@ class ElasticsearchMonitorSource(MonitorSource):
             "locations": {
                 "terms": {"field": "observer.geo.name", "missing": "",
                           "size": MAX_LOCATIONS},
-                "aggs": {"latest": {"top_hits": {
-                    "size": 1,
-                    "sort": [{"@timestamp": {"order": "desc"}}]}}},
+                "aggs": {
+                    "latest": newest_check,
+                    # And inside the bucket for the checks with no geography,
+                    # one per `observer.name`. That is the second field
+                    # `_location()` reads, so a deployment that names its
+                    # probes without giving them a geography — which this
+                    # adapter's own docstring names — had every one of its
+                    # places in this single bucket, and the row went back to
+                    # being whichever of them reported last.
+                    "named": {
+                        "terms": {"field": "observer.name", "missing": "",
+                                  "size": MAX_LOCATIONS},
+                        "aggs": {"latest": newest_check},
+                    },
+                },
             },
         }
         if series:
@@ -383,31 +441,70 @@ class ElasticsearchMonitorSource(MonitorSource):
                                warnings=(f"{self.name}: {exc}",))
 
         buckets = _dig(response, "aggregations.monitors.buckets") or []
-        monitors = []
+        monitors, incomplete = [], []
         for bucket in buckets:
-            latest = []
-            for place in _dig(bucket, "locations.buckets") or ():
-                hits = _dig(place, "latest.hits.hits") or []
-                if hits:
-                    latest.append(hits[0])
+            latest, dropped = self._places(bucket)
             if not latest:
                 continue
-            monitor = self._to_monitor(latest)
+            monitor = self._to_monitor(latest, window)
             if series:
                 monitor.series = self._to_series(bucket)
             monitors.append(monitor)
+            if dropped:
+                incomplete.append(monitor.name or monitor.id)
 
         # Down first, then by name: a list sorted by id puts the one thing
         # that needs attention wherever the alphabet happens to place it.
         monitors.sort(key=lambda m: (m.status != DOWN, m.name.lower(), m.id))
 
-        page = MonitorPage(monitors=monitors, sources=(self.name,))
+        notes = []
         if len(buckets) >= MAX_MONITORS:
-            page.warnings = (
-                f"{self.name}: showing the first {MAX_MONITORS} monitors.",)
-        return page
+            notes.append(
+                f"{self.name}: showing the first {MAX_MONITORS} monitors.")
+        if incomplete:
+            # One note naming a few of them rather than one note each: a
+            # listing whose warning block is five hundred lines long is a page
+            # nobody reads the first line of.
+            named = ", ".join(f"'{name}'" for name in incomplete[:5])
+            more = (f" and {len(incomplete) - 5:,} more"
+                    if len(incomplete) > 5 else "")
+            notes.append(
+                f"{self.name}: more than {MAX_LOCATIONS} places check "
+                f"{named}{more}, and only {MAX_LOCATIONS} of them were read — "
+                f"what the rest reported is missing from the row.")
+        return MonitorPage(monitors=monitors, sources=(self.name,),
+                           warnings=tuple(notes))
 
-    def _to_monitor(self, latest):
+    @staticmethod
+    def _places(bucket):
+        """The newest check at each place, and whether any place was dropped.
+
+        `observer.geo.name`, and inside its "missing" bucket `observer.name`:
+        the two fields `_location()` reads, in the same order, so the listing
+        groups by exactly what the rest of the page calls a place.
+
+        The second number is `sum_other_doc_count` from both levels — checks
+        at places past `MAX_LOCATIONS`, which a terms aggregation drops
+        without saying which places they were.
+        """
+        locations = _dig(bucket, "locations") or {}
+        latest = []
+        dropped = int(locations.get("sum_other_doc_count") or 0)
+        for place in locations.get("buckets") or ():
+            named = place.get("named") or {}
+            if place.get("key") == "" and (named.get("buckets") or []):
+                dropped += int(named.get("sum_other_doc_count") or 0)
+                for probe in named["buckets"]:
+                    hits = _dig(probe, "latest.hits.hits") or []
+                    if hits:
+                        latest.append(hits[0])
+                continue
+            hits = _dig(place, "latest.hits.hits") or []
+            if hits:
+                latest.append(hits[0])
+        return latest, dropped
+
+    def _to_monitor(self, latest, window):
         """One row from the newest check at each place the monitor runs from.
 
         Down if ANY place's newest check is down, and the row is that check:
@@ -416,15 +513,32 @@ class ElasticsearchMonitorSource(MonitorSource):
         per monitor rather than one per place, so an alert keyed on the
         monitor sees every failure — the detail page's "By location" card is
         where the places are set side by side.
+
+        Among the places that are still reporting. A probe that was removed,
+        restarted or renamed leaves its last check behind, and worst-of made
+        that check the monitor's state for as long as it stayed in the window:
+        one place down fifty minutes ago and never heard from since held the
+        row down — with its timestamp, its duration and its error on it —
+        while another place had been answering every thirty seconds. The alert
+        window is an hour, so a monitor_down rule at threshold three fired on a
+        healthy endpoint for most of one. `_stopped_reporting` decides it, from
+        the schedule Heartbeat writes on each check.
+
+        When no place is still reporting, the last thing anybody said is the
+        best there is, and it stands as before.
         """
         def moment(hit):
             return (_parse_time(_dig(hit, "_source.@timestamp"))
                     or datetime.min.replace(tzinfo=timezone.utc))
 
         newest_first = sorted(latest, key=moment, reverse=True)
-        down = [hit for hit in newest_first
+        end = window.end
+        speaking = [hit for hit in newest_first
+                    if not _stopped_reporting(hit.get("_source") or {}, end)]
+        speaking = speaking or newest_first
+        down = [hit for hit in speaking
                 if _status(hit.get("_source") or {}) == DOWN]
-        hit = (down or newest_first)[0]
+        hit = (down or speaking)[0]
         source = hit.get("_source") or {}
         duration = _dig(source, "monitor.duration.us")
         error = _dig(source, "error.message") or ""

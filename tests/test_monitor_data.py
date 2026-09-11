@@ -17,6 +17,8 @@ cannot tell a query that asks per location from one that does not.
 import dataclasses
 import datetime as dt
 import fnmatch
+import html
+import json
 import os
 import re
 import sys
@@ -447,6 +449,24 @@ class TheHeaderIsTheWholeWindowTest(_PageCase):
             found[label] = match.group(1) if match else None
         return found
 
+    def _hints(self, page):
+        """The line under each card, card by card.
+
+        Both percentile cards carry the same sentence, so asserting that it
+        appears somewhere on the page leaves either of them free to lose it —
+        and the Median card losing it is the whole difference between a figure
+        that happened and one the cluster estimated.
+        """
+        found = {}
+        for card in page.split("Response time")[0].split(
+                'class="col-6 col-md-3"')[1:]:
+            label = re.search(r'letter-spacing:1px">([^<]+)</div>', card)
+            hint = re.search(r'font-size:.7rem">([^<]*)</small>', card)
+            if label:
+                found[label.group(1).strip()] = (hint.group(1).strip()
+                                                 if hint else None)
+        return found
+
     def test_the_adapter_counts_the_whole_window(self):
         source = ElasticsearchMonitorSource(
             HeartbeatCluster(_day_of_checks()), name="lab")
@@ -476,8 +496,13 @@ class TheHeaderIsTheWholeWindowTest(_PageCase):
             "Slowest": "30000.0"})
         self.assertSays(page, "1,440 check(s), <span class=\"text-danger\">"
                               "940 failed")
-        # And the two estimated figures say they are estimates.
-        self.assertSays(page, "estimated by the source")
+        # And the two estimated figures say they are estimates — each of
+        # them, on its own card.
+        self.assertEqual(self._hints(page), {
+            "Availability": "of checks that answered",
+            "Median": "estimated by the source",
+            "p95": "estimated by the source",
+            "Slowest": "over this window"})
 
     def test_the_same_through_the_fan_out(self):
         """The default deployment: Elasticsearch plus the agents' store."""
@@ -498,6 +523,11 @@ class TheHeaderIsTheWholeWindowTest(_PageCase):
         self.assertEqual(self._header(page)["Availability"], "75.0")
         self.assertDoesNotSay(page, "estimated by the source")
         self.assertDoesNotSay(page.split("Response time")[0], "newest")
+        self.assertEqual(self._hints(page), {
+            "Availability": "of checks that answered",
+            "Median": "typical response",
+            "p95": "nearest-rank, a real observation",
+            "Slowest": "over this window"})
 
     def _two_places(self, documents):
         for number, document in enumerate(documents):
@@ -672,6 +702,38 @@ class SeveralLocationsTest(unittest.TestCase):
                       status=DOWN, location=None, error="timed out"),
             heartbeat("api", self.now - dt.timedelta(seconds=30),
                       status=UP, location="lab-frankfurt")]
+        monitor = self._page(documents).monitors[0]
+        self.assertEqual(monitor.status, DOWN)
+        self.assertIn("timed out", monitor.error)
+
+    def test_a_place_named_without_a_geography(self):
+        """Fleet-managed synthetics stamp `observer.geo.name`; a self-managed
+        Heartbeat that somebody named writes `observer.name` and no geography.
+        `_location()` reads the second where there is no first — the By
+        location card, the history rows and the "down from" sentence all show
+        what it returns — so the listing has to group by it too. Grouped by
+        the geography alone, every named probe fell into the single "missing"
+        bucket and the row went back to being whichever of them reported
+        last: down, up, down, up, with one of them broken throughout."""
+        for dublin_newer in (True, False):
+            documents = self._pair(dublin_newer)
+            for document in documents:
+                document["observer"].pop("geo")
+            monitor = self._page(documents).monitors[0]
+            self.assertEqual(monitor.status, DOWN,
+                             f"dublin newer: {dublin_newer}")
+            self.assertIn("lab-dublin", monitor.error)
+            self.assertIn("received status code 500", monitor.error)
+
+    def test_a_geography_a_name_and_neither_are_three_places(self):
+        documents = [
+            heartbeat("api", self.now - dt.timedelta(seconds=30),
+                      location="lab-frankfurt"),
+            heartbeat("api", self.now - dt.timedelta(seconds=40),
+                      location="lab-oslo"),
+            heartbeat("api", self.now - dt.timedelta(seconds=50),
+                      status=DOWN, location=None, error="timed out")]
+        documents[1]["observer"].pop("geo")
         monitor = self._page(documents).monitors[0]
         self.assertEqual(monitor.status, DOWN)
         self.assertIn("timed out", monitor.error)
@@ -1034,6 +1096,31 @@ class AFailureIsNotAQuietWindowTest(_PageCase):
         self.assertSays(page.split("Response time")[0],
                         "the steps of these runs could not be read")
 
+    def test_a_member_that_failed_only_on_the_page_query_is_named(self):
+        """A page of checks is a second, narrower query once the window holds
+        more than a source returns. The window read can succeed and that one
+        fail — a shard that went away between them — and the page said
+        nothing: the route reads the warnings off the rows it was handed, and
+        `reversed()` had turned them into a plain list on the way."""
+        def the_page_query_fails(body):
+            if body.get("size") == 25 and not body.get("aggs"):
+                return ConnectionError("shard failure")
+            return None
+
+        now = _now()
+        checks = [heartbeat("api", now - dt.timedelta(seconds=30 * n))
+                  for n in range(600)]
+        healthy = ElasticsearchMonitorSource(HeartbeatCluster(checks),
+                                             name="ok")
+        flaky = ElasticsearchMonitorSource(
+            HeartbeatCluster(checks, fail=the_page_query_fails),
+            name="es-mon")
+        self.use(healthy, flaky)
+        page = self.text("/monitors/api?window=24h")
+        top = page.split("Response time")[0]
+        self.assertSays(top, "This page is incomplete")
+        self.assertSays(top, "es-mon: shard failure")
+
     def test_a_listing_that_failed_is_not_a_monitor_that_did_not_report(self):
         self.use(self._es(_unreachable))
         response = self.client.get("/monitors/api?source=es-mon&window=1h")
@@ -1148,3 +1235,405 @@ class AnUnknownSourceIsSaidTest(_PageCase):
             self.client.get("/monitors?source=lab").status_code, 200)
         self.assertEqual(
             self.client.get("/monitors/a?source=lab").status_code, 200)
+
+
+# ---------------------------------------------------------------------------
+# the chart two members share, at the resolution the page asks for
+# ---------------------------------------------------------------------------
+
+class TheMergedChartIsDrawnAtTheRouteResolutionTest(_PageCase):
+    """Two members that both measured the monitor, on a short window.
+
+    Elasticsearch will not bucket below 30 s and the route asks for 120 points
+    however short the window is. Merged onto 120 equal spans of a quarter of
+    an hour — 7.5 s each — every bucket landed in every fourth cell, so no two
+    values were ever side by side. Both datasets are drawn with spanGaps:false
+    and pointRadius:0, on purpose: a gap means the agent stopped. The card
+    rendered with its axes, no line and no point in it, under a header saying
+    116 check(s).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.window = TimeWindow.of("15m")
+        now = _now()
+        self.dublin = [heartbeat("m", now - dt.timedelta(seconds=15 * n + 3),
+                                 location="lab-dublin") for n in range(58)]
+        self.oslo = [heartbeat("m", now - dt.timedelta(seconds=15 * n + 9),
+                               location="lab-oslo") for n in range(58)]
+        self.a = ElasticsearchMonitorSource(HeartbeatCluster(self.dublin),
+                                            name="a")
+        self.b = ElasticsearchMonitorSource(HeartbeatCluster(self.oslo),
+                                            name="b")
+        self.fanout = FanOutMonitorSource([self.a, self.b])
+
+    @staticmethod
+    def _drawable(values):
+        """Line segments Chart.js can draw: two values side by side."""
+        return sum(1 for n in range(len(values) - 1)
+                   if values[n] is not None and values[n + 1] is not None)
+
+    def _merged(self):
+        # No `points`: 120 is what the route asks for, and asking for fewer
+        # here is asking at the one resolution where this cannot happen.
+        return self.fanout.series("m", self.window, SCOPE)
+
+    def test_the_grid_is_no_finer_than_the_members_own_buckets(self):
+        merged = self._merged()
+        own = self.a.series("m", self.window, SCOPE)
+        steps = {(later.timestamp - earlier.timestamp).total_seconds()
+                 for earlier, later in zip(merged, merged[1:])}
+        theirs = {(later.timestamp - earlier.timestamp).total_seconds()
+                  for earlier, later in zip(own, own[1:])}
+        self.assertEqual(steps, {30.0}, "the merge invented a finer clock")
+        self.assertEqual(steps, theirs)
+
+    def test_no_check_is_lost_or_counted_twice(self):
+        self.assertEqual(sum(p.checks for p in self._merged()),
+                         len(self.dublin) + len(self.oslo))
+
+    def test_the_line_can_be_drawn(self):
+        from wdash.api.monitor_routes import response_chart
+        chart = response_chart(self._merged())
+        self.assertIsNotNone(chart)
+        drawn = self._drawable(chart["average"])
+        self.assertGreater(drawn, 20,
+                           f"only {drawn} segments Chart.js could draw")
+
+    def test_the_page_draws_it(self):
+        self.use(self.a, self.b)
+        page = self.text("/monitors/m?window=15m")
+        found = re.search(r'id="chartData"> (.*?) </script>', page)
+        self.assertIsNotNone(found, "no chart on the page")
+        data = json.loads(html.unescape(found.group(1)))
+        self.assertGreater(self._drawable(data["average"]), 20)
+        self.assertGreater(self._drawable(data["worst"]), 20)
+        self.assertSays(page, "116 check(s)")
+
+    class _Gapped:
+        """A member that answers with only the buckets holding a check.
+
+        Both members here send back their empty buckets — `min_doc_count: 0`,
+        because a gap is an agent that stopped and the line must break there —
+        but nothing in the interface obliges a source to. What that leaves is
+        a series whose steps are MULTIPLES of its own bucket width.
+        """
+
+        name = "gapped"
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def series(self, monitor_id, window, scope, points=120):
+            return [point for point
+                    in self._inner.series(monitor_id, window, scope,
+                                          points=points) if point.checks]
+
+        def health(self):
+            return True, "ok"
+
+        def containers(self, scope):
+            return []
+
+    def test_a_member_that_drops_its_empty_buckets_does_not_coarsen_it(self):
+        """The width is the smallest step a member took, not the largest: a
+        five-minute gap where one place reported nothing is not a five-minute
+        bucket, and drawing the other place's checks at that resolution would
+        throw away nine tenths of them."""
+        quiet = [heartbeat("m", _now() - dt.timedelta(seconds=15 * n + 9),
+                           location="lab-oslo")
+                 for n in list(range(10)) + list(range(30, 58))]
+        merged = FanOutMonitorSource([
+            self.a, self._Gapped(ElasticsearchMonitorSource(
+                HeartbeatCluster(quiet), name="quiet"))]).series(
+                    "m", self.window, SCOPE)
+        steps = {(later.timestamp - earlier.timestamp).total_seconds()
+                 for earlier, later in zip(merged, merged[1:])}
+        self.assertEqual(steps, {30.0})
+        self.assertEqual(sum(p.checks for p in merged),
+                         len(self.dublin) + len(quiet))
+
+    def test_one_member_is_still_its_own_series(self):
+        """The grid is for merging. One member that measured it keeps its own
+        buckets, at whatever resolution it chose."""
+        own = self.a.series("m", self.window, SCOPE)
+        alone = FanOutMonitorSource([self.a, self.store_source()]).series(
+            "m", self.window, SCOPE)
+        self.assertEqual([(p.timestamp, p.checks) for p in alone],
+                         [(p.timestamp, p.checks) for p in own])
+
+
+# ---------------------------------------------------------------------------
+# places the listing could not read, and places that stopped reporting
+# ---------------------------------------------------------------------------
+
+class PlacesPastTheCapAreSaidTest(_PageCase):
+    """A monitor checked from more places than one terms aggregation returns.
+
+    The cap is 25, and what a terms aggregation cannot hold it drops without
+    saying which. A monitor run from thirty places lost five of them, and when
+    a dropped one was the place that was down the row read up — no error, no
+    note, nothing partial: the same missed outage the per-place aggregation
+    exists to stop.
+    """
+
+    def _thirty_places(self):
+        from wdash.hub.adapters import es_monitors
+        now = _now()
+        places = [f"place-{n:02d}"
+                  for n in range(es_monitors.MAX_LOCATIONS + 5)]
+        documents = [heartbeat("api", now - dt.timedelta(seconds=30),
+                               location=place) for place in places[:-1]]
+        # Last by name, so the terms aggregation drops exactly this one.
+        documents.append(heartbeat(
+            "api", now - dt.timedelta(seconds=30), status=DOWN,
+            location=places[-1], error="received status code 500"))
+        return documents
+
+    def _source(self, documents):
+        return ElasticsearchMonitorSource(HeartbeatCluster(documents),
+                                          name="lab")
+
+    def test_the_listing_says_a_place_was_not_read(self):
+        from wdash.hub.adapters import es_monitors
+        page = self._source(self._thirty_places()).monitors(
+            TimeWindow.of("1h"), SCOPE)
+        self.assertTrue(
+            any(f"more than {es_monitors.MAX_LOCATIONS} places" in warning
+                and "'api'" in warning for warning in page.warnings),
+            page.warnings)
+
+    def test_a_monitor_inside_the_cap_says_nothing(self):
+        now = _now()
+        page = self._source(
+            [heartbeat("api", now - dt.timedelta(seconds=30),
+                       location=f"place-{n}") for n in range(5)]).monitors(
+                           TimeWindow.of("1h"), SCOPE)
+        self.assertEqual(page.warnings, ())
+
+    def test_the_note_reaches_the_page(self):
+        self.use(self._source(self._thirty_places()))
+        page = self.text("/monitors?window=1h")
+        self.assertSays(page, "places check")
+        self.assertSays(page, "what the rest reported is missing from the row")
+
+
+class APlaceThatStoppedReportingTest(unittest.TestCase):
+    """Worst-of across places, and a probe that went away.
+
+    A place that is removed, restarted or renamed leaves its last check
+    behind. Taken as the monitor's state now, a down one held the row down for
+    as long as it stayed in the window — and the row shown was that check: its
+    time, its duration and its error, while another place had been answering
+    up every thirty seconds. The alert runner's window is an hour, so a
+    monitor_down rule at threshold three fired on a healthy endpoint for most
+    of one.
+    """
+
+    def setUp(self):
+        self.now = _now()
+        self.window = TimeWindow.of("1h")
+
+    def _row(self, documents):
+        source = ElasticsearchMonitorSource(HeartbeatCluster(documents),
+                                            name="lab")
+        return source.monitors(self.window, SCOPE).monitors[0]
+
+    def _live_frankfurt(self):
+        """Every thirty seconds, all up, across the window."""
+        return [heartbeat("api", self.now - dt.timedelta(seconds=30 * n),
+                          schedule=30) for n in range(1, 100)]
+
+    def _dublin(self, minutes_ago):
+        """One check, down, on a one-minute schedule."""
+        return heartbeat("api", self.now - dt.timedelta(minutes=minutes_ago),
+                         status=DOWN, location="lab-dublin",
+                         error="connection refused", schedule=60)
+
+    def test_a_place_that_has_stopped_does_not_hold_the_monitor_down(self):
+        row = self._row([self._dublin(50)] + self._live_frankfurt())
+        self.assertEqual(row.status, UP)
+        self.assertEqual(row.error, "")
+        # And the row is the live place's check, not the fifty-minute-old one.
+        self.assertLess((self.now - row.checked_at).total_seconds(), 90)
+
+    def test_a_place_that_has_only_just_missed_a_check_still_counts(self):
+        """One missed check is a restart or a slow run, not a probe that has
+        gone. Five of its own intervals is still reporting, and a down check
+        there is still the monitor being down."""
+        row = self._row([self._dublin(5)] + self._live_frankfurt())
+        self.assertEqual(row.status, DOWN)
+        self.assertIn("lab-dublin", row.error)
+        self.assertIn("connection refused", row.error)
+
+    def test_when_every_place_has_stopped_the_last_check_still_stands(self):
+        """Nobody is reporting, so the last thing anybody said is the best
+        there is. Dropping it would leave the row looking fine."""
+        row = self._row([self._dublin(50)])
+        self.assertEqual(row.status, DOWN)
+        self.assertIn("connection refused", row.error)
+
+    def test_a_check_that_does_not_say_its_schedule_is_not_called_stale(self):
+        """`monitor.timespan` is what the interval is measured from. An agent
+        that writes none has not said how often it checks, and guessing one
+        would drop a live place over a missing field."""
+        dublin = self._dublin(50)
+        dublin["monitor"].pop("timespan")
+        row = self._row([dublin] + self._live_frankfurt())
+        self.assertEqual(row.status, DOWN)
+
+    def test_no_alert_fires_on_the_endpoint_that_is_answering(self):
+        """End to end through the real rule evaluation: threshold three, four
+        passes while the live place keeps reporting up."""
+        from wdash.alerts.evaluate import Observation, evaluate
+        rule = {"threshold": 3, "repeat_minutes": 0}
+        previous, fired = {}, []
+        for turn in range(4):
+            row = self._row([self._dublin(50)] + self._live_frankfurt())
+            for decision in evaluate(rule, previous, [Observation(
+                    row.id, row.status == DOWN, row.error, row.name)],
+                    self.now + dt.timedelta(minutes=turn)):
+                previous[decision.subject] = decision.state
+                if decision.notify:
+                    fired.append(turn)
+        self.assertEqual(fired, [])
+        self.assertEqual(previous["api"].failures, 0)
+
+
+# ---------------------------------------------------------------------------
+# a deep page of a merge both members stop short of
+# ---------------------------------------------------------------------------
+
+class TwoMembersThatBothStopShortTest(_PageCase):
+    """Two clusters that each hold more checks of one monitor than
+    Elasticsearch will return to a single search.
+
+    Each member was asked for its own newest `offset + limit`, its ceiling cut
+    that at 500, and the page was sliced out of the 1,000 that came back: page
+    40 of a window holding 1,700 checks showed rows eleven hours older than
+    the range the pager named, and not one of its twenty-five belonged on it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        now = _now()
+        self.window = TimeWindow.of("24h")
+        # Uneven cadences on purpose. With the same cadence on both sides the
+        # halves of a page happen to line up and the defect hides.
+        self.dense = [heartbeat("m", now - dt.timedelta(seconds=20 * n),
+                                location="lab-dublin") for n in range(1000)]
+        self.sparse = [heartbeat("m", now - dt.timedelta(minutes=2 * n),
+                                 location="lab-oslo") for n in range(700)]
+        self.a = ElasticsearchMonitorSource(HeartbeatCluster(self.dense),
+                                            name="a")
+        self.b = ElasticsearchMonitorSource(HeartbeatCluster(self.sparse),
+                                            name="b")
+        self.fanout = FanOutMonitorSource([self.a, self.b])
+        self.newest_first = sorted(
+            (d["@timestamp"] for d in self.dense + self.sparse), reverse=True)
+
+    def _stamps(self, checks):
+        return list(reversed([_stamp(c.timestamp) for c in checks]))
+
+    def test_a_deep_page_is_that_page_of_the_merge(self):
+        page = self.fanout.history("m", self.window, SCOPE, offset=975,
+                                   limit=25)
+        self.assertEqual(page.total, 1700)
+        self.assertEqual(self._stamps(page), self.newest_first[975:1000])
+
+    def test_every_page_across_the_ceiling(self):
+        for offset in (0, 480, 975, 1200, 1675):
+            page = self.fanout.history("m", self.window, SCOPE, offset=offset,
+                                       limit=25)
+            self.assertEqual(self._stamps(page),
+                             self.newest_first[offset:offset + 25],
+                             f"offset {offset}")
+
+    def test_the_rows_are_the_rows_the_pager_names(self):
+        self.use(self.a, self.b)
+        deep = self.text("/monitors/m?window=24h&page=40").replace(
+            "&ndash;", "–")
+        self.assertSays(deep, "976–1000 of 1,700 checks")
+        body = deep.split("Recent checks")[1].split("<tbody>")[1]
+        stamps = re.findall(r'data-timestamp="([^"]+)"', body)
+        self.assertEqual(
+            [_stamp(dt.datetime.fromisoformat(s)) for s in stamps],
+            self.newest_first[975:1000])
+
+    def test_the_note_under_the_header_says_what_happened(self):
+        """The figures come from the rows in hand; the total does not. Both
+        members counted the rest — 1,700 is their own count, and it is what
+        the pager prints — so "did not count the rest" was the opposite of
+        what had happened."""
+        self.use(self.a, self.b)
+        page = self.text("/monitors/m?window=24h")
+        self.assertSays(page, "From the newest 1,000 of 1,700 checks in this "
+                              "window: the source returns no more at once, "
+                              "and the figures above are what those rows "
+                              "hold.")
+        self.assertDoesNotSay(page, "did not count the rest")
+
+    class _Trickle:
+        """A source that will not answer with more than five checks at once.
+
+        Not a shape any backend here has — it is the one the round cap is
+        for, and the only way to reach it without a query per round of a
+        million-row window.
+        """
+
+        name = "trickle"
+
+        def __init__(self, checks):
+            from wdash.hub.source import Capability
+            self._checks = list(checks)
+            self.capabilities = frozenset({Capability.MONITOR_LIST,
+                                           Capability.MONITOR_HISTORY})
+
+        def supports(self, capability):
+            return capability in self.capabilities
+
+        def monitors(self, window, scope, series=False):
+            return MonitorPage(monitors=[Monitor(id="m", name="m", status=UP,
+                                                 source=self.name)],
+                               sources=(self.name,))
+
+        def history(self, monitor_id, window, scope, offset=0, limit=None):
+            newest = list(reversed(self._checks))
+            size = min(5, limit if limit is not None else 5)
+            rows = _Counted(reversed(newest[int(offset):int(offset) + size]))
+            rows.total = len(self._checks)
+            return rows
+
+        def series(self, monitor_id, window, scope, points=120):
+            return []
+
+        def certificates(self, window, scope):
+            return []
+
+        def health(self):
+            return True, "ok"
+
+        def containers(self, scope):
+            return []
+
+    def _trickling(self):
+        checks = self.a.history("m", self.window, SCOPE)
+        return FanOutMonitorSource([self.a, self._Trickle(checks)])
+
+    def test_a_page_that_cannot_be_built_is_not_shown_as_rows(self):
+        """A member that trickles cannot be walked to a deep page inside the
+        cap on rounds. Rows under a range they do not belong to is the fault
+        being fixed here, and so is a table quietly missing what a member
+        could not reach."""
+        with self.assertRaises(Exception) as caught:
+            self._trickling().history("m", self.window, SCOPE, offset=900,
+                                      limit=25)
+        self.assertIn("could not be put in one order", str(caught.exception))
+
+    def test_and_the_page_says_so_where_the_rows_would_be(self):
+        self.use(self.a, self._Trickle(self.a.history("m", self.window,
+                                                      SCOPE)))
+        page = self.text("/monitors/m?window=24h&page=40")
+        self.assertDoesNotSay(page, "No check in this window")
+        self.assertSays(page, "The checks could not be read")
+        self.assertSays(page, "could not be put in one order")
