@@ -5,7 +5,7 @@ Platinum-only features such as document- and field-level security are out of
 scope — WDash's RBAC has to live in the application layer regardless.
 """
 
-from ..models import Finding, Severity, rule
+from ..models import Finding, NotEvaluated, Severity, rule
 
 CATEGORY = "security"
 
@@ -29,10 +29,11 @@ def _is_true(value):
     return str(value).lower() == "true"
 
 
-@rule(id="SEC001", category=CATEGORY, title="Cluster authentication")
+@rule(id="SEC001", category=CATEGORY, title="Cluster authentication",
+      needs=("nodes_info",))
 def security_disabled(snap):
     disabled = []
-    for node_id, info, _ in snap.nodes():
+    for node_id, info in snap.node_infos():
         value = _node_setting(info, "xpack.security.enabled")
         # Security is on by default in ES 8; treat an absent setting as enabled
         if value is not None and not _is_true(value):
@@ -58,12 +59,12 @@ def security_disabled(snap):
     )
 
 
-@rule(id="SEC002", category=CATEGORY, title="Transport TLS")
+@rule(id="SEC002", category=CATEGORY, title="Transport TLS", needs=("nodes_info",))
 def transport_tls_disabled(snap):
     # If security is off entirely, SEC001 already reports a stronger finding
     any_security = False
     insecure = []
-    for node_id, info, _ in snap.nodes():
+    for node_id, info in snap.node_infos():
         enabled = _node_setting(info, "xpack.security.enabled")
         if enabled is not None and not _is_true(enabled):
             continue
@@ -87,16 +88,16 @@ def transport_tls_disabled(snap):
     )
 
 
-@rule(id="SEC003", category=CATEGORY, title="Snapshot repository")
+@rule(id="SEC003", category=CATEGORY, title="Snapshot repository",
+      needs=("snapshot_repositories", "nodes_info"))
 def no_snapshot_repository(snap):
-    if "snapshot_repositories" in snap.errors:
-        return
     if snap.snapshot_repositories:
         return
-    # Absence of data is not absence of the thing: if the cluster was never
-    # reached, do not claim there is no repository.
+    # Absence of data is not absence of the thing: an empty answer from a
+    # cluster that listed no nodes either is not one that was reached.
     if not (snap.nodes_info or {}).get("nodes"):
-        return
+        raise NotEvaluated("_nodes/info listed no nodes, so the empty "
+                           "repository list is not known to be the cluster's")
 
     yield Finding(
         rule_id="SEC003", category=CATEGORY, severity=Severity.WARNING,
@@ -112,7 +113,8 @@ def no_snapshot_repository(snap):
     )
 
 
-@rule(id="SEC004", category=CATEGORY, title="Wildcard delete protection")
+@rule(id="SEC004", category=CATEGORY, title="Wildcard delete protection",
+      needs=("cluster_settings",))
 def destructive_requires_name(snap):
     value = snap.cluster_setting("action.destructive_requires_name")
     if value is None or _is_true(value):

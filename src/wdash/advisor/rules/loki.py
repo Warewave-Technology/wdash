@@ -11,10 +11,22 @@ limits low enough to drop logs during the incident you are trying to read
 about.
 """
 
-from ..models import Finding, Severity, rule
+from ..models import Finding, NotEvaluated, Severity, rule
 
 LOKI = ("loki",)
 DOCS = "https://grafana.com/docs/loki/latest/operations/storage/retention/"
+#: Every rule here reads `/config`.
+CONFIG = ("config",)
+
+
+def _setting(snapshot, path):
+    """A setting from `/config`, which lists the whole effective
+    configuration — so one that is not there could not be read, and the
+    rule has no verdict. It used to pass."""
+    value = snapshot.setting(path)
+    if value is None:
+        raise NotEvaluated(f"{path} is not in /config")
+    return value
 
 
 def _duration_seconds(value):
@@ -46,7 +58,8 @@ def _duration_seconds(value):
     return total
 
 
-@rule("LOKI001", "retention", "Retention is configured", backends=LOKI)
+@rule("LOKI001", "retention", "Retention is configured", backends=LOKI,
+      needs=CONFIG)
 def retention_is_set(snapshot):
     """`retention_period: 0s` means Loki never deletes anything.
 
@@ -54,10 +67,11 @@ def retention_is_set(snapshot):
     bill and then into an outage when the volume fills. Nothing warns about
     it, because from Loki's point of view it is working perfectly.
     """
-    value = snapshot.setting("limits_config.retention_period")
-    if value is None:
-        return
+    value = _setting(snapshot, "limits_config.retention_period")
     seconds = _duration_seconds(value)
+    if seconds is None:
+        raise NotEvaluated(f"limits_config.retention_period = {value!r} is not "
+                           f"a duration this rule can read")
     if seconds == 0:
         yield Finding(
             rule_id="LOKI001", category="retention",
@@ -74,19 +88,23 @@ def retention_is_set(snapshot):
             targets=[snapshot.source_name], docs_url=DOCS)
 
 
-@rule("LOKI002", "retention", "The compactor applies retention", backends=LOKI)
+@rule("LOKI002", "retention", "The compactor applies retention", backends=LOKI,
+      needs=CONFIG)
 def compactor_retention_enabled(snapshot):
     """A retention period with `retention_enabled: false` deletes nothing.
 
     Two settings, and the one people set is not the one that does the work.
     The result looks configured and behaves exactly like no retention at all.
     """
-    enabled = snapshot.setting("compactor.retention_enabled")
-    if enabled is None:
+    enabled = _setting(snapshot, "compactor.retention_enabled")
+    if enabled:
         return
     period = _duration_seconds(
-        snapshot.setting("limits_config.retention_period"))
-    if not enabled and period:
+        _setting(snapshot, "limits_config.retention_period"))
+    if period is None:
+        raise NotEvaluated("limits_config.retention_period is not a duration "
+                           "this rule can read")
+    if period:
         yield Finding(
             rule_id="LOKI002", category="retention",
             severity=Severity.CRITICAL,
@@ -102,15 +120,15 @@ def compactor_retention_enabled(snapshot):
             targets=[snapshot.source_name], docs_url=DOCS)
 
 
-@rule("LOKI003", "ingestion", "Old samples are rejected", backends=LOKI)
+@rule("LOKI003", "ingestion", "Old samples are rejected", backends=LOKI,
+      needs=CONFIG)
 def rejects_old_samples(snapshot):
     """Accepting arbitrarily old lines corrupts every time-based query.
 
     A backfill or a clock-skewed host writes into the past, and the histogram
     somebody is reading gains volume that was not there a moment ago.
     """
-    value = snapshot.setting("limits_config.reject_old_samples")
-    if value is None or value:
+    if _setting(snapshot, "limits_config.reject_old_samples"):
         return
     yield Finding(
         rule_id="LOKI003", category="ingestion",
@@ -127,7 +145,7 @@ def rejects_old_samples(snapshot):
 
 
 @rule("LOKI004", "capacity", "The ingestion limit is not at its default",
-      backends=LOKI)
+      backends=LOKI, needs=CONFIG)
 def ingestion_rate_is_considered(snapshot):
     """4 MB/s per tenant is the packaged default, not a decision.
 
@@ -135,8 +153,8 @@ def ingestion_rate_is_considered(snapshot):
     incident is when volume spikes — so the data you most want is the data
     most likely to be missing.
     """
-    rate = snapshot.setting("limits_config.ingestion_rate_mb")
-    if rate is None or float(rate) != 4:
+    rate = _setting(snapshot, "limits_config.ingestion_rate_mb")
+    if float(rate) != 4:
         return
     yield Finding(
         rule_id="LOKI004", category="capacity",
@@ -156,12 +174,12 @@ def ingestion_rate_is_considered(snapshot):
 
 
 @rule("LOKI005", "reliability", "Data survives losing one ingester",
-      backends=LOKI)
+      backends=LOKI, needs=CONFIG)
 def replication_factor(snapshot):
     """A replication factor of 1 means an ingester restart loses whatever it
     was holding that had not been flushed."""
-    factor = snapshot.setting("common.replication_factor")
-    if factor is None or int(factor) > 1:
+    factor = _setting(snapshot, "common.replication_factor")
+    if int(factor) > 1:
         return
     yield Finding(
         rule_id="LOKI005", category="reliability",
@@ -177,16 +195,19 @@ def replication_factor(snapshot):
         targets=[snapshot.source_name])
 
 
-@rule("LOKI006", "security", "Multi-tenancy is on", backends=LOKI)
+@rule("LOKI006", "security", "Multi-tenancy is on", backends=LOKI, needs=CONFIG)
 def auth_enabled(snapshot):
     """With `auth_enabled: false` every write and read lands in one tenant.
 
     WDash enforces its own boundary in front, so this is not a hole in WDash —
     but anything else pointed at the same Loki sees everything, and the
     per-tenant limits above apply to the whole installation at once.
+
+    Loki writes this one with omitempty, so false is not in /config at all:
+    absent means off. Read as "not off", it passed on the lab's Loki, which
+    answers queries with no tenant.
     """
-    value = snapshot.setting("auth_enabled")
-    if value is None or value:
+    if snapshot.setting("auth_enabled", False):
         return
     yield Finding(
         rule_id="LOKI006", category="security",

@@ -13,7 +13,7 @@ a report that looks thorough while covering nothing is worse than a short one
 that admits its reach.
 """
 
-from ..models import Finding, Severity, rule
+from ..models import Finding, NotEvaluated, Severity, rule
 
 JAEGER = ("jaeger",)
 DOCS = "https://www.jaegertracing.io/docs/latest/deployment/"
@@ -23,7 +23,7 @@ CARDINALITY_LIMIT = 500
 
 
 @rule("JAEGER001", "cardinality", "The service list is a list of services",
-      backends=JAEGER)
+      backends=JAEGER, needs=("services",))
 def service_cardinality(snapshot):
     """Thousands of services means `service.name` is carrying something else.
 
@@ -34,7 +34,7 @@ def service_cardinality(snapshot):
     """
     services = snapshot.facts.get("services")
     if services is None:
-        return
+        raise NotEvaluated("/api/services was not read")
     count = len(services)
     if count <= CARDINALITY_LIMIT:
         return
@@ -55,7 +55,7 @@ def service_cardinality(snapshot):
 
 
 @rule("JAEGER002", "observability", "Service metrics are available",
-      backends=JAEGER)
+      backends=JAEGER, needs=("metrics",))
 def metrics_api(snapshot):
     """`/api/metrics/*` answers HTTP 501 without a metrics backend.
 
@@ -65,7 +65,9 @@ def metrics_api(snapshot):
     losing the counts.
     """
     status = snapshot.facts.get("metrics_api")
-    if status is None or status != 501:
+    if status is None:
+        raise NotEvaluated("/api/metrics/calls was not asked")
+    if status != 501:
         return
     yield Finding(
         rule_id="JAEGER002", category="observability",
@@ -83,7 +85,8 @@ def metrics_api(snapshot):
         targets=[snapshot.source_name], docs_url=DOCS)
 
 
-@rule("JAEGER003", "coverage", "What the Advisor can see here", backends=JAEGER)
+@rule("JAEGER003", "coverage", "What the Advisor can see here", backends=JAEGER,
+      needs=("services",))
 def limited_visibility(snapshot):
     """Always reported. Deliberately.
 
@@ -91,6 +94,9 @@ def limited_visibility(snapshot):
     fine". It is not the same statement as "there are three things anybody
     can check from here", and the difference matters to whoever is deciding
     whether the Advisor has looked.
+
+    Except when the query API itself did not answer: then nothing here could
+    be inspected, and the report says that instead.
     """
     yield Finding(
         rule_id="JAEGER003", category="coverage",

@@ -311,3 +311,134 @@ class DefaultSourceTest(unittest.TestCase):
         payload = self.client.get("/api/advisor/report").get_json()
         self.assertEqual(payload["error_type"], "no_cluster")
         self.assertIn("configuration page", payload["error"])
+
+
+class UnreadableClusterTest(unittest.TestCase):
+    """The real `analyze()`, against a cluster that answers nothing a rule
+    can use.
+
+    It rendered "No findings — All 31 rules passed against this cluster",
+    "31 rules passed" and a score of 100, with a small yellow banner as the
+    only hint. The JSON said the same: score 100, 31 passed, 13 collection
+    errors.
+    """
+
+    def setUp(self):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        from tests.support import serve_in_background
+
+        class Refusing(BaseHTTPRequestHandler):
+            """Every request 401, as with credentials that expired."""
+
+            def log_message(self, *_):
+                pass
+
+            def _answer(self):
+                body = b'{"error":{"type":"security_exception"},"status":401}'
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("X-Elastic-Product", "Elasticsearch")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_HEAD = do_POST = _answer
+
+        self.expired = serve_in_background(HTTPServer(("127.0.0.1", 0), Refusing))
+        import socket
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            self.closed_port = probe.getsockname()[1]
+        advisor_routes._cache.clear()
+
+    def tearDown(self):
+        self.expired.shutdown()
+        self.expired.server_close()
+        advisor_routes._cache.clear()
+
+    def client_for(self, url):
+        class Unreadable(TestConfig):
+            ELASTICSEARCH_URL = url
+
+        app = create_app(Unreadable)
+        client = app.test_client()
+        grant(app, ADMIN_SESSION["username"], ADMIN_SESSION["permissions"])
+        with client.session_transaction() as session:
+            session["user_data"] = ADMIN_SESSION
+            session["_user_id"] = ADMIN_SESSION["id"]
+        return client
+
+    def urls(self):
+        return {"refused": f"http://127.0.0.1:{self.closed_port}",
+                "expired credentials": f"http://127.0.0.1:{self.expired.server_address[1]}"}
+
+    def test_the_page_says_the_analysis_did_not_happen(self):
+        for label, url in self.urls().items():
+            with self.subTest(label):
+                body = self.client_for(url).get("/advisor").get_data(as_text=True)
+                self.assertNotIn("rules passed", body)
+                self.assertNotIn("No findings", body)
+                self.assertIn("Analysis unavailable", body)
+                self.assertIn("nodes_info", body, "what could not be collected")
+
+    def test_the_json_says_nothing_passed(self):
+        from wdash.advisor import all_rules
+
+        for label, url in self.urls().items():
+            with self.subTest(label):
+                payload = self.client_for(url).get("/api/advisor/report").get_json()
+                self.assertEqual(payload["passed"], [])
+                self.assertIsNone(payload["score"])
+                self.assertFalse(payload["complete"])
+                self.assertEqual(len(payload["not_evaluated"]),
+                                 len(all_rules("elasticsearch")))
+
+
+class PartialReportPageTest(unittest.TestCase):
+    """What the page says when some rules could and some could not look."""
+
+    setUpClass = AdvisorRouteTest.__dict__["setUpClass"]
+    login = AdvisorRouteTest.login
+    tearDown = AdvisorRouteTest.tearDown
+
+    def setUp(self):
+        AdvisorRouteTest.setUp(self)
+        self.login(ADMIN_SESSION)
+
+    def serve(self, report):
+        advisor_routes.analyze = lambda es, timeout=30: report
+        return self.client.get("/advisor").get_data(as_text=True)
+
+    def test_a_partial_report_does_not_claim_everything_passed(self):
+        snapshot = ClusterSnapshot.load(FIXTURE)
+        snapshot.nodes_info = {}
+        snapshot.errors["nodes_info"] = "ConnectionTimeout"
+        body = self.serve(run_rules(snapshot))
+        self.assertNotIn("rules passed against", body)
+        self.assertIn("could not be evaluated", body)
+        self.assertIn("SEC001", body)
+
+    def test_a_partial_report_without_findings_does_not_say_all_passed(self):
+        from wdash.advisor import all_rules
+
+        snapshot = ClusterSnapshot.load(FIXTURE)
+        report = run_rules(snapshot)
+        report.findings = []
+        report.not_evaluated = [("SEC001", "Cluster authentication",
+                                 "nodes_info could not be collected")]
+        body = self.serve(report)
+        self.assertNotIn(f"All {len(all_rules('elasticsearch'))} rules passed", body)
+        self.assertIn("No findings among", body)
+
+    def test_a_complete_clean_report_says_all_passed(self):
+        from wdash.advisor import all_rules
+        from wdash.advisor.models import Report
+
+        rules = all_rules("elasticsearch")
+        report = Report(taken_at="x", cluster_name="clean", version="8.19.9",
+                        distribution="elasticsearch",
+                        passed=[(r.id, r.title) for r in rules])
+        body = self.serve(report)
+        self.assertIn(f"All {len(rules)} rules passed against this cluster", body)
+        self.assertNotIn("Analysis unavailable", body)

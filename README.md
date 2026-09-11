@@ -516,6 +516,11 @@ PYTHONPATH=src python -m wdash.advisor --url http://localhost:9200
 PYTHONPATH=src python -m wdash.advisor --fail-on critical   # exit 1 on findings
 ```
 
+With `--fail-on` it exits 2 when it could not look at everything, and it
+exits 2 in any case when nothing could be evaluated. The cluster's
+certificate is checked, against `ELASTICSEARCH_CA_CERTS` when that is set;
+`ELASTICSEARCH_VERIFY_CERTS=false` or `--insecure` turns the check off.
+
 Two checks are specific to how WDash queries data:
 
 - **MAP001** flags fields that WDash aggregates on but that are mapped as

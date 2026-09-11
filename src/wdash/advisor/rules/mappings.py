@@ -10,8 +10,12 @@ DEFAULT_FIELD_LIMIT = 1000
 # Below this count, dynamic mapping is ordinary usage rather than a risk
 DYNAMIC_FIELD_THRESHOLD = 150
 
+#: Which indices there are, and their mappings.
+MAPPED = ("index_settings", "index_mappings")
 
-@rule(id="MAP001", category=CATEGORY, title="Aggregated fields are aggregatable")
+
+@rule(id="MAP001", category=CATEGORY, title="Aggregated fields are aggregatable",
+      needs=MAPPED)
 def aggregation_fields_not_aggregatable(snap):
     """Check the mapping of every field WDash runs a terms aggregation on.
 
@@ -72,7 +76,7 @@ def aggregation_fields_not_aggregatable(snap):
         )
 
 
-@rule(id="MAP002", category=CATEGORY, title="Unbounded dynamic mapping")
+@rule(id="MAP002", category=CATEGORY, title="Unbounded dynamic mapping", needs=MAPPED)
 def dynamic_mapping_explosion(snap):
     offenders = []
     for index in snap.user_indices():
@@ -107,7 +111,7 @@ def dynamic_mapping_explosion(snap):
     )
 
 
-@rule(id="MAP003", category=CATEGORY, title="Field count limit")
+@rule(id="MAP003", category=CATEGORY, title="Field count limit", needs=MAPPED)
 def field_limit(snap):
     warnings, criticals = [], []
 
@@ -147,7 +151,8 @@ def field_limit(snap):
         )
 
 
-@rule(id="MAP004", category=CATEGORY, title="Redundant .keyword on a large text field")
+@rule(id="MAP004", category=CATEGORY, title="Redundant .keyword on a large text field",
+      needs=MAPPED)
 def redundant_keyword_subfield(snap):
     offenders = []
     for index in snap.user_indices():
@@ -181,7 +186,7 @@ def redundant_keyword_subfield(snap):
     )
 
 
-@rule(id="MAP005", category=CATEGORY, title="Time field")
+@rule(id="MAP005", category=CATEGORY, title="Time field", needs=MAPPED)
 def timestamp_field(snap):
     missing, alternative = [], []
 

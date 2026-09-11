@@ -8,8 +8,12 @@ CATEGORY = "indices"
 LARGE_INDEX = 1 * GB
 COMPRESSION_WORTH_IT = 10 * GB
 
+#: Which indices there are and their settings, and how big each one is. An
+#: index whose size was not collected reads as 0 bytes.
+SIZED = ("index_settings", "indices_stats")
 
-@rule(id="IDX001", category=CATEGORY, title="Refresh interval")
+
+@rule(id="IDX001", category=CATEGORY, title="Refresh interval", needs=SIZED)
 def refresh_interval(snap):
     large, small = [], []
 
@@ -54,7 +58,10 @@ def refresh_interval(snap):
 
 
 @rule(id="IDX002", category=CATEGORY, title="Lifecycle policy",
-      distributions=("elasticsearch",))
+      distributions=("elasticsearch",),
+      # `info` because whether it applies depends on the distribution, and
+      # unread that defaults to Elasticsearch.
+      needs=("info", "index_settings"))
 def no_ilm_policy(snap):
     unmanaged = [index for index in snap.user_indices()
                  if not snap.index_setting(index, "index.lifecycle.name")]
@@ -77,7 +84,8 @@ def no_ilm_policy(snap):
     )
 
 
-@rule(id="IDX003", category=CATEGORY, title="Index sorting")
+@rule(id="IDX003", category=CATEGORY, title="Index sorting",
+      needs=("index_settings", "index_mappings"))
 def index_sorting(snap):
     unsorted_indices = []
     for index in snap.user_indices():
@@ -107,7 +115,7 @@ def index_sorting(snap):
     )
 
 
-@rule(id="IDX004", category=CATEGORY, title="Compression codec")
+@rule(id="IDX004", category=CATEGORY, title="Compression codec", needs=SIZED)
 def compression_codec(snap):
     candidates = []
     for index in snap.user_indices():
@@ -135,7 +143,7 @@ def compression_codec(snap):
     )
 
 
-@rule(id="IDX005", category=CATEGORY, title="Slow query log")
+@rule(id="IDX005", category=CATEGORY, title="Slow query log", needs=("index_settings",))
 def slowlog_not_configured(snap):
     indices = snap.user_indices()
     if not indices:

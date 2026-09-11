@@ -1,9 +1,14 @@
 """Shard design rules — the most common failure point in log clusters."""
 
-from ..models import Finding, Severity, rule
+from ..models import Finding, NotEvaluated, Severity, rule
 from ._util import GB, human_bytes
 
 CATEGORY = "shards"
+
+#: What a rule says when it has shards or indices to judge and no data node
+#: count to judge them against. Guessing one node told a three-node cluster
+#: its replicas could never be allocated.
+NO_DATA_NODES = "_nodes/info listed no data nodes, so there is no node count to judge by"
 
 # Elastic's own guidance: at most ~20 shards per GB of heap per node
 SHARDS_PER_GB_HEAP = 20
@@ -23,13 +28,16 @@ def _avg_heap_gb(snap):
     return sum(sizes) / len(sizes) / GB
 
 
-@rule(id="SHD001", category=CATEGORY, title="Shards per node")
+@rule(id="SHD001", category=CATEGORY, title="Shards per node",
+      needs=("cat_shards", "nodes_info", "nodes_stats"))
 def oversharding(snap):
     assigned = [s for s in snap.cat_shards if s.get("state") == "STARTED"]
     if not assigned:
         return
 
     data_nodes = snap.data_node_count
+    if not data_nodes:
+        raise NotEvaluated(NO_DATA_NODES)
     per_node = len(assigned) / data_nodes
     heap_gb = _avg_heap_gb(snap)
     if not heap_gb:
@@ -56,7 +64,7 @@ def oversharding(snap):
     )
 
 
-@rule(id="SHD002", category=CATEGORY, title="Oversized shard")
+@rule(id="SHD002", category=CATEGORY, title="Oversized shard", needs=("cat_shards",))
 def shard_too_large(snap):
     offenders = []
     for shard in snap.cat_shards:
@@ -86,7 +94,10 @@ def shard_too_large(snap):
     )
 
 
-@rule(id="SHD003", category=CATEGORY, title="Index split into more shards than its size warrants")
+@rule(id="SHD003", category=CATEGORY, title="Index split into more shards than its size warrants",
+      # Without the sizes every index reads as 0 bytes, and every
+      # multi-shard index as over-sharded.
+      needs=("index_settings", "indices_stats"))
 def over_sharded_index(snap):
     offenders = []
     for index in snap.user_indices():
@@ -122,12 +133,18 @@ def over_sharded_index(snap):
     )
 
 
-@rule(id="SHD004", category=CATEGORY, title="Replica configuration")
+@rule(id="SHD004", category=CATEGORY, title="Replica configuration",
+      needs=("index_settings", "nodes_info"))
 def replica_configuration(snap):
+    indices = snap.user_indices()
+    if not indices:
+        return
     data_nodes = snap.data_node_count
+    if not data_nodes:
+        raise NotEvaluated(NO_DATA_NODES)
     unassignable, unprotected = [], []
 
-    for index in snap.user_indices():
+    for index in indices:
         try:
             replicas = int(snap.index_setting(index, "index.number_of_replicas") or 0)
         except (TypeError, ValueError):
@@ -163,15 +180,20 @@ def replica_configuration(snap):
         )
 
 
-@rule(id="SHD005", category=CATEGORY, title="Cluster shard limit")
+@rule(id="SHD005", category=CATEGORY, title="Cluster shard limit",
+      needs=("cluster_settings", "cat_shards", "nodes_info"))
 def approaching_shard_limit(snap):
     try:
         per_node_limit = int(snap.cluster_setting("cluster.max_shards_per_node", 1000))
     except (TypeError, ValueError):
         per_node_limit = 1000
 
-    total_limit = per_node_limit * snap.data_node_count
     open_shards = len([s for s in snap.cat_shards if s.get("state") in ("STARTED", "INITIALIZING")])
+    if not open_shards:
+        return
+    if not snap.data_node_count:
+        raise NotEvaluated(NO_DATA_NODES)
+    total_limit = per_node_limit * snap.data_node_count
     if not total_limit:
         return
 

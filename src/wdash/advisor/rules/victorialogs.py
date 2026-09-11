@@ -5,12 +5,17 @@ VictoriaLogs checks.
 default. That shape is what these rules are mostly about: an absent flag means
 "left at the packaged default", and for retention and disk usage the default
 is the thing worth knowing.
+
+Which is also why they need `/flags` to have answered: absence is the
+finding, and a page that could not be read is nothing but absence. They
+reported "no authentication" from a server that had just answered 401.
 """
 
-from ..models import Finding, Severity, rule
+from ..models import Finding, NotEvaluated, Severity, rule
 
 VL = ("victorialogs",)
 DOCS = "https://docs.victoriametrics.com/victorialogs/"
+FLAGS = ("flags",)
 
 #: What VictoriaLogs uses when `-retentionPeriod` is not given.
 DEFAULT_RETENTION = "7d"
@@ -30,7 +35,7 @@ def _days(value):
 
 
 @rule("VL001", "retention", "Retention is chosen rather than inherited",
-      backends=VL)
+      backends=VL, needs=FLAGS)
 def retention_is_explicit(snapshot):
     """The default is one month, and it is silent.
 
@@ -55,7 +60,7 @@ def retention_is_explicit(snapshot):
         targets=[snapshot.source_name], docs_url=DOCS)
 
 
-@rule("VL002", "capacity", "Disk usage is bounded", backends=VL)
+@rule("VL002", "capacity", "Disk usage is bounded", backends=VL, needs=FLAGS)
 def disk_usage_is_bounded(snapshot):
     """Without `-storage.maxDiskSpaceUsageBytes`, VictoriaLogs will use the
     whole volume and stop when it is full.
@@ -84,12 +89,13 @@ def disk_usage_is_bounded(snapshot):
         targets=[snapshot.source_name], docs_url=DOCS)
 
 
-@rule("VL003", "capacity", "Free disk space is healthy", backends=VL)
+@rule("VL003", "capacity", "Free disk space is healthy", backends=VL,
+      needs=("metrics",))
 def free_disk_space(snapshot):
     """Below a few gigabytes, VictoriaLogs stops accepting writes."""
     free = snapshot.facts.get("vl_free_disk_space_bytes")
     if not isinstance(free, (int, float)):
-        return
+        raise NotEvaluated("/metrics has no vl_free_disk_space_bytes")
     gigabytes = free / 1e9
     if gigabytes >= 10:
         return
@@ -109,7 +115,8 @@ def free_disk_space(snapshot):
         targets=[snapshot.source_name], docs_url=DOCS)
 
 
-@rule("VL004", "security", "Read and write paths are protected", backends=VL)
+@rule("VL004", "security", "Read and write paths are protected", backends=VL,
+      needs=FLAGS)
 def authentication(snapshot):
     """VictoriaLogs has no built-in authentication.
 

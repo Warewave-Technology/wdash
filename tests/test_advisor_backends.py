@@ -140,6 +140,10 @@ def _passed(report):
     return {rule_id for rule_id, _ in report.passed}
 
 
+def _not_evaluated(report):
+    return {entry[0] for entry in report.not_evaluated}
+
+
 class RegistryTest(unittest.TestCase):
     """A rule must not run where its concepts do not exist."""
 
@@ -259,10 +263,16 @@ class LokiRuleTest(unittest.TestCase):
     def test_an_unreadable_duration_does_not_become_a_finding(self):
         """A format the parser does not know must skip, not be read as zero —
         that turns an unrecognised value into advice about a setting that is
-        perfectly fine."""
+        perfectly fine. Nor as a pass: "Retention is configured", about a
+        value nobody could read, is the same mistake the other way round."""
         report = self.report(LOKI_CONFIG.replace("retention_period: 0s",
                                                  "retention_period: forever"))
-        self.assertIn("LOKI001", _passed(report))
+        self.assertNotIn("LOKI001", _findings(report))
+        self.assertNotIn("LOKI001", _passed(report))
+        self.assertIn("LOKI001", _not_evaluated(report))
+        # The compactor rule reads the same value: off, with a retention
+        # nobody can read, is not "nothing to enforce".
+        self.assertIn("LOKI002", _not_evaluated(report))
 
     def test_findings_carry_the_source_name(self):
         finding = _findings(self.report())["LOKI001"]
@@ -270,10 +280,28 @@ class LokiRuleTest(unittest.TestCase):
 
     def test_a_missing_setting_produces_no_finding(self):
         """Absent is not false. A rule that cannot see a setting must not
-        claim it is off."""
+        claim it is off — nor that it is on, which is what counting it as
+        passed said: "Retention is configured", about a /config that never
+        mentions retention."""
         report = self.report("auth_enabled: false\n")
         for rule_id in ("LOKI001", "LOKI002", "LOKI003", "LOKI004", "LOKI005"):
-            self.assertIn(rule_id, _passed(report), rule_id)
+            self.assertNotIn(rule_id, _findings(report), rule_id)
+            self.assertNotIn(rule_id, _passed(report), rule_id)
+            self.assertIn(rule_id, _not_evaluated(report), rule_id)
+
+    def test_loki_leaves_auth_enabled_out_when_it_is_false(self):
+        """Loki writes `auth_enabled` with omitempty, so false is not written
+        at all. Measured on the lab's Loki 3.1: /config goes `target`,
+        `http_prefix`, `ballast_bytes` with nothing between the first two,
+        and a query without X-Scope-OrgID is answered. LOKI006 passed there
+        as "Multi-tenancy is on"."""
+        report = self.report(LOKI_CONFIG.replace("auth_enabled: false\n", ""))
+        self.assertIn("LOKI006", _findings(report))
+
+    def test_multi_tenancy_that_is_on_passes(self):
+        report = self.report(LOKI_CONFIG.replace("auth_enabled: false",
+                                                 "auth_enabled: true"))
+        self.assertIn("LOKI006", _passed(report))
 
 
 class VictoriaLogsRuleTest(unittest.TestCase):
@@ -376,6 +404,39 @@ class TempoRuleTest(unittest.TestCase):
     def test_a_bounded_trace_size_passes(self):
         self.assertIn("TEMPO004", _passed(self.report()))
 
+    def test_tempo_leaves_multitenancy_out_when_it_is_false(self):
+        """omitempty, as in Loki. The lab's Tempo 2.6 has no
+        multitenancy_enabled in /status/config and answers a search with
+        no X-Scope-OrgID; TEMPO005 passed there as "Multi-tenancy is on"."""
+        report = self.report(TEMPO_CONFIG.replace("multitenancy_enabled: false\n", ""))
+        self.assertIn("TEMPO005", _findings(report))
+
+    def test_multi_tenancy_that_is_on_passes(self):
+        report = self.report(TEMPO_CONFIG.replace("multitenancy_enabled: false",
+                                                  "multitenancy_enabled: true"))
+        self.assertIn("TEMPO005", _passed(report))
+
+    def test_an_unreadable_retention_is_not_a_pass(self):
+        report = self.report(TEMPO_CONFIG.replace("block_retention: 168h0m0s",
+                                                  "block_retention: a week"))
+        self.assertNotIn("TEMPO002", _passed(report))
+        self.assertIn("TEMPO002", _not_evaluated(report))
+
+    def test_a_missing_setting_is_not_a_pass(self):
+        report = self.report("GET /status/config\n---\nmultitenancy_enabled: true\n")
+        for rule_id in ("TEMPO001", "TEMPO002", "TEMPO003", "TEMPO004"):
+            self.assertNotIn(rule_id, _findings(report), rule_id)
+            self.assertNotIn(rule_id, _passed(report), rule_id)
+            self.assertIn(rule_id, _not_evaluated(report), rule_id)
+
+    def test_a_version_page_without_a_version_is_a_failed_collection(self):
+        """It was stored as 'unknown' with no error, so the report named
+        nothing missing."""
+        session = tempo_http()
+        session.routes["/status/version"] = FakeResponse(text="GET /status/version\n")
+        snapshot = collect_tempo("http://tempo:3200", "lab-tempo", session=session)
+        self.assertIn("version", snapshot.errors)
+
 
 class JaegerRuleTest(unittest.TestCase):
     def report(self, services=("a", "b"), metrics_status=501):
@@ -436,6 +497,231 @@ class CollectionFailureTest(unittest.TestCase):
     def test_an_unknown_backend_collects_nothing(self):
         from wdash.advisor.backends import collect
         self.assertIsNone(collect("carrier-pigeon", "http://x", "name"))
+
+    def test_rules_with_nothing_to_read_have_not_passed(self):
+        """Quiet is not the same as passed: six Loki rules passing against a
+        /config that could not be read is a clean bill for a backend nobody
+        looked at."""
+        session = loki_http()
+        session.explode.add("/config")
+        report = run_rules(collect_loki("http://loki:3100", "lab-loki",
+                                        session=session))
+        self.assertEqual(report.passed, [])
+        self.assertEqual(_not_evaluated(report),
+                         {r.id for r in all_rules("loki")})
+        self.assertTrue(report.unavailable)
+
+    def test_a_tempo_without_its_config_passes_nothing(self):
+        session = tempo_http()
+        session.explode.add("/status/config")
+        report = run_rules(collect_tempo("http://tempo:3200", "lab-tempo",
+                                         session=session))
+        self.assertEqual(report.passed, [])
+        self.assertEqual(report.findings, [])
+
+    def test_a_jaeger_without_its_service_list_passes_nothing_about_it(self):
+        session = jaeger_http()
+        session.explode.add("/api/services")
+        report = run_rules(collect_jaeger("http://jaeger:16686", "lab-jaeger",
+                                          session=session))
+        self.assertNotIn("JAEGER001", _passed(report))
+        self.assertLessEqual({"JAEGER001", "JAEGER003"}, _not_evaluated(report))
+        self.assertIn("JAEGER002", _findings(report), "the metrics call still answered")
+
+    def test_a_jaeger_without_its_metrics_call_does_not_pass_it(self):
+        session = jaeger_http(metrics_status=200)
+        session.explode.add("/api/metrics/calls")
+        report = run_rules(collect_jaeger("http://jaeger:16686", "lab-jaeger",
+                                          session=session))
+        self.assertNotIn("JAEGER002", _passed(report))
+        self.assertIn("JAEGER002", _not_evaluated(report))
+
+    def test_jaeger_facts_nobody_collected_are_not_a_pass(self):
+        """A snapshot with no error recorded and nothing in it either: the
+        rules have to refuse on their own."""
+        report = run_rules(SourceSnapshot(backend="jaeger", source_name="x"))
+        self.assertLessEqual({"JAEGER001", "JAEGER002"}, _not_evaluated(report))
+        self.assertEqual({"JAEGER001", "JAEGER002"} & _passed(report), set())
+
+    def test_a_rule_needs_only_what_its_collector_records(self):
+        """A need nobody records is never missing: a check that never
+        fires. Every call refused, so every name a collector can write is
+        written."""
+        from wdash.advisor.backends import COLLECTORS
+
+        class Refusing:
+            def get(self, *_, **__):
+                raise OSError("connection refused")
+
+        for backend, collector in COLLECTORS.items():
+            recorded = set(collector("http://x", "x", session=Refusing()).errors)
+            for registered in all_rules(backend):
+                self.assertLessEqual(set(registered.needs), recorded,
+                                     f"{registered.id} needs {registered.needs}")
+
+
+class VictoriaLogsFlagsFailureTest(unittest.TestCase):
+    """VictoriaLogs' rules read an absent flag as the finding, so a /flags
+    that could not be read looked exactly like a VictoriaLogs started with
+    nothing set: VL001, VL002 and VL004, score 89 — including "no
+    authentication" from a server that had just answered 401.
+    """
+
+    def report(self, session):
+        return run_rules(collect_victorialogs("http://vl:9428", "lab-vl",
+                                              session=session))
+
+    def assert_nothing_invented(self, report):
+        self.assertIn("flags", report.collection_errors)
+        self.assertEqual({"VL001", "VL002", "VL004"} & set(_findings(report)), set())
+        self.assertLessEqual({"VL001", "VL002", "VL004"}, _not_evaluated(report))
+
+    def test_an_unreachable_flags_page_invents_nothing(self):
+        session = vl_http()
+        session.explode.add("/flags")
+        self.assert_nothing_invented(self.report(session))
+
+    def test_a_refused_flags_page_is_not_read_as_no_authentication(self):
+        session = vl_http()
+        session.routes["/flags"] = FakeResponse(text="Unauthorized", status_code=401)
+        self.assert_nothing_invented(self.report(session))
+
+    def test_the_disk_rule_still_runs_on_the_metrics(self):
+        session = vl_http()
+        session.explode.add("/flags")
+        self.assertIn("VL003", _passed(self.report(session)))
+
+    def test_without_metrics_the_disk_is_not_healthy_by_default(self):
+        session = vl_http()
+        session.explode.add("/metrics")
+        report = self.report(session)
+        self.assertNotIn("VL003", _passed(report))
+        self.assertIn("VL003", _not_evaluated(report))
+
+    def test_metrics_without_the_disk_gauge_are_not_a_healthy_disk(self):
+        report = self.report(vl_http(metrics='vm_app_version{short_version="v1.9.1"} 1\n'))
+        self.assertNotIn("VL003", _passed(report))
+        self.assertIn("VL003", _not_evaluated(report))
+
+
+#: Pages that answer 200 where a backend was expected: a sign-in page, a
+#: proxy's error page, an SSO front door.
+PAGES = {
+    "tiny": "<html><body>Sign in</body></html>",
+    "nginx502": ("<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n"
+                 "<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>nginx</center>\r\n"
+                 "</body>\r\n</html>\r\n"),
+    "oauth2proxy": ("<!DOCTYPE html>\n<html lang=\"en\" charset=\"utf-8\">\n<head>\n"
+                    "<title>Sign In</title>\n</head>\n<body>\n<section class=\"section\">\n"
+                    "<form method=\"GET\" action=\"/oauth2/start\">\n"
+                    "<button type=\"submit\">Sign in with OpenID Connect</button>\n"
+                    "</form>\n</section>\n</body>\n</html>\n"),
+}
+
+
+class PageNotBackendTest(unittest.TestCase):
+    """A source URL that answers 200 with a page rather than the backend.
+
+    Every collector accepted it. Tempo recorded no error and passed all five
+    rules; VictoriaLogs recorded no error and invented VL001, VL002 and
+    VL004; Loki's /config filtered the page out as "not a mapping", returned
+    {}, and passed six rules. A real server, answering text/html on every
+    path.
+    """
+
+    def setUp(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from tests.support import serve_in_background
+
+        page = self.page = {"body": ""}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                body = page["body"].encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = serve_in_background(ThreadingHTTPServer(("127.0.0.1", 0), Handler))
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def each_page(self, collector):
+        """(page, snapshot, report) for every page, collected for real."""
+        out = []
+        for label, body in PAGES.items():
+            self.page["body"] = body
+            snapshot = collector(self.url, "behind-a-proxy")
+            out.append((label, snapshot, run_rules(snapshot)))
+        return out
+
+    def test_loki(self):
+        for label, snapshot, report in self.each_page(collect_loki):
+            with self.subTest(page=label):
+                self.assertIn("config", snapshot.errors)
+                self.assertEqual(report.passed, [])
+
+    def test_tempo(self):
+        for label, snapshot, report in self.each_page(collect_tempo):
+            with self.subTest(page=label):
+                self.assertLessEqual({"config", "version"}, set(snapshot.errors))
+                self.assertEqual(report.passed, [])
+
+    def test_victorialogs(self):
+        for label, snapshot, report in self.each_page(collect_victorialogs):
+            with self.subTest(page=label):
+                self.assertLessEqual({"flags", "metrics"}, set(snapshot.errors))
+                self.assertEqual(report.findings, [])
+                self.assertEqual(report.passed, [])
+
+    def test_jaeger(self):
+        """Its metrics call records a status, and 200 read as "the metrics
+        API works"."""
+        for label, snapshot, report in self.each_page(collect_jaeger):
+            with self.subTest(page=label):
+                self.assertLessEqual({"services", "metrics"}, set(snapshot.errors))
+                self.assertEqual(report.passed, [])
+
+
+class PageWithoutContentTypeTest(unittest.TestCase):
+    """The same pages with no Content-Type to give them away: what the body
+    says has to be enough on its own."""
+
+    def test_a_page_is_not_a_loki_configuration(self):
+        for label, body in PAGES.items():
+            with self.subTest(page=label):
+                snapshot = collect_loki("http://loki:3100", "x",
+                                        session=loki_http(config=body))
+                self.assertIn("config", snapshot.errors)
+
+    def test_a_page_is_not_a_tempo_configuration(self):
+        for label, body in PAGES.items():
+            with self.subTest(page=label):
+                snapshot = collect_tempo("http://tempo:3200", "x",
+                                         session=tempo_http(config=body))
+                self.assertIn("config", snapshot.errors)
+
+    def test_a_page_is_not_a_list_of_flags(self):
+        for label, body in PAGES.items():
+            with self.subTest(page=label):
+                snapshot = collect_victorialogs("http://vl:9428", "x",
+                                                session=vl_http(flags=body))
+                self.assertIn("flags", snapshot.errors)
+
+    def test_an_empty_flags_page_is_a_victorialogs_with_nothing_set(self):
+        """/flags lists only what was set; nothing set is an empty body."""
+        snapshot = collect_victorialogs("http://vl:9428", "x",
+                                        session=vl_http(flags=""))
+        self.assertNotIn("flags", snapshot.errors)
 
 
 class SnapshotTest(unittest.TestCase):

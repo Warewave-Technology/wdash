@@ -48,6 +48,17 @@ class Finding:
         return d
 
 
+class NotEvaluated(Exception):
+    """Raised by a rule that cannot see what its verdict depends on.
+
+    A rule that simply returns has passed, and "passed" is a claim about the
+    cluster. When the input is missing, unreadable or not in a form the rule
+    understands, the honest outcome is neither a finding nor a pass: the
+    report files the rule under `not_evaluated`, with this message as the
+    reason. Raise it before yielding anything.
+    """
+
+
 @dataclass
 class Rule:
     id: str
@@ -65,6 +76,11 @@ class Rule:
     #: Loki, and running it there would produce a finding about a concept the
     #: operator does not have.
     backends: tuple = ("elasticsearch",)
+    #: The collected fields the verdict depends on, by the name `errors`
+    #: records a failure under. When one of them failed the rule is not run:
+    #: every rule reads an empty field as "nothing wrong here", so running it
+    #: turned "could not look" into "passed".
+    needs: tuple = ()
 
     def applies_to(self, snapshot):
         backend = getattr(snapshot, "backend", "elasticsearch")
@@ -88,10 +104,11 @@ _REGISTRY = []
 
 
 def rule(id, category, title, min_version=None, max_version=None,
-         distributions=None, backends=("elasticsearch",)):
+         distributions=None, backends=("elasticsearch",), needs=()):
     """Decorator that adds a rule function to the registry.
 
-    The decorated function takes a snapshot and yields Findings.
+    The decorated function takes a snapshot and yields Findings. `needs`
+    names the collected fields its verdict depends on.
     """
     def decorator(fn):
         _REGISTRY.append(Rule(
@@ -103,6 +120,7 @@ def rule(id, category, title, min_version=None, max_version=None,
             max_version=max_version,
             distributions=distributions,
             backends=tuple(backends),
+            needs=tuple(needs),
         ))
         return fn
     return decorator
@@ -140,7 +158,12 @@ class Report:
     backend: str = "elasticsearch"
     findings: list = field(default_factory=list)
     passed: list = field(default_factory=list)    # [(rule_id, title)]
+    #: Rules that do not apply here: another distribution or version.
     skipped: list = field(default_factory=list)   # [(rule_id, title, reason)]
+    #: Rules that apply and could not look: their input was not collected,
+    #: or was not in a form they can read. Kept apart from `skipped`, which
+    #: says nothing about this cluster; this says the report has a hole.
+    not_evaluated: list = field(default_factory=list)  # [(rule_id, title, reason)]
     errors: list = field(default_factory=list)    # [(rule_id, error)]
     collection_errors: dict = field(default_factory=dict)
 
@@ -152,12 +175,36 @@ class Report:
         return out
 
     @property
+    def evaluated(self):
+        """How many rules reached a verdict, a pass or a finding."""
+        return len(self.passed) + len({f.rule_id for f in self.findings})
+
+    @property
+    def complete(self):
+        """Everything was collected and every rule that applies looked.
+
+        Only a complete report may say "all rules passed"."""
+        return not (self.collection_errors or self.not_evaluated or self.errors)
+
+    @property
+    def unavailable(self):
+        """Nothing was evaluated, because nothing it needed arrived.
+
+        Not a report with no findings: a report of nothing."""
+        return self.evaluated == 0 and bool(self.collection_errors
+                                            or self.not_evaluated)
+
+    @property
     def score(self):
-        """Heuristic health score (0-100).
+        """Heuristic health score (0-100), or None when nothing was evaluated.
 
         Not a precise measure — it exists to track trends over time and compare
-        reports. Base decisions on the findings themselves.
+        reports. Base decisions on the findings themselves. None rather than
+        100 for a report of nothing: 100 is the score of a cluster with no
+        findings, and that is not what an unreachable cluster is.
         """
+        if self.unavailable:
+            return None
         penalty = sum({"critical": 15, "warning": 5, "info": 1}[f.severity.value]
                       for f in self.findings)
         return max(0, 100 - penalty)
@@ -171,10 +218,13 @@ class Report:
             "source": self.source,
             "backend": self.backend,
             "score": self.score,
+            "complete": self.complete,
             "counts": self.counts,
             "findings": [f.to_dict() for f in self.findings],
             "passed": [{"rule_id": r, "title": t} for r, t in self.passed],
             "skipped": [{"rule_id": r, "title": t, "reason": s} for r, t, s in self.skipped],
+            "not_evaluated": [{"rule_id": r, "title": t, "reason": s}
+                              for r, t, s in self.not_evaluated],
             "errors": [{"rule_id": r, "error": e} for r, e in self.errors],
             "collection_errors": self.collection_errors,
         }
@@ -185,8 +235,15 @@ def run_rules(snapshot):
 
     A single failing rule does not bring the report down; the error is recorded
     and execution continues. The Advisor itself must not become an outage.
+
+    A rule whose input was not collected is not run, and a rule that says it
+    cannot see what it needs (`NotEvaluated`) is not counted as passed. Both
+    land in `not_evaluated`: every rule reads an empty field as "nothing wrong
+    here", and a cluster that refused every call used to score 100 with all
+    31 rules passed.
     """
     backend = getattr(snapshot, "backend", "elasticsearch")
+    failed = getattr(snapshot, "errors", None) or {}
     report = Report(
         taken_at=snapshot.taken_at,
         cluster_name=snapshot.cluster_name,
@@ -210,8 +267,16 @@ def run_rules(snapshot):
         if not applicable:
             report.skipped.append((r.id, r.title, reason))
             continue
+        missing = [name for name in r.needs if name in failed]
+        if missing:
+            report.not_evaluated.append(
+                (r.id, r.title, f"{', '.join(missing)} could not be collected"))
+            continue
         try:
             found = list(r.check(snapshot) or [])
+        except NotEvaluated as exc:
+            report.not_evaluated.append((r.id, r.title, str(exc)))
+            continue
         except Exception as exc:
             report.errors.append((r.id, f"{type(exc).__name__}: {exc}"))
             continue

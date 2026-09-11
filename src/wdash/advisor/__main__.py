@@ -7,6 +7,17 @@ Run the Advisor from the command line.
 
 With --from-snapshot no live cluster is needed; the rules run against a saved
 snapshot. That is the fastest loop while developing rules.
+
+The exit status, for CI: 0 when there is nothing to report, 1 when --fail-on
+names a level and a finding at or above it exists, and 2 when the report
+cannot say — nothing could be evaluated, or with --fail-on, anything was not
+collected or not evaluated. A gate that passes when it could not look is not
+a gate.
+
+The cluster's certificate is checked, against ELASTICSEARCH_CA_CERTS when it
+is set; ELASTICSEARCH_VERIFY_CERTS=false or --insecure turns that off.
+ELASTICSEARCH_USERNAME and ELASTICSEARCH_PASSWORD go to the cluster, and
+without the check they go to whoever answers.
 """
 
 import argparse
@@ -55,10 +66,17 @@ def print_report(report, use_color=True, show_passed=False):
     print(paint(f"Elasticsearch Advisor — {report.cluster_name}", BOLD))
     print(f"  version    : {report.version} ({report.distribution})")
     print(f"  taken at   : {report.taken_at}")
-    print(f"  score      : {report.score}/100")
+    if report.score is None:
+        print(paint("  score      : n/a — nothing could be evaluated",
+                    COLORS[Severity.CRITICAL]))
+    else:
+        print(f"  score      : {report.score}/100")
     print(f"  findings   : {counts['critical']} critical, "
           f"{counts['warning']} warning, {counts['info']} info")
     print(f"  passed     : {len(report.passed)} rules")
+    if report.not_evaluated:
+        print(paint(f"  not evaluated: {len(report.not_evaluated)} rules",
+                    COLORS[Severity.WARNING]))
     if report.skipped:
         print(f"  skipped    : {len(report.skipped)} rules")
     if report.errors:
@@ -69,7 +87,14 @@ def print_report(report, use_color=True, show_passed=False):
     print()
 
     if not report.findings:
-        print("  No findings.")
+        if report.unavailable:
+            print("  Nothing could be evaluated: none of what the rules read "
+                  "was collected.")
+        elif report.complete:
+            print("  No findings.")
+        else:
+            print(f"  No findings among the {report.evaluated} rules that could "
+                  f"look. The rest could not; see below.")
         print()
 
     for finding in report.findings:
@@ -92,11 +117,74 @@ def print_report(report, use_color=True, show_passed=False):
             print(f"  [OK] {rule_id}  {title}")
         print()
 
+    if report.not_evaluated:
+        print(paint("Rules that could not be evaluated", BOLD))
+        for rule_id, title, reason in report.not_evaluated:
+            print(f"  {rule_id}  {title} — {reason}")
+        print()
+
     if report.errors:
         print(paint("Rules that failed to run", BOLD))
         for rule_id, error in report.errors:
             print(f"  {rule_id}: {error}")
         print()
+
+
+def _client_config(args, environ):
+    """What `ElasticsearchClient` reads, from the variables the web process
+    reads.
+
+    It hard-coded `verify_certs=False` and ignored ELASTICSEARCH_VERIFY_CERTS
+    and ELASTICSEARCH_CA_CERTS, so ELASTICSEARCH_PASSWORD went to any
+    certificate at all. Verification is on here unless one of them says
+    otherwise: the web process defaults to off so that an upgrade does not
+    cut a deployment off from its cluster, but this is run by hand or in CI,
+    where a refused certificate is a message, and a password sent to whoever
+    answered cannot be taken back.
+    """
+    written = (environ.get("ELASTICSEARCH_VERIFY_CERTS") or "").strip()
+    verify = written.lower() == "true" if written else True
+    return {
+        "ELASTICSEARCH_URL": args.url,
+        "ELASTICSEARCH_USERNAME": environ.get("ELASTICSEARCH_USERNAME"),
+        "ELASTICSEARCH_PASSWORD": environ.get("ELASTICSEARCH_PASSWORD"),
+        "ELASTICSEARCH_TIMEOUT": 30,
+        "ELASTICSEARCH_VERIFY_CERTS": verify and not args.insecure,
+        "ELASTICSEARCH_CA_CERTS": environ.get("ELASTICSEARCH_CA_CERTS") or None,
+    }
+
+
+def _explain(report, headline):
+    """Why the exit status is 2, on stderr so --json stays parseable."""
+    print(f"wdash.advisor: {headline}", file=sys.stderr)
+    for name, error in report.collection_errors.items():
+        print(f"  {name} was not collected: {error}", file=sys.stderr)
+    if report.not_evaluated:
+        print(f"  {len(report.not_evaluated)} rules could not be evaluated",
+              file=sys.stderr)
+    for rule_id, error in report.errors:
+        print(f"  {rule_id} failed to run: {error}", file=sys.stderr)
+    if any("CERTIFICATE_VERIFY_FAILED" in str(error)
+           for error in report.collection_errors.values()):
+        print("  The cluster's certificate is not trusted. Point "
+              "ELASTICSEARCH_CA_CERTS at the CA that signed it, or pass "
+              "--insecure to skip the check; the credentials then go to "
+              "whoever answers.", file=sys.stderr)
+
+
+def _exit_status(report, fail_on):
+    if report.unavailable:
+        _explain(report, "nothing could be evaluated")
+        return 2
+    if fail_on:
+        threshold = Severity(fail_on).weight
+        if any(f.severity.weight >= threshold for f in report.findings):
+            return 1
+        if not report.complete:
+            _explain(report, f"no finding at {fail_on} or above among the rules "
+                             f"that ran, but the report is incomplete")
+            return 2
+    return 0
 
 
 def main(argv=None):
@@ -111,27 +199,34 @@ def main(argv=None):
     parser.add_argument("--show-passed", action="store_true", help="also list passing rules")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--fail-on", choices=["critical", "warning", "info"],
-                        help="exit 1 when a finding at this level exists (for CI)")
+                        help="exit 1 when a finding at this level exists, and 2 "
+                             "when the report is incomplete (for CI)")
+    parser.add_argument("--insecure", action="store_true",
+                        help="do not check the cluster's certificate; the "
+                             "credentials then go to whoever answers")
     args = parser.parse_args(argv)
 
     if args.from_snapshot:
         snapshot = ClusterSnapshot.load(args.from_snapshot)
     else:
         try:
-            from elasticsearch import Elasticsearch
+            from ..logs.elasticsearch_client import ElasticsearchClient
         except ImportError:
             sys.exit("the elasticsearch library is required: "
                      "pip install 'elasticsearch>=8,<9'")
 
-        kwargs = {"hosts": [args.url], "verify_certs": False, "request_timeout": 30}
-        user = os.environ.get("ELASTICSEARCH_USERNAME")
-        password = os.environ.get("ELASTICSEARCH_PASSWORD")
-        if user and password:
-            kwargs["basic_auth"] = (user, password)
+        config = _client_config(args, os.environ)
+        if not config["ELASTICSEARCH_VERIFY_CERTS"]:
+            print("wdash.advisor: the cluster's certificate is not checked",
+                  file=sys.stderr)
         try:
-            snapshot = collect(Elasticsearch(**kwargs))
+            snapshot = collect(ElasticsearchClient(config).es)
         except Exception as exc:
-            sys.exit(f"could not collect a snapshot from {args.url}: {exc}")
+            # 2, not sys.exit's 1: that is the status for "findings", and a
+            # gate reading it would blame the cluster for a wrong URL.
+            print(f"could not collect a snapshot from {args.url}: {exc}",
+                  file=sys.stderr)
+            return 2
 
     if args.save_snapshot:
         snapshot.save(args.save_snapshot)
@@ -144,11 +239,7 @@ def main(argv=None):
     else:
         print_report(report, use_color=not args.no_color, show_passed=args.show_passed)
 
-    if args.fail_on:
-        threshold = Severity(args.fail_on).weight
-        if any(f.severity.weight >= threshold for f in report.findings):
-            return 1
-    return 0
+    return _exit_status(report, args.fail_on)
 
 
 if __name__ == "__main__":

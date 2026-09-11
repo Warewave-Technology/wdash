@@ -6,10 +6,21 @@ read the same values an operator would. The ones here are about durability and
 about the two features people expect Tempo to have and then find switched off.
 """
 
-from ..models import Finding, Severity, rule
+from ..models import Finding, NotEvaluated, Severity, rule
 
 TEMPO = ("tempo",)
 DOCS = "https://grafana.com/docs/tempo/latest/configuration/"
+#: Every rule here reads `/status/config`.
+CONFIG = ("config",)
+
+
+def _setting(snapshot, path):
+    """A setting from `/status/config`, the effective configuration: one that
+    is not there could not be read, and the rule has no verdict."""
+    value = snapshot.setting(path)
+    if value is None:
+        raise NotEvaluated(f"{path} is not in /status/config")
+    return value
 
 #: Backends that survive losing the machine. `local` does not, and it is what
 #: every getting-started configuration uses.
@@ -37,7 +48,7 @@ def _seconds(value):
 
 
 @rule("TEMPO001", "reliability", "Traces are stored somewhere durable",
-      backends=TEMPO)
+      backends=TEMPO, needs=CONFIG)
 def durable_storage(snapshot):
     """`backend: local` keeps blocks on the container's own disk.
 
@@ -46,8 +57,8 @@ def durable_storage(snapshot):
     scaled horizontally over it because the other replicas cannot see the
     blocks.
     """
-    backend = snapshot.setting("storage.trace.backend")
-    if backend is None or backend in DURABLE_BACKENDS:
+    backend = _setting(snapshot, "storage.trace.backend")
+    if backend in DURABLE_BACKENDS:
         return
     yield Finding(
         rule_id="TEMPO001", category="reliability",
@@ -63,14 +74,16 @@ def durable_storage(snapshot):
         targets=[snapshot.source_name], docs_url=DOCS)
 
 
-@rule("TEMPO002", "retention", "Block retention is set", backends=TEMPO)
+@rule("TEMPO002", "retention", "Block retention is set", backends=TEMPO,
+      needs=CONFIG)
 def retention_is_set(snapshot):
     """Zero means the compactor never deletes a block."""
-    value = snapshot.setting("compactor.compaction.block_retention")
-    if value is None:
-        return
+    value = _setting(snapshot, "compactor.compaction.block_retention")
     seconds = _seconds(value)
-    if seconds is None or seconds > 0:
+    if seconds is None:
+        raise NotEvaluated(f"compactor.compaction.block_retention = {value!r} "
+                           f"is not a duration this rule can read")
+    if seconds > 0:
         return
     yield Finding(
         rule_id="TEMPO002", category="retention",
@@ -85,7 +98,7 @@ def retention_is_set(snapshot):
 
 
 @rule("TEMPO003", "observability", "The metrics generator is running",
-      backends=TEMPO)
+      backends=TEMPO, needs=CONFIG)
 def metrics_generator(snapshot):
     """Without it there is no service graph and no span metrics.
 
@@ -94,9 +107,7 @@ def metrics_generator(snapshot):
     `remote_write` target exists to send the metrics to. Configured-looking
     and inert.
     """
-    processors = snapshot.setting("metrics_generator.processor")
-    if processors is None:
-        return
+    processors = _setting(snapshot, "metrics_generator.processor")
     remote_write = (snapshot.setting("metrics_generator.storage.remote_write")
                     or [])
     if remote_write:
@@ -118,7 +129,7 @@ def metrics_generator(snapshot):
 
 
 @rule("TEMPO004", "capacity", "A single trace cannot exhaust an ingester",
-      backends=TEMPO)
+      backends=TEMPO, needs=CONFIG)
 def max_bytes_per_trace(snapshot):
     """Zero means unlimited, and one runaway trace can then take Tempo down.
 
@@ -126,8 +137,8 @@ def max_bytes_per_trace(snapshot):
     spans. Held whole in an ingester, it is an out-of-memory kill rather than
     a rejected write.
     """
-    value = snapshot.setting("overrides.defaults.global.max_bytes_per_trace")
-    if value is None or int(value) > 0:
+    value = _setting(snapshot, "overrides.defaults.global.max_bytes_per_trace")
+    if int(value) > 0:
         return
     yield Finding(
         rule_id="TEMPO004", category="capacity",
@@ -146,11 +157,15 @@ def max_bytes_per_trace(snapshot):
         targets=[snapshot.source_name], docs_url=DOCS)
 
 
-@rule("TEMPO005", "security", "Multi-tenancy is on", backends=TEMPO)
+@rule("TEMPO005", "security", "Multi-tenancy is on", backends=TEMPO, needs=CONFIG)
 def multitenancy(snapshot):
-    """Same shape as Loki's: one tenant for everybody."""
-    value = snapshot.setting("multitenancy_enabled")
-    if value is None or value:
+    """Same shape as Loki's: one tenant for everybody.
+
+    And written the same way, with omitempty: false is not in
+    /status/config at all. The lab's Tempo has no such key and answers a
+    search with no tenant; read as "not off", this passed there.
+    """
+    if snapshot.setting("multitenancy_enabled", False):
         return
     yield Finding(
         rule_id="TEMPO005", category="security",

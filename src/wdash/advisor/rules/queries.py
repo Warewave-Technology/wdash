@@ -8,8 +8,11 @@ CATEGORY = "queries"
 # Below this sample size the ratio is meaningless and would fire on a fresh cluster
 MIN_SAMPLE = 50
 
+#: Per-node counters: which nodes, and their statistics.
+NODES = ("nodes_info", "nodes_stats")
 
-@rule(id="QRY001", category=CATEGORY, title="Request cache hit rate")
+
+@rule(id="QRY001", category=CATEGORY, title="Request cache hit rate", needs=NODES)
 def request_cache_hit_rate(snap):
     hits = sum_node_stat(snap, "indices", "request_cache", "hit_count")
     misses = sum_node_stat(snap, "indices", "request_cache", "miss_count")
@@ -42,7 +45,7 @@ def request_cache_hit_rate(snap):
     )
 
 
-@rule(id="QRY002", category=CATEGORY, title="Query cache hit rate")
+@rule(id="QRY002", category=CATEGORY, title="Query cache hit rate", needs=NODES)
 def query_cache_hit_rate(snap):
     hits = sum_node_stat(snap, "indices", "query_cache", "hit_count")
     misses = sum_node_stat(snap, "indices", "query_cache", "miss_count")
@@ -68,7 +71,7 @@ def query_cache_hit_rate(snap):
     )
 
 
-@rule(id="QRY003", category=CATEGORY, title="Fielddata memory usage")
+@rule(id="QRY003", category=CATEGORY, title="Fielddata memory usage", needs=NODES)
 def fielddata_in_use(snap):
     offenders = []
     for node_id, _, stats in snap.nodes():

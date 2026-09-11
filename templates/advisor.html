@@ -66,6 +66,23 @@
         {% endif %}
     </p>
 </div>
+{% elif report.unavailable %}
+{# A report of nothing, not a report with nothing in it: every rule needed
+   something that did not arrive. It used to render "No findings — all 31
+   rules passed" with a score of 100. #}
+<div class="alert alert-danger">
+    <h5><i class="fas fa-exclamation-circle"></i> Analysis unavailable</h5>
+    <p>
+        Nothing could be evaluated: none of what the rules read was collected
+        from <strong>{{ report.source or report.cluster_name }}</strong>. This
+        is not a clean report — nothing was looked at.
+    </p>
+    <ul class="mb-0 small">
+        {% for name, error in report.collection_errors.items() %}
+        <li><code>{{ name }}</code> — {{ error }}</li>
+        {% endfor %}
+    </ul>
+</div>
 {% else %}
 
 <div class="row g-3 mb-4">
@@ -73,9 +90,11 @@
         <div class="card h-100">
             <div class="card-body text-center">
                 {% set score_class = 'success' if report.score >= 80 else ('warning' if report.score >= 50 else 'danger') %}
-                <div class="display-4 fw-bold text-{{ score_class }}">{{ report.score }}</div>
+                <div class="display-4 fw-bold text-{{ score_class if report.complete else 'secondary' }}">{{ report.score }}</div>
                 <div class="text-muted small">Health score</div>
-                <div class="text-muted" style="font-size:0.7rem">heuristic — read the findings</div>
+                <div class="text-muted" style="font-size:0.7rem">
+                    {% if report.complete %}heuristic — read the findings{% else %}partial — scored on what could be read{% endif %}
+                </div>
             </div>
         </div>
     </div>
@@ -88,7 +107,7 @@
                             <span class="badge bg-secondary ms-1">{{ report.distribution }} {{ report.version }}</span>
                         </div>
                         <div class="text-muted small mt-1">
-                            Analysed {{ age }}s ago &middot; {{ rule_count }} rules evaluated
+                            Analysed {{ age }}s ago &middot; {{ report.evaluated }} of {{ rule_count }} rules evaluated
                         </div>
                     </div>
                     <div class="col-md-6 text-md-end mt-3 mt-md-0">
@@ -96,6 +115,9 @@
                         <span class="badge bg-warning">{{ report.counts.warning }} warning</span>
                         <span class="badge bg-info">{{ report.counts.info }} info</span>
                         <span class="badge bg-success">{{ report.passed|length }} passed</span>
+                        {% if report.not_evaluated %}
+                        <span class="badge bg-warning">{{ report.not_evaluated|length }} not evaluated</span>
+                        {% endif %}
                         {% if report.skipped %}
                         <span class="badge bg-secondary">{{ report.skipped|length }} skipped</span>
                         {% endif %}
@@ -114,10 +136,21 @@
 </div>
 
 {% if not report.findings %}
+{% if report.complete %}
 <div class="alert alert-success">
     <h5 class="mb-1"><i class="fas fa-check-circle"></i> No findings</h5>
-    <p class="mb-0">All {{ rule_count }} rules passed against this cluster.</p>
+    <p class="mb-0">All {{ report.passed|length }} rules passed against this cluster.</p>
 </div>
+{% else %}
+{# Only a complete report may say everything passed. #}
+<div class="alert alert-warning">
+    <h5 class="mb-1"><i class="fas fa-exclamation-triangle"></i> No findings among the rules that could look</h5>
+    <p class="mb-0">
+        {{ report.evaluated }} of {{ rule_count }} rules reached a verdict. The
+        rest could not look, so this is not a clean bill of health.
+    </p>
+</div>
+{% endif %}
 {% endif %}
 
 {% for finding in report.findings %}
@@ -159,6 +192,24 @@
         </div>
     </div>
 {% endfor %}
+
+{% if report.not_evaluated %}
+<div class="card mb-3 border-warning">
+    <div class="card-header py-2">
+        <i class="fas fa-eye-slash text-warning"></i>
+        <strong>{{ report.not_evaluated|length }} rules could not be evaluated</strong>
+    </div>
+    <div class="card-body py-2">
+        {% for item in report.not_evaluated %}
+        <div class="d-flex py-1" style="font-size:0.85rem">
+            <code class="text-muted" style="width:80px">{{ item.0 }}</code>
+            <span>{{ item.1 }}</span>
+            <span class="text-muted ms-2">— {{ item.2 }}</span>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
 
 {% if report.passed %}
 <div class="card mb-3">

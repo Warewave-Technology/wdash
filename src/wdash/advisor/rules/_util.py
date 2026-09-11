@@ -1,20 +1,55 @@
 """Shared helpers for rule functions."""
 
+import re
+
 GB = 1024 ** 3
 MB = 1024 ** 2
 
+#: Elasticsearch's byte units, which are binary: 1gb is 1024**3.
+_BYTE_UNITS = {"b": 1, "k": 1024, "kb": 1024, "m": MB, "mb": MB, "g": GB, "gb": GB,
+               "t": 1024 * GB, "tb": 1024 * GB, "p": 1024 ** 2 * GB, "pb": 1024 ** 2 * GB}
+_BYTE_SIZE = re.compile(r"(\d+(?:\.\d+)?)\s*(pb|tb|gb|mb|kb|[ptgmkb])")
 
-def parse_percent(value):
-    """'85%' -> 85.0. Returns None when the value is not a percentage (e.g. '100gb')."""
+
+def parse_bytes(value):
+    """'100gb' -> bytes, the way Elasticsearch reads a byte size. None when
+    the value is not one."""
     if value is None:
         return None
-    text = str(value).strip()
-    if not text.endswith("%"):
+    match = _BYTE_SIZE.fullmatch(str(value).strip().lower())
+    if not match:
         return None
-    try:
-        return float(text[:-1])
-    except ValueError:
+    return int(float(match.group(1)) * _BYTE_UNITS[match.group(2)])
+
+
+def parse_watermark(value):
+    """A disk watermark, the way Elasticsearch reads one.
+
+    ('ratio', 0.85) for '85%' or '0.85' — the share of the disk that may be
+    USED — and ('bytes', n) for '100gb', the space that must stay FREE.
+    None when it is neither, which a rule has to report rather than replace
+    with a default.
+    """
+    if value is None:
         return None
+    text = str(value).strip().lower()
+    # Elasticsearch tries a ratio first unless the value ends in 'b'.
+    if not text.endswith("b"):
+        try:
+            if text.endswith("%"):
+                percent = float(text[:-1])
+                if 0 <= percent <= 100:
+                    return "ratio", percent / 100
+            else:
+                ratio = float(text)
+                if ratio == 0:
+                    return "bytes", 0
+                if 0 < ratio <= 1:
+                    return "ratio", ratio
+        except ValueError:
+            pass
+    size = parse_bytes(text)
+    return ("bytes", size) if size is not None else None
 
 
 def human_bytes(n):

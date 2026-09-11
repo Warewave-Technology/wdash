@@ -1,12 +1,17 @@
 """Cluster and node level rules."""
 
-from ..models import Finding, Severity, rule
-from ._util import GB, human_bytes, parse_percent
+import math
+
+from ..models import Finding, NotEvaluated, Severity, rule
+from ._util import GB, human_bytes, parse_bytes, parse_watermark
 
 CATEGORY = "cluster"
 
+#: Per-node statistics come from two calls: which nodes, and their numbers.
+NODES = ("nodes_info", "nodes_stats")
 
-@rule(id="CLU001", category=CATEGORY, title="Cluster status")
+
+@rule(id="CLU001", category=CATEGORY, title="Cluster status", needs=("health",))
 def cluster_status(snap):
     status = (snap.health or {}).get("status")
     if status not in ("red", "yellow"):
@@ -40,7 +45,7 @@ def cluster_status(snap):
     )
 
 
-@rule(id="CLU002", category=CATEGORY, title="JVM heap usage")
+@rule(id="CLU002", category=CATEGORY, title="JVM heap usage", needs=NODES)
 def heap_usage(snap):
     hot = []
     for node_id, _, stats in snap.nodes():
@@ -70,7 +75,8 @@ def heap_usage(snap):
     )
 
 
-@rule(id="CLU003", category=CATEGORY, title="Heap above the compressed oops threshold")
+@rule(id="CLU003", category=CATEGORY, title="Heap above the compressed oops threshold",
+      needs=NODES)
 def heap_over_compressed_oops(snap):
     offenders = []
     for node_id, _, stats in snap.nodes():
@@ -95,7 +101,7 @@ def heap_over_compressed_oops(snap):
     )
 
 
-@rule(id="CLU004", category=CATEGORY, title="Heap to system memory ratio")
+@rule(id="CLU004", category=CATEGORY, title="Heap to system memory ratio", needs=NODES)
 def heap_ratio(snap):
     for node_id, _, stats in snap.nodes():
         jvm_mem = (stats.get("jvm") or {}).get("mem") or {}
@@ -136,9 +142,10 @@ def heap_ratio(snap):
             )
 
 
-@rule(id="CLU005", category=CATEGORY, title="Memory locking (mlockall)")
+@rule(id="CLU005", category=CATEGORY, title="Memory locking (mlockall)",
+      needs=("nodes_info",))
 def memory_lock(snap):
-    unlocked = [snap.node_name(nid) for nid, info, _ in snap.nodes()
+    unlocked = [snap.node_name(nid) for nid, info in snap.node_infos()
                 if (info.get("process") or {}).get("mlockall") is False]
     if not unlocked:
         return
@@ -156,64 +163,139 @@ def memory_lock(snap):
     )
 
 
-@rule(id="CLU006", category=CATEGORY, title="Disk watermarks")
+WATERMARK = "cluster.routing.allocation.disk.watermark."
+
+#: Elasticsearch's own defaults: each watermark, and the most free space it
+#: asks for (max_headroom, 8.5 and later) while the watermark is that default.
+DISK_DEFAULTS = {"flood_stage": ("95%", 100 * GB), "high": ("90%", 150 * GB),
+                 "low": ("85%", 200 * GB)}
+
+#: What each stage does, the worst first: a disk past flood stage is past the
+#: other two as well, and only the worst is worth saying.
+DISK_STAGES = (
+    ("flood_stage", Severity.CRITICAL, "Disk is past the flood-stage watermark",
+     "flood stage",
+     "Elasticsearch applies a read-only-allow-delete block to every index on "
+     "this node. Writes STOP.",
+     "Free space urgently, then clear the block: "
+     'PUT /_all/_settings {"index.blocks.read_only_allow_delete": null}'),
+    ("high", Severity.CRITICAL, "Disk is past the high watermark", "high watermark",
+     "Elasticsearch will try to relocate shards away from this node. If space is "
+     "not freed it reaches flood stage and writes stop.",
+     "Delete or archive old indices, apply an ILM policy, or add disk capacity."),
+    ("low", Severity.WARNING, "Disk is past the low watermark", "low watermark",
+     "Elasticsearch stops allocating new shards to this node. Creating a new "
+     "index may leave shards unassigned.",
+     "Apply a retention policy (ILM) or add capacity."),
+)
+
+
+def _chosen(snap, key, differs_from_default):
+    """Was this setting chosen rather than inherited?
+
+    Set through the API it is in `persistent` or `transient`. Set in
+    elasticsearch.yml it arrives in `defaults`, like a default, and the only
+    sign is that it is not Elasticsearch's own value.
+    """
+    for section in ("persistent", "transient"):
+        if key in (snap.cluster_settings.get(section) or {}):
+            return True
+    return differs_from_default
+
+
+def _watermark(snap, stage):
+    """(written value, parsed watermark, max_headroom in bytes or None).
+
+    Raises NotEvaluated when either cannot be read: a default put in the
+    place of a value nobody could read judged '0.97' at 95% and '10gb' at
+    90%, and called both critical.
+    """
+    key = WATERMARK + stage
+    default_mark, default_headroom = DISK_DEFAULTS[stage]
+    raw = snap.cluster_setting(key)
+    mark = parse_watermark(raw)
+    if mark is None:
+        if raw is None:
+            raise NotEvaluated(f"{key} is not in the cluster settings")
+        raise NotEvaluated(f"{key} = {raw!r} is not a percentage, a ratio or a "
+                           f"byte size")
+    if mark[0] != "ratio":
+        return raw, mark, None
+
+    # A percentage asks for at most max_headroom of free space. Its default
+    # applies only while the watermark is a default too — a watermark somebody
+    # set turns it off — and a headroom somebody set applies either way.
+    # Before 8.5 the setting does not exist, and nothing is capped.
+    headroom_key = key + ".max_headroom"
+    raw_headroom = snap.cluster_setting(headroom_key)
+    if raw_headroom is None:
+        return raw, mark, None
+    headroom_chosen = _chosen(snap, headroom_key,
+                              parse_bytes(raw_headroom) != default_headroom)
+    mark_chosen = _chosen(snap, key, mark != parse_watermark(default_mark))
+    if mark_chosen and not headroom_chosen:
+        return raw, mark, None
+    if str(raw_headroom).strip() == "-1":
+        return raw, mark, None
+    headroom = parse_bytes(raw_headroom)
+    if headroom is None:
+        raise NotEvaluated(f"{headroom_key} = {raw_headroom!r} is not a byte size")
+    return raw, mark, headroom
+
+
+def _required_free(total, mark, headroom):
+    """The free space a watermark asks for on a disk of `total` bytes, the
+    way Elasticsearch works it out."""
+    kind, amount = mark
+    if kind == "bytes":
+        return amount
+    used = math.ceil(amount * total)
+    if headroom is not None:
+        used = max(used, total - headroom)
+    return total - used
+
+
+@rule(id="CLU006", category=CATEGORY, title="Disk watermarks",
+      needs=("cluster_settings",) + NODES)
 def disk_watermarks(snap):
-    low = parse_percent(snap.cluster_setting("cluster.routing.allocation.disk.watermark.low"))
-    high = parse_percent(snap.cluster_setting("cluster.routing.allocation.disk.watermark.high"))
-    flood = parse_percent(snap.cluster_setting(
-        "cluster.routing.allocation.disk.watermark.flood_stage"))
+    """Is a node's free space below what a watermark asks for?
 
-    # Watermarks can be expressed in bytes (for example '100gb'), which cannot be
-    # compared against a percentage. Fall back to the defaults rather than skipping.
-    low, high, flood = low or 85.0, high or 90.0, flood or 95.0
-
+    Compared in bytes, as Elasticsearch compares them. A percentage read as
+    a percentage of used space put the high watermark of a 10TB disk at 90%,
+    where Elasticsearch — capping it at 150GB free — puts it at 98.5%.
+    """
+    disks = []
     for node_id, _, stats in snap.nodes():
         fs_total = (stats.get("fs") or {}).get("total") or {}
         total = fs_total.get("total_in_bytes")
         available = fs_total.get("available_in_bytes")
-        if not total or available is None:
-            continue
+        if total and available is not None:
+            disks.append((snap.node_name(node_id), total, available))
+    if not disks:
+        return
 
+    marks = {stage: _watermark(snap, stage) for stage, *_ in DISK_STAGES}
+
+    for name, total, available in disks:
         used_pct = (1 - available / total) * 100
-        name = snap.node_name(node_id)
-        evidence = (f"{name}: {used_pct:.1f}% used "
-                    f"({human_bytes(total - available)} of {human_bytes(total)})")
-
-        if used_pct >= flood:
+        for stage, severity, title, label, impact, remediation in DISK_STAGES:
+            raw, mark, headroom = marks[stage]
+            required = _required_free(total, mark, headroom)
+            if available >= required:
+                continue
+            how = str(raw)
+            if headroom is not None and required == headroom:
+                how += f", capped at {human_bytes(headroom)} by max_headroom"
             yield Finding(
-                rule_id="CLU006", category=CATEGORY, severity=Severity.CRITICAL,
-                title="Disk is past the flood-stage watermark",
-                evidence=f"{evidence}, flood stage at {flood:.0f}%",
-                impact="Elasticsearch applies a read-only-allow-delete block to every "
-                       "index on this node. Writes STOP.",
-                remediation="Free space urgently, then clear the block: "
-                            'PUT /_all/_settings {"index.blocks.read_only_allow_delete": null}',
-                targets=[name],
-            )
-        elif used_pct >= high:
-            yield Finding(
-                rule_id="CLU006", category=CATEGORY, severity=Severity.CRITICAL,
-                title="Disk is past the high watermark",
-                evidence=f"{evidence}, high watermark at {high:.0f}%",
-                impact="Elasticsearch will try to relocate shards away from this node. "
-                       "If space is not freed it reaches flood stage and writes stop.",
-                remediation="Delete or archive old indices, apply an ILM policy, or add "
-                            "disk capacity.",
-                targets=[name],
-            )
-        elif used_pct >= low:
-            yield Finding(
-                rule_id="CLU006", category=CATEGORY, severity=Severity.WARNING,
-                title="Disk is past the low watermark",
-                evidence=f"{evidence}, low watermark at {low:.0f}%",
-                impact="Elasticsearch stops allocating new shards to this node. Creating "
-                       "a new index may leave shards unassigned.",
-                remediation="Apply a retention policy (ILM) or add capacity.",
-                targets=[name],
-            )
+                rule_id="CLU006", category=CATEGORY, severity=severity, title=title,
+                evidence=(f"{name}: {used_pct:.1f}% used, {human_bytes(available)} "
+                          f"free of {human_bytes(total)}; the {label} ({how}) asks "
+                          f"for {human_bytes(required)} free"),
+                impact=impact, remediation=remediation, targets=[name])
+            break
 
 
-@rule(id="CLU007", category=CATEGORY, title="Thread pool rejections")
+@rule(id="CLU007", category=CATEGORY, title="Thread pool rejections", needs=NODES)
 def thread_pool_rejections(snap):
     watched = {
         "search": ("Search requests are being rejected", Severity.CRITICAL),
@@ -248,7 +330,7 @@ def thread_pool_rejections(snap):
         )
 
 
-@rule(id="CLU008", category=CATEGORY, title="Circuit breaker trips")
+@rule(id="CLU008", category=CATEGORY, title="Circuit breaker trips", needs=NODES)
 def circuit_breakers(snap):
     tripped = {}
     for node_id, _, stats in snap.nodes():
@@ -273,7 +355,8 @@ def circuit_breakers(snap):
         )
 
 
-@rule(id="CLU009", category=CATEGORY, title="Master-eligible node count")
+@rule(id="CLU009", category=CATEGORY, title="Master-eligible node count",
+      needs=("nodes_info",))
 def master_eligible_nodes(snap):
     count = snap.master_eligible_count
     if count == 0:

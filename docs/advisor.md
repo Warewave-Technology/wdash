@@ -22,8 +22,20 @@ Rules never see a live connection. Three consequences follow:
 
 Collection is parallel and each call is isolated: if one fails, that field
 stays empty, the error is recorded under `collection_errors`, and the others
-continue. If a rule raises, the report survives and the error is recorded under
+continue. The whole collection has a 30-second budget. A call still running
+when it runs out is recorded as not collected, and everything that did arrive
+is kept. If a rule raises, the report survives and the error is recorded under
 `errors`. The Advisor itself must not become an outage.
+
+A rule whose input was not collected is not run. It is listed under
+`not_evaluated` with the reason, and so is a rule that could not read what it
+found (`NotEvaluated`). Both used to count as passed, so a cluster that
+refused every call scored 100 with all 31 rules passed. Now:
+
+- only a complete report says every rule passed;
+- a partial report says which rules could not look;
+- a report where nothing could be evaluated says "Analysis unavailable" and
+  has no score (`"score": null`, `"complete": false` in the JSON).
 
 ## Usage
 
@@ -57,6 +69,26 @@ PYTHONPATH=src python -m wdash.advisor --fail-on critical
 
 `--from-snapshot` is the fastest loop while writing rules: capture once, then
 run the rule as often as you like.
+
+The exit status:
+
+| Status | Meaning |
+|---|---|
+| 0 | Nothing to report at the `--fail-on` level, or no `--fail-on` given |
+| 1 | A finding at or above the `--fail-on` level |
+| 2 | Nothing could be evaluated. With `--fail-on`, also any call that was not collected or any rule that could not look. The reasons go to stderr |
+
+A finding at the level still exits 1 from a partial report, because what was
+found is found. Nothing found in a partial report is not the same as nothing
+there, so that exits 2.
+
+The client checks the cluster's certificate. Set `ELASTICSEARCH_CA_CERTS` to
+the CA that signed it. `ELASTICSEARCH_VERIFY_CERTS=false` (the web process's
+own switch) or `--insecure` turns the check off. `ELASTICSEARCH_USERNAME` and
+`ELASTICSEARCH_PASSWORD` are sent with every request, and without the check
+they go to whoever answers. The web process defaults to no check, so that an
+upgrade does not cut a deployment off from its cluster. The command line is
+run by hand or in CI, where a refused certificate is only a message.
 
 ## Rules
 
@@ -108,7 +140,8 @@ Two rules are specific to how WDash queries data:
 ```python
 from ..models import Finding, Severity, rule
 
-@rule(id="IDX006", category="indices", title="Short description")
+@rule(id="IDX006", category="indices", title="Short description",
+      needs=("index_settings",))    # what the verdict depends on
 def my_check(snapshot):
     offenders = [i for i in snapshot.user_indices()
                  if snapshot.index_setting(i, "index.some.setting") is None]
@@ -135,8 +168,14 @@ Three principles:
 2. **Actionable remediation.** "Review this" is not a fix. Give a runnable API
    call where possible. A test enforces it
    (`test_every_finding_is_actionable`).
-3. **Absence of data is not absence of the thing.** If collection failed, do
-   not emit a finding — `SEC003` is the example to copy.
+3. **Absence of data is not absence of the thing.** Declare every collected
+   field the verdict depends on with `needs=`. When one of them failed, the
+   rule is not run and the report says so. A test reads what each rule
+   touches and fails when it reads more than it declares
+   (`test_every_rule_declares_what_it_reads`). When the data arrived but the
+   rule cannot read it, raise `NotEvaluated` with the reason rather than
+   returning: returning is a pass. Examples are a watermark in a form it does
+   not know, a setting not in `/config`, or no data nodes to divide by.
 
 ### Choosing thresholds
 
@@ -153,10 +192,14 @@ real problem. Examples:
 ## Testing
 
 ```bash
-python -m unittest tests.test_advisor tests.test_advisor_routes
+python -m unittest tests.test_advisor tests.test_advisor_routes \
+    tests.test_advisor_backends tests.test_advisor_cli
 ```
 
 The tests use snapshots under `tests/fixtures/` and need no Elasticsearch.
+Local listeners stand in for what a fixture cannot be: a port nothing
+listens on, a cluster that answers 401, a sign-in page answering 200, and a
+TLS listener with a certificate nobody vouches for.
 
 To refresh the fixtures after changing the sample data:
 

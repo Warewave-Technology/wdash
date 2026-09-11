@@ -84,8 +84,8 @@ class SourceSnapshot:
         """A dotted path into the effective configuration.
 
         Missing is not the same as false: a rule that cannot see a setting
-        should skip rather than claim it is off, so this returns the default
-        and the rules check for `None` explicitly.
+        should say so rather than claim it is off — or on — so this returns
+        the default and the rules raise `NotEvaluated` on `None`.
         """
         current = self.settings
         for part in path.split("."):
@@ -105,16 +105,38 @@ def _get(session, url, timeout=DEFAULT_TIMEOUT, **kwargs):
     return response
 
 
+def _not_a_page(response):
+    """Refuse a web page where the backend's own answer was expected.
+
+    A sign-in page, an SSO front door or a proxy's error page answers 200
+    too, and every parser here found a way to read one: YAML as a string,
+    /flags as "nothing set", a status code as "the metrics API works". The
+    content type gives most of them away; the parsers catch the rest.
+    """
+    content_type = str((getattr(response, "headers", None) or {}).get(
+        "Content-Type") or "")
+    if "html" in content_type.lower():
+        raise ValueError(f"answered with a web page ({content_type}), not the "
+                         f"backend — a sign-in or proxy page?")
+    return response
+
+
 def _yaml_document(text):
     """Parse a YAML body that may carry a header line before the document.
 
     Tempo answers `/status/config` with `GET /status/config\\n---\\n…`, which
     is two documents to a YAML parser and an error to a naive one.
+
+    Raises when there is no mapping in it at all. It returned {} — so an HTML
+    page parsed as one string was an empty configuration, and every rule
+    passed against it.
     """
     import yaml
 
     documents = [d for d in yaml.safe_load_all(text) if isinstance(d, dict)]
-    return documents[0] if documents else {}
+    if not documents:
+        raise ValueError("the answer holds no configuration document")
+    return documents[0]
 
 
 # ---------------------------------------------------------------------------
@@ -131,14 +153,14 @@ def collect_loki(url, name, session=None, auth=None, verify=True,
     try:
         response = _get(session, f"{base}/config", timeout, auth=auth,
                         verify=verify)
-        snapshot.settings = _yaml_document(response.text) or {}
+        snapshot.settings = _yaml_document(_not_a_page(response).text)
     except Exception as exc:
         snapshot.errors["config"] = str(exc)[:200]
 
     try:
         response = _get(session, f"{base}/loki/api/v1/status/buildinfo",
                         timeout, auth=auth, verify=verify)
-        snapshot.facts["version"] = (response.json() or {}).get("version")
+        snapshot.facts["version"] = (_not_a_page(response).json() or {}).get("version")
     except Exception as exc:
         snapshot.errors["buildinfo"] = str(exc)[:200]
 
@@ -161,13 +183,19 @@ def collect_victorialogs(url, name, session=None, auth=None, verify=True,
     try:
         response = _get(session, f"{base}/flags", timeout, auth=auth,
                         verify=verify)
+        text = _not_a_page(response).text
         flags = {}
-        for line in response.text.splitlines():
+        for line in text.splitlines():
             line = line.strip()
             if not line.startswith("-"):
                 continue
             key, _, value = line[1:].partition("=")
             flags[key.strip()] = value.strip().strip('"')
+        # Empty is a VictoriaLogs started with nothing set. Something with
+        # no flag in it is not /flags at all — and read as "nothing set", it
+        # is exactly what VL001, VL002 and VL004 report.
+        if text.strip() and not flags:
+            raise ValueError("the answer lists no flags")
         snapshot.settings = flags
     except Exception as exc:
         snapshot.errors["flags"] = str(exc)[:200]
@@ -175,6 +203,7 @@ def collect_victorialogs(url, name, session=None, auth=None, verify=True,
     try:
         response = _get(session, f"{base}/metrics", timeout, auth=auth,
                         verify=verify)
+        response = _not_a_page(response)
         snapshot.facts.update(_prometheus(response.text, (
             "vl_free_disk_space_bytes",
             "vl_data_size_bytes",
@@ -203,7 +232,7 @@ def collect_tempo(url, name, session=None, auth=None, verify=True,
     try:
         response = _get(session, f"{base}/status/config", timeout, auth=auth,
                         verify=verify)
-        snapshot.settings = _yaml_document(response.text) or {}
+        snapshot.settings = _yaml_document(_not_a_page(response).text)
     except Exception as exc:
         snapshot.errors["config"] = str(exc)[:200]
 
@@ -217,8 +246,11 @@ def collect_tempo(url, name, session=None, auth=None, verify=True,
         # Anchored on the digits, not on the word "version": the body starts
         # with `GET /status/version`, so a loose match read the URL and
         # reported the version as "tempo,".
-        match = re.search(r"version\s+(\d[\w.\-]*)", response.text)
-        snapshot.facts["version"] = match.group(1) if match else "unknown"
+        match = re.search(r"version\s+(\d[\w.\-]*)", _not_a_page(response).text)
+        if not match:
+            # Not "unknown" with no error: that named nothing missing.
+            raise ValueError("the answer holds no version")
+        snapshot.facts["version"] = match.group(1)
     except Exception as exc:
         snapshot.errors["version"] = str(exc)[:200]
 
@@ -239,19 +271,19 @@ def collect_jaeger(url, name, session=None, auth=None, verify=True,
     try:
         response = _get(session, f"{base}/api/services", timeout, auth=auth,
                         verify=verify)
-        services = (response.json() or {}).get("data") or []
+        services = (_not_a_page(response).json() or {}).get("data") or []
         snapshot.facts["services"] = [s for s in services if s]
     except Exception as exc:
         snapshot.errors["services"] = str(exc)[:200]
 
     # Not an error when it refuses: HTTP 501 is Jaeger saying the metrics
     # backend is not wired up, which is a finding rather than a collection
-    # failure.
+    # failure. A sign-in page is not Jaeger saying anything.
     try:
         response = (session or requests).get(
             f"{base}/api/metrics/calls", params={"service": "any"},
             timeout=timeout, auth=auth, verify=verify)
-        snapshot.facts["metrics_api"] = response.status_code
+        snapshot.facts["metrics_api"] = _not_a_page(response).status_code
     except Exception as exc:
         snapshot.errors["metrics"] = str(exc)[:200]
 

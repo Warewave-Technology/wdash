@@ -16,7 +16,8 @@ Usage:
     print(report.to_dict())
 """
 
-from .models import Finding, Report, Rule, Severity, all_rules, rule, run_rules
+from .models import (Finding, NotEvaluated, Report, Rule, Severity, all_rules, rule,
+                     run_rules)
 from .snapshot import ClusterSnapshot, collect
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "run_rules",
     "all_rules",
     "ClusterSnapshot",
+    "NotEvaluated",
     "Report",
     "Finding",
     "Rule",

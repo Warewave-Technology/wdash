@@ -1,0 +1,365 @@
+"""
+`python -m wdash.advisor`, the way CI and an operator run it.
+
+Two things it owes whoever runs it, and did not give.
+
+**An exit code that means what CI reads it as.** `--fail-on critical`
+exited 0 against a port nothing listened on, against a cluster that answered
+every call 401, and against a saved snapshot of thirteen failures — each
+time printing "score: 100/100" and "No findings." A gate that passes when it
+cannot see is not a gate.
+
+**The credentials only to the cluster.** It hard-coded `verify_certs=False`
+and sent ELASTICSEARCH_USERNAME/PASSWORD to whatever certificate answered,
+ignoring ELASTICSEARCH_VERIFY_CERTS and ELASTICSEARCH_CA_CERTS, which the web
+process honours. Measured here with a listener holding a certificate nobody
+vouches for, and what reaches it.
+"""
+
+import base64
+import contextlib
+import datetime as dt
+import io
+import ipaddress
+import json
+import os
+import socket
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest import mock
+
+from tests.support import serve_in_background
+
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+sys.path.insert(0, os.path.join(ROOT, "src"))
+
+from wdash.advisor import ClusterSnapshot  # noqa: E402
+from wdash.advisor.__main__ import main  # noqa: E402
+
+FIXTURE = os.path.join(ROOT, "tests", "fixtures", "lab-cluster.json")
+
+
+def run_cli(*argv, env=None):
+    """main() in this process, with no ELASTICSEARCH_* but the ones given.
+
+    Returns (exit code, stdout, stderr)."""
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.dict(os.environ):
+        for name in [n for n in os.environ if n.startswith("ELASTICSEARCH_")]:
+            del os.environ[name]
+        os.environ.update(env or {})
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = main(["--no-color", *argv])
+            except SystemExit as exc:
+                code = exc.code
+    return code, out.getvalue(), err.getvalue()
+
+
+def closed_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+class Expired(BaseHTTPRequestHandler):
+    """An Elasticsearch that answers every request 401."""
+
+    def log_message(self, *_):
+        pass
+
+    def _answer(self):
+        body = json.dumps({"error": {"type": "security_exception",
+                                     "reason": "unable to authenticate user"},
+                           "status": 401}).encode()
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("X-Elastic-Product", "Elasticsearch")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_HEAD = do_POST = _answer
+
+
+def failed(snapshot, *names):
+    for name in names:
+        setattr(snapshot, name, type(getattr(snapshot, name))())
+        snapshot.errors[name] = "ConnectionTimeout(30s)"
+    return snapshot
+
+
+class FailOnTest(unittest.TestCase):
+    """The exit code: 0 clean, 1 findings at the level, 2 could not tell."""
+
+    def setUp(self):
+        self.scratch = tempfile.mkdtemp()
+
+    def saved(self, snapshot):
+        path = os.path.join(self.scratch, "snapshot.json")
+        snapshot.save(path)
+        return path
+
+    def test_a_refused_cluster_fails_the_gate(self):
+        code, out, err = run_cli("--url", f"http://127.0.0.1:{closed_port()}",
+                                 "--fail-on", "critical")
+        self.assertEqual(code, 2)
+        self.assertNotIn("100/100", out)
+        self.assertNotIn("No findings.", out)
+        self.assertIn("info", err, "what could not be collected, on stderr")
+
+    def test_expired_credentials_fail_the_gate(self):
+        server = serve_in_background(HTTPServer(("127.0.0.1", 0), Expired))
+        try:
+            code, out, _ = run_cli(
+                "--url", f"http://127.0.0.1:{server.server_address[1]}",
+                "--fail-on", "critical",
+                env={"ELASTICSEARCH_USERNAME": "elastic",
+                     "ELASTICSEARCH_PASSWORD": "expired"})
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(code, 2)
+        self.assertNotIn("100/100", out)
+
+    def test_a_saved_snapshot_of_nothing_fails_the_gate(self):
+        snapshot = failed(ClusterSnapshot(taken_at="x"),
+                          *(n for n in ClusterSnapshot.__dataclass_fields__
+                            if n not in ("taken_at", "errors")))
+        code, out, _ = run_cli("--from-snapshot", self.saved(snapshot),
+                               "--fail-on", "info")
+        self.assertEqual(code, 2)
+        self.assertIn("n/a", out)
+
+    def test_nothing_collected_fails_even_without_the_gate(self):
+        code, _, _ = run_cli("--url", f"http://127.0.0.1:{closed_port()}")
+        self.assertEqual(code, 2)
+
+    def test_an_unusable_url_is_not_a_finding(self):
+        """It exited through sys.exit(message), which is status 1 — what CI
+        reads as "the cluster has findings"."""
+        code, _, err = run_cli("--url", "not a url", "--fail-on", "critical")
+        self.assertEqual(code, 2)
+        self.assertIn("not a url", err)
+
+    def test_a_partial_report_with_nothing_at_the_level_fails_the_gate(self):
+        """The three critical findings in the lab fixture come from mappings
+        and nodes. Without those calls there is no critical finding, and no
+        way to say there is none."""
+        snapshot = failed(ClusterSnapshot.load(FIXTURE), "nodes_info", "index_mappings")
+        code, out, err = run_cli("--from-snapshot", self.saved(snapshot),
+                                 "--fail-on", "critical")
+        self.assertEqual(code, 2)
+        self.assertIn("not evaluated", out)
+        self.assertIn("nodes_info", err)
+
+    def test_a_partial_report_without_the_gate_still_exits_0(self):
+        """The printed report says what is missing; without --fail-on
+        nobody asked for a verdict on it."""
+        snapshot = failed(ClusterSnapshot.load(FIXTURE), "nodes_info")
+        code, _, _ = run_cli("--from-snapshot", self.saved(snapshot))
+        self.assertEqual(code, 0)
+
+    def test_findings_at_the_level_still_exit_1(self):
+        """Even from a partial report: what was found is found."""
+        snapshot = failed(ClusterSnapshot.load(FIXTURE), "nodes_info")
+        code, _, _ = run_cli("--from-snapshot", self.saved(snapshot),
+                             "--fail-on", "critical")
+        self.assertEqual(code, 1)
+
+    def test_a_complete_report_below_the_level_exits_0(self):
+        snapshot = ClusterSnapshot(
+            taken_at="x", info={"version": {"number": "8.19.9"}},
+            health={"status": "green"},
+            nodes_info={"nodes": {"n": {"name": "n", "roles": ["data", "master"]}}},
+            cluster_settings={"defaults": {"action.destructive_requires_name": "true"}})
+        code, out, err = run_cli("--from-snapshot", self.saved(snapshot),
+                                 "--fail-on", "critical")
+        self.assertEqual(code, 0, out + err)
+
+    def test_the_exit_code_reaches_the_shell(self):
+        snapshot = failed(ClusterSnapshot(taken_at="x"), "info", "health")
+        environment = {k: v for k, v in os.environ.items()
+                       if not k.startswith("ELASTICSEARCH_")}
+        environment["PYTHONPATH"] = os.path.join(ROOT, "src")
+        finished = subprocess.run(
+            [sys.executable, "-m", "wdash.advisor", "--from-snapshot",
+             self.saved(snapshot), "--fail-on", "info", "--no-color"],
+            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=60)
+        self.assertEqual(finished.returncode, 2, finished.stdout + finished.stderr)
+
+
+def _authority(directory, name):
+    """A CA that could sign for anything, and nothing trusts."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    now = dt.datetime.now(dt.timezone.utc)
+    certificate = (
+        x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+        .public_key(key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(minutes=1))
+        .not_valid_after(now + dt.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.KeyUsage(
+            digital_signature=True, content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=False, key_cert_sign=True,
+            crl_sign=True, encipher_only=False, decipher_only=False), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
+                       critical=False)
+        .sign(key, hashes.SHA256()))
+    path = os.path.join(directory, f"{name}.crt")
+    with open(path, "wb") as handle:
+        handle.write(certificate.public_bytes(serialization.Encoding.PEM))
+    return certificate, key, path
+
+
+def _leaf(directory, authority, authority_key):
+    """A server certificate for 127.0.0.1, signed by `authority`."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = dt.datetime.now(dt.timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "impostor")]))
+        .issuer_name(authority.subject)
+        .public_key(key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(minutes=1))
+        .not_valid_after(now + dt.timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName(
+            [x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+                       critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(
+            authority_key.public_key()), critical=False)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
+                       critical=False)
+        .sign(authority_key, hashes.SHA256()))
+    cert_path = os.path.join(directory, "impostor.crt")
+    key_path = os.path.join(directory, "impostor.key")
+    with open(cert_path, "wb") as handle:
+        handle.write(certificate.public_bytes(serialization.Encoding.PEM))
+    with open(key_path, "wb") as handle:
+        handle.write(key.private_bytes(serialization.Encoding.PEM,
+                                       serialization.PrivateFormat.PKCS8,
+                                       serialization.NoEncryption()))
+    return cert_path, key_path
+
+
+class CertificateTest(unittest.TestCase):
+    """Something answering in the cluster's place, and what it is sent."""
+
+    USER, PASSWORD = "elastic", "s3cret-advisor-cli"
+
+    def setUp(self):
+        self.scratch = tempfile.mkdtemp()
+        authority, authority_key, self.authority = _authority(self.scratch, "its-own-ca")
+        _, _, self.other_authority = _authority(self.scratch, "some-other-ca")
+        cert, key = _leaf(self.scratch, authority, authority_key)
+        self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.context.load_cert_chain(cert, key)
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(32)
+        self.port = self.listener.getsockname()[1]
+        self.received = []
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def tearDown(self):
+        self.listener.close()
+
+    def _serve(self):
+        while True:
+            try:
+                raw, _ = self.listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._one, args=(raw,), daemon=True).start()
+
+    def _one(self, raw):
+        # What arrives before any handshake, too: a request sent in the clear
+        # fails the handshake here, and a listener that read only after one
+        # would see nothing of it.
+        try:
+            raw.settimeout(3)
+            self.received.append(raw.recv(4096, socket.MSG_PEEK))
+        except Exception:
+            pass
+        try:
+            with self.context.wrap_socket(raw, server_side=True) as tls:
+                tls.settimeout(3)
+                self.received.append(tls.recv(4096))
+                tls.sendall(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n"
+                            b"X-Elastic-Product: Elasticsearch\r\n\r\n")
+        except Exception:
+            self.received.append(b"")
+
+    def advise(self, *argv, **env):
+        return run_cli("--url", f"https://127.0.0.1:{self.port}", *argv,
+                       env={"ELASTICSEARCH_USERNAME": self.USER,
+                            "ELASTICSEARCH_PASSWORD": self.PASSWORD, **env})
+
+    def credentials_sent(self):
+        token = base64.b64encode(f"{self.USER}:{self.PASSWORD}".encode())
+        return any(token in chunk or self.PASSWORD.encode() in chunk
+                   for chunk in self.received)
+
+    def dialled(self):
+        """The ClientHello arrived: 'nothing was sent' is not 'nothing
+        connected'."""
+        return any(self.received)
+
+    def test_by_default_a_certificate_nobody_vouches_for_gets_nothing(self):
+        code, _, err = self.advise()
+        self.assertTrue(self.dialled())
+        self.assertFalse(self.credentials_sent(),
+                         "the password went to a certificate nobody vouches for")
+        self.assertEqual(code, 2)
+        self.assertIn("ELASTICSEARCH_CA_CERTS", err)
+        self.assertIn("--insecure", err)
+
+    def test_verification_with_another_ca_gets_nothing(self):
+        self.advise(ELASTICSEARCH_VERIFY_CERTS="true",
+                    ELASTICSEARCH_CA_CERTS=self.other_authority)
+        self.assertTrue(self.dialled())
+        self.assertFalse(self.credentials_sent())
+
+    def test_the_named_ca_is_what_the_certificate_is_checked_against(self):
+        """Given its own CA, the same listener is trusted — which is also
+        what shows `credentials_sent` can see a password when one comes."""
+        self.advise(ELASTICSEARCH_VERIFY_CERTS="true",
+                    ELASTICSEARCH_CA_CERTS=self.authority)
+        self.assertTrue(self.credentials_sent())
+
+    def test_the_named_ca_is_used_without_being_asked_twice(self):
+        """ELASTICSEARCH_CA_CERTS alone: verification is already on."""
+        self.advise(ELASTICSEARCH_CA_CERTS=self.authority)
+        self.assertTrue(self.credentials_sent())
+
+    def test_insecure_is_a_choice_and_does_what_it_says(self):
+        self.advise("--insecure")
+        self.assertTrue(self.credentials_sent())
+
+    def test_insecure_wins_over_the_environment(self):
+        self.advise("--insecure", ELASTICSEARCH_VERIFY_CERTS="true")
+        self.assertTrue(self.credentials_sent())
+
+    def test_the_applications_own_switch_is_honoured(self):
+        """ELASTICSEARCH_VERIFY_CERTS=false is how the web process is told
+        not to check, and the same words mean the same here."""
+        self.advise(ELASTICSEARCH_VERIFY_CERTS="false")
+        self.assertTrue(self.credentials_sent())

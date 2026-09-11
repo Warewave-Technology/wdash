@@ -71,9 +71,14 @@ class ClusterSnapshot:
 
     # ---------------- node helpers ----------------
 
+    def node_infos(self):
+        """Yield (node_id, info) pairs, for a rule that needs nothing from
+        _nodes/stats — and so does not stop being evaluated when it fails."""
+        yield from (self.nodes_info.get("nodes") or {}).items()
+
     def nodes(self):
         """Yield (node_id, info, stats) triples."""
-        for node_id, info in (self.nodes_info.get("nodes") or {}).items():
+        for node_id, info in self.node_infos():
             yield node_id, info, (self.nodes_stats.get("nodes") or {}).get(node_id, {})
 
     def node_name(self, node_id):
@@ -81,16 +86,20 @@ class ClusterSnapshot:
 
     @property
     def data_node_count(self):
+        """Nodes that hold data, as _nodes/info reports them. 0 when it
+        reported none, which means unknown: this used to guess 1, and the
+        shard rules then told a three-node cluster it was a single node."""
         n = 0
-        for _, info, _ in self.nodes():
+        for _, info in self.node_infos():
             roles = info.get("roles") or []
             if any(r == "data" or r.startswith("data_") for r in roles):
                 n += 1
-        return max(n, 1)
+        return n
 
     @property
     def master_eligible_count(self):
-        return sum(1 for _, info, _ in self.nodes() if "master" in (info.get("roles") or []))
+        return sum(1 for _, info in self.node_infos()
+                   if "master" in (info.get("roles") or []))
 
     def cluster_setting(self, key, default=None):
         """Read a flat setting, preferring persistent over transient over defaults."""
@@ -171,6 +180,10 @@ def collect(es, timeout=30):
     Every call runs in parallel and in isolation: if one fails its field stays
     empty, the error is recorded under `errors`, and the rest continue. The
     Advisor itself must not become a point of failure.
+
+    `timeout` bounds the whole collection. A call still running when it runs
+    out is recorded as not collected and left behind; everything that did
+    arrive is kept.
     """
     snapshot = ClusterSnapshot(taken_at=datetime.now(timezone.utc).isoformat())
 
@@ -197,13 +210,23 @@ def collect(es, timeout=30):
         "snapshot_repositories": lambda: _body(es.snapshot.get_repository()),
     }
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    # Not `with ThreadPoolExecutor`, and not `as_completed(timeout=)`. The
+    # second raised out of the loop on the first slow call, throwing away
+    # every field already collected; the first then waited for that call
+    # anyway on its way out, so the budget bounded nothing.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+    try:
         futures = {pool.submit(fn): name for name, fn in tasks.items()}
-        for future in concurrent.futures.as_completed(futures, timeout=timeout):
+        done, pending = concurrent.futures.wait(futures, timeout=timeout)
+        for future in done:
             name = futures[future]
             try:
                 setattr(snapshot, name, future.result())
             except Exception as exc:
                 snapshot.errors[name] = f"{type(exc).__name__}: {exc}"
+        for future in pending:
+            snapshot.errors[futures[future]] = f"not collected within {timeout}s"
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     return snapshot
