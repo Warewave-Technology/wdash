@@ -149,20 +149,29 @@ class JaegerTraceSource(TraceSource):
     # ---------- containers ----------
 
     def containers(self, scope):
-        """Jaeger has no index, stream or table a role can be granted.
+        """The one container Jaeger has: the store itself, by its source name.
 
-        The unit a person can be given or denied here is the service, and that
-        boundary already exists in `Scope.services`. Returning a fake container
-        list would put a second, weaker boundary next to the real one.
+        Jaeger has no index a role can be granted, so a role's trace stores
+        are matched against this source's NAME — `*`, `lab-jaeger`, or
+        `lab-jaeger:*`. It used to ask only whether the role had any LOG
+        container, so a role granted nothing but `otel-traces-*` in
+        Elasticsearch read every trace in Jaeger, while the role preview,
+        which does match the name, said it reached none.
         """
-        return [] if scope.is_empty else [self.name]
+        if scope.trace_is_empty:
+            return []
+        return scope.resolve_traces([self.name], source=self.name)
+
+    def _granted(self, scope):
+        return bool(self.containers(scope))
 
     # ---------- services ----------
 
     def _service_names(self, scope):
         body = self._get("/api/services") or {}
         names = [name for name in (body.get("data") or []) if name]
-        return sorted(name for name in names if scope.allows_service(name))
+        return sorted(name for name in names
+                      if scope.allows_service(name, source=self.name))
 
     def services(self, window, scope):
         """Service names, without volume.
@@ -173,6 +182,8 @@ class JaegerTraceSource(TraceSource):
         that describes 20 fetched traces, presented as the volume of a
         service, is worse than no count at all.
         """
+        if not self._granted(scope):
+            return []
         try:
             names = self._service_names(scope)
         except Exception as exc:
@@ -184,6 +195,8 @@ class JaegerTraceSource(TraceSource):
     # ---------- one trace ----------
 
     def trace(self, trace_id, window, scope):
+        if not self._granted(scope):
+            return None
         try:
             body = self._get(f"/api/traces/{trace_id}")
         except Exception as exc:
@@ -211,7 +224,7 @@ class JaegerTraceSource(TraceSource):
             span = self._to_span(raw, processes)
             if span is None:
                 continue
-            if not scope.allows_service(span.service):
+            if not scope.allows_service(span.service, source=self.name):
                 continue
             spans.append(span)
         return spans
@@ -274,9 +287,11 @@ class JaegerTraceSource(TraceSource):
         page load into hundreds of round trips.
         """
         wanted = getattr(query, "service", None)
+        if not self._granted(scope):
+            return []
         try:
             if wanted:
-                if not scope.allows_service(wanted):
+                if not scope.allows_service(wanted, source=self.name):
                     return []
                 services = [wanted]
             else:

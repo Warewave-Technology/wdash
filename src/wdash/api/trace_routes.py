@@ -18,7 +18,7 @@ from flask import (
 )
 from flask_login import current_user, login_required
 
-from ..hub import LogQuery, Scope, SourceRef, TimeWindow, TraceQuery
+from ..hub import LogQuery, Scope, SourceRef, TimeWindow, TraceQuery, patterns
 from ..hub.query import SORT_RECENT, SORT_SLOWEST
 from ..hub.source import Capability
 
@@ -37,6 +37,51 @@ def _denied(message="Access denied: you do not have permission to view traces.")
 
 class TraceSourceMissing(RuntimeError):
     """A request names a trace source that is not configured."""
+
+
+def _may_see_service(scope, source, service):
+    """Whether any source behind this request may show `service`.
+
+    Asked of each source by its name, so a rule written for one source
+    counts there and nowhere else; a merged view asks every member, and each
+    adapter still applies the rule to its own spans.
+    """
+    return any(scope.allows_service(service, source=member.name)
+               for member in _members(source))
+
+
+def _members(source):
+    return getattr(source, "sources", None) or [source]
+
+
+def _services_narrowed(scope, source):
+    """Whether the service rules can have removed spans from this trace.
+
+    It asked whether `*` was in the list, so `*` beside `-payments` — a role
+    that drops every payments span — said nothing was hidden.
+    """
+    if scope.services is None:
+        return False
+    return any(set(patterns.for_source(scope.services, member.name)) != {"*"}
+               for member in _members(source))
+
+
+NO_STORE_SUGGESTION = ("Your role reaches no trace store in {source}. Trace stores "
+                       "are matched against index names in Elasticsearch and "
+                       "against the source's own name in Tempo and Jaeger.")
+
+
+def _reaches_no_store(source, scope):
+    """An empty answer that is the role's doing, not the time range's.
+
+    Asked only after an empty answer, so a source whose store list costs a
+    round trip pays it when there is something to explain. A failure to list
+    them is not reported as a missing grant.
+    """
+    try:
+        return not source.containers(scope)
+    except Exception:
+        return False
 
 
 def _traces(name=None, default_to_all=False):
@@ -130,6 +175,13 @@ def api_services():
         current_app.logger.error(f"Trace services failed: {exc}")
         return jsonify({"error": "Unable to load services.",
                         "error_type": "trace_source_error", "details": str(exc)}), 503
+
+    if not services and _reaches_no_store(source, scope):
+        return jsonify({
+            "services": [],
+            "error_type": "no_accessible_trace_stores",
+            "suggestion": NO_STORE_SUGGESTION.format(source=source.name),
+        })
 
     return jsonify({
         "services": [s.to_dict() for s in services],
@@ -239,7 +291,7 @@ def api_search_traces():
         return jsonify({"traces": [], "error_type": "no_accessible_trace_stores"})
 
     service = request.args.get("service") or None
-    if service and not scope.allows_service(service):
+    if service and not _may_see_service(scope, source, service):
         return _denied("Your role cannot see traces for that service.")
 
     sort = request.args.get("sort", SORT_RECENT)
@@ -268,6 +320,10 @@ def api_search_traces():
         current_app.logger.error(f"Trace search failed: {exc}")
         return jsonify({"error": "Unable to search traces.",
                         "error_type": "trace_source_error", "details": str(exc)}), 503
+
+    if not traces and _reaches_no_store(source, scope):
+        return jsonify({"traces": [], "error_type": "no_accessible_trace_stores",
+                        "suggestion": NO_STORE_SUGGESTION.format(source=source.name)})
 
     # The fan-out stamps this; a single source does not know it is being
     # asked by name. Filled in here so "which store answered" is answerable
@@ -338,7 +394,7 @@ def api_trace(trace_id):
     ]
     payload["service_breakdown"] = trace.service_breakdown()
     # Spans may have been dropped by the scope — tell the user.
-    payload["scoped"] = scope.services is not None and "*" not in (scope.services or ())
+    payload["scoped"] = _services_narrowed(scope, source)
     return jsonify(payload)
 
 

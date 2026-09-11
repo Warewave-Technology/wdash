@@ -140,6 +140,50 @@ class SourceTest(ConfigTestCase):
         self.assertEqual([s["name"] for s in self.app.store.sources.all()],
                          ["lab-es-2"])
 
+    def test_a_service_rule_naming_the_source_counts_too(self):
+        self.add_source(name="lab-es")
+        self.app.store.roles.upsert(
+            "tracers", permissions=["traces:read"], containers=[],
+            trace_containers=["*"], services=["*", "-lab-es:payments"])
+        self.rename(self.app.store.sources.all()[0], "lab-es-2")
+        self.assertEqual([s["name"] for s in self.app.store.sources.all()],
+                         ["lab-es"])
+
+    def _tempo(self, role_stores):
+        self.add_source(name="lab-tempo", kind="tempo", signal="traces",
+                        url="http://tempo:3200")
+        self.app.store.roles.upsert(
+            "tracers", permissions=["traces:read"], containers=[],
+            trace_containers=role_stores)
+        source = self.app.store.sources.all()[0]
+        self.client.post("/admin/sources", data={
+            "id": source["id"], "name": "tempo-2", "signal": "traces",
+            "kind": "tempo", "url": "http://tempo:3200", "password": "",
+            "verify_certs": "on", "enabled": "on"}, follow_redirects=True)
+        return [s["name"] for s in self.app.store.sources.all()]
+
+    def test_a_tempo_store_excluded_by_name_cannot_be_renamed_open(self):
+        """Tempo's one trace store is matched by the source's name, so
+        `-lab-tempo` beside `*` stops excluding under any other name."""
+        self.assertEqual(self._tempo(["*", "-lab-tempo"]), ["lab-tempo"])
+
+    def test_a_tempo_store_granted_by_name_cannot_be_renamed_shut(self):
+        self.assertEqual(self._tempo(["lab-tempo"]), ["lab-tempo"])
+
+    def test_a_tempo_rename_the_patterns_do_not_notice_goes_through(self):
+        self.assertEqual(self._tempo(["*", "-otel-*"]), ["tempo-2"])
+
+    def test_an_elasticsearch_source_name_is_not_a_trace_store(self):
+        """Its trace stores are indices; a pattern that happens to spell the
+        source's name says nothing about it."""
+        self.add_source(name="lab-es")
+        self.app.store.roles.upsert(
+            "tracers", permissions=["traces:read"], containers=[],
+            trace_containers=["*", "-lab-es"])
+        self.rename(self.app.store.sources.all()[0], "lab-es-2")
+        self.assertEqual([s["name"] for s in self.app.store.sources.all()],
+                         ["lab-es-2"])
+
     def test_a_source_can_be_added(self):
         self.add_source(name="lab-es")
         names = [s["name"] for s in self.app.store.sources.all()]

@@ -394,6 +394,113 @@ class TempoSpecificTest(unittest.TestCase):
         self.assertEqual(self.source.services(self.window,
                                               Scope.unrestricted()), [])
 
+    # --- the store boundary ---
+
+    @staticmethod
+    def _role(stores=("*",), services=None, containers=()):
+        return Scope(principal="p", containers=containers,
+                     trace_containers=stores, services=services,
+                     permissions=frozenset({"traces:read"}))
+
+    def test_a_role_granted_only_elasticsearch_indices_reads_nothing_here(self):
+        """Tempo asked whether the role had any LOG container, so a role
+        granted `otel-traces-*` and every log index read every trace in
+        Tempo, while the role preview, which matches the name, said none."""
+        role = self._role(stores=("otel-traces-*",), containers=("*",))
+        self.assertEqual(self.source.containers(role), [])
+        self.assertEqual(self.source.services(self.window, role), [])
+        self.assertEqual(self._search(scope=role), [])
+        self.assertIsNone(self.source.trace(TRACE_ID, self.window, role))
+        self.assertEqual(self.harness._requests, [],
+                         "Tempo was asked on behalf of a role it is closed to")
+
+    def test_the_store_is_granted_by_the_source_name(self):
+        for stores in (("*",), ("tempo",), ("tem*",), ("tempo:*",)):
+            role = self._role(stores=stores)
+            self.assertEqual(self.source.containers(role), ["tempo"], stores)
+            self.assertEqual([s.trace_id for s in self._search(scope=role)],
+                             [TRACE_ID], stores)
+
+    def test_an_exclusion_of_the_store_holds(self):
+        role = self._role(stores=("*", "-tempo"))
+        self.assertEqual(self._search(scope=role), [])
+        self.assertIsNone(self.source.trace(TRACE_ID, self.window, role))
+
+    def test_a_role_with_trace_stores_and_no_log_index_can_search(self):
+        """Search asked `is_empty`, which is about LOG containers: a
+        trace-only role got an empty page from Tempo and no error."""
+        role = self._role(stores=("tempo",), containers=())
+        self.assertEqual([s.trace_id for s in self._search(scope=role)],
+                         [TRACE_ID])
+
+    # --- the service boundary ---
+
+    def test_a_trace_entering_through_a_hidden_service_is_still_found(self):
+        """Every trace whose ROOT was out of scope was dropped — after
+        TraceQL had chosen it for a service that was in scope. A role allowed
+        `billing-api` saw nothing for calls entering through the gateway."""
+        found = self._search(scope=self._role(services=("billing-api",)))
+        self.assertEqual(len(found), 1)
+        summary = found[0]
+        self.assertEqual(summary.service, "billing-api")
+        self.assertEqual(summary.name, "",
+                         "the hidden root's operation was shown")
+        self.assertEqual(summary.span_count, 1)
+        self.assertTrue(summary.has_error)
+
+    def test_a_hidden_services_spans_are_not_counted(self):
+        summary = self._search(scope=self._role(services=("edge-router",)))[0]
+        self.assertEqual(summary.service, "edge-router")
+        self.assertEqual(summary.name, "GET /checkout")
+        self.assertEqual(summary.span_count, 1)
+        self.assertFalse(summary.has_error,
+                         "an error in a service the role cannot see was shown")
+
+    def test_a_trace_with_no_visible_service_is_not_listed(self):
+        self.assertEqual(
+            self._search(scope=self._role(services=("payments",))), [])
+
+    def test_a_service_exclusion_holds_in_every_answer(self):
+        role = self._role(services=("*", "-billing-api"))
+        self.assertEqual(
+            [s.name for s in self.source.services(self.window, role)],
+            ["edge-router", "payments"])
+        trace = self.source.trace(TRACE_ID, self.window, role)
+        self.assertEqual({span.service for span in trace.spans}, {"edge-router"})
+        summary = self._search(scope=role)[0]
+        self.assertFalse(summary.has_error)
+        self.assertEqual(summary.span_count, 1)
+
+    def test_a_service_rule_held_to_this_source_applies_in_every_answer(self):
+        role = self._role(services=("tempo:billing-api",))
+        self.assertEqual(
+            [s.name for s in self.source.services(self.window, role)],
+            ["billing-api"])
+        trace = self.source.trace(TRACE_ID, self.window, role)
+        self.assertEqual({span.service for span in trace.spans}, {"billing-api"})
+        self.assertEqual([s.service for s in self._search(scope=role)],
+                         ["billing-api"])
+
+    def test_a_service_rule_for_another_source_is_not_pushed_down(self):
+        self._search(scope=self._role(services=("billing-api", "jaeger:payments")))
+        rendered = self._traceql()
+        self.assertIn('"billing-api"', rendered)
+        self.assertNotIn("payments", rendered)
+
+    def test_a_service_rule_for_this_source_is_pushed_down_bare(self):
+        self._search(scope=self._role(services=("tempo:payments",)))
+        rendered = self._traceql()
+        self.assertIn('= "payments"', rendered)
+        self.assertNotIn("tempo:", rendered)
+
+    def test_an_exact_grant_is_pushed_down_beside_an_exclusion(self):
+        """The exclusion is left to the filter on the way out; the query
+        asks for a superset of what the role may see, never a subset."""
+        self._search(scope=self._role(services=("billing-api", "-payments")))
+        rendered = self._traceql()
+        self.assertIn('= "billing-api"', rendered)
+        self.assertNotIn("payments", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

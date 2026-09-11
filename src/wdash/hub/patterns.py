@@ -104,6 +104,22 @@ def shape(pattern):
     return EXACT
 
 
+def glob(pattern, literal):
+    """The pattern for a backend whose own glob reads more characters.
+
+    Only a leading and a trailing star are wildcards here, so the text
+    between them is passed through `literal`, which makes it mean itself in
+    the backend's syntax.
+    """
+    kind = shape(pattern)
+    if kind == ANY:
+        return pattern
+    leading = kind in (SUFFIX, CONTAINS)
+    trailing = kind in (PREFIX, CONTAINS)
+    core = pattern[1 if leading else 0:len(pattern) - 1 if trailing else None]
+    return ("*" if leading else "") + literal(core) + ("*" if trailing else "")
+
+
 def matches_any(patterns, name):
     """Deny wins. An exclusion with no inclusion grants nothing."""
     allow, deny = partition(patterns)
@@ -135,6 +151,40 @@ def split_qualifier(pattern):
     return source, rest
 
 
+def parse(pattern):
+    """Return (is_denial, source_or_None, bare) — the one reading of a rule.
+
+    The marker may come before the qualifier or after it: `-primary:secret-*`
+    and `primary:-secret-*` are the same exclusion. Read the second way as a
+    grant, it named things starting with "-secret-", which nothing is called,
+    and every reader of the rule had to agree on that or the query pushed to a
+    backend and the check applied to its answer meant different things.
+    """
+    is_denial, rest = split_deny(pattern)
+    qualifier, bare = split_qualifier(rest)
+    if qualifier is not None:
+        inner_denial, bare = split_deny(bare)
+        is_denial = is_denial or inner_denial
+    return is_denial, qualifier, bare
+
+
+def for_source(patterns, source_name):
+    """The patterns that apply to one source, with their qualifiers removed.
+
+    For an adapter pushing a boundary into its backend's own query language:
+    it knows which source it is, so a pattern qualified for another source
+    says nothing about it, and one qualified for this source is an ordinary
+    pattern here. A denial keeps its marker, so `partition` still sees it.
+    """
+    applicable = []
+    for pattern in patterns or ():
+        is_denial, qualifier, bare = parse(pattern)
+        if qualifier is not None and qualifier != source_name:
+            continue
+        applicable.append((DENY if is_denial else "") + bare)
+    return applicable
+
+
 def matches_for_source(patterns, name, source_name=None):
     """Does `name` satisfy the rules, given which source it came from?
 
@@ -155,8 +205,7 @@ def matches_for_source(patterns, name, source_name=None):
     """
     allowed = False
     for pattern in patterns or ():
-        is_denial, rest = split_deny(pattern)
-        qualifier, bare = split_qualifier(rest)
+        is_denial, qualifier, bare = parse(pattern)
         if qualifier is not None and qualifier != source_name:
             if source_name is None and is_denial and matches(bare, name):
                 return False

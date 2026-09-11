@@ -156,6 +156,28 @@ class ScopeTest(unittest.TestCase):
         self.assertTrue(scope.allows_service("payment-service"))
         self.assertFalse(scope.allows_service("auth-service"))
 
+    def test_a_service_exclusion_beats_the_wildcard(self):
+        """Each service pattern was matched bare, so `-payments` was the
+        literal name "-payments": a role of `*` with it saw payments in every
+        trace store but the one Elasticsearch search that rendered it."""
+        scope = Scope(containers=("*",), services=("*", "-payments"))
+        self.assertTrue(scope.allows_service("billing-api"))
+        self.assertFalse(scope.allows_service("payments"))
+        self.assertEqual(scope.filter_services(["payments", "billing-api"]),
+                         ["billing-api"])
+
+    def test_a_service_rule_can_be_held_to_one_source(self):
+        scope = Scope(containers=("*",), services=("lab-tempo:payments",))
+        self.assertTrue(scope.allows_service("payments", source="lab-tempo"))
+        self.assertFalse(scope.allows_service("payments", source="lab-jaeger"))
+        self.assertFalse(scope.allows_service("payments"))
+
+    def test_a_service_exclusion_for_one_source_holds_where_it_is_unknown(self):
+        scope = Scope(containers=("*",), services=("*", "-lab-tempo:payments"))
+        self.assertFalse(scope.allows_service("payments", source="lab-tempo"))
+        self.assertTrue(scope.allows_service("payments", source="lab-jaeger"))
+        self.assertFalse(scope.allows_service("payments"))
+
     def test_from_user_bridges_existing_rbac(self):
         class FakeUser:
             username = "yigit"
@@ -683,6 +705,112 @@ class TraceScopeTest(unittest.TestCase):
         self.assertTrue(scope.allows_service("payment-service"))
         self.assertFalse(scope.allows_service("postgres"))
         self.assertTrue(scope.has("traces:read"))
+
+
+def _wildcard_regex(value):
+    """Lucene's wildcard syntax: `*`, `?`, and `\\` escaping the next one."""
+    import re
+    out, index = [], 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value):
+            out.append(re.escape(value[index + 1]))
+            index += 2
+            continue
+        out.append(".*" if char == "*" else "." if char == "?" else re.escape(char))
+        index += 1
+    return re.compile("".join(out), re.DOTALL)
+
+
+def _es_selects(clause, field, value):
+    """Whether Elasticsearch keeps a document whose keyword `field` is `value`."""
+    if clause is None or "exists" in clause:
+        return True
+    if "match_none" in clause:
+        return False
+    if "term" in clause:
+        return clause["term"][field] == value
+    if "wildcard" in clause:
+        return bool(_wildcard_regex(
+            clause["wildcard"][field]["value"]).fullmatch(value))
+    query = clause["bool"]
+    should = query.get("should") or []
+    if should and not any(_es_selects(c, field, value) for c in should):
+        return False
+    return not any(_es_selects(c, field, value)
+                   for c in query.get("must_not") or ())
+
+
+class ServiceFilterPushDownTest(unittest.TestCase):
+    """The service clause put into a trace search means what the check means.
+
+    The clause is evaluated against a model of term, wildcard and bool
+    queries, and compared with `Scope.allows_service` for the same source.
+    Where they disagree, either rows the role may see never come back, or the
+    query fills a page with rows the check then throws away.
+    """
+
+    SOURCE = "es-traces"
+
+    def clause(self, services):
+        return ElasticsearchTraceSource._scope_service_filter(
+            OtelSpanSchema(), Scope(containers=("*",), services=services),
+            self.SOURCE)
+
+    def test_the_query_and_the_check_agree(self):
+        field = OtelSpanSchema().service_field
+        lists = [(), ("*",), ("*", "-payments"), ("-payments",),
+                 ("*", "-*pay?*"), ("pay*", "-pay*s"), ("p*y*",),
+                 ("a\\b*",), ("es-traces:payments",),
+                 ("other:payments", "billing-api"), ("*", "-other:payments"),
+                 ("*", "-es-traces:payments"), ("*", "es-traces:-payments")]
+        names = ["payments", "pay?ments", "billing-api", "p*yroll",
+                 "pxyroll", "a\\bc", "abc"]
+        for services in lists:
+            scope = Scope(containers=("*",), services=services)
+            clause = self.clause(services)
+            for name in names:
+                self.assertEqual(
+                    _es_selects(clause, field, name),
+                    scope.allows_service(name, source=self.SOURCE),
+                    f"{services} {name}: {clause}")
+
+    def test_an_exclusion_beside_the_wildcard_is_in_the_query(self):
+        """It returned early on `*` and left `-payments` to the filter on the
+        way out: a short page rather than a boundary in the query."""
+        self.assertIn("must_not", self.clause(("*", "-payments"))["bool"])
+
+    def test_the_search_asks_with_its_own_name(self):
+        """A rule held to this source reaches the query only if the adapter
+        says which source it is."""
+        import json
+
+        class Recording(FakeES):
+            @property
+            def indices(self):
+                class Indices:
+                    def get_mapping(self, index=None, **kw):
+                        return {"otel-traces-000001": {"mappings": {"properties": {
+                            "trace_id": {"type": "keyword"},
+                            "span_id": {"type": "keyword"}}}}}
+                return Indices()
+
+            @property
+            def cat(self):
+                class Cat:
+                    def indices(self, **kw):
+                        return [{"index": "otel-traces-000001"}]
+                return Cat()
+
+        from wdash.hub.query import TraceQuery
+        es = Recording()
+        source = ElasticsearchTraceSource(es, name=self.SOURCE)
+        source.search(TraceQuery(window=TimeWindow.of("1h"), limit=10),
+                      Scope(containers=(), trace_containers=("*",),
+                            services=("es-traces:payments",)))
+        sent = json.dumps(es.searches)
+        self.assertIn('"payments"', sent)
+        self.assertNotIn("match_none", sent)
 
 
 class DuplicateSpanTest(unittest.TestCase):

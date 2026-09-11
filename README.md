@@ -219,7 +219,7 @@ grants nothing** — access is granted explicitly or not at all.
 | Boundary | Unit | Blank means |
 |---|---|---|
 | log containers | index / stream | nothing |
-| trace stores | index | nothing |
+| trace stores | index; Tempo and Jaeger by source name | nothing |
 | services | service name | **every service** |
 
 Services is the one exception, and the form says so. The granularity differs by
@@ -227,25 +227,37 @@ signal on purpose: for logs the meaningful unit is the index, for traces it is
 the service. A role given every trace store but restricted to application
 services sees no infrastructure spans at all.
 
-Container patterns support `*`, `prefix*`, `*suffix` and `*middle*` — the same
-four everywhere. A bare pattern applies to **every configured source**, so
-adding a source widens what existing roles reach; write `source-name:pattern`
-to hold one to a single source.
+Tempo and Jaeger have no index to grant, so each is one trace store matched by
+its source's name: `*`, `lab-tempo`, `lab-*` or `lab-tempo:*` open it, and
+`-lab-tempo` beside `*` keeps it closed. In 2.4.0 and earlier they asked only
+whether a role had any log container, so a role granted nothing but
+Elasticsearch trace indices (`otel-traces-*`) read every trace in Tempo and
+Jaeger; such a role now needs the store's name added. The shipped roles use `*`
+and are unaffected.
+
+Patterns support `*`, `prefix*`, `*suffix` and `*middle*` — the same four in
+every boundary, services included. A bare pattern applies to **every configured
+source**, so adding a source widens what existing roles reach; write
+`source-name:pattern` to hold one to a single source.
 
 A pattern prefixed with `-` is an exclusion, and **an exclusion beats every
 inclusion** regardless of the order they are written in — a role is a set, not
 a program, and a rule whose meaning depends on typing order is not reviewable
 in any list that displays it. So `app-*` together with `-*-pii-*` means "the
 app family, never the sensitive ones", and keeps meaning that as new indices
-appear. Exclusions can be source-qualified too (`-primary:secret-*`). An
-exclusion on its own grants nothing: `-secret-*` is a role with no access, not
-a role with all of it.
+appear. Exclusions can be source-qualified too, with the `-` on either side
+(`-primary:secret-*` and `primary:-secret-*` are the same rule). An exclusion
+on its own grants nothing: `-secret-*` is a role with no access, not a role
+with all of it. The same holds for services: `*` with `-payments` hides every
+payments span, in every trace store, and a trace narrowed that way says so.
 
 A check made without knowing the source fails closed both ways: a qualified
 grant does not apply, and a qualified exclusion does. And because a qualifier
 is a source's name, a source that some role's patterns name cannot be renamed
 until those patterns change — renaming `primary` would otherwise turn
-`-primary:secret-*` into an exclusion of nothing.
+`-primary:secret-*` into an exclusion of nothing. The same goes for a Tempo or
+Jaeger source whose name a role's trace stores match differently than they
+would match the new one.
 
 When a role is edited, the configuration page reports what the change *does* —
 which containers it starts and stops reaching, which permissions it adds and

@@ -264,6 +264,9 @@ class FrontendSmokeTest(unittest.TestCase):
         first run."""
         self._run("config_smoke.js")
 
+    def test_traces_smoke_suite(self):
+        self._run("traces_smoke.js")
+
     def test_every_jsdom_suite_is_run_from_here(self):
         """A suite nobody runs is a suite that rots. `npm test` lists them
         too, but the Python run is what CI executes."""

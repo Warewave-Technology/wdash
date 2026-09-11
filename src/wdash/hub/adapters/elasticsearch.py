@@ -28,6 +28,16 @@ _RESOURCE_FIELDS = ("host", "environment", "container", "pod", "namespace")
 from ..patterns import matches as _pattern_matches  # noqa: F401
 
 
+def _wildcard_literal(text):
+    """Text an Elasticsearch `wildcard` query reads as itself.
+
+    It treats `*`, `?` and `\\` as syntax anywhere; the pattern language only
+    a leading and a trailing star. Unescaped, `*pay?*` beside `*` hid
+    `payments` in the query while the check allowed it.
+    """
+    return "".join("\\" + c if c in "\\*?" else c for c in text)
+
+
 #: Request-body fields whose name differs from the client's keyword argument.
 #:
 #: Only one so far, and it is the one that matters: `_source` is what
@@ -882,7 +892,7 @@ class ElasticsearchTraceSource(TraceSource):
                     span.source = self.name
                 if not span or span.span_id in seen_spans:
                     continue
-                if not scope.allows_service(span.service):
+                if not scope.allows_service(span.service, source=self.name):
                     continue
                 seen_spans.add(span.span_id)
                 spans.append(span)
@@ -922,7 +932,7 @@ class ElasticsearchTraceSource(TraceSource):
             must = [{"range": {schema.timestamp_field: query.window.as_es_range()}}]
 
             if query.service:
-                if not scope.allows_service(query.service):
+                if not scope.allows_service(query.service, source=self.name):
                     continue
                 must.append({"term": {schema.service_field: query.service}})
 
@@ -940,7 +950,7 @@ class ElasticsearchTraceSource(TraceSource):
             # sort order, so a restricted role would get a page full of spans
             # it cannot see and end up with an empty list even when matching
             # traces exist.
-            scope_filter = self._scope_service_filter(schema, scope)
+            scope_filter = self._scope_service_filter(schema, scope, self.name)
             if scope_filter is not None:
                 must.append(scope_filter)
 
@@ -967,7 +977,7 @@ class ElasticsearchTraceSource(TraceSource):
                     span.source = self.name
                 if not span or span.trace_id in seen:
                     continue
-                if not scope.allows_service(span.service):
+                if not scope.allows_service(span.service, source=self.name):
                     continue
                 seen.add(span.trace_id)
                 summaries.append(TraceSummary(
@@ -990,16 +1000,26 @@ class ElasticsearchTraceSource(TraceSource):
         return "parent_span_id" if schema.name == "otel" else "parent.id"
 
     @staticmethod
-    def _scope_service_filter(schema, scope):
+    def _scope_service_filter(schema, scope, source_name):
         """Turn the scope's service allowlist into a query clause.
 
-        Returns None when the scope imposes no restriction.
+        Returns None when the scope imposes no restriction. Built from the
+        patterns that apply to THIS source (bare ones, and ones qualified with
+        its name), so `other-source:api-*` does not widen it and
+        `-this-source:payments` does narrow it. A `*` alone is no restriction;
+        a `*` beside an exclusion still has an exclusion to push down — it
+        used to return early here and leave `-payments` to a post-filter,
+        which is a short page rather than a boundary in the query.
         """
-        if scope.services is None or "*" in scope.services:
+        if scope.services is None:
             return None
-        if not scope.services:
+        from ...hub.patterns import for_source
+        applicable = for_source(scope.services, source_name)
+        if not applicable:
             # An empty allowlist means nothing is visible.
             return {"match_none": {}}
+        if applicable == ["*"]:
+            return None
 
         # The filter pushed into the query has to mean the same thing as
         # Scope.allows_service, or the boundary and the query disagree. This
@@ -1011,7 +1031,7 @@ class ElasticsearchTraceSource(TraceSource):
         from ...hub import patterns as patterns_module
         from ...hub.patterns import partition, shape
 
-        allow, deny = partition(scope.services)
+        allow, deny = partition(applicable)
         if not allow:
             return {"match_none": {}}
 
@@ -1025,7 +1045,8 @@ class ElasticsearchTraceSource(TraceSource):
             # `wildcard` covers prefix, suffix and contains alike. Special-
             # casing prefix bought nothing and was the reason the other two
             # were missing.
-            return {"wildcard": {field: {"value": pattern}}}
+            return {"wildcard": {field: {
+                "value": patterns_module.glob(pattern, _wildcard_literal)}}}
 
         query = {"bool": {"should": [clause(p) for p in allow],
                           "minimum_should_match": 1}}
@@ -1073,7 +1094,7 @@ class ElasticsearchTraceSource(TraceSource):
                 continue
             for bucket in response["aggregations"]["services"]["buckets"]:
                 name = bucket["key"]
-                if not scope.allows_service(name):
+                if not scope.allows_service(name, source=self.name):
                     continue
                 totals[name] = totals.get(name, 0) + bucket["doc_count"]
                 errors[name] = errors.get(name, 0) + bucket["failed"]["doc_count"]

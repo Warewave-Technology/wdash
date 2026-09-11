@@ -295,7 +295,8 @@ def save_source():
         existing = store.sources.get(source_id)
         new_name = (form.get("name") or "").strip()
         if existing and new_name and new_name != existing["name"]:
-            naming = _roles_naming_source(store, existing["name"])
+            naming = _roles_naming_source(store, existing["name"], new_name,
+                                          existing.get("kind"))
             if naming:
                 flash(f"Roles name the source '{existing['name']}' in their "
                       f"patterns: {', '.join(naming)}. Renaming it would "
@@ -332,19 +333,33 @@ def save_source():
     return redirect(url_for("config.config_page"))
 
 
-def _roles_naming_source(store, name):
-    """Roles with a pattern qualified by `name`, granting or excluding."""
-    from ..hub.patterns import split_deny, split_qualifier
+#: Sources whose one trace store is the source itself, matched by its name.
+NAMED_STORE_KINDS = frozenset({"tempo", "jaeger"})
+
+
+def _roles_naming_source(store, name, new_name=None, kind=None):
+    """Roles whose patterns would mean something else after a rename.
+
+    Any pattern qualified by `name` — log store, trace store or service,
+    granting or excluding. And for Tempo or Jaeger, whose trace store is
+    matched by the source's name, any trace-store pattern that answers
+    differently for the new one: `-lab-tempo` beside `*` stops excluding
+    once the source is called anything else.
+    """
+    from ..hub.patterns import matches_for_source, parse
 
     naming = []
     for role in store.roles.all():
-        for pattern in ((role.get("containers") or [])
-                        + (role.get("trace_containers") or [])):
-            _, rest = split_deny(pattern)
-            qualifier, _ = split_qualifier(rest)
-            if qualifier == name:
-                naming.append(role["name"])
-                break
+        stores = role.get("trace_containers") or []
+        rules = ((role.get("containers") or []) + stores
+                 + (role.get("services") or []))
+        qualified = any(parse(pattern)[1] == name for pattern in rules)
+        renamed_store = (
+            kind in NAMED_STORE_KINDS and new_name is not None
+            and matches_for_source(stores, name, name)
+            != matches_for_source(stores, new_name, new_name))
+        if qualified or renamed_store:
+            naming.append(role["name"])
     return naming
 
 

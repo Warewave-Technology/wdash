@@ -258,7 +258,10 @@
                         data-kind="traces" rows="4"
                         style="font-family:monospace;font-size:.8rem"></textarea>
               <div class="d-flex justify-content-between align-items-start mt-1">
-                <div class="form-text mb-0">Blank grants nothing.</div>
+                <div class="form-text mb-0">
+                  Blank grants nothing. Index names in Elasticsearch; Tempo
+                  and Jaeger by their source name.
+                </div>
                 <button type="button" class="btn btn-link btn-sm p-0 ms-2 pick-target"
                         data-kind="traces" data-target="roleTraceContainers"
                         style="font-size:.7rem;white-space:nowrap">browse…</button>
@@ -273,7 +276,8 @@
               <div class="d-flex justify-content-between align-items-start mt-1">
                 <div class="form-text mb-0">
                   <strong>Blank means every service.</strong> The one field
-                  where empty is permissive.
+                  where empty is permissive. <code>-name</code> excludes,
+                  <code>source:name</code> holds a rule to one source.
                 </div>
                 <button type="button" class="btn btn-link btn-sm p-0 ms-2 pick-target"
                         data-kind="services" data-target="roleServices"

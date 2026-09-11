@@ -100,6 +100,48 @@ class PatternTest(unittest.TestCase):
         self.assertTrue(matches_for_source(["primary:secret-*"],
                                            "secret-1", "primary"))
 
+    def test_the_exclusion_marker_may_follow_the_qualifier(self):
+        """`primary:-secret-*` was a grant of names starting "-secret-" —
+        nothing — while the query pushed to the backend read it as the
+        exclusion it was written as."""
+        patterns = ["*", "primary:-secret-*"]
+        self.assertFalse(matches_for_source(patterns, "secret-1", "primary"))
+        self.assertTrue(matches_for_source(patterns, "secret-1", "secondary"))
+        self.assertFalse(matches_for_source(patterns, "secret-1", None))
+
+    def test_what_an_adapter_pushes_down_is_what_the_check_allows(self):
+        """`for_source` is the rule list an adapter renders into its query;
+        `matches_for_source` is the check applied to what comes back. Where
+        they disagree the query is either the boundary — rows the role may
+        see never arrive — or wider than it and trusted anyway."""
+        from wdash.hub.patterns import for_source
+
+        rules = ["*", "app-*", "-app-pii-*", "primary:secret-*",
+                 "-primary:app-*", "secondary:-*-pii-*", "primary:-*",
+                 "-", "-secondary:*"]
+        names = ["app-1", "app-pii-1", "secret-1", "db-pii-2", "-", "other"]
+        for size in range(len(rules) + 1):
+            for start in range(len(rules)):
+                chosen = (rules[start:] + rules[:start])[:size]
+                for source in ("primary", "secondary"):
+                    for name in names:
+                        self.assertEqual(
+                            matches_any(for_source(chosen, source), name),
+                            matches_for_source(chosen, name, source),
+                            f"{chosen} {source} {name}")
+
+    def test_a_glob_keeps_only_the_outer_stars_as_wildcards(self):
+        from wdash.hub.patterns import glob
+
+        def literal(text):
+            return "<" + text + ">"
+
+        self.assertEqual(glob("*", literal), "*")
+        self.assertEqual(glob("pay*", literal), "<pay>*")
+        self.assertEqual(glob("*pay", literal), "*<pay>")
+        self.assertEqual(glob("*p*y?*", literal), "*<p*y?>*")
+        self.assertEqual(glob("p*y", literal), "<p*y>")
+
     def test_there_is_exactly_one_pattern_implementation(self):
         """A second one is not a duplicate, it is a second answer.
 

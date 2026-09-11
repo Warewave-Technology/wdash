@@ -356,6 +356,74 @@ class JaegerSpecificTest(unittest.TestCase):
         found = self._search(limit=2)
         self.assertEqual(len(found), 2)
 
+    # --- the store and service boundaries ---
+
+    @staticmethod
+    def _role(stores=("*",), services=None, containers=()):
+        return Scope(principal="p", containers=containers,
+                     trace_containers=stores, services=services,
+                     permissions=frozenset({"traces:read"}))
+
+    def test_a_role_granted_only_elasticsearch_indices_reads_nothing_here(self):
+        """Jaeger asked whether the role had any LOG container, so a role
+        granted `otel-traces-*` and every log index read all of Jaeger."""
+        role = self._role(stores=("otel-traces-*",), containers=("*",))
+        self.assertEqual(self.source.containers(role), [])
+        self.assertEqual(self.source.services(self.window, role), [])
+        self.assertEqual(self._search(scope=role), [])
+        self.assertIsNone(self.source.trace(TRACE["traceID"], self.window, role))
+        self.assertEqual(self.harness._requests, [],
+                         "Jaeger was asked on behalf of a role it is closed to")
+
+    def test_the_store_is_granted_by_the_source_name(self):
+        for stores in (("*",), ("jaeger",), ("jae*",), ("jaeger:*",)):
+            role = self._role(stores=stores)
+            self.assertEqual(self.source.containers(role), ["jaeger"], stores)
+            self.assertTrue(self._search(scope=role), stores)
+
+    def test_an_exclusion_of_the_store_holds(self):
+        role = self._role(stores=("*", "-jaeger"))
+        self.assertEqual(self._search(scope=role), [])
+        self.assertIsNone(self.source.trace(TRACE["traceID"], self.window, role))
+
+    def test_a_service_exclusion_holds_in_every_answer(self):
+        role = self._role(services=("*", "-billing-api"))
+        self.assertEqual(
+            [s.name for s in self.source.services(self.window, role)],
+            ["edge-router", "payments"])
+        trace = self.source.trace(TRACE["traceID"], self.window, role)
+        self.assertEqual({span.service for span in trace.spans}, {"edge-router"})
+        self._search(scope=role)
+        self.assertEqual({r["params"]["service"] for r in self._sent()},
+                         {"edge-router", "payments"})
+
+    def test_a_named_service_the_role_excludes_is_not_asked_for(self):
+        self._search(scope=self._role(services=("*", "-payments")),
+                     service="payments")
+        self.assertEqual(self._sent(), [])
+
+    def test_a_named_service_granted_for_this_source_is_asked_for(self):
+        self._search(scope=self._role(services=("jaeger:payments",)),
+                     service="payments")
+        self.assertEqual([r["params"]["service"] for r in self._sent()],
+                         ["payments"])
+
+    def test_a_service_rule_held_to_this_source_applies_in_every_answer(self):
+        role = self._role(services=("jaeger:billing-api",))
+        self.assertEqual(
+            [s.name for s in self.source.services(self.window, role)],
+            ["billing-api"])
+        trace = self.source.trace(TRACE["traceID"], self.window, role)
+        self.assertEqual({span.service for span in trace.spans}, {"billing-api"})
+        self.assertEqual({s.service for s in self._search(scope=role)},
+                         {"billing-api"})
+
+    def test_a_service_rule_for_another_source_does_not_apply(self):
+        role = self._role(services=("tempo:billing-api", "edge-router"))
+        self.assertEqual(
+            [s.name for s in self.source.services(self.window, role)],
+            ["edge-router"])
+
 
 if __name__ == "__main__":
     unittest.main()

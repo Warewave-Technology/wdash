@@ -99,10 +99,19 @@ class Scope:
     def allows_trace_container(self, name, source=None):
         return matches_for_source(self.trace_containers, name, source)
 
-    def allows_service(self, name):
+    def allows_service(self, name, source=None):
+        """Are spans from this service permitted?
+
+        None is every service and () is none. Anything else is the same
+        pattern language the containers use, with the same guarantees: a `-`
+        exclusion beats every inclusion, and `source:pattern` holds a rule to
+        one source. This matched each pattern bare, so `-payments` was the
+        literal name "-payments" — a role's service exclusion reached the
+        Elasticsearch search, which rendered it, and nothing else.
+        """
         if self.services is None:
             return True
-        return any(_matches(p, name) for p in self.services)
+        return matches_for_source(self.services, name, source)
 
     def has(self, permission):
         return permission in self.permissions
@@ -137,8 +146,8 @@ class Scope:
         return [name for name in available
                 if self.allows_trace_container(name, source)]
 
-    def filter_services(self, names):
-        return [name for name in names if self.allows_service(name)]
+    def filter_services(self, names, source=None):
+        return [name for name in names if self.allows_service(name, source)]
 
     def __str__(self):
         services = "*" if self.services is None else (",".join(self.services) or "-")

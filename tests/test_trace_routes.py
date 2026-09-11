@@ -543,3 +543,92 @@ class TraceLookupAcrossSourcesTest(TraceRouteTest):
             "/api/traces/wanted?time_range=24h").get_json()
         # Span ids collide between the two stubs, so the dedup leaves two.
         self.assertEqual(len(payload["spans"]), 2)
+
+
+class ServiceRuleTest(unittest.TestCase):
+    """Service rules in the pattern language, as the routes apply them."""
+
+    setUp = TraceRouteTest.setUp
+
+    def as_role(self, **boundaries):
+        grant(self.app, "developer", permissions=["traces:read", "logs:read"],
+              **boundaries)
+        data = session_for("developer")
+        with self.client.session_transaction() as session:
+            session["user_data"] = data
+            session["_user_id"] = data["id"]
+
+    def test_a_service_the_role_excludes_is_refused(self):
+        self.as_role(services=["*", "-postgres"])
+        self.assertEqual(
+            self.client.get("/api/traces?service=postgres").status_code, 403)
+        self.assertEqual(
+            self.client.get("/api/traces?service=redis").status_code, 200)
+
+    def test_a_service_rule_counts_for_the_source_it_names(self):
+        self.as_role(services=["elasticsearch-traces:postgres"])
+        self.assertEqual(
+            self.client.get("/api/traces?service=postgres").status_code, 200)
+        self.as_role(services=["jaeger:postgres"])
+        self.assertEqual(
+            self.client.get("/api/traces?service=postgres").status_code, 403)
+
+    def test_a_service_rule_held_to_this_source_applies_in_every_answer(self):
+        self.as_role(services=["elasticsearch-traces:postgres"])
+        names = {s["name"] for s in
+                 self.client.get("/api/traces/services").get_json()["services"]}
+        self.assertEqual(names, {"postgres"})
+        spans = self.client.get("/api/traces/trace-1").get_json()["spans"]
+        self.assertEqual({s["service"] for s in spans}, {"postgres"})
+        traces = self.client.get("/api/traces").get_json()["traces"]
+        self.assertTrue(traces)
+        self.assertEqual({t["service"] for t in traces}, {"postgres"})
+
+    def test_an_excluded_service_is_not_listed(self):
+        self.as_role(services=["*", "-postgres"])
+        names = {s["name"] for s in
+                 self.client.get("/api/traces/services").get_json()["services"]}
+        self.assertNotIn("postgres", names)
+        self.assertIn("redis", names)
+
+    def test_a_trace_an_exclusion_narrowed_says_so(self):
+        """It asked whether `*` was in the list, so a role of `*` beside
+        `-postgres` lost every postgres span and was told nothing was
+        hidden."""
+        self.as_role(services=["*", "-postgres"])
+        payload = self.client.get("/api/traces/trace-1").get_json()
+        self.assertNotIn("postgres", {s["service"] for s in payload["spans"]})
+        self.assertTrue(payload["scoped"])
+
+    def test_a_trace_nothing_narrowed_does_not_say_so(self):
+        self.as_role(services=["*"])
+        self.assertFalse(
+            self.client.get("/api/traces/trace-1").get_json()["scoped"])
+
+    def test_a_store_the_role_cannot_reach_is_explained(self):
+        """A role whose trace stores match nothing here got an empty list,
+        which reads as a quiet time range."""
+        self.as_role(trace_indices=["apm-*"])
+        for path, key in (("/api/traces/services", "services"),
+                          ("/api/traces", "traces")):
+            payload = self.client.get(path).get_json()
+            self.assertEqual(payload[key], [], path)
+            self.assertEqual(payload["error_type"],
+                             "no_accessible_trace_stores", path)
+            self.assertIn("elasticsearch-traces", payload["suggestion"], path)
+
+    def test_an_empty_answer_from_a_reachable_store_is_not_blamed_on_the_role(self):
+        self.as_role(services=["nothing-*"])
+        for path in ("/api/traces/services", "/api/traces"):
+            self.assertNotIn("error_type", self.client.get(path).get_json(), path)
+
+    def test_the_page_says_an_exclusion_narrows_it(self):
+        self.as_role(services=["*", "-postgres"])
+        page = self.client.get("/traces").data
+        self.assertIn(b"Your role can see spans from", page)
+        self.assertIn(b"-postgres", page)
+
+    def test_the_page_does_not_call_every_service_narrowed(self):
+        self.as_role(services=["*"])
+        self.assertNotIn(b"Your role can see spans from",
+                         self.client.get("/traces").data)

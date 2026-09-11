@@ -43,6 +43,7 @@ from ..models import (
     STATUS_ERROR, STATUS_OK, STATUS_UNSET, Service, SourceRef, Span, Trace,
     TraceSummary,
 )
+from .. import patterns
 from ..source import Capability, TraceSource
 
 logger = logging.getLogger(__name__)
@@ -204,12 +205,21 @@ class TempoTraceSource(TraceSource):
     # ---------- containers ----------
 
     def containers(self, scope):
-        """Tempo has no index or stream a role can be granted.
+        """The one container Tempo has: the store itself, by its source name.
 
-        The unit somebody can be given or denied is the service, and that
-        boundary already exists in `Scope.services`.
+        Tempo has no index a role can be granted, so a role's trace stores are
+        matched against this source's NAME — `*`, `lab-tempo`, or
+        `lab-tempo:*`. It used to ask only whether the role had any LOG
+        container, so a role granted nothing but `otel-traces-*` in
+        Elasticsearch read every trace in Tempo, while the role preview,
+        which does match the name, said it reached none.
         """
-        return [] if scope.is_empty else [self.name]
+        if scope.trace_is_empty:
+            return []
+        return scope.resolve_traces([self.name], source=self.name)
+
+    def _granted(self, scope):
+        return bool(self.containers(scope))
 
     # ---------- services ----------
 
@@ -228,7 +238,8 @@ class TempoTraceSource(TraceSource):
             if name:
                 names.append(name)
 
-        return sorted({name for name in names if scope.allows_service(name)})
+        return sorted({name for name in names
+                       if scope.allows_service(name, source=self.name)})
 
     def services(self, window, scope):
         """Service names, without volume.
@@ -238,6 +249,8 @@ class TempoTraceSource(TraceSource):
         Zero is reported rather than a count aggregated from a bounded search:
         that would describe the traces that came back, not the service.
         """
+        if not self._granted(scope):
+            return []
         try:
             names = self._service_names(scope, window)
         except Exception as exc:
@@ -249,6 +262,8 @@ class TempoTraceSource(TraceSource):
     # ---------- one trace ----------
 
     def trace(self, trace_id, window, scope):
+        if not self._granted(scope):
+            return None
         try:
             body = self._get(f"/api/traces/{trace_id}")
         except Exception as exc:
@@ -263,7 +278,7 @@ class TempoTraceSource(TraceSource):
             resource = _attributes((batch.get("resource") or {})
                                    .get("attributes"))
             service = str(resource.get("service.name") or "")
-            if not scope.allows_service(service):
+            if not scope.allows_service(service, source=self.name):
                 continue
             for scope_spans in batch.get("scopeSpans") or ():
                 for raw in scope_spans.get("spans") or ():
@@ -332,10 +347,15 @@ class TempoTraceSource(TraceSource):
             # glob into one is a second pattern language — the thing this
             # codebase already unified once. Those are filtered on the way
             # out instead, which is correct but reads fewer traces per page.
-            exact = [name for name in scope.services if "*" not in name]
-            if exact and len(exact) == len(scope.services):
+            # Only the patterns that apply to THIS source count. Exclusions
+            # are left to the filter on the way out: pushing the exact names
+            # a role is granted reads a superset of what it may see, which
+            # the filter narrows — the other way round would be the boundary.
+            allow, _ = patterns.partition(
+                patterns.for_source(scope.services, self.name))
+            if allow and not any("*" in name for name in allow):
                 rendered = " || ".join(
-                    f"{SERVICE_ATTRIBUTE} = {_quote(name)}" for name in exact)
+                    f"{SERVICE_ATTRIBUTE} = {_quote(name)}" for name in allow)
                 clauses.append(f"({rendered})")
 
         if getattr(query, "name", None):
@@ -348,7 +368,10 @@ class TempoTraceSource(TraceSource):
         return "{ " + " && ".join(clauses) + " }" if clauses else "{}"
 
     def search(self, query, scope):
-        if scope.is_empty or scope.services == ():
+        # The TRACE side's emptiness. This asked `is_empty`, which is about
+        # log containers: a role with trace stores and no log index — a
+        # trace-only role — got an empty page from Tempo and no error.
+        if not self._granted(scope) or scope.services == ():
             return []
 
         params = {"q": self._traceql(query, scope),
@@ -387,14 +410,27 @@ class TempoTraceSource(TraceSource):
         return summaries[:limit] if limit else summaries
 
     def _to_summary(self, entry, scope):
-        service = entry.get("rootServiceName") or ""
-        if not scope.allows_service(service):
-            return None
+        """One row, told only through the services this scope may see.
 
+        It dropped every trace whose ROOT service was out of scope — after
+        TraceQL had already chosen the trace for a service that was in it.
+        A role allowed `billing-api` saw nothing for the calls that entered
+        through a gateway it may not see, which is most of them. The trace
+        is kept when any of its services is allowed, and described by one of
+        those: the root's name and operation are not shown when the root is
+        not, and the counts are of the allowed services' spans.
+        """
+        root = entry.get("rootServiceName") or ""
         # `serviceStats` is per trace, per service: {svc: {spanCount,
         # errorCount}}. It is what makes the error flag and the span count
         # free here — Jaeger has to fetch the whole trace to know either.
-        stats = entry.get("serviceStats") or {}
+        stats = {name: row for name, row
+                 in (entry.get("serviceStats") or {}).items()
+                 if scope.allows_service(name, source=self.name)}
+        root_allowed = scope.allows_service(root, source=self.name)
+        if not root_allowed and not stats:
+            return None
+        service = root if root_allowed else sorted(stats)[0]
         span_count = sum(int(row.get("spanCount") or 0)
                          for row in stats.values()) or None
         has_error = any(int(row.get("errorCount") or 0) > 0
@@ -403,7 +439,7 @@ class TempoTraceSource(TraceSource):
         return TraceSummary(
             trace_id=entry.get("traceID") or "",
             service=service,
-            name=entry.get("rootTraceName") or "",
+            name=(entry.get("rootTraceName") or "") if root_allowed else "",
             start=_nanoseconds_to_datetime(entry.get("startTimeUnixNano")),
             # `durationMs` is the whole trace, and the neutral model is in
             # microseconds.
