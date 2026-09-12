@@ -1590,7 +1590,84 @@ def _source_names():
     return [source.name for source in (hub.log_sources if hub else [])]
 
 
-def _editor_context(panels, thresholds, defaulted):
+def _group_by_fields(name):
+    """(fields, reason) the editor may offer for the source called `name`.
+
+    Both halves always sensible, because the editor has one select to fill and
+    an empty one is the same dead end whatever caused it. So: the source's own
+    list and no reason, or the standard names and the sentence saying why they
+    are the standard names — never a blank select, and never the standard four
+    presented as though the source had chosen them.
+
+    ADVISORY. Nothing here validates a stored panel: `normalise_all` runs on
+    every READ of a dashboard and a refusal there is a 400 for the whole
+    board, so a field this list does not hold is refused by the source that
+    cannot answer it, as one panel carrying the reason.
+    """
+    standard = list(AGGREGATABLE_FIELDS)
+    try:
+        source = _logs(_NamedSource(name) if name else None)
+    except SourceMissing as exc:
+        return standard, str(exc)
+    if source is None:
+        return standard, "No log source is configured."
+
+    # Absent as well as declined: a fan-out over several sources, and a
+    # source object that is not a `LogSource` subclass, both reach here, and
+    # "there is no such method" is the same fact as "not implemented".
+    ask = getattr(source, "group_by_fields", None)
+    if ask is None:
+        return standard, (f"'{source.name}' does not list the fields it can "
+                          f"group by; these are the standard ones.")
+    try:
+        found = list(ask(_scope()))
+    except NotImplementedError:
+        return standard, (f"'{source.name}' does not list the fields it can "
+                          f"group by; these are the standard ones.")
+    except Exception as exc:
+        current_app.logger.warning(
+            f"group-by fields could not be read from {source.name}: {exc}")
+        # The reason, not a shrug: a cluster that is down and a cluster with
+        # nothing to group by look identical in an empty select, and only one
+        # of them is worth waiting out.
+        return standard, (f"The fields of '{source.name}' could not be read "
+                          f"({exc}); these are the standard ones.")
+    if not found:
+        return standard, (f"'{source.name}' reported no fields your role can "
+                          f"group by; these are the standard ones.")
+    return found, None
+
+
+class _NamedSource:
+    """Just enough of a dashboard for `_logs` to resolve a source by name.
+
+    The create form has no dashboard yet and the edit form's select can point
+    at one the stored board does not name, so the editor asks by NAME. Reusing
+    `_logs` is what keeps "the source is not configured" one sentence in one
+    place rather than two that drift.
+    """
+
+    def __init__(self, source):
+        self.source = source
+
+
+@dashboard_bp.route("/api/dashboard/group-by-fields")
+@login_required
+def api_group_by_fields():
+    """What the panel editor may offer as a group-by, for one source."""
+    if not (current_user.has_permission("dashboard:create")
+            or current_user.has_permission("dashboard:edit")):
+        return jsonify({"error": "Access denied: You do not have permission "
+                                 "to edit dashboards.",
+                        "error_type": "permission_denied"}), 403
+
+    name = (request.args.get("source") or "").strip()
+    fields, reason = _group_by_fields(name)
+    return jsonify({"source": name, "fields": fields,
+                    "standard": list(AGGREGATABLE_FIELDS), "reason": reason})
+
+
+def _editor_context(panels, thresholds, defaulted, source=""):
     """What the shared panel-and-threshold editor needs, said once.
 
     Both forms render the same include, so the day a control is added it is
@@ -1607,14 +1684,21 @@ def _editor_context(panels, thresholds, defaulted):
     freezing the version of them that happened to be current the day it was
     made.
     """
+    fields, reason = _group_by_fields(source)
     return {"panels": panels,
             "panels_are_default": defaulted,
             "aggregatable_fields": list(AGGREGATABLE_FIELDS),
+            # Rendered with the page rather than fetched by it, so the select
+            # is never briefly wrong: the form comes back with the source's
+            # own fields already in it, and the endpoint above is for the
+            # source SELECT changing under the author.
+            "group_by_fields": fields,
+            "group_by_reason": reason,
             "panel_heights": [list(pair) for pair in PANEL_HEIGHTS],
             "thresholds": thresholds}
 
 
-def _resubmitted(panels, defaulted):
+def _resubmitted(panels, defaulted, source=""):
     """The editor context for a form that was REFUSED, holding what was typed.
 
     A validation error re-rendered the editor from the stored (or default)
@@ -1651,7 +1735,12 @@ def _resubmitted(panels, defaulted):
         levels = {level: value for level, value in levels.items() if value}
         if levels:
             typed[metric] = levels
-    return _editor_context(panels, typed, defaulted)
+    # And the group-by list for the source that was CHOSEN on the refused
+    # form, not for the one the board is stored with: the author may have
+    # been repointing it, and a refusal about the query would otherwise
+    # re-render the select against the old source's fields.
+    return _editor_context(panels, typed, defaulted,
+                           (request.form.get("source") or source).strip())
 
 
 @dashboard_bp.route("/dashboard/create", methods=["GET", "POST"])
@@ -1730,7 +1819,7 @@ def edit_dashboard(dashboard_id):
     # a form that cannot tell "the defaults" from "a list somebody chose"
     # freezes the first into the record the moment anybody presses Save.
     editor = _editor_context(dashboard.get_panels(), dashboard.thresholds,
-                             not dashboard.panels)
+                             not dashboard.panels, dashboard.source or "")
     if request.method == "POST":
         fields, error = _dashboard_form()
         if error:
@@ -1740,7 +1829,8 @@ def edit_dashboard(dashboard_id):
                                    sources=_source_names(),
                                    visibilities=VISIBILITIES,
                                    **_resubmitted(dashboard.get_panels(),
-                                                  not dashboard.panels))
+                                                  not dashboard.panels,
+                                                  dashboard.source or ""))
         # The revision the form was rendered from. The database store refuses
         # a write against a stale one — its docstring said "the edit form
         # passes it", and the form did not, so optimistic locking was

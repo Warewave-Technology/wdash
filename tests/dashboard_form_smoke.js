@@ -222,8 +222,16 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
     // ---------------------------------------------------------------
     const EDITOR = path.join(ROOT, 'templates', '_dashboard_editor_script.html');
 
-    /** The editor script with its Jinja values filled in. */
-    function editor({ panels, fields = ['service', 'level'],
+    /** The editor script with its Jinja values filled in.
+     *
+     * `fields` is the standard list the server falls back to; `offered` is
+     * what the DASHBOARD'S SOURCE said it can group by, which is what the
+     * selects are actually built from. They are two values because they are
+     * two facts: one is a constant, the other is a backend's answer, and
+     * `reason` says why the select is showing the first.
+     */
+    function editor({ panels, fields = ['severity', 'service', 'host', 'environment'],
+                      offered = null, reason = null,
                       heights = [[180, 'short'], [300, 'standard'],
                                  [450, 'tall'], [600, 'very tall']],
                       defaulted = false } = {}) {
@@ -232,14 +240,24 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
         if (!found) throw new Error('no script in the editor include');
         return found[1]
             .replace('{{ aggregatable_fields | tojson }}', JSON.stringify(fields))
+            .replace('{{ group_by_fields | tojson }}',
+                     JSON.stringify(offered === null ? fields : offered))
+            .replace('{{ group_by_reason | tojson }}', JSON.stringify(reason))
             .replace('{{ panel_heights | tojson }}', JSON.stringify(heights))
             .replace('{{ panels_are_default | tojson }}', JSON.stringify(defaulted))
             .replace('{{ panels | tojson }}', JSON.stringify(panels));
     }
 
     /** A page with the pieces _dashboard_editor.html provides. */
-    function editorPage(options) {
+    function editorPage(options = {}) {
         const dom = new JSDOM(`<!doctype html><body><form>
+          <!-- The source select lives on the form above the editor, and it
+               decides what can be grouped by: it is here because the editor
+               listens to it. -->
+          <select id="source" name="source">
+            <option value="" selected>Default (es)</option>
+            <option value="loki-lab">loki-lab</option>
+          </select>
           <button type="button" data-add-panel="timeseries"></button>
           <button type="button" data-add-panel="terms"></button>
           <button type="button" data-add-panel="records"></button>
@@ -250,12 +268,25 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
           <!-- Not in the real menu: a stand-in for the next panel type,
                put on the page by whoever forgets to write its blank. -->
           <button type="button" data-add-panel="a_type_from_the_future"></button>
-          <div id="panelList"></div><input type="hidden" id="panelsField">
+          <div id="panelList"></div>
+          <div class="form-text" id="groupByNote"></div>
+          <input type="hidden" id="panelsField">
           </form></body>`, { runScripts: 'outside-only' });
         const said = [];
+        const asked = [];
         dom.window.alert = (message) => said.push(message);
+        // The editor asks the server what the newly chosen source can group
+        // by. `answers` is what it gets, in order.
+        const answers = (options.answers || []).slice();
+        dom.window.fetch = (url) => {
+            asked.push(url);
+            const next = answers.shift();
+            if (next === undefined) return Promise.reject(new Error('offline'));
+            return Promise.resolve({ ok: next.ok !== false,
+                                     json: () => Promise.resolve(next) });
+        };
         dom.window.eval(editor(options));
-        return { d: dom.window.document, w: dom.window, said };
+        return { d: dom.window.document, w: dom.window, said, asked };
     }
 
     const stored = (d) => JSON.parse(d.getElementById('panelsField').value || 'null');
@@ -655,6 +686,103 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
         check('a list somebody chose is posted whether or not it is touched',
               stored(chosen.d) && stored(chosen.d).length === 2,
               chosen.d.getElementById('panelsField').value);
+    }
+
+    // ---------------------------------------------------------------
+    // What the Group by / Split by selects offer.
+    //
+    // Four names, hardcoded, to every backend. Two of them — `host` and
+    // `environment` — are answered by the lab's Loki with nothing at all,
+    // and six fields its Elasticsearch index maps and can group by
+    // (`http_status`, `user_id`, `correlation_id`, `request_id`,
+    // `duration_ms`, `trace_id`) could not be asked for by any board.
+    // ---------------------------------------------------------------
+    {
+        const groupBy = (d) => Array.from(
+            d.querySelectorAll('#panelList [data-key="field"] option'),
+            o => o.value);
+
+        const { d } = editorPage({
+            panels: [{ id: 'p', type: 'terms', title: 'Top', field: 'service',
+                       size: 10, width: 6, height: 300 }],
+            offered: ['severity', 'service', 'http_status', 'user_id'] });
+        check('the group-by select offers what the SOURCE can group by',
+              groupBy(d).join() === 'severity,service,http_status,user_id',
+              groupBy(d).join());
+        check('and the note says whose list it is',
+              /4 fields/.test(d.getElementById('groupByNote').textContent),
+              d.getElementById('groupByNote').textContent);
+
+        // Advisory, not a fence: a stored panel keeps its own field even
+        // when the source stops listing it. Dropping it would not refuse the
+        // panel — the select would simply be showing a DIFFERENT field, and
+        // the next change to the row would save that one instead.
+        const stale = editorPage({
+            panels: [{ id: 'p', type: 'terms', title: 'Top',
+                       field: 'http_status', size: 10, width: 6, height: 300 }],
+            offered: ['severity', 'service'] });
+        const select = stale.d.querySelector('#panelList [data-key="field"]');
+        check('a stored field the source no longer lists stays selected',
+              select.value === 'http_status', select.value);
+        check('and is marked as one this source does not offer',
+              /not offered by this source/.test(select.innerHTML),
+              select.innerHTML);
+
+        // The failure that must not look like emptiness: a source that could
+        // not be asked leaves a usable select AND says why.
+        const down = editorPage({
+            panels: [{ id: 'p', type: 'terms', title: 'Top', field: 'service',
+                       size: 10, width: 6, height: 300 }],
+            fields: ['severity', 'service', 'host', 'environment'],
+            offered: ['severity', 'service', 'host', 'environment'],
+            reason: "The fields of 'es' could not be read (connection "
+                    + 'refused); these are the standard ones.' });
+        check('a discovery that failed still offers the standard fields',
+              groupBy(down.d).join() === 'severity,service,host,environment',
+              groupBy(down.d).join());
+        check('and says so rather than showing them as the source’s own',
+              /could not be read/.test(
+                  down.d.getElementById('groupByNote').textContent)
+              && down.d.getElementById('groupByNote')
+                     .classList.contains('text-warning'),
+              down.d.getElementById('groupByNote').outerHTML);
+
+        // Changing the source changes what can be grouped by, and the select
+        // has to follow: a board moved from Elasticsearch to Loki keeps
+        // offering four names Loki answers two of.
+        const moved = editorPage({
+            panels: [{ id: 'p', type: 'terms', title: 'Top', field: 'service',
+                       size: 10, width: 6, height: 300 }],
+            offered: ['severity', 'service', 'http_status'],
+            answers: [{ source: 'loki-lab', fields: ['service', 'severity'],
+                        reason: null }] });
+        moved.d.getElementById('source').value = 'loki-lab';
+        moved.d.getElementById('source').dispatchEvent(
+            new moved.w.Event('change'));
+        await settle();
+        check('choosing another source asks that source what it can group by',
+              moved.asked.length === 1
+              && moved.asked[0].includes('source=loki-lab'), moved.asked);
+        check('and the select is rebuilt from its answer',
+              groupBy(moved.d).join() === 'service,severity',
+              groupBy(moved.d).join());
+        check('while the panel keeps the field it had',
+              stored(moved.d)[0].field === 'service',
+              moved.d.getElementById('panelsField').value);
+
+        // And an ask that fails leaves what is on screen rather than
+        // emptying the select.
+        const offline = editorPage({
+            panels: [{ id: 'p', type: 'terms', title: 'Top', field: 'service',
+                       size: 10, width: 6, height: 300 }],
+            offered: ['severity', 'service', 'http_status'], answers: [] });
+        offline.d.getElementById('source').value = 'loki-lab';
+        offline.d.getElementById('source').dispatchEvent(
+            new offline.w.Event('change'));
+        await settle();
+        check('a failed ask leaves the select it could not replace',
+              groupBy(offline.d).join() === 'severity,service,http_status',
+              groupBy(offline.d).join());
     }
 
     console.log(failures.length ? `\n${failures.length} failure(s)`

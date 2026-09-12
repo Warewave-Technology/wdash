@@ -17,6 +17,7 @@ of the application never has to defend against a half-specified panel loaded
 from a file somebody edited by hand.
 """
 
+import re
 import uuid
 
 #: Panel kinds and the fields each one needs.
@@ -95,11 +96,42 @@ TRACE_LIST_VIEWS = ("slowest", "recent", "errors")
 #: one that is wrong is the one nobody checked the caption of.
 MONITOR_VIEWS = ("status", "availability")
 
-#: Fields a terms panel may aggregate on. Restricted deliberately: an
-#: aggregation on an analysed text field either fails or returns tokenised
-#: nonsense, and letting anyone type a field name makes that a support burden
-#: rather than an impossible state.
+#: Fields the editor offers when the source has not said what it holds.
+#:
+#: These four used to be the whole vocabulary, and a closed list of four is a
+#: UI constant rather than a backend limit. Measured on the lab: the
+#: Elasticsearch index maps ten fields that group cleanly — `http_status`
+#: (200: 885, 404: 332, 201: 300, 503: 300, 400: 298), `user_id`,
+#: `correlation_id`, `request_id`, `duration_ms` and `trace_id` beside these —
+#: none of which a board could ask for, while Loki carries no `host` and no
+#: `environment` label at all and answered both with nothing. So the list a
+#: source can really group by is read FROM the source
+#: (`LogSource.group_by_fields`), and these are what the editor shows while
+#: nobody has answered: a deployment with one of everything still recognises
+#: them, and a discovery call that fails leaves a list rather than a blank
+#: select.
 AGGREGATABLE_FIELDS = ("severity", "service", "host", "environment")
+
+#: Neutral names that are the log LINE rather than a value to count. Refused
+#: outright, whatever the source says: an aggregation on an analysed text
+#: field either fails or returns tokenised nonsense, one word per bucket.
+UNCOUNTABLE_FIELDS = ("body", "message", "_msg", "line", "log")
+
+#: The shape a group-by field name must have.
+#:
+#: This is the static vocabulary `normalise` validates against, and it is a
+#: SHAPE rather than a list on purpose. `models.Dashboard.get_panels` calls
+#: `normalise_all` on every READ, and a PanelError there is a 400 for the
+#: whole dashboard — so a rule that consults a backend, or a closed list that
+#: a re-pointed board can fall outside of, turns one stale panel into a board
+#: that will not open. Whether this source can answer `http_status` today is
+#: the SOURCE's answer, given per panel at fill time; whether `http_status` is
+#: a field name at all is decidable here, forever, offline.
+#:
+#: Strict for a second reason: the name is interpolated into a LogQL `sum by
+#: (...)` clause and a LogsQL filter. Letters, digits, underscore and dot
+#: cannot close a quote, a brace or a pipeline stage.
+_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,63}\Z")
 
 DEFAULT_SIZE = 10
 MAX_SIZE = 50
@@ -150,6 +182,29 @@ PANEL_HEIGHTS = (
 
 class PanelError(ValueError):
     """A panel definition that cannot be rendered."""
+
+
+def check_group_by(title, field, verb="group by"):
+    """Refuse a field name no source could ever group by. Raises PanelError.
+
+    Deliberately NOT "refuse a field THIS source cannot group by". That
+    question has a different answer per source and per day, it costs a
+    request to ask, and it is asked where the panel is drawn — one card
+    saying why, out of `AggregationResult.notes`. Asked here it would be
+    asked on every read of the dashboard, and answered with a 400 for the
+    board.
+    """
+    if field in UNCOUNTABLE_FIELDS:
+        raise PanelError(
+            f"'{title}': cannot {verb} '{field}' — that is the log line "
+            f"itself, not a value to count. Fields most sources hold: "
+            f"{', '.join(AGGREGATABLE_FIELDS)}; the editor offers what this "
+            f"dashboard's source actually carries.")
+    if not _FIELD_NAME.match(field):
+        raise PanelError(
+            f"'{title}': cannot {verb} '{field}' — a field name starts with "
+            f"a letter and holds letters, digits, underscores and dots. "
+            f"Fields most sources hold: {', '.join(AGGREGATABLE_FIELDS)}.")
 
 
 def signals(panels):
@@ -254,10 +309,7 @@ def normalise(panel, panel_id=None):
 
     if kind == "terms":
         field = (panel.get("field") or "").strip()
-        if field not in AGGREGATABLE_FIELDS:
-            raise PanelError(
-                f"'{title}': cannot group by '{field}'. "
-                f"Available: {', '.join(AGGREGATABLE_FIELDS)}")
+        check_group_by(title, field)
         try:
             size = int(panel.get("size", DEFAULT_SIZE))
         except (TypeError, ValueError):
@@ -329,10 +381,8 @@ def normalise(panel, panel_id=None):
 
     elif kind == "timeseries":
         split_by = (panel.get("split_by") or "").strip()
-        if split_by and split_by not in AGGREGATABLE_FIELDS:
-            raise PanelError(
-                f"'{title}': cannot split by '{split_by}'. "
-                f"Available: {', '.join(AGGREGATABLE_FIELDS)}")
+        if split_by:
+            check_group_by(title, split_by, verb="split by")
         out["split_by"] = split_by or None
 
     return out

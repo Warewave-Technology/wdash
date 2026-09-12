@@ -614,6 +614,46 @@ class VictoriaLogsSource(LogSource):
         chosen += sorted(present - set(chosen) - {self._stream_field})[:4]
         return chosen[:8]
 
+    def group_by_fields(self, scope, window=None):
+        """The fields these records carry, as neutral names.
+
+        Not `fields()` above, which is the sidebar's list and deliberately
+        raw: it shows `level`, `severity`, `log.level` and `severity_text`
+        separately because a person reading field statistics wants to know
+        which one this deployment writes. A panel does not — it asks for
+        `severity` and `_severity_terms` counts all four together — so the
+        four collapse to one here. Measured on the lab: the sidebar's eight
+        names (`env, host, level, log.level, service, severity,
+        severity_text, trace_id`) are five fields to group by.
+
+        Scoped, unlike `fields()`, which asks `*` over the whole store: the
+        editor must not name a field that exists only in a container the
+        caller may not read.
+        """
+        containers = self.containers(scope, window)
+        if not containers:
+            return []
+        params = {"query": self._selector(containers)}
+        if window is not None:
+            params.update({"start": _rfc3339(window.start),
+                           "end": _rfc3339(window.end)})
+        try:
+            body = self._json("/select/logsql/field_names", params)
+        except Exception as exc:
+            # Raised rather than answered with []: an empty select is "this
+            # source holds nothing to group by", which is a different fact
+            # from "VictoriaLogs did not answer", and the editor says both.
+            raise VictoriaLogsError(
+                f"field names could not be read: {exc}") from exc
+
+        out = set()
+        for entry in body.get("values") or ():
+            name = entry.get("value")
+            if not name or name in _RESERVED:
+                continue
+            out.add("severity" if name in _SEVERITY_FIELDS else name)
+        return sorted(out)
+
     def fields(self, scope, window=None):
         """Field names present in the data, for the query builder."""
         try:

@@ -132,6 +132,28 @@ class FakeResponse:
         return self._payload
 
 
+#: Streams a RANGE metric query counts over: a label set, and lines per
+#: second. Modelled rather than canned, because the fixture that ignores what
+#: it is asked is exactly how a missing `by` clause passes for a present one:
+#: this file's old matrix answered every `count_over_time` with one unlabelled
+#: series, so a split the adapter never built and a split it built correctly
+#: were the same green test.
+#:
+#: The totals are what the canned answer was — 7 at the first second and 3 at
+#: the next — so nothing that counted the whole had to change.
+METRIC_STREAMS = (
+    ({"service_name": "api-gateway", "level": "info"},
+     {1754305800: 5, 1754305860: 3}),
+    ({"service_name": "api-gateway", "level": "error"},
+     {1754305800: 2}),
+)
+
+#: The label names Loki holds, which is a short list and not the fields a
+#: record carries: `/loki/api/v1/labels` is what the editor's group-by select
+#: is filled from.
+LABEL_NAMES = ("detected_level", "level", "service_name")
+
+
 class FakeLoki(Harness):
     """Loki's HTTP API, enough of it."""
 
@@ -146,15 +168,22 @@ class FakeLoki(Harness):
         #: What an instant metric query answers with. None means the default
         #: per-level vector.
         self.vector = None
+        #: What a range metric query counts over. Replaceable, so a test can
+        #: put a stream with no `level` label in front of the adapter.
+        self.metric_streams = METRIC_STREAMS
+        #: The label NAMES. None means the default list.
+        self.label_names = None
 
     # --- harness contract ---
 
     def requests(self):
         # Label lookups are how the adapter learns what exists; they are not
         # data queries, and counting them would make "issued no query"
-        # impossible to state.
+        # impossible to state. `/labels` is the same kind of lookup one level
+        # up — the label NAMES, which is what the editor's group-by list is.
         return [request for request in self._requests
-                if "/label/" not in request["path"]]
+                if "/label/" not in request["path"]
+                and not request["path"].endswith("/labels")]
 
     def reset(self):
         self._requests = []
@@ -194,6 +223,10 @@ class FakeLoki(Harness):
         if "/label/" in path:
             data = SERVICES if self._labels_present is None else self._labels_present
             return FakeResponse({"status": "success", "data": data})
+        if path.endswith("/labels"):
+            names = (LABEL_NAMES if self.label_names is None
+                     else self.label_names)
+            return FakeResponse({"status": "success", "data": list(names)})
         if path.endswith("ready"):
             return FakeResponse({}, text="ready")
         if "query_range" in path:
@@ -202,9 +235,9 @@ class FakeLoki(Harness):
 
     def _range(self, params):
         if "count_over_time" in (params.get("query") or ""):
-            return {"status": "success", "data": {"resultType": "matrix",
-                                                  "result": [{
-                "metric": {}, "values": [[1754305800, "7"], [1754305860, "3"]]}]}}
+            return {"status": "success",
+                    "data": {"resultType": "matrix",
+                             "result": self._matrix(params["query"])}}
         if self.streams is not None:
             return {"status": "success", "data": {"resultType": "streams",
                                                   "result": self.streams}}
@@ -215,6 +248,35 @@ class FakeLoki(Harness):
                         '{"msg":"hello","trace_id":"abc","level":"info"}'],
                        ["1754305801000000000", "plain text line"]],
         }]}}
+
+    def _matrix(self, query):
+        """`sum [by (...)] (count_over_time(...))` over `metric_streams`.
+
+        The `by` clause is READ, so a query with none answers with one
+        unlabelled series and a query naming a label nothing carries answers
+        the same way — which is what the lab's Loki does, measured: `sum by
+        (host)` over streams with no `host` label returns ONE series, no
+        labels, carrying every line.
+        """
+        import re
+
+        match = re.search(r"sum(?:\s+by\s+\(([^)]*)\))?\s*\(count_over_time",
+                          query)
+        if not match:
+            raise AssertionError(f"not a count_over_time query: {query!r}")
+        names = [name.strip()
+                 for name in (match.group(1) or "").split(",") if name.strip()]
+
+        grouped = {}
+        for labels, points in self.metric_streams:
+            key = tuple(sorted((name, labels[name]) for name in names
+                               if labels.get(name)))
+            counted = grouped.setdefault(key, {})
+            for at, count in points.items():
+                counted[at] = counted.get(at, 0) + count
+        return [{"metric": dict(key),
+                 "values": [[at, str(count)] for at, count in sorted(counted.items())]}
+                for key, counted in grouped.items()]
 
     def _instant(self):
         if self.vector is not None:
@@ -862,15 +924,189 @@ class LokiSpecificTest(unittest.TestCase):
         self.assertIn("Loki cannot express", " ".join(result.warnings))
         self.assertEqual(self.harness.requests(), [])
 
-    def test_a_split_loki_does_not_make_is_said(self):
-        """A timeline split by level came back as one unsplit series."""
+    # --- the split the default panel asks for ---
+
+    def test_the_default_panels_split_is_made_by_loki(self):
+        """A severity-split timeline drew the unsplit total and said so.
+
+        It is the panel every dashboard is born with, so the gap was
+        maximally exposed — and it was the adapter's, not Loki's: the `by`
+        clause `_terms_buckets` had always built works here too, with no
+        parser stage and no error filter. Measured on the lab's Loki 3.1.1
+        over 24h, before 0 series under a legend promising a breakdown and
+        after 4 (ERROR, INFO, UNSPECIFIED, WARN) summing to the 488 lines the
+        unsplit total reported.
+        """
         from wdash.hub.aggregation import DateHistogram, Terms
         result = self._aggregate("*", DateHistogram(
             name="timeline", sub=(Terms(name="split", field="severity"),)))
-        self.assertTrue(result.get("timeline"))
-        self.assertIn("does not split", " ".join(result.warnings))
-        plain = self._aggregate("*", DateHistogram(name="timeline"))
-        self.assertEqual(plain.warnings, ())
+
+        rows = result.get("timeline")
+        self.assertEqual([(row.key, row.count) for row in rows],
+                         [(1754305800000, 7), (1754305860000, 3)])
+        self.assertEqual(
+            [sorted((b.key, b.count) for b in row.sub["split"]) for row in rows],
+            [[("ERROR", 2), ("INFO", 5)], [("INFO", 3)]])
+        # The stack adds up to the line above it.
+        for row in rows:
+            self.assertEqual(sum(b.count for b in row.sub["split"]), row.count)
+        self.assertEqual(result.warnings, ())
+        self.assertIn("sum by (level, severity, detected_level)",
+                      self.harness.requests()[0]["params"]["query"])
+
+    def test_a_split_loki_cannot_make_is_still_said(self):
+        """The other half, and the one that must not become a silent total.
+
+        `host` is not a label on these streams, so Loki answers `sum by
+        (host)` with ONE series carrying no labels and every line — right
+        totals, no breakdown. The panel draws the total and says which half
+        of the answer is missing.
+        """
+        from wdash.hub.aggregation import DateHistogram, Terms
+        result = self._aggregate("*", DateHistogram(
+            name="timeline", sub=(Terms(name="split", field="host"),)))
+
+        rows = result.get("timeline")
+        self.assertEqual([(row.key, row.count) for row in rows],
+                         [(1754305800000, 7), (1754305860000, 3)])
+        self.assertEqual([row.sub for row in rows], [{}, {}])
+        self.assertEqual(result.reasons("timeline"),
+                         ("'host' is not a Loki label on these streams; "
+                          "this is the total",))
+
+    def test_a_half_labelled_split_says_what_is_missing_from_the_stack(self):
+        """The worse state: a stack shorter than the line above it.
+
+        One stream with no `level` label is counted in the total and in no
+        series, so the breakdown is honest about the part it cannot show
+        rather than leaving the difference for somebody to notice.
+        """
+        from wdash.hub.aggregation import DateHistogram, Terms
+        self.harness.metric_streams = (
+            ({"service_name": "api-gateway", "host": "node-1"},
+             {1754305800: 4}),
+            ({"service_name": "payment-service", "host": "node-2"},
+             {1754305800: 2}),
+            ({"service_name": "quiet-one"}, {1754305800: 6}),
+        )
+        result = self._aggregate("*", DateHistogram(
+            name="timeline", sub=(Terms(name="split", field="host"),)))
+
+        row = result.get("timeline")[0]
+        self.assertEqual(row.count, 12)
+        self.assertEqual(sorted((b.key, b.count) for b in row.sub["split"]),
+                         [("node-1", 4), ("node-2", 2)])
+        self.assertEqual(result.reasons("timeline"),
+                         ("some streams carry no 'host' label; those lines "
+                          "are counted in the total and not in the split",))
+
+    def test_a_split_by_a_name_logql_cannot_hold_is_refused_not_sent(self):
+        """A dotted field is a PARSE error, not a narrower answer.
+
+        The editor offers what the source can group by, and on Elasticsearch
+        and VictoriaLogs that includes names like `log.level`. `sum by
+        (log.level)` is HTTP 400 from Loki, which would reach the panel as a
+        stack trace where its reason belongs — so the clause is never built
+        and the unsplit total is drawn with the reason.
+        """
+        from wdash.hub.aggregation import DateHistogram, Terms
+        result = self._aggregate("*", DateHistogram(
+            name="timeline", sub=(Terms(name="split", field="log.level"),)))
+
+        rows = result.get("timeline")
+        self.assertEqual([(row.key, row.count) for row in rows],
+                         [(1754305800000, 7), (1754305860000, 3)])
+        self.assertIn("cannot be a Loki label name",
+                      " ".join(result.reasons("timeline")))
+        for request in self.harness.requests():
+            self.assertNotIn("log.level", request["params"]["query"])
+
+    def test_a_second_split_is_reported_rather_than_dropped(self):
+        """Loki splits a series one way, and the panel says which way.
+
+        A second sub-aggregation quietly ignored is a legend that promises
+        two breakdowns and draws one, with nothing on the card about it.
+        """
+        from wdash.hub.aggregation import DateHistogram, Terms
+        result = self._aggregate("*", DateHistogram(
+            name="timeline", sub=(Terms(name="split", field="severity"),
+                                  Terms(name="also", field="service"))))
+
+        row = result.get("timeline")[0]
+        self.assertEqual(sorted((b.key, b.count) for b in row.sub["split"]),
+                         [("ERROR", 2), ("INFO", 5)])
+        self.assertEqual(list(row.sub), ["split"])
+        self.assertEqual(result.reasons("timeline"),
+                         ("Loki splits a series one way: service was not "
+                          "applied",))
+
+    def test_a_split_that_fails_degrades_to_the_total_and_not_to_an_error(self):
+        """'maximum of series (500) reached' is a property of the data.
+
+        A label set wider than the server's limit must leave the panel with
+        the total it had before any split existed, and the reason — not a
+        failed board.
+        """
+        from wdash.hub.aggregation import DateHistogram, Terms
+        sent = []
+        original = self.harness.get
+
+        def refuse_the_split(url, params=None, **kw):
+            sent.append((params or {}).get("query"))
+            if " by (" in ((params or {}).get("query") or ""):
+                return FakeResponse({}, status_code=500,
+                                    text="maximum of series (500) reached")
+            return original(url, params=params, **kw)
+
+        self.harness.get = refuse_the_split
+        result = self._aggregate("*", DateHistogram(
+            name="timeline", sub=(Terms(name="split", field="severity"),)))
+
+        self.assertFalse(result.failed)
+        self.assertEqual([(row.key, row.count)
+                          for row in result.get("timeline")],
+                         [(1754305800000, 7), (1754305860000, 3)])
+        self.assertIn("could not split", " ".join(result.reasons("timeline")))
+        self.assertIn("maximum of series", " ".join(result.reasons("timeline")))
+        self.assertTrue(any(query and " by (" not in query and
+                            "count_over_time" in query for query in sent),
+                        f"no unsplit query was issued: {sent}")
+
+    # --- what the editor may offer ---
+
+    def test_the_group_by_offer_is_lokis_labels_and_not_four_names(self):
+        """Two of the four names the editor offered every source — `host` and
+        `environment` — are answered by Loki with nothing at all.
+
+        Measured against the lab's Loki: `/loki/api/v1/labels` over 24h
+        returns exactly `detected_level, level, service_name, severity`, which
+        is `service` and `severity` in the neutral names a panel stores.
+        """
+        from wdash.hub import Scope
+        self.assertEqual(self.source.group_by_fields(Scope.unrestricted()),
+                         ["service", "severity"])
+
+    def test_the_group_by_offer_is_asked_within_the_scope(self):
+        """A label only a forbidden stream carries is not disclosed.
+
+        Loki honours the selector here: measured on the lab,
+        `/labels?query={service_name="billing"}` answers `[level,
+        service_name]` where the unrestricted call answers four names.
+        """
+        from wdash.hub import Scope
+        self.source.group_by_fields(
+            Scope(principal="narrow", containers=("api-gateway",)))
+        asked = [request for request in self.harness._requests
+                 if request["path"].endswith("/labels")]
+        self.assertEqual(len(asked), 1, asked)
+        self.assertEqual(asked[0]["params"]["query"],
+                         '{service_name="api-gateway"}')
+
+    def test_a_scope_that_permits_nothing_asks_loki_nothing(self):
+        from wdash.hub import Scope
+        self.assertEqual(self.source.group_by_fields(Scope.nothing()), [])
+        self.assertEqual([request for request in self.harness._requests
+                          if request["path"].endswith("/labels")], [])
 
     # --- the catalogue ---
 

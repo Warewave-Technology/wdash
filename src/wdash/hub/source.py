@@ -86,6 +86,31 @@ class LogSource(Source):
         """Field distributions in the current query context. Optional."""
         raise NotImplementedError(f"{self.name} does not support field statistics")
 
+    def group_by_fields(self, scope, window=None):
+        """Neutral field names a panel may GROUP BY here. Optional.
+
+        Distinct from `field_stats`, which describes VALUES in a query
+        context. This answers the editor's question — "what can I put on the
+        x axis of a panel against this source" — and the answer is the
+        backend's, not a constant: Elasticsearch groups by any mapped keyword
+        or number, Loki only by a stream LABEL, VictoriaLogs by any field the
+        records carry.
+
+        ADVISORY, and that word is the contract. Nothing validates a stored
+        panel against this list: `panels.normalise_all` runs on every READ of
+        a dashboard, so a source that has changed, or one that is briefly
+        down, would turn a stale field name into a 400 for the WHOLE board
+        rather than one panel. A field this list does not hold is refused by
+        the source that cannot answer it, as one panel carrying the reason —
+        `AggregationResult.notes`.
+
+        Scoped, like everything else here: the names come from the containers
+        the scope reaches, so a label that exists only in a stream the caller
+        may not read is not disclosed by the editor's select.
+        """
+        raise NotImplementedError(
+            f"{self.name} does not list the fields it can group by")
+
     def context(self, ref, scope, before=10, after=10, correlate_by=None):
         """Records surrounding a given record. Optional."""
         raise NotImplementedError(f"{self.name} does not support context view")

@@ -242,6 +242,10 @@ class FakeVictoriaLogs(Harness):
         self._requests = []
         self._fail_next = False
         self._values_present = None
+        #: What `/select/logsql/field_names` answers. Replaceable, because the
+        #: editor's group-by offer is read from it and a deployment's field
+        #: names are the whole variable.
+        self.field_names = None
 
     # --- harness contract ---
 
@@ -295,9 +299,10 @@ class FakeVictoriaLogs(Harness):
                 field, int((data or {}).get("limit") or 10))})
 
         if "field_names" in path:
-            return FakeResponse(payload={"values": [
-                {"value": "_msg", "hits": 9}, {"value": "level", "hits": 9},
-                {"value": "service", "hits": 9}]})
+            names = (["_msg", "level", "service"] if self.field_names is None
+                     else self.field_names)
+            return FakeResponse(payload={
+                "values": [{"value": name, "hits": 9} for name in names]})
 
         if "stats_query" in path:
             return FakeResponse(payload={"status": "success", "data": {

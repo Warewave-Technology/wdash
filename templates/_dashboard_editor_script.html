@@ -13,6 +13,22 @@
  * control missing from the other.
  * ---------------------------------------------------------------- */
 const AGGREGATABLE = {{ aggregatable_fields | tojson }};
+
+/* What THIS dashboard's source says it can group a panel by, and why the
+ * list is the standard one when it is.
+ *
+ * Advisory, and the word decides the whole design. The server does not
+ * validate a stored panel against this: `normalise_all` runs on every READ of
+ * a dashboard, so a field this list has stopped holding — the board was
+ * re-pointed, the mapping changed, the cluster was down for a minute — would
+ * be a 400 for the whole board rather than one panel. A field the source
+ * cannot answer comes back as that panel's own reason instead.
+ *
+ * So this list is not a fence, and the select below never drops the value a
+ * panel is STORED with: a select that quietly rewrites the panel it was
+ * opened to edit is worse than one offering a field that answers nothing. */
+let FIELDS = {{ group_by_fields | tojson }};
+let FIELD_REASON = {{ group_by_reason | tojson }};
 const HEIGHTS = {{ panel_heights | tojson }};
 let panels = {{ panels | tojson }};
 
@@ -65,11 +81,56 @@ const optionsFor = (values, labels, selected) => values.map(v =>
     `<option value="${v}"${v === selected ? ' selected' : ''}>${
         labels[v] || v.replace('_', ' ')}</option>`).join('');
 
-const fieldOptions = (selected, allowNone) =>
-    (allowNone ? '<option value="">(total only)</option>' : '') +
-    AGGREGATABLE.map(f =>
-        `<option value="${f}"${f === selected ? ' selected' : ''}>${f}</option>`
-    ).join('');
+/* The offer, plus whatever this panel already says.
+ *
+ * A stored field that the source does not list stays in its own select and
+ * stays selected. Dropping it would not refuse the panel — it would silently
+ * re-point it at the first name in the list the next time anything on the row
+ * changed, which is the author's question replaced by another one with no
+ * refusal anywhere. It is marked instead, and the panel's own card says what
+ * the source answered. */
+const fieldOptions = (selected, allowNone) => {
+    const values = FIELDS.slice();
+    const extra = (selected || '').trim() && !values.includes(selected);
+    if (extra) values.push(selected);
+    return (allowNone ? '<option value="">(total only)</option>' : '')
+        + values.map(f =>
+            `<option value="${escapeAttr(f)}"${f === selected ? ' selected' : ''}>${
+                escapeAttr(f)}${extra && f === selected
+                    ? ' — not offered by this source' : ''}</option>`).join('');
+};
+
+/** Say where the offer came from, under the panel list. */
+function drawFieldNote() {
+    const note = document.getElementById('groupByNote');
+    if (!note) return;
+    note.textContent = FIELD_REASON
+        ? FIELD_REASON
+        : `Group by: the ${FIELDS.length} field${FIELDS.length === 1 ? '' : 's'}`
+          + ' this dashboard’s source reports it can count by.';
+    note.classList.toggle('text-warning', Boolean(FIELD_REASON));
+}
+
+/* The source select is on the form ABOVE this editor, and it decides what can
+ * be grouped by: a board moved from Elasticsearch to Loki keeps four field
+ * names on offer that Loki answers with nothing. Re-asked rather than
+ * guessed, and a failed ask leaves the list that is already on screen. */
+function watchSource() {
+    const select = document.getElementById('source');
+    if (!select || typeof fetch !== 'function') return;
+    select.addEventListener('change', () => {
+        fetch('/api/dashboard/group-by-fields?source='
+              + encodeURIComponent(select.value))
+            .then(response => response.ok ? response.json() : null)
+            .then(body => {
+                if (!body || !Array.isArray(body.fields)) return;
+                FIELDS = body.fields;
+                FIELD_REASON = body.reason || '';
+                drawPanels();
+            })
+            .catch(() => {});
+    });
+}
 
 /** Said if the form is submitted without one, where there is room to say why. */
 const SERVICE_NEEDED = 'A trace list needs a service to list traces for. '
@@ -355,6 +416,7 @@ function drawPanels() {
     const list = document.getElementById('panelList');
     list.innerHTML = '';
     panels.forEach((panel, index) => list.appendChild(panelRow(panel, index)));
+    drawFieldNote();
     serialise();
 }
 
@@ -413,5 +475,6 @@ document.querySelector('form').addEventListener('submit', (event) => {
     }
 });
 
+watchSource();
 drawPanels();
 </script>

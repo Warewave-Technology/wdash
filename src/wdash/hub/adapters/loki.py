@@ -53,6 +53,16 @@ DEFAULT_TIMEOUT = 30
 _SEVERITY_LABELS = ("level", "severity", "detected_level")
 _SERVICE_LABELS = ("service_name", "service", "app", "job", "container")
 
+#: What LogQL accepts as a label name inside `sum by (...)`.
+#:
+#: A panel may now name any field its source offers, and on Elasticsearch and
+#: VictoriaLogs that includes dotted names like `log.level`. `sum by
+#: (log.level)` is not a narrower answer here, it is a parse error — Loki
+#: replies HTTP 400 and the panel would carry a stack trace where its reason
+#: belongs. Checked before the query is built, so the refusal is this
+#: adapter's sentence rather than Loki's.
+_LABEL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
 
 class LokiError(RuntimeError):
     """Loki could not answer."""
@@ -271,6 +281,43 @@ class LokiLogSource(LogSource):
             self._label_cache.clear()
         self._label_cache[key] = (values, now)
         return values
+
+    def group_by_fields(self, scope, window=None):
+        """Loki's LABEL NAMES, as neutral field names.
+
+        The whole list, and it is short. Loki indexes labels and treats the
+        rest of the line as text, so a panel can group by a label and by
+        nothing else — measured on the lab, `/loki/api/v1/labels` over 24h
+        answers exactly `detected_level, level, service_name, severity`, and a
+        terms panel over `host` or `environment` (two of the four names the
+        editor used to offer every source) came back with no rows and the
+        reason that they are not labels here.
+
+        Scoped, and Loki honours it: `/labels` takes the same stream selector
+        a search does, and the lab answers `[level, service_name]` for the
+        `billing` stream against `[detected_level, level, service_name,
+        severity]` unrestricted. A label only one forbidden stream carries is
+        not put in the editor's select.
+        """
+        targets = self.containers(scope, window)
+        if not targets:
+            return []
+        end = window.end if window else dt.datetime.now(dt.timezone.utc)
+        start = (window.start if window
+                 else end - self.CATALOGUE_WINDOW)
+        body = self._get("/loki/api/v1/labels", {
+            "start": _nanoseconds(start), "end": _nanoseconds(end),
+            "query": self._selector(targets)})
+
+        neutral = set()
+        for label in body.get("data") or []:
+            if label in _SEVERITY_LABELS:
+                neutral.add("severity")
+            elif label == self._stream_label:
+                neutral.add("service")
+            elif _LABEL_NAME.match(label):
+                neutral.add(label)
+        return sorted(neutral)
 
     # ---------- query building ----------
 
@@ -514,14 +561,10 @@ class LokiLogSource(LogSource):
         for aggregation in aggregations:
             try:
                 if isinstance(aggregation, DateHistogram):
-                    buckets[aggregation.name] = self._histogram_buckets(
+                    rows, reasons = self._histogram_buckets(
                         query, targets, aggregation)
-                    if getattr(aggregation, "sub", None):
-                        # Counted whole: the split is not done here, and a
-                        # series drawn unsplit under a split legend is a
-                        # breakdown nobody asked Loki for.
-                        reason = ("Loki does not split this series; it is "
-                                  "the total")
+                    buckets[aggregation.name] = rows
+                    for reason in reasons:
                         warnings.append(f"{aggregation.name}: {reason}")
                         attribute(aggregation, reason)
                 elif isinstance(aggregation, Terms):
@@ -563,6 +606,34 @@ class LokiLogSource(LogSource):
         """
         return self._selector(targets) + self._pipeline(query.filter)
 
+    def _by_labels(self, field):
+        """(labels, normalised, reason) for a `sum by (...)` over `field`.
+
+        One place, because a terms panel and a split timeseries ask the same
+        question and used to answer it in one function only. `reason` is
+        non-None when no `by` clause can be built at all, and then `labels` is
+        None: the caller counts the whole and says why.
+        """
+        # Severity buckets are normalised, because the neutral model promises
+        # normalised severity everywhere and Loki labels are lower case. Two
+        # sources answering the same panel with "ERROR" and "error" would draw
+        # two bars for one thing — and colour only one of them red.
+        #
+        # And a level is counted over every label it may have been written
+        # in, grouped together so the FIRST one a stream carries decides —
+        # the same rule the record reader and the filter use. Grouped by
+        # `level` alone, a panel over the 18 ERROR lines a search now returns
+        # reported ERROR 6 and said nothing about the rest.
+        if field in ("severity", "severity_text"):
+            return list(_SEVERITY_LABELS), True, None
+
+        label = self._label_for(field) or ""
+        if not _LABEL_NAME.match(label):
+            return None, False, (
+                f"'{field}' cannot be a Loki label name, so these streams "
+                f"cannot be grouped by it")
+        return [label], False, None
+
     def _terms_buckets(self, query, targets, aggregation):
         """`sum by (label) (count_over_time(...))`, and a note or None.
 
@@ -572,19 +643,9 @@ class LokiLogSource(LogSource):
         is what it did, until the note: Loki answers `sum by (host)` over
         streams with no `host` label with one series whose labels are empty.
         """
-        # Severity buckets are normalised, because the neutral model promises
-        # normalised severity everywhere and Loki labels are lower case. Two
-        # sources answering the same panel with "ERROR" and "error" would draw
-        # two bars for one thing — and colour only one of them red.
-        normalise = aggregation.field in ("severity", "severity_text")
-
-        # And a level is counted over every label it may have been written
-        # in, grouped together so the FIRST one a stream carries decides —
-        # the same rule the record reader and the filter use. Grouped by
-        # `level` alone, a panel over the 18 ERROR lines a search now returns
-        # reported ERROR 6 and said nothing about the rest.
-        labels = (list(_SEVERITY_LABELS) if normalise
-                  else [self._label_for(aggregation.field)])
+        labels, normalise, refusal = self._by_labels(aggregation.field)
+        if refusal:
+            return [], refusal
         window = int(query.window.duration_seconds) or 1
         expression = (f"sum by ({', '.join(labels)}) (count_over_time("
                       f"{self._log_query(query, targets)}[{window}s]))")
@@ -617,28 +678,148 @@ class LokiLogSource(LogSource):
         return rows[:aggregation.size], None
 
     def _histogram_buckets(self, query, targets, aggregation):
+        """Counts over time, split by a label, and the reasons it is not.
+
+        The split is the SAME `by` clause `_terms_buckets` has always built —
+        no parser stage, no `| json`, no `__error__=""`. That matters because
+        the parser is what makes this expensive and fragile: measured against
+        the lab's Loki 3.1.1, `{service_name=~".+"} | json | __error__=""`
+        answers HTTP 400 ("pipeline error: JSONParserErr") on a stream holding
+        one non-JSON line, while `sum by (level) (count_over_time(...))` over
+        the same streams answers 200 and splits. A label split is what the
+        default panel — Volume by Severity, on every board — actually needs.
+
+        Non-label fields stay unanswerable and say so. Loki reports them as
+        one series carrying no labels and the full count, so the totals are
+        right and only the breakdown is missing: the panel draws the total and
+        carries the reason, which is what it did before there was any split at
+        all.
+        """
         step = _step_seconds(aggregation.interval,
                              query.window.duration_seconds)
-        expression = (f"sum(count_over_time("
-                      f"{self._log_query(query, targets)}[{step}s]))")
 
-        body = self._get("/loki/api/v1/query_range", {
-            "query": expression,
-            "start": _nanoseconds(query.window.start),
-            "end": _nanoseconds(query.window.end),
-            "step": f"{step}s",
-        })
+        # One Terms child is a split. Anything else is reported rather than
+        # dropped: a legend promising a breakdown nobody ran is the fault
+        # this whole function exists to fix.
+        children = tuple(getattr(aggregation, "sub", None) or ())
+        split = next((child for child in children
+                      if isinstance(child, Terms)), None)
+        notes = []
+        ignored = sorted({str(getattr(child, "field", None)
+                              or type(child).__name__)
+                          for child in children if child is not split})
+        if ignored:
+            notes.append(f"Loki splits a series one way: "
+                         f"{', '.join(ignored)} was not applied")
+
+        labels = normalise = None
+        if split is not None:
+            labels, normalise, refusal = self._by_labels(split.field)
+            if refusal:
+                notes.append(f"{refusal}; this is the total")
+
+        rows, note = self._counts_over_time(query, targets, step, labels,
+                                            normalise, split)
+        if note:
+            notes.append(note)
+        return rows, notes
+
+    def _counts_over_time(self, query, targets, step, labels, normalise, split):
+        """Issue the range query, with a `by` clause or without one.
+
+        A split that Loki refuses falls back to the unsplit total rather than
+        to a 400: the label set may be wider than the server's series limit
+        ("maximum of series (500) reached"), which is a property of the data
+        and not of the panel. The fallback is a second query, so an outage
+        still fails — it is only the SPLIT that degrades.
+        """
+        def ask(by):
+            expression = (f"sum{by} (count_over_time("
+                          f"{self._log_query(query, targets)}[{step}s]))")
+            body = self._get("/loki/api/v1/query_range", {
+                "query": expression,
+                "start": _nanoseconds(query.window.start),
+                "end": _nanoseconds(query.window.end),
+                "step": f"{step}s",
+            })
+            return (body.get("data") or {}).get("result") or []
+
+        note = None
+        if labels:
+            try:
+                series = ask(f" by ({', '.join(labels)})")
+            except Exception as exc:
+                note = (f"Loki could not split this series ({exc}); "
+                        f"this is the total")
+                labels, series = None, ask("")
+        else:
+            series = ask("")
+
+        totals, split_counts, unlabelled = {}, {}, False
+        for one in series:
+            key = None
+            if labels:
+                metric = one.get("metric") or {}
+                if normalise:
+                    # A series carrying none of them is not an unlabelled
+                    # series to skip: those lines have no level, which IS a
+                    # level. The same rule `_terms_buckets` counts by.
+                    key = severity_from(metric, _SEVERITY_LABELS)[0]
+                else:
+                    key = metric.get(labels[0])
+                    if key is None:
+                        unlabelled = True
+            for at, value in one.get("values") or []:
+                at = float(at)
+                count = int(float(value))
+                totals[at] = totals.get(at, 0) + count
+                if key is not None:
+                    counts = split_counts.setdefault(at, {})
+                    counts[key] = counts.get(key, 0) + count
+
+        if labels and note is None:
+            note = self._split_note(split, split_counts, unlabelled)
+
+        # The series kept are chosen over the WINDOW, not per bucket: picking
+        # the top few inside each bucket makes a legend whose entries appear
+        # and vanish as the eye moves along the axis.
+        ranked = {}
+        for counts in split_counts.values():
+            for key, count in counts.items():
+                ranked[key] = ranked.get(key, 0) + count
+        biggest = sorted(ranked.items(), key=lambda item: -item[1])
+        keep = {key for key, _ in biggest[:(getattr(split, "size", 10) or 10)]}
 
         rows = []
-        for series in (body.get("data") or {}).get("result") or []:
-            for at, value in series.get("values") or []:
-                rows.append(Bucket(
-                    key=int(float(at) * 1000),
-                    key_text=datetime.fromtimestamp(
-                        float(at), tz=timezone.utc).isoformat(),
-                    count=int(float(value))))
-        rows.sort(key=lambda bucket: bucket.key)
-        return rows
+        for at in sorted(totals):
+            bucket = Bucket(
+                key=int(at * 1000),
+                key_text=datetime.fromtimestamp(at, tz=timezone.utc).isoformat(),
+                count=totals[at])
+            kept = [Bucket(key=key, count=count)
+                    for key, count in sorted(split_counts.get(at, {}).items(),
+                                             key=lambda item: -item[1])
+                    if key in keep]
+            if kept:
+                bucket.sub[split.name] = kept
+            rows.append(bucket)
+        return rows, note
+
+    @staticmethod
+    def _split_note(split, split_counts, unlabelled):
+        """Why a split is missing or short, or None when it is whole."""
+        if not split_counts:
+            # Measured: `sum by (host)` over streams with no `host` label
+            # answers with ONE series, no labels, carrying every line — so the
+            # totals above are right and only the breakdown is missing.
+            return (f"'{split.field}' is not a Loki label on these streams; "
+                    f"this is the total")
+        if unlabelled:
+            # Half a breakdown is the worse state, because the stack is
+            # shorter than the line above it and nothing says why.
+            return (f"some streams carry no '{split.field}' label; those "
+                    f"lines are counted in the total and not in the split")
+        return None
 
     def histogram(self, query, scope):
         result = self.aggregate(

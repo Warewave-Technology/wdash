@@ -292,15 +292,34 @@ class LokiAttributionTest(unittest.TestCase):
             "be counted by value",))
 
     def test_an_unsplittable_series_is_filed_under_its_panel(self):
+        """Aimed at `host` rather than at `severity`.
+
+        It used to ask for a severity split, which is the default panel on
+        every board, and Loki refused every one of them; Loki makes that
+        split now. A field that is not a label still cannot be split on, and
+        THAT is the reason a panel has to carry.
+        """
+        from wdash.hub import DateHistogram
+
+        result = self.aggregate(DateHistogram(
+            name="panel-8", sub=(Terms(name="split", field="host"),)))
+
+        self.assertIn("not a Loki label", result.reasons("panel-8")[0])
+        self.assertEqual(result.warnings,
+                         ("panel-8: 'host' is not a Loki label on these "
+                          "streams; this is the total",))
+
+    def test_a_split_loki_can_make_is_not_marked(self):
+        """And the panel that now answers carries no reason at all."""
         from wdash.hub import DateHistogram
 
         result = self.aggregate(DateHistogram(
             name="panel-8", sub=(Terms(name="split", field="severity"),)))
 
-        self.assertIn("does not split", result.reasons("panel-8")[0])
-        self.assertEqual(result.warnings,
-                         ("panel-8: Loki does not split this series; it is "
-                          "the total",))
+        self.assertTrue(any(row.sub.get("split")
+                            for row in result.get("panel-8")))
+        self.assertEqual(result.notes, {})
+        self.assertEqual(result.warnings, ())
 
     def test_a_panel_loki_could_answer_is_not_marked(self):
         result = self.aggregate(Terms(name="panel-7", field="severity", size=10))

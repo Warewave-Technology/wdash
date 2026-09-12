@@ -52,6 +52,14 @@
         </div>
     </div>
     <div id="panelList" class="list-group"></div>
+    {# Where the Group by / Split by choices came from. The editor offered the
+       same four names to every backend, two of which Loki answers with
+       nothing and six of which the lab's Elasticsearch index maps and could
+       never be asked for. The list is the SOURCE's now, and this says so —
+       or says why it is the standard four instead, because a cluster that
+       cannot be reached and a source with nothing to group by look identical
+       in a select. #}
+    <div class="form-text" id="groupByNote"></div>
     {# Panels travel as a JSON blob in one hidden field: the server validates
        the list as a whole, so posting it as a set of indexed form fields
        would only mean reassembling it there. #}

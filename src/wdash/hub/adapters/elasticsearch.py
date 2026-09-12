@@ -38,6 +38,29 @@ _RESOURCE_FIELDS = ("host", "environment", "container", "pod", "namespace")
 
 from ..patterns import matches as _pattern_matches  # noqa: F401
 
+#: A discovered mapping path -> the neutral name it IS, for the editor.
+#:
+#: `field_candidates` runs the other way, neutral -> the paths a cluster might
+#: keep it under, and that table is the one place the two spellings are
+#: related; inverting it here keeps them from drifting. `severity` leads so
+#: that both `level` and `severity_text` come back as `severity` — the name
+#: `_panel_aggregations` and `_bucket_key` treat specially, and the one a
+#: panel keeps when its board is re-pointed at another backend.
+_NEUTRAL_FOR_PATH = {
+    candidate: neutral
+    for neutral in ("severity", "service", "host", "environment",
+                    "trace_id", "span_id", "body", "timestamp")
+    for candidate in field_candidates(neutral)
+}
+
+#: Neutral names that are the log line or its clock. Discovery excludes
+#: `@timestamp` and `message` by path, so this is about the OTHER spellings:
+#: an OpenTelemetry index maps `body_text` as a keyword, which discovery does
+#: find and the table above resolves to `body` — a name the panel model
+#: refuses, so offering it would be a select whose value the save rejects,
+#: and a refused save re-renders from the stored panel list.
+_NOT_GROUPABLE = frozenset({"body", "message", "timestamp"})
+
 
 class MalformedResponse(ValueError):
     """The cluster answered with something Elasticsearch does not send."""
@@ -567,6 +590,45 @@ class ElasticsearchLogSource(LogSource):
             return None
         return {"_index": response.get("_index"), "_id": response.get("_id"),
                 "_source": response.get("_source") or {}}
+
+    #: How many names the editor's group-by select is offered.
+    #:
+    #: The discovery walk itself is uncapped here (`max_fields=1000`, the same
+    #: number `_resolve_agg_field` already asks for) because the cap applies
+    #: AFTER `_PRIORITY_FIELDS`, so a small one is what kept the list at four
+    #: useful names. A mapping with a thousand dynamic fields is a select
+    #: nobody can read, though, so the offer is cut — priority names first,
+    #: then alphabetical, which is the order discovery returns.
+    GROUP_BY_LIMIT = 50
+
+    def group_by_fields(self, scope, window=None):
+        """Every mapped field these indices can aggregate on, neutrally named.
+
+        Measured on the lab's `app-logs-000001`: ten fields — `correlation_id`,
+        `duration_ms`, `environment`, `host`, `http_status`, `level`,
+        `request_id`, `service`, `trace_id`, `user_id` — of which the editor
+        used to offer four. A text field is not among them: `_discover_...`
+        keeps a `text` field only when it carries a `keyword` sub-field, which
+        is the difference between a bar chart and tokenised nonsense.
+
+        Named neutrally where a neutral name exists, so `level` is offered as
+        `severity` and a panel built here still means the same thing if the
+        board is re-pointed at Loki: `severity` is answerable on all three
+        backends, `level` is one cluster's spelling of it.
+        """
+        targets = self.containers(scope)
+        if not targets:
+            return []
+        discovered = self._aggregatable_fields(list(targets), max_fields=1000)
+
+        seen, out = set(), []
+        for path in discovered:
+            name = _NEUTRAL_FOR_PATH.get(path, path)
+            if name in _NOT_GROUPABLE or name in seen:
+                continue
+            seen.add(name)
+            out.append(name)
+        return out[:self.GROUP_BY_LIMIT]
 
     def field_stats(self, query, scope, fields=None, top=10):
         targets = self._targets(query, scope)
