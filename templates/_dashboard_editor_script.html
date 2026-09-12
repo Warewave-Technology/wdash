@@ -1,0 +1,220 @@
+<script nonce="{{ csp_nonce }}">
+/* ------------------------------------------------------------------
+ * Panel editor.
+ *
+ * Kept deliberately plain: a list of rows, each with its own controls,
+ * serialised into a hidden field on submit. The server re-validates
+ * everything — nothing here is trusted, and nothing here needs to be
+ * clever enough to be worth a framework.
+ *
+ * One copy, included by BOTH forms. It was in the edit template only, so
+ * the create form had no panel list at all and every dashboard started as
+ * the same three panels; and a control added to one form would have been a
+ * control missing from the other.
+ * ---------------------------------------------------------------- */
+const AGGREGATABLE = {{ aggregatable_fields | tojson }};
+const HEIGHTS = {{ panel_heights | tojson }};
+let panels = {{ panels | tojson }};
+
+/* Whether `panels` above is the standard set rather than a list somebody
+ * chose, and what the list looked like when this form was rendered. While
+ * the two still agree the hidden field is sent EMPTY — see `serialise`. */
+const DEFAULTED = {{ panels_are_default | tojson }};
+const AS_RENDERED = JSON.stringify(panels);
+
+// For a value inside a quoted attribute, which escapeHtml does not cover:
+// it leaves quotes as they are. Replacing only `"` left `&` alone, so a title
+// holding the text `&quot;` came back as a quote.
+function escapeAttr(value) {
+    return String(value).replace(/[&<>"']/g, c =>
+        ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+function panelRow(panel, index) {
+    const row = document.createElement('div');
+    row.className = 'list-group-item';
+
+    const fieldOptions = (selected, allowNone) =>
+        (allowNone ? '<option value="">(total only)</option>' : '') +
+        AGGREGATABLE.map(f =>
+            `<option value="${f}"${f === selected ? ' selected' : ''}>${f}</option>`
+        ).join('');
+
+    const sortOptions = (selected) => ['spans', 'errors', 'error_rate'].map(v =>
+        `<option value="${v}"${v === selected ? ' selected' : ''}>${
+            v.replace('_', ' ')}</option>`).join('');
+
+    // "Is it up now" and "was it up all window" are two questions out of one
+    // fetch, so they are one panel type with a view rather than two types
+    // costing two round trips.
+    const viewOptions = (selected) =>
+        [['status', 'status right now'],
+         ['availability', 'availability over the window']].map(([v, label]) =>
+            `<option value="${v}"${v === selected ? ' selected' : ''}>${
+                label}</option>`).join('');
+
+    const specific = panel.type === 'trace_services'
+        ? `<div class="col-md-2">
+             <label class="form-label small mb-0">Sort by</label>
+             <select class="form-select form-select-sm" data-key="sort">
+               ${sortOptions(panel.sort || 'spans')}
+             </select>
+           </div>
+           <div class="col-md-2">
+             <label class="form-label small mb-0">Show top</label>
+             <input type="number" class="form-control form-control-sm"
+                    data-key="size" min="1" max="50" value="${panel.size || 10}">
+           </div>`
+        : panel.type === 'monitors'
+        ? `<div class="col-md-2">
+             <label class="form-label small mb-0">Show</label>
+             <select class="form-select form-select-sm" data-key="view">
+               ${viewOptions(panel.view || 'status')}
+             </select>
+           </div>
+           <div class="col-md-2"></div>`
+        : panel.type === 'monitor_certificates'
+        ? '<div class="col-md-4"></div>'
+        : panel.type === 'terms'
+        ? `<div class="col-md-2">
+             <label class="form-label small mb-0">Group by</label>
+             <select class="form-select form-select-sm" data-key="field">
+               ${fieldOptions(panel.field, false)}
+             </select>
+           </div>
+           <div class="col-md-2">
+             <label class="form-label small mb-0">Show top</label>
+             <input type="number" class="form-control form-control-sm"
+                    data-key="size" min="1" max="50" value="${panel.size || 10}">
+           </div>`
+        : `<div class="col-md-2">
+             <label class="form-label small mb-0">Split by</label>
+             <select class="form-select form-select-sm" data-key="split_by">
+               ${fieldOptions(panel.split_by || '', true)}
+             </select>
+           </div>
+           <div class="col-md-2"></div>`;
+
+    row.innerHTML = `
+      <div class="row g-2 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label small mb-0">Title</label>
+          <input type="text" class="form-control form-control-sm"
+                 data-key="title" value="${escapeAttr(panel.title || '')}">
+        </div>
+        ${specific}
+        <div class="col-md-2">
+          <label class="form-label small mb-0">Width</label>
+          <select class="form-select form-select-sm" data-key="width">
+            ${[3, 4, 6, 8, 12].map(w =>
+              `<option value="${w}"${w === panel.width ? ' selected' : ''}>${
+                w === 12 ? 'full' : w + '/12'}</option>`).join('')}
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small mb-0">Height</label>
+          <select class="form-select form-select-sm" data-key="height">
+            ${HEIGHTS.map(([px, label]) =>
+              `<option value="${px}"${px === panel.height ? ' selected' : ''}>${
+                escapeAttr(label)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="col-md-1 text-end">
+          <div class="btn-group btn-group-sm">
+            <button type="button" class="btn btn-outline-secondary" data-move="-1"
+                    title="Move up"${index === 0 ? ' disabled' : ''}>&uarr;</button>
+            <button type="button" class="btn btn-outline-secondary" data-move="1"
+                    title="Move down"${index === panels.length - 1 ? ' disabled' : ''}>&darr;</button>
+            <button type="button" class="btn btn-outline-danger" data-remove
+                    title="Remove">&times;</button>
+          </div>
+        </div>
+      </div>
+      <small class="text-muted">${
+          { terms: 'Top values',
+            timeseries: 'Volume over time',
+            trace_services: 'Services by traffic — from traces, so this panel costs a second query',
+            monitors: 'Monitor status — from the monitor sources, so this panel costs a second query, and it needs monitors:read to read',
+            monitor_certificates: 'TLS certificates — rides the monitor panel’s source, and needs monitors:read to read'
+          }[panel.type] || panel.type}</small>`;
+
+    row.querySelectorAll('[data-key]').forEach(input => {
+        input.addEventListener('change', () => {
+            const key = input.dataset.key;
+            panels[index][key] = key === 'size' || key === 'width' || key === 'height'
+                ? parseInt(input.value, 10) : input.value;
+            serialise();
+        });
+    });
+    row.querySelectorAll('[data-move]').forEach(button => {
+        button.addEventListener('click', () => {
+            const to = index + parseInt(button.dataset.move, 10);
+            if (to < 0 || to >= panels.length) return;
+            [panels[index], panels[to]] = [panels[to], panels[index]];
+            drawPanels();
+        });
+    });
+    row.querySelector('[data-remove]').addEventListener('click', () => {
+        // A dashboard with no panels is a blank page, and the server refuses
+        // it anyway — say so here rather than on submit.
+        if (panels.length === 1) {
+            alert('A dashboard needs at least one panel.');
+            return;
+        }
+        panels.splice(index, 1);
+        drawPanels();
+    });
+    return row;
+}
+
+/**
+ * Put the list in the hidden field — or leave the field empty while the list
+ * is still the untouched default set.
+ *
+ * Absent and "today's defaults" are different records. The server reads an
+ * absent `panels` as "leave the default set", and `Dashboard.to_dict` writes
+ * the key only once a board is customised, so that a board nobody has edited
+ * keeps following the defaults rather than freezing the version of them that
+ * was current the day it was saved. A form that always posted its rendered
+ * list would have frozen them on every create and on every save of an
+ * unedited board — the create form especially, where the list is the
+ * defaults by definition.
+ */
+function serialise() {
+    const text = JSON.stringify(panels);
+    document.getElementById('panelsField').value =
+        (DEFAULTED && text === AS_RENDERED) ? '' : text;
+}
+
+function drawPanels() {
+    const list = document.getElementById('panelList');
+    list.innerHTML = '';
+    panels.forEach((panel, index) => list.appendChild(panelRow(panel, index)));
+    serialise();
+}
+
+document.querySelectorAll('[data-add-panel]').forEach(button => {
+    button.addEventListener('click', () => {
+        const type = button.dataset.addPanel;
+        const blank = {
+            terms: { type: 'terms', title: 'Top values', field: 'service',
+                     size: 10, width: 6, height: 300 },
+            timeseries: { type: 'timeseries', title: 'Volume over time',
+                          split_by: 'severity', width: 12, height: 300 },
+            trace_services: { type: 'trace_services', title: 'Services by traffic',
+                              sort: 'spans', size: 10, width: 6, height: 300 },
+            monitors: { type: 'monitors', title: 'Monitor status',
+                        view: 'status', width: 6, height: 300 },
+            monitor_certificates: { type: 'monitor_certificates',
+                                    title: 'TLS certificates', width: 6,
+                                    height: 300 },
+        };
+        panels.push({ ...blank[type] });
+        drawPanels();
+    });
+});
+
+document.querySelector('form').addEventListener('submit', () => serialise());
+
+drawPanels();
+</script>

@@ -11,6 +11,11 @@
  * The script is taken from each template as it is, so there is no copy of it
  * here to drift.
  *
+ * The second half is the PANEL EDITOR, which now lives in one include that
+ * both forms pull in. It had two checks, both about a title round-tripping;
+ * add, move, remove, the width select, the at-least-one-panel guard and the
+ * new height had none, and that file is where every panel control lands.
+ *
  * Run: npm test
  */
 
@@ -203,86 +208,219 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
               planted.w.document.getElementById('testResults').innerHTML);
     }
 
-    // The edit page's panel editor, its second script. A title went into a
-    // quoted `value` attribute with only its quotes replaced, so a title
-    // holding the text `&quot;` came back as a quote, and the next save
-    // stored the changed title.
-    {
-        const text = fs.readFileSync(path.join(ROOT, 'templates', 'dashboard_edit.html'), 'utf8');
-        const blocks = [...text.matchAll(/<script nonce="\{\{ csp_nonce \}\}">([\s\S]*?)<\/script>/g)]
-            .map(found => found[1]);
-        const title = 'Errors &quot;prod&quot; & "stage" <b>bold</b> it\'s';
-        const editor = blocks[1]
-            .replace('{{ aggregatable_fields | tojson }}', JSON.stringify(['service', 'level']))
-            .replace('{{ panels | tojson }}', JSON.stringify(
-                [{ type: 'terms', title, field: 'service', size: 10, width: 6 }]));
-        const dom = new JSDOM(`<!doctype html><body><form>
-          <input id="query" value="*"><div><select id="index_patterns" multiple>
-          <option value="*" selected>*</option></select></div>
-          <button id="testQuery"></button><div id="testResults"></div>
-          <div id="panelList"></div><input type="hidden" id="panelsField">
-          </form></body>`, { runScripts: 'outside-only' });
-        dom.window.eval(blocks[0]);
-        dom.window.eval(editor);
-        const box = dom.window.document.querySelector('#panelList [data-key="title"]');
-        check('a panel title comes back into its box as it was written',
-              box && box.value === title, box && box.value);
-        check('and brings no markup with it',
-              !dom.window.document.querySelector('#panelList b'),
-              dom.window.document.getElementById('panelList').innerHTML);
+    // ---------------------------------------------------------------
+    // The panel editor.
+    //
+    // One file now, included by BOTH forms — it used to be the second
+    // script block of dashboard_edit.html, so the create form had no panel
+    // list at all and every dashboard was born as the same three panels.
+    // Read from the include itself, so there is no copy here to drift.
+    //
+    // Everything below the first two checks was missing: nothing exercised
+    // add, move, remove, the width select, the at-least-one-panel guard or
+    // the height, and that file is where every new panel control lands.
+    // ---------------------------------------------------------------
+    const EDITOR = path.join(ROOT, 'templates', '_dashboard_editor_script.html');
+
+    /** The editor script with its Jinja values filled in. */
+    function editor({ panels, fields = ['service', 'level'],
+                      heights = [[180, 'short'], [300, 'standard'],
+                                 [450, 'tall'], [600, 'very tall']],
+                      defaulted = false } = {}) {
+        const text = fs.readFileSync(EDITOR, 'utf8');
+        const found = text.match(/<script nonce="\{\{ csp_nonce \}\}">([\s\S]*?)<\/script>/);
+        if (!found) throw new Error('no script in the editor include');
+        return found[1]
+            .replace('{{ aggregatable_fields | tojson }}', JSON.stringify(fields))
+            .replace('{{ panel_heights | tojson }}', JSON.stringify(heights))
+            .replace('{{ panels_are_default | tojson }}', JSON.stringify(defaulted))
+            .replace('{{ panels | tojson }}', JSON.stringify(panels));
     }
 
-    // The monitor rows of the same editor. A panel type the server accepts
-    // and the form cannot produce is a panel nobody can add without editing
-    // JSON by hand, which is the thing the panel editor exists to avoid.
-    {
-        const text = fs.readFileSync(path.join(ROOT, 'templates', 'dashboard_edit.html'), 'utf8');
-        const blocks = [...text.matchAll(/<script nonce="\{\{ csp_nonce \}\}">([\s\S]*?)<\/script>/g)]
-            .map(found => found[1]);
-        const editor = blocks[1]
-            .replace('{{ aggregatable_fields | tojson }}', JSON.stringify(['service']))
-            .replace('{{ panels | tojson }}', JSON.stringify(
-                [{ id: 'p1', type: 'terms', title: 'Top', field: 'service',
-                   size: 10, width: 6 }]));
+    /** A page with the pieces _dashboard_editor.html provides. */
+    function editorPage(options) {
         const dom = new JSDOM(`<!doctype html><body><form>
-          <input id="query" value="*"><div><select id="index_patterns" multiple>
-          <option value="*" selected>*</option></select></div>
-          <button id="testQuery"></button><div id="testResults"></div>
+          <button type="button" data-add-panel="timeseries"></button>
+          <button type="button" data-add-panel="terms"></button>
+          <button type="button" data-add-panel="trace_services"></button>
           <button type="button" data-add-panel="monitors"></button>
           <button type="button" data-add-panel="monitor_certificates"></button>
           <div id="panelList"></div><input type="hidden" id="panelsField">
           </form></body>`, { runScripts: 'outside-only' });
-        const d = dom.window.document;
-        dom.window.eval(blocks[0]);
-        dom.window.eval(editor);
+        const said = [];
+        dom.window.alert = (message) => said.push(message);
+        dom.window.eval(editor(options));
+        return { d: dom.window.document, w: dom.window, said };
+    }
+
+    const stored = (d) => JSON.parse(d.getElementById('panelsField').value || 'null');
+    const rows = (d) => d.querySelectorAll('#panelList .list-group-item');
+
+    // Both forms must actually pull the one copy in, or "shared" is a claim
+    // about a file nobody includes.
+    {
+        for (const template of ['dashboard_create.html', 'dashboard_edit.html']) {
+            const text = fs.readFileSync(
+                path.join(ROOT, 'templates', template), 'utf8');
+            check(`${template} includes the panel editor`,
+                  text.includes('{% include "_dashboard_editor_script.html" %}')
+                  && text.includes('{% include "_dashboard_editor.html" %}'),
+                  template);
+        }
+    }
+
+    // A title went into a quoted `value` attribute with only its quotes
+    // replaced, so a title holding the text `&quot;` came back as a quote,
+    // and the next save stored the changed title.
+    {
+        const title = 'Errors &quot;prod&quot; & "stage" <b>bold</b> it\'s';
+        const { d } = editorPage({ panels: [
+            { type: 'terms', title, field: 'service', size: 10, width: 6,
+              height: 300 }] });
+        const box = d.querySelector('#panelList [data-key="title"]');
+        check('a panel title comes back into its box as it was written',
+              box && box.value === title, box && box.value);
+        check('and brings no markup with it',
+              !d.querySelector('#panelList b'),
+              d.getElementById('panelList').innerHTML);
+    }
+
+    // Adding, moving and removing: the three things the editor is for, and
+    // the three nothing had ever run.
+    {
+        const { d, said } = editorPage({ panels: [
+            { id: 'p1', type: 'terms', title: 'First', field: 'service',
+              size: 10, width: 6, height: 300 }] });
+
+        d.querySelector('[data-add-panel="timeseries"]').click();
+        check('adding a panel appends it to the list and to the field',
+              rows(d).length === 2 && stored(d).length === 2
+              && stored(d)[1].type === 'timeseries', d.getElementById('panelsField').value);
+
+        d.querySelectorAll('[data-move="-1"]')[1].click();
+        check('moving a panel up swaps it with the one above',
+              stored(d)[0].type === 'timeseries' && stored(d)[1].id === 'p1',
+              d.getElementById('panelsField').value);
+
+        check('the first row cannot be moved up and the last cannot be moved down',
+              rows(d)[0].querySelector('[data-move="-1"]').disabled
+              && rows(d)[1].querySelector('[data-move="1"]').disabled
+              && !rows(d)[0].querySelector('[data-move="1"]').disabled,
+              d.getElementById('panelList').innerHTML);
+
+        // The ends are guarded twice: the button is disabled, and the
+        // handler refuses an index outside the list. The second is what
+        // stands between a stray click and `panels[2]` on a list of two, so
+        // it is dispatched rather than pressed — `.click()` on a disabled
+        // button fires nothing and measures nothing.
+        const before = d.getElementById('panelsField').value;
+        rows(d)[1].querySelector('[data-move="1"]')
+            .dispatchEvent(new d.defaultView.Event('click'));
+        rows(d)[0].querySelector('[data-move="-1"]')
+            .dispatchEvent(new d.defaultView.Event('click'));
+        check('a move past either end changes nothing',
+              d.getElementById('panelsField').value === before
+              && stored(d).length === 2,
+              d.getElementById('panelsField').value);
+
+        d.querySelectorAll('[data-remove]')[0].click();
+        check('removing a panel takes it out of the field too',
+              rows(d).length === 1 && stored(d).length === 1
+              && stored(d)[0].id === 'p1', d.getElementById('panelsField').value);
+
+        d.querySelector('[data-remove]').click();
+        check('the last panel cannot be removed, and the reason is said',
+              rows(d).length === 1 && said.length === 1
+              && /at least one panel/.test(said[0]), JSON.stringify(said));
+    }
+
+    // Width and height. The server clamps both; what is measured here is
+    // that what a person chose is what gets sent, which is where a control
+    // wired to the wrong key goes unnoticed.
+    {
+        const { d } = editorPage({ panels: [
+            { id: 'p1', type: 'terms', title: 'T', field: 'service', size: 10,
+              width: 6, height: 300 }] });
+
+        const width = d.querySelector('[data-key="width"]');
+        const height = d.querySelector('[data-key="height"]');
+        check('the width and height selects start on the panel’s own values',
+              width.value === '6' && height.value === '300',
+              `${width.value} / ${height.value}`);
+
+        height.value = '450';
+        height.dispatchEvent(new d.defaultView.Event('change'));
+        width.value = '12';
+        width.dispatchEvent(new d.defaultView.Event('change'));
+        d.querySelector('form').dispatchEvent(
+            new d.defaultView.Event('submit', { cancelable: true }));
+        check('a chosen height is saved as a number, not as text',
+              stored(d)[0].height === 450 && stored(d)[0].width === 12,
+              d.getElementById('panelsField').value);
+    }
+
+    // A panel type the server accepts and the form cannot produce is a panel
+    // nobody can add without editing JSON by hand.
+    {
+        const { d } = editorPage({ fields: ['service'], panels: [
+            { id: 'p1', type: 'terms', title: 'Top', field: 'service',
+              size: 10, width: 6, height: 300 }] });
 
         d.querySelector('[data-add-panel="monitors"]').click();
-        const rows = d.querySelectorAll('#panelList .list-group-item');
-        const view = rows[1].querySelector('[data-key="view"]');
+        const view = rows(d)[1].querySelector('[data-key="view"]');
         check('the editor can add a monitor panel',
-              view && JSON.parse(d.getElementById('panelsField').value)[1].type
-                   === 'monitors',
+              view && stored(d)[1].type === 'monitors',
               d.getElementById('panelsField').value);
         check('and it starts on status, the cheaper of the two questions',
               view && view.value === 'status', view && view.value);
 
         view.value = 'availability';
-        view.dispatchEvent(new dom.window.Event('change'));
+        view.dispatchEvent(new d.defaultView.Event('change'));
         d.querySelector('form').dispatchEvent(
-            new dom.window.Event('submit', { cancelable: true }));
+            new d.defaultView.Event('submit', { cancelable: true }));
         check('and the view a person chose is what gets saved',
-              JSON.parse(d.getElementById('panelsField').value)[1].view
-                  === 'availability',
+              stored(d)[1].view === 'availability',
               d.getElementById('panelsField').value);
 
         d.querySelector('[data-add-panel="monitor_certificates"]').click();
-        const saved = JSON.parse(d.getElementById('panelsField').value);
         check('the editor can add a certificate panel',
-              saved[2] && saved[2].type === 'monitor_certificates',
+              stored(d)[2] && stored(d)[2].type === 'monitor_certificates',
               d.getElementById('panelsField').value);
         check('a monitor row says the permission it needs to draw',
               /monitors:read/.test(d.getElementById('panelList').textContent),
               d.getElementById('panelList').textContent);
+    }
+
+    // The create form renders the DEFAULT panel set, which it must not then
+    // write into the record: the server reads an absent `panels` as "follow
+    // the defaults", and a form that always posted its list would freeze
+    // today's defaults into every dashboard ever created.
+    {
+        const defaults = [
+            { id: 'default-volume', type: 'timeseries', title: 'Volume by Severity',
+              split_by: 'severity', width: 12, height: 300 },
+            { id: 'default-levels', type: 'terms', title: 'Log Levels',
+              field: 'severity', size: 10, width: 4, height: 300 }];
+
+        const untouched = editorPage({ panels: defaults, defaulted: true });
+        untouched.d.querySelector('form').dispatchEvent(
+            new untouched.d.defaultView.Event('submit', { cancelable: true }));
+        check('an untouched default set is posted as absent, not as itself',
+              untouched.d.getElementById('panelsField').value === '',
+              untouched.d.getElementById('panelsField').value);
+
+        const touched = editorPage({ panels: defaults, defaulted: true });
+        touched.d.querySelector('[data-add-panel="terms"]').click();
+        check('and the moment it is changed the whole list is posted',
+              stored(touched.d) && stored(touched.d).length === 3,
+              touched.d.getElementById('panelsField').value);
+
+        // The edit form of a board somebody HAS customised always posts,
+        // even before anything is touched — there is nothing to fall back to.
+        const chosen = editorPage({ panels: defaults, defaulted: false });
+        check('a list somebody chose is posted whether or not it is touched',
+              stored(chosen.d) && stored(chosen.d).length === 2,
+              chosen.d.getElementById('panelsField').value);
     }
 
     console.log(failures.length ? `\n${failures.length} failure(s)`

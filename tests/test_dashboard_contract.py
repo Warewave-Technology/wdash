@@ -401,13 +401,27 @@ class SinglePanelRequestTest(DashboardContractTest):
         string. Adding "15m" and "6h" to the picker without touching the map
         left both falling through to the default, so a fifteen-minute window
         was drawn as a single bucket — one dot, no chart.
+
+        Read from the time-range SELECT rather than from every option on the
+        page. It used to scrape the whole template, which worked while that
+        select was the only one on it; the page now also carries a refresh
+        interval, whose options are seconds and not ranges, and "every 30s"
+        is not a window anybody can ask for. Narrowing the scrape keeps the
+        check pointed at the control it is about instead of at whatever else
+        the page grows. `custom` is the absolute range and names no span at
+        all — the same drift for that one is measured in
+        tests.test_dashboard_controls, where a window can be supplied.
         """
         import re
 
         with open(os.path.join(os.path.dirname(__file__), "..", "templates",
                                "dashboard_view.html"), encoding="utf-8") as handle:
             markup = handle.read()
-        offered = re.findall(r'<option value="([^"]+)"', markup)
+        picker = re.search(r'<select[^>]*id="timeRange".*?</select>', markup, re.S)
+        self.assertIsNotNone(picker, "the time-range select is gone")
+        offered = [value for value in
+                   re.findall(r'<option value="([^"]+)"', picker.group(0))
+                   if value != "custom"]
         self.assertIn("15m", offered, "the picker no longer offers 15m")
 
         units = {"m": 60, "h": 3600, "d": 86400}

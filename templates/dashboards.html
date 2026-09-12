@@ -12,6 +12,32 @@
     {% endif %}
 </div>
 
+{# A box that narrows the list by name and description. A GET form, so the
+   term is in the URL and the page is reloadable and shareable; the filtering
+   itself happens in Python before the page is sliced, so it searches the
+   whole list rather than the 24 cards already on screen. #}
+<form method="GET" action="{{ url_for('dashboards.dashboards_page') }}"
+      class="mb-3" role="search">
+    <div class="input-group">
+        <span class="input-group-text"><i class="fas fa-magnifying-glass"></i></span>
+        <input type="search" class="form-control" name="q" id="dashboardSearch"
+               value="{{ search }}" aria-label="Filter dashboards"
+               placeholder="Filter by name or description">
+        <button class="btn btn-outline-secondary" type="submit">Filter</button>
+        {% if search %}
+        <a class="btn btn-outline-secondary"
+           href="{{ url_for('dashboards.dashboards_page') }}">Clear</a>
+        {% endif %}
+    </div>
+    {% if search and filtered_out %}
+    <div class="form-text">
+      {{ filtered_out }} more dashboard{{ 's' if filtered_out != 1 else '' }}
+      you can see {{ 'do' if filtered_out != 1 else 'does' }} not match
+      &ldquo;{{ search }}&rdquo;.
+    </div>
+    {% endif %}
+</form>
+
 {% if hidden_count %}
 <div class="alert alert-secondary py-2" style="font-size:.85rem">
   <i class="fas fa-eye-slash"></i>
@@ -122,7 +148,23 @@
                                     <i class="fas fa-edit"></i> Edit
                                 </a>
                             {% endif %}
-                            {% if current_user.has_permission('dashboard:delete') and 
+                            {% if can_create %}
+                                {# A copy under a new name, so the thirteenth
+                                   board starts from the twelfth. A POST, not
+                                   a link: it creates something. The copy is
+                                   the duplicator's and starts private —
+                                   copying "shared" would put a board in
+                                   front of a room nobody chose. #}
+                                <form method="POST" class="d-inline"
+                                      action="{{ url_for('dashboards.duplicate_dashboard', dashboard_id=dashboard.id) }}">
+                                    <button type="submit"
+                                            class="btn btn-outline-secondary"
+                                            title="Make a private copy of this dashboard">
+                                        <i class="fas fa-copy"></i> Duplicate
+                                    </button>
+                                </form>
+                            {% endif %}
+                            {% if current_user.has_permission('dashboard:delete') and
                                   (dashboard.created_by == current_user.username or current_user.has_permission('system:admin')) %}
                                 {# Data attributes rather than an inline
                                    handler: `onclick` is inline script, and a
@@ -153,14 +195,14 @@
       <ul class="pagination pagination-sm">
         <li class="page-item {% if page == 0 %}disabled{% endif %}">
           <a class="page-link"
-             href="{{ url_for('dashboards.dashboards_page', page=page - 1) }}">
+             href="{{ url_for('dashboards.dashboards_page', page=page - 1, q=search or none) }}">
             Previous</a>
         </li>
         {% for number in range(pages) %}
           {% if number < 3 or number > pages - 4 or (number - page)|abs < 2 %}
           <li class="page-item {% if number == page %}active{% endif %}">
             <a class="page-link"
-               href="{{ url_for('dashboards.dashboards_page', page=number) }}">
+               href="{{ url_for('dashboards.dashboards_page', page=number, q=search or none) }}">
               {{ number + 1 }}</a>
           </li>
           {% elif number == 3 and page > 4 %}
@@ -171,7 +213,7 @@
         {% endfor %}
         <li class="page-item {% if page + 1 >= pages %}disabled{% endif %}">
           <a class="page-link"
-             href="{{ url_for('dashboards.dashboards_page', page=page + 1) }}">
+             href="{{ url_for('dashboards.dashboards_page', page=page + 1, q=search or none) }}">
             Next</a>
         </li>
       </ul>
@@ -180,6 +222,21 @@
 {% else %}
     <div class="text-center py-5">
         <i class="fas fa-chart-bar fa-4x text-muted mb-3"></i>
+        {# A search that matched nothing is not an installation with no
+           dashboards in it, and "Create your first dashboard to get started"
+           under a filter box holding a typo is the same emptiness-for-a-
+           failure the rest of this product refuses. Said first, because it is
+           the only one of the three that the reader can undo themselves. #}
+        {% if search %}
+        <h4 class="text-muted">Nothing matches &ldquo;{{ search }}&rdquo;</h4>
+        <p class="text-muted">
+          {% if filtered_out %}
+            {{ filtered_out }} dashboard{{ 's' if filtered_out != 1 else '' }}
+            you can see did not match.
+          {% endif %}
+          <a href="{{ url_for('dashboards.dashboards_page') }}">Show all of them</a>.
+        </p>
+        {% else %}
         <h4 class="text-muted">No Dashboards Found</h4>
         {# "Create your first" is a lie when we have just said, above, that
            there are some in a file. The list really is empty; what is not
@@ -189,6 +246,7 @@
           database yet &mdash; see above.</p>
         {% else %}
         <p class="text-muted">Create your first dashboard to get started.</p>
+        {% endif %}
         {% endif %}
         {% if can_create %}
             <a href="{{ url_for('dashboards.create_dashboard') }}" class="btn btn-primary">

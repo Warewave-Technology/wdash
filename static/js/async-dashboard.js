@@ -91,6 +91,35 @@ const PANEL_HINTS = Object.assign(Object.create(null), {
 });
 
 
+/**
+ * How often auto-refresh asks, in seconds, when the page offers no choice.
+ *
+ * It was one hardcoded 30000 inside `setInterval`, tuned for the backend
+ * where a refresh is cheap. One refresh of a board is ONE request on
+ * Elasticsearch however many panels it has, because every log panel rides a
+ * single msearch; on Loki and VictoriaLogs the adapter issues one request per
+ * panel, so an eight-panel board is eight — per open tab, every interval.
+ */
+const DEFAULT_REFRESH_SECONDS = 30;
+
+
+/**
+ * A UTC instant as a `datetime-local` input's value, in the reader's own zone.
+ *
+ * The URL carries UTC, because a shared link must mean the same window to
+ * whoever opens it; the boxes show local time, because "last Tuesday 14:00"
+ * is a local sentence. `new Date(value)` parses a bare `datetime-local` as
+ * local, so the conversion back is the constructor's own.
+ */
+function localInputValue(iso) {
+    const at = new Date(iso);
+    if (isNaN(at.getTime())) return '';
+    const p = n => String(n).padStart(2, '0');
+    return `${at.getFullYear()}-${p(at.getMonth() + 1)}-${p(at.getDate())}`
+         + `T${p(at.getHours())}:${p(at.getMinutes())}`;
+}
+
+
 /** Text into HTML. One definition: it was written inside drawServiceTable,
  *  and every panel that renders markup needs the same one. */
 function escapeHtml(value) {
@@ -191,6 +220,10 @@ class AsyncDashboard {
         console.log('🚀 Initializing Async Dashboard:', this.dashboardId);
         this.applyUrlState();
         this.setupEventListeners();
+        // After the URL has been read, so a link that arrives saying "off"
+        // arrives with the button already unavailable rather than offering a
+        // rate nobody chose.
+        this.applyRefreshChoice();
         this.initializeCharts();
         this.setupStatCards();
 
@@ -219,17 +252,89 @@ class AsyncDashboard {
      */
     applyUrlState() {
         const params = new URLSearchParams(window.location.search);
-
-        const timeRange = params.get('time_range');
         const select = document.getElementById('timeRange');
-        if (timeRange && select
-            && [...select.options].some(o => o.value === timeRange)) {
-            select.value = timeRange;
+
+        // An absolute range wins over a relative one when both are in the
+        // link: `start`/`end` name a window, `time_range` names a rule for
+        // making one, and a link carrying both was written by something that
+        // did not decide.
+        const start = params.get('start');
+        const end = params.get('end');
+        const from = document.getElementById('rangeStart');
+        const to = document.getElementById('rangeEnd');
+        if (start && end && select && from && to) {
+            select.value = 'custom';
+            from.value = localInputValue(start);
+            to.value = localInputValue(end);
+        } else {
+            const timeRange = params.get('time_range');
+            if (timeRange && select
+                && [...select.options].some(o => o.value === timeRange)) {
+                select.value = timeRange;
+            }
+        }
+        this.showRangeInputs();
+
+        const refresh = params.get('refresh');
+        const interval = document.getElementById('refreshInterval');
+        if (refresh && interval
+            && [...interval.options].some(o => o.value === refresh)) {
+            interval.value = refresh;
         }
 
         const filter = params.get('q');
         const input = document.getElementById('dashboardFilter');
         if (filter && input) input.value = filter;
+    }
+
+    /** Show the two boxes only when they are the range being used. */
+    showRangeInputs() {
+        const row = document.getElementById('customRange');
+        if (!row) return;
+        row.classList.toggle(
+            'd-none',
+            document.getElementById('timeRange')?.value !== 'custom');
+    }
+
+    /**
+     * The absolute window the two boxes name, in UTC — or null.
+     *
+     * Null for every relative range, and null for an absolute one that is not
+     * yet usable. `load` refuses to ask in the second case rather than
+     * falling back to the default hour: an hour of data under a control
+     * reading "Between two times" is the failure this product refuses
+     * everywhere else, emptiness — or worse, plausible numbers — standing in
+     * for a question nobody asked.
+     */
+    absoluteBounds() {
+        if (document.getElementById('timeRange')?.value !== 'custom') return null;
+        const from = document.getElementById('rangeStart')?.value || '';
+        const to = document.getElementById('rangeEnd')?.value || '';
+        if (!from || !to) return null;
+        const start = new Date(from);
+        const end = new Date(to);
+        if (isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) {
+            return null;
+        }
+        return { start: start.toISOString(), end: end.toISOString() };
+    }
+
+    /** Why the chosen range cannot be asked for, or '' when it can. */
+    rangeProblem() {
+        if (document.getElementById('timeRange')?.value !== 'custom') return '';
+        if (this.absoluteBounds()) return '';
+        const from = document.getElementById('rangeStart')?.value || '';
+        const to = document.getElementById('rangeEnd')?.value || '';
+        if (!from || !to) return 'Choose both a start and an end.';
+        return 'The start of a range must be before its end.';
+    }
+
+    /** How often auto-refresh should ask, in seconds. 0 is off. */
+    refreshSeconds() {
+        const select = document.getElementById('refreshInterval');
+        if (!select) return DEFAULT_REFRESH_SECONDS;
+        const seconds = Number(select.value);
+        return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
     }
 
     /**
@@ -241,10 +346,24 @@ class AsyncDashboard {
      */
     syncUrl() {
         const params = new URLSearchParams();
-        params.set('time_range', document.getElementById('timeRange')?.value || '1h');
+        const bounds = this.absoluteBounds();
+        if (bounds) {
+            // The bounds and NOT `time_range` beside them: two answers to one
+            // question, and the recipient's page would have to pick.
+            params.set('start', bounds.start);
+            params.set('end', bounds.end);
+        } else {
+            params.set('time_range',
+                       document.getElementById('timeRange')?.value || '1h');
+        }
 
         const filter = (document.getElementById('dashboardFilter')?.value || '').trim();
         if (filter) params.set('q', filter);
+
+        // Carried like the time range, and for the same reason: a link to a
+        // board somebody is watching should arrive watching.
+        const interval = document.getElementById('refreshInterval');
+        if (interval) params.set('refresh', interval.value);
 
         window.history.replaceState(null, '',
             `${window.location.pathname}?${params.toString()}`);
@@ -260,7 +379,31 @@ class AsyncDashboard {
         }
 
         if (timeRange) {
-            timeRange.addEventListener('change', () => { this.syncUrl(); this.load(); });
+            timeRange.addEventListener('change', () => {
+                this.showRangeInputs();
+                this.syncUrl();
+                this.load();
+            });
+        }
+
+        // Both boxes, so filling the second one asks. Filling only the first
+        // asks too, and is refused by name — see `load`.
+        ['rangeStart', 'rangeEnd'].forEach(id => {
+            const box = document.getElementById(id);
+            if (box) {
+                box.addEventListener('change', () => { this.syncUrl(); this.load(); });
+            }
+        });
+
+        const interval = document.getElementById('refreshInterval');
+        if (interval) {
+            // No load: choosing how often to ask is not asking. It restarts a
+            // running timer at the new rate, which is what changing it while
+            // watching is for.
+            interval.addEventListener('change', () => {
+                this.syncUrl();
+                this.applyRefreshChoice();
+            });
         }
 
         const filter = document.getElementById('dashboardFilter');
@@ -327,6 +470,19 @@ class AsyncDashboard {
             this.pending.quiet = Boolean(this.pending.quiet ?? true) && quiet;
             return;
         }
+
+        // Half an absolute range is not a window, and it is not the default
+        // hour either. Refused HERE, before anything spins or is blanked, and
+        // said in words: falling through would have asked for the last hour
+        // and drawn it under a control reading "Between two times", which is
+        // a real answer to a question nobody asked — the worst of the three
+        // things this page can do.
+        const problem = this.rangeProblem();
+        if (problem) {
+            this.showMessage(problem, [], 'warning');
+            return;
+        }
+
         this.loading = true;
 
         if (!quiet) this.showAllLoadingStates();
@@ -509,6 +665,13 @@ class AsyncDashboard {
 
         slot.className = `col-md-${panel.width} panel-slot`;
         slot.dataset.panelId = panel.id;
+        // How tall, beside how wide, from the panel itself. The card template
+        // used to say `height:300px` for every panel on every board, so a
+        // one-row service table left two thirds of its card empty and a
+        // twenty-row table scrolled inside a box. `normalise` clamps the
+        // number and gives one to every panel, including the ones stored
+        // before this existed, so there is nothing to default to here.
+        slot.querySelector('.chart-container').style.height = `${panel.height}px`;
         slot.querySelector('.panel-title').textContent = panel.title;
 
         // A panel whose source answered for only some of its backends says so
@@ -721,9 +884,15 @@ class AsyncDashboard {
     }
 
     getQueryParams() {
-        const params = new URLSearchParams({
-            time_range: document.getElementById('timeRange')?.value || '1h',
-        });
+        const params = new URLSearchParams();
+        const bounds = this.absoluteBounds();
+        if (bounds) {
+            params.set('start', bounds.start);
+            params.set('end', bounds.end);
+        } else {
+            params.set('time_range',
+                       document.getElementById('timeRange')?.value || '1h');
+        }
         const filter = (document.getElementById('dashboardFilter')?.value || '').trim();
         if (filter) params.set('q', filter);
         return params.toString();
@@ -1582,28 +1751,60 @@ class AsyncDashboard {
     }
 
     toggleAutoRefresh() {
+        if (this.isAutoRefreshing) this.stopAutoRefresh();
+        else this.startAutoRefresh();
+    }
+
+    startAutoRefresh() {
+        const btn = document.getElementById('autoRefreshBtn');
+        const seconds = this.refreshSeconds();
+        // "Off" is a choice, not a rate. Starting anyway at some default
+        // would ask on behalf of somebody who had just said not to.
+        if (!btn || !seconds) return;
+
+        clearInterval(this.autoRefreshInterval);
+        // Quiet, and only while the tab is actually being looked at. A
+        // dashboard left open in a background tab was querying every thirty
+        // seconds for nobody — multiply that by the number of people who
+        // never close tabs.
+        this.autoRefreshInterval = setInterval(() => {
+            if (document.visibilityState === 'visible') this.load({ quiet: true });
+        }, seconds * 1000);
+        btn.innerHTML = '<i class="fas fa-pause"></i> Stop Auto Refresh';
+        btn.classList.remove('btn-outline-secondary');
+        btn.classList.add('btn-success');
+        this.isAutoRefreshing = true;
+    }
+
+    stopAutoRefresh() {
+        clearInterval(this.autoRefreshInterval);
+        this.autoRefreshInterval = null;
+        this.isAutoRefreshing = false;
         const btn = document.getElementById('autoRefreshBtn');
         if (!btn) return;
+        btn.innerHTML = '<i class="fas fa-play"></i> Auto Refresh';
+        btn.classList.remove('btn-success');
+        btn.classList.add('btn-outline-secondary');
+    }
 
-        if (this.isAutoRefreshing) {
-            clearInterval(this.autoRefreshInterval);
-            btn.innerHTML = '<i class="fas fa-play"></i> Auto Refresh';
-            btn.classList.remove('btn-success');
-            btn.classList.add('btn-outline-secondary');
-            this.isAutoRefreshing = false;
-        } else {
-            // Quiet, and only while the tab is actually being looked at. A
-            // dashboard left open in a background tab was querying every
-            // thirty seconds for nobody — multiply that by the number of
-            // people who never close tabs.
-            this.autoRefreshInterval = setInterval(() => {
-                if (document.visibilityState === 'visible') this.load({ quiet: true });
-            }, 30000);
-            btn.innerHTML = '<i class="fas fa-pause"></i> Stop Auto Refresh';
-            btn.classList.remove('btn-outline-secondary');
-            btn.classList.add('btn-success');
-            this.isAutoRefreshing = true;
+    /**
+     * Make the chosen interval the one in force.
+     *
+     * Choosing "Off" while a board is refreshing stops it there and then —
+     * the choice is about what this tab is costing the backend right now, and
+     * a setting that only takes effect after a press of Stop is a setting
+     * that lies for one more interval. A running timer moves to the new rate
+     * for the same reason.
+     */
+    applyRefreshChoice() {
+        const btn = document.getElementById('autoRefreshBtn');
+        const seconds = this.refreshSeconds();
+        if (btn) btn.disabled = !seconds;
+        if (!seconds) {
+            if (this.isAutoRefreshing) this.stopAutoRefresh();
+            return;
         }
+        if (this.isAutoRefreshing) this.startAutoRefresh();
     }
 
     destroy() {

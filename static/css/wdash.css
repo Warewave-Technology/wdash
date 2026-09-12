@@ -437,6 +437,39 @@ a:not([class]):hover {
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
+/* The label welded to the side of an input.
+ *
+ * Never restyled, so it kept Bootstrap's `--bs-tertiary-bg` — #f8f9fa, one of
+ * the twelve literals `tests/test_rendered_pages.py` refuses. Nothing looked
+ * broken, which is the whole trap: it is close enough to this palette's
+ * light surfaces to pass a glance and wrong in the dark theme, where a pale
+ * grey block sits against a dark input. It went unseen because the two
+ * screens that used it — the edit form's thresholds and, until now, nothing
+ * else — were not among the pages that test walks.
+ */
+.input-group-text {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+/* A button that cannot be pressed still has to be readable.
+ *
+ * Bootstrap paints a disabled button #6c757d through `--bs-btn-disabled-color`
+ * under the selector `.btn:disabled`, whose class-plus-pseudo-class
+ * specificity outranks the plain `.btn-outline-secondary` rule above — so
+ * every restyled variant reverted to Bootstrap grey the moment it was
+ * disabled. Measured on the panel editor's Move-up button in the light
+ * theme: rgb(108, 117, 125) on rgb(251, 241, 199), 4.13:1 against the 4.5:1
+ * button text needs. `--text-secondary` is 5.9:1 there and 5.1:1 on the dark
+ * card, and still reads as "unavailable" beside `--accent`.
+ */
+.btn:disabled,
+.btn.disabled {
+    color: var(--text-secondary);
+    border-color: var(--border-strong);
+}
+
 .form-label {
     color: var(--text-primary);
     font-weight: 600;

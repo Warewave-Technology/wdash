@@ -1,0 +1,98 @@
+{# The panel list and the thresholds, shared by the create and edit forms.
+
+   They lived in dashboard_edit.html alone, so every dashboard was born with
+   the three default panels and no thresholds and its author's first act was
+   to open Edit. Lifting them here is also what stops the next panel control
+   being added twice — once to each form, with the second one forgotten.
+
+   Rendered from `_editor_context`: panels, panels_are_default,
+   aggregatable_fields, panel_heights, thresholds. #}
+<hr>
+<div class="mb-3">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <label class="form-label mb-0">Panels</label>
+        <div class="btn-group btn-group-sm">
+            <button type="button" class="btn btn-outline-primary"
+                    data-add-panel="timeseries">
+                <i class="fas fa-chart-area"></i> Volume over time
+            </button>
+            <button type="button" class="btn btn-outline-primary"
+                    data-add-panel="terms">
+                <i class="fas fa-chart-bar"></i> Top values
+            </button>
+            <button type="button" class="btn btn-outline-info"
+                    data-add-panel="trace_services">
+                <i class="fas fa-project-diagram"></i> Services (traces)
+            </button>
+            <button type="button" class="btn btn-outline-info"
+                    data-add-panel="monitors">
+                <i class="fas fa-heart-pulse"></i> Monitors
+            </button>
+            <button type="button" class="btn btn-outline-info"
+                    data-add-panel="monitor_certificates">
+                <i class="fas fa-lock"></i> Certificates
+            </button>
+        </div>
+    </div>
+    <div id="panelList" class="list-group"></div>
+    {# Panels travel as a JSON blob in one hidden field: the server validates
+       the list as a whole, so posting it as a set of indexed form fields
+       would only mean reassembling it there. #}
+    <input type="hidden" name="panels" id="panelsField">
+    <div class="form-text">
+        Every log panel is answered by the same request, so adding one costs
+        an aggregation rather than a round trip. Traces and monitors are other
+        sources: the first panel from each costs one more request, and every
+        further panel from it costs nothing.
+    </div>
+</div>
+
+{# Thresholds. Not alerting: no notification, no schedule, no silencing. Just
+   "is this outside what the owner calls normal", which stops every reader
+   re-deriving it. #}
+<hr>
+<div class="mb-3">
+    <label class="form-label">Thresholds <span class="text-muted" style="font-size:.8rem">(optional)</span></label>
+    <div class="row g-2">
+        <div class="col-md-6">
+            <div class="input-group input-group-sm">
+                <span class="input-group-text" style="width:9rem">Error rate warn</span>
+                <input type="number" step="0.001" min="0" max="1"
+                       class="form-control" name="threshold_error_rate_warning"
+                       placeholder="0.02"
+                       value="{{ thresholds.get('error_rate', {}).get('warning', '') }}">
+                <span class="input-group-text">ratio</span>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="input-group input-group-sm">
+                <span class="input-group-text" style="width:9rem">Error rate critical</span>
+                <input type="number" step="0.001" min="0" max="1"
+                       class="form-control" name="threshold_error_rate_critical"
+                       placeholder="0.05"
+                       value="{{ thresholds.get('error_rate', {}).get('critical', '') }}">
+                <span class="input-group-text">ratio</span>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="input-group input-group-sm">
+                <span class="input-group-text" style="width:9rem">Error count warn</span>
+                <input type="number" step="1" min="0"
+                       class="form-control" name="threshold_error_count_warning"
+                       value="{{ thresholds.get('error_count', {}).get('warning', '') }}">
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="input-group input-group-sm">
+                <span class="input-group-text" style="width:9rem">Error count critical</span>
+                <input type="number" step="1" min="0"
+                       class="form-control" name="threshold_error_count_critical"
+                       value="{{ thresholds.get('error_count', {}).get('critical', '') }}">
+            </div>
+        </div>
+    </div>
+    <div class="form-text">
+        A rate is between 0 and 1 &mdash; use <code>0.05</code> for 5%.
+        Leave blank to leave the dashboard never alarming.
+    </div>
+</div>

@@ -48,19 +48,34 @@ function makeDashboard(responder) {
         <div id="warnCountDelta"></div><div id="infoCountDelta"></div>
         <div id="baselineNote"></div>
         <span id="lastUpdated"></span>
-        <select id="timeRange"><option value="1h" selected>1h</option></select>
+        <select id="timeRange">
+            <option value="1h" selected>1h</option>
+            <option value="24h">24h</option>
+            <option value="custom">Between two times…</option>
+        </select>
+        <div id="customRange" class="d-none">
+            <input type="datetime-local" id="rangeStart" value="">
+            <input type="datetime-local" id="rangeEnd" value="">
+        </div>
+        <button id="autoRefreshBtn"></button>
+        <select id="refreshInterval">
+            <option value="0">Off</option>
+            <option value="10">10s</option>
+            <option value="30" selected>30s</option>
+            <option value="60">1m</option>
+        </select>
         <input id="dashboardFilter" value="">
         <div id="dashboardMessage" class="alert d-none"></div>
         <div id="panelGrid"></div>
         <template id="panelTemplate">
             <div class="col-md-6 panel-slot">
-                <div class="card h-100">
+                <div class="card">
                     <div class="card-header">
                         <h5 class="mb-0 panel-title"></h5>
                         <small class="panel-hint"></small>
                     </div>
                     <div class="card-body">
-                        <div class="chart-container" style="height:300px">
+                        <div class="chart-container">
                             <canvas></canvas>
                         </div>
                         <div class="panel-empty text-center text-muted d-none py-5">
@@ -1338,6 +1353,177 @@ async function main() {
         assert(JSON.stringify(built) === JSON.stringify(LINKS),
                `the link builder produced ${JSON.stringify(built)}`);
     });
+
+    // ------------------------------------------------------------------
+    // The board's own controls: how tall a panel is, which window is being
+    // asked for, and how often.
+    // ------------------------------------------------------------------
+
+    /** A dashboard that records every URL it asks for. */
+    function controlled(body = { panels: [] }) {
+        const asked = [];
+        const w = makeDashboard(async (url) => {
+            asked.push(url);
+            return { ok: true, status: 200, json: async () => body };
+        });
+        w.asked = asked;
+        return w;
+    }
+
+    async function started(w) {
+        const dashboard = new w.AsyncDashboard('d1');
+        await settle(dashboard);
+        w.dashboard = dashboard;
+        return dashboard;
+    }
+
+    // Every panel was exactly 300px because the card template said so, which
+    // left a one-row table two thirds empty. The card template no longer
+    // says anything; the panel does.
+    {
+        const tall = await loadWith({ panels: [
+            { ...PANEL, id: 'short', width: 6, height: 180,
+              buckets: [{ key: 'ERROR', count: 1 }] },
+            { ...PANEL, id: 'long', width: 6, height: 600,
+              buckets: [{ key: 'ERROR', count: 1 }] }] });
+        const heights = ['short', 'long'].map(id => tall.document.querySelector(
+            `[data-panel-id="${id}"] .chart-container`).style.height);
+        check('a panel is as tall as it says it is', () =>
+            assert(heights[0] === '180px' && heights[1] === '600px',
+                   `got ${JSON.stringify(heights)}`));
+
+        const plain = await loadWith({ panels: [
+            { ...PANEL, height: 300, buckets: [{ key: 'ERROR', count: 1 }] }] });
+        check('and the standard height is still 300', () =>
+            assert(plain.document.querySelector('.chart-container').style.height
+                   === '300px',
+                   plain.document.querySelector('.chart-container').style.height));
+    }
+
+    // "Last Tuesday 14:00 to 15:00" — the one question the five relative
+    // options cannot be pointed at.
+    {
+        const w = controlled();
+        await started(w);
+        const d = w.document;
+        w.asked.length = 0;
+
+        d.getElementById('timeRange').value = 'custom';
+        d.getElementById('timeRange').dispatchEvent(new w.Event('change'));
+        check('choosing an absolute range reveals the two boxes', () =>
+            assert(!d.getElementById('customRange').classList.contains('d-none'),
+                   d.getElementById('customRange').className));
+        check('and an incomplete range is refused by name rather than asked', () =>
+            assert(w.asked.length === 0
+                   && /both a start and an end/i.test(
+                       d.getElementById('dashboardMessage').textContent),
+                   `${w.asked.length} request(s): `
+                   + d.getElementById('dashboardMessage').textContent));
+
+        d.getElementById('rangeStart').value = '2026-09-08T14:00';
+        d.getElementById('rangeEnd').value = '2026-09-08T15:00';
+        d.getElementById('rangeEnd').dispatchEvent(new w.Event('change'));
+        await settle(w.dashboard);
+
+        const sent = new URL(w.asked[w.asked.length - 1], 'http://localhost')
+            .searchParams;
+        const expected = new Date('2026-09-08T14:00').toISOString();
+        check('the bounds go out in UTC, and no relative range beside them', () =>
+            assert(sent.get('start') === expected && !sent.has('time_range')
+                   && new Date(sent.get('end')) > new Date(sent.get('start')),
+                   w.asked[w.asked.length - 1]));
+        check('and the address bar reproduces exactly that window', () =>
+            assert(w.location.search.includes('start=')
+                   && w.location.search.includes('end=')
+                   && !w.location.search.includes('time_range='),
+                   w.location.search));
+
+        // Backwards is its own refusal: both boxes are filled, so "choose
+        // both" would be a sentence about a field that is not empty.
+        w.asked.length = 0;
+        d.getElementById('rangeEnd').value = '2026-09-08T13:00';
+        d.getElementById('rangeEnd').dispatchEvent(new w.Event('change'));
+        await settle(w.dashboard);
+        check('a range that runs backwards is refused, and says why', () =>
+            assert(w.asked.length === 0
+                   && /before its end/i.test(
+                       d.getElementById('dashboardMessage').textContent),
+                   `${w.asked.length} request(s): `
+                   + d.getElementById('dashboardMessage').textContent));
+    }
+
+    // A link carrying an absolute window must open on that window.
+    {
+        const w = controlled();
+        const from = new Date('2026-09-08T14:00');
+        const to = new Date('2026-09-08T15:00');
+        w.history.replaceState(null, '', '/dashboards/d1?start='
+            + encodeURIComponent(from.toISOString()) + '&end='
+            + encodeURIComponent(to.toISOString()) + '&refresh=60');
+        await started(w);
+        const d = w.document;
+        check('a shared absolute link opens on that window, in local time', () =>
+            assert(d.getElementById('timeRange').value === 'custom'
+                   && d.getElementById('rangeStart').value === '2026-09-08T14:00'
+                   && d.getElementById('rangeEnd').value === '2026-09-08T15:00',
+                   `${d.getElementById('timeRange').value} `
+                   + `${d.getElementById('rangeStart').value} `
+                   + `${d.getElementById('rangeEnd').value}`));
+        check('and the interval it was shared at comes with it', () =>
+            assert(d.getElementById('refreshInterval').value === '60',
+                   d.getElementById('refreshInterval').value));
+    }
+
+    // How often this tab asks. One refresh is one request on Elasticsearch
+    // and one PER PANEL on Loki and VictoriaLogs, so the interval is what the
+    // board costs a deployment — and it was one hardcoded 30 seconds.
+    {
+        const w = controlled();
+        const delays = [];
+        const real = w.setInterval;
+        w.setInterval = (fn, ms) => { delays.push(ms); return real(() => {}, 1e9); };
+        await started(w);
+        const d = w.document;
+
+        d.getElementById('refreshInterval').value = '10';
+        d.getElementById('refreshInterval').dispatchEvent(new w.Event('change'));
+        d.getElementById('autoRefreshBtn').click();
+        check('auto-refresh asks at the interval that was chosen', () =>
+            assert(delays.length === 1 && delays[0] === 10000,
+                   JSON.stringify(delays)));
+
+        d.getElementById('refreshInterval').value = '60';
+        d.getElementById('refreshInterval').dispatchEvent(new w.Event('change'));
+        check('changing it while watching moves the running timer', () =>
+            assert(delays.length === 2 && delays[1] === 60000
+                   && w.dashboard.isAutoRefreshing, JSON.stringify(delays)));
+
+        d.getElementById('refreshInterval').value = '0';
+        d.getElementById('refreshInterval').dispatchEvent(new w.Event('change'));
+        check('"off" stops it there and then, and takes the button away', () =>
+            assert(!w.dashboard.isAutoRefreshing && delays.length === 2
+                   && d.getElementById('autoRefreshBtn').disabled,
+                   `${w.dashboard.isAutoRefreshing} `
+                   + JSON.stringify(delays)));
+
+        // Dispatched rather than pressed: `.click()` on a disabled button
+        // fires nothing, so it measures the `disabled` attribute and not the
+        // guard inside `startAutoRefresh` — which is what stands between
+        // "off" and `setInterval(fn, 0)`.
+        d.getElementById('autoRefreshBtn').dispatchEvent(new w.Event('click'));
+        check('and a press that gets through anyway starts nothing', () =>
+            assert(!w.dashboard.isAutoRefreshing && delays.length === 2,
+                   JSON.stringify(delays)));
+
+        // The interval travels in the link, like the time range: a board
+        // somebody is watching should arrive watching.
+        d.getElementById('refreshInterval').value = '30';
+        d.getElementById('refreshInterval').dispatchEvent(new w.Event('change'));
+        check('the chosen interval is written into the address bar', () =>
+            assert(/[?&]refresh=30\b/.test(w.location.search),
+                   w.location.search));
+        w.setInterval = real;
+    }
 
     console.log('');
     if (failures.length) {

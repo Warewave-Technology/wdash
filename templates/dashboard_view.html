@@ -34,7 +34,7 @@
 <div class="card mb-4">
     <div class="card-body">
         <div class="row align-items-center">
-            <div class="col-md-2">
+            <div class="col-md-3">
                 <label for="timeRange" class="form-label">Time Range</label>
                 <select class="form-select" id="timeRange">
                     <option value="15m">Last 15 minutes</option>
@@ -42,9 +42,12 @@
                     <option value="6h">Last 6 hours</option>
                     <option value="24h">Last 24 hours</option>
                     <option value="7d">Last 7 days</option>
+                    <!-- The one question the five above cannot be pointed at:
+                         reviewing an incident after it has ended. -->
+                    <option value="custom">Between two times&hellip;</option>
                 </select>
             </div>
-            <div class="col-md-5">
+            <div class="col-md-4">
                 <label for="dashboardFilter" class="form-label">
                     Filter <span class="text-muted" style="font-size:.75rem">(narrows the dashboard query)</span>
                 </label>
@@ -63,14 +66,60 @@
                 <button class="btn btn-outline-secondary" id="autoRefreshBtn">
                     <i class="fas fa-play"></i> Auto Refresh
                 </button>
+                <!-- Beside the button rather than inside it: the interval is
+                     what the refresh COSTS, and it used to be one hardcoded
+                     thirty seconds tuned for the backend where panels are
+                     free. See the note below. -->
+                <select class="form-select d-inline-block w-auto align-middle"
+                        id="refreshInterval" aria-label="Refresh interval">
+                    <option value="0">Off</option>
+                    <option value="10">every 10s</option>
+                    <option value="30" selected>every 30s</option>
+                    <option value="60">every 1m</option>
+                    <option value="300">every 5m</option>
+                </select>
                 <button class="btn btn-outline-secondary" id="shareBtn"
                         title="Copy a link to exactly this view">
                     <i class="fas fa-link"></i>
                 </button>
             </div>
         </div>
+
+        <!-- The absolute range, shown only when it is the one being used.
+             Local time in the boxes, UTC on the wire. -->
+        <div class="row align-items-end mt-2 d-none" id="customRange">
+            <div class="col-md-3">
+                <label for="rangeStart" class="form-label">From</label>
+                <input type="datetime-local" class="form-control" id="rangeStart">
+            </div>
+            <div class="col-md-3">
+                <label for="rangeEnd" class="form-label">To</label>
+                <input type="datetime-local" class="form-control" id="rangeEnd">
+            </div>
+            <div class="col-md-6">
+                <div class="form-text mb-2" id="rangeNote">
+                    Both ends are needed, and the start must come before the
+                    end. Times are yours; the query is asked in UTC.
+                </div>
+            </div>
+        </div>
+
         <div class="row mt-2">
-            <div class="col-12 text-end">
+            <div class="col-md-8">
+                <!-- What a refresh costs, said where the interval is chosen
+                     rather than left for an operator to discover. Every log
+                     panel rides ONE Elasticsearch msearch whatever the panel
+                     count; the Loki and VictoriaLogs adapters loop and issue
+                     a request per aggregation. Counted at the transport
+                     against the lab, eight panels over 24 hours. -->
+                <small class="text-muted" id="refreshCost">
+                    Every log panel rides one Elasticsearch request; Loki and
+                    VictoriaLogs are asked once per panel. Measured on an
+                    eight-panel board: 2 requests to Elasticsearch, 9 to Loki,
+                    10 to VictoriaLogs &mdash; per open tab, every interval.
+                </small>
+            </div>
+            <div class="col-md-4 text-end">
                 <small class="text-muted">Last updated: <span id="lastUpdated">-</span></small>
             </div>
         </div>
@@ -147,13 +196,24 @@
 
 <template id="panelTemplate">
     <div class="col-md-6 panel-slot">
-        <div class="card h-100">
+        <!-- No `h-100`. It stretched every card to the height of the tallest
+             one in its row, which is exactly the waste a per-panel height
+             exists to remove: a 180px table beside a 600px one grew a card
+             with 420px of nothing under it. Each card is now as tall as the
+             panel says it is. -->
+        <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <h5 class="mb-0 panel-title"></h5>
                 <small class="text-muted panel-hint" style="font-size:.7rem"></small>
             </div>
             <div class="card-body">
-                <div class="chart-container" style="height:300px">
+                <!-- No height here. Every panel was exactly 300px because
+                     this literal said so, which left a one-row table two
+                     thirds empty and made a twenty-row one scroll inside a
+                     box. The panel says how tall it is and `panelSlot` binds
+                     it; `normalise` guarantees the number, clamped, for every
+                     panel including ones stored before heights existed. -->
+                <div class="chart-container">
                     <canvas></canvas>
                 </div>
                 <div class="panel-empty text-center text-muted d-none py-5">

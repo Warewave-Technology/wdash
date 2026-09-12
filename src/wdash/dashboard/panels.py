@@ -119,6 +119,34 @@ DEFAULT_TRACE_ROWS = 5
 MIN_WIDTH = 3
 MAX_WIDTH = 12
 
+#: How tall a panel's chart area is, in pixels.
+#:
+#: Every panel used to be exactly 300, hardcoded in the card template, so a
+#: one-row service table left two thirds of its card empty and a twenty-row
+#: table scrolled inside a box. One clamped int beside `width` and no
+#: migration: the panel record is schemaless JSON, and a panel written before
+#: this existed gets the default it already had.
+#:
+#: Deliberately NOT a layout system. There is no position, no row, no drag: a
+#: panel says how wide and how tall, and the grid flows. The heights offered
+#: by the editor are a short list rather than a free number — see
+#: PANEL_HEIGHTS — because "how tall should this be" has about four useful
+#: answers and a spinner invites the other four hundred.
+MIN_HEIGHT = 120
+MAX_HEIGHT = 900
+DEFAULT_HEIGHT = 300
+
+#: The heights the editor offers, and what each one is for. Any integer
+#: between MIN_HEIGHT and MAX_HEIGHT is accepted on the way in — a stored
+#: board is not invalidated by this list changing — but these are the ones
+#: with a name.
+PANEL_HEIGHTS = (
+    (180, "short — a few rows"),
+    (300, "standard"),
+    (450, "tall"),
+    (600, "very tall — a long table"),
+)
+
 
 class PanelError(ValueError):
     """A panel definition that cannot be rendered."""
@@ -210,11 +238,18 @@ def normalise(panel, panel_id=None):
         raise PanelError(f"'{title}': width must be a number.")
     width = max(MIN_WIDTH, min(MAX_WIDTH, width))
 
+    try:
+        height = int(panel.get("height", DEFAULT_HEIGHT))
+    except (TypeError, ValueError):
+        raise PanelError(f"'{title}': height must be a number.")
+    height = max(MIN_HEIGHT, min(MAX_HEIGHT, height))
+
     out = {
         "id": panel.get("id") or panel_id or str(uuid.uuid4()),
         "type": kind,
         "title": title,
         "width": width,
+        "height": height,
     }
 
     if kind == "terms":

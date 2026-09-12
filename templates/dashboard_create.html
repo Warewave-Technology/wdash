@@ -115,7 +115,7 @@
                             either.
                         </div>
                     </div>
-
+                    {% include "_dashboard_editor.html" %}
 
                     <div class="d-grid gap-2 d-md-flex justify-content-md-end">
                         <a href="{{ url_for('dashboards.dashboards_page') }}" class="btn btn-secondary">Cancel</a>
@@ -274,4 +274,6 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 </script>
+
+{% include "_dashboard_editor_script.html" %}
 {% endblock %}
