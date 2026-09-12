@@ -88,9 +88,20 @@ const PANEL_HINTS = Object.assign(Object.create(null), {
     // counted — a number whose question is only in the author's title is a
     // number nobody else can check.
     count: 'One value of one field, counted over this window',
-    alerts: 'What WDash’s own alerting said in this window',
+    // Not a click either, and — unlike every panel above — not narrowed by
+    // the board. These read WDash's own store, so the board's stored query
+    // and the ad-hoc ?q= reach them no more than they reach the Monitors
+    // page. On a board filtered to one service the charts beside them narrow
+    // and these do not, and two panels side by side are read as one picture
+    // unless one of them says otherwise. No semicolon in either of these:
+    // tests/test_dashboard_tables.py reads this table with a regex that
+    // stops at the first one, and a hint carrying one takes the whole table
+    // out of its reach.
+    alerts: 'Every rule on this instance, in this window — the board’s '
+            + 'filter does not reach alert history',
     alerts_undelivered: 'The last word on each rule and subject, counted as '
-                        + 'the Alerts page counts it',
+                        + 'the Alerts page counts it — the board’s filter '
+                        + 'does not reach alert history',
     trace_services: 'Click a service to open it in the Traces page',
     trace_list: 'Click a trace to open its waterfall in this window',
     monitors: 'Click a check to open it in the Monitors page',

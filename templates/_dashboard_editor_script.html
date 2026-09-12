@@ -326,10 +326,12 @@ const ROW_CAPTIONS = Object.assign(Object.create(null), {
            + 'among the 50 commonest is refused rather than shown as zero',
     alerts: 'Alerts that fired — from WDash’s own store, so it '
             + 'costs no backend request and answers in a log outage; it '
-            + 'needs monitors:read to read',
-    alerts_undelivered: 'Alerts nobody received — the same store and '
-            + 'the same permission, counted the way the Alerts page counts '
-            + 'it',
+            + 'needs monitors:read to read, and it lists every rule on this '
+            + 'instance rather than the board’s own filter',
+    alerts_undelivered: 'Alerts nobody received — the same store, and it '
+            + 'needs monitors:read to read; counted the way the Alerts page '
+            + 'counts it, over every rule on this instance rather than the '
+            + 'board’s own filter',
     records: 'Recent records — the board’s own query and window, newest '
              + 'first; a search rather than an aggregation, so it costs '
              + 'one more request, shared by every records panel here',

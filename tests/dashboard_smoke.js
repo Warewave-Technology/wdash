@@ -1869,6 +1869,22 @@ async function main() {
                `the card read "${text}"`);
     });
 
+    // The board's stored query and its ad-hoc ?q= narrow reach the charts
+    // and the count panel, and do NOT reach these two: they read WDash's own
+    // store. On a board filtered to one service the panels beside them
+    // narrow and these do not, and two cards side by side are read as one
+    // picture unless one of them says otherwise. The count panel already
+    // says its half ("in this window and this board's query").
+    check('the alert panels say the board’s filter does not reach them', () => {
+        [['a1', alerts], ['a2', undelivered]].forEach(([id, page]) => {
+            const hint = page.document
+                .querySelector(`[data-panel-id="${id}"] .panel-hint`);
+            const said = hint ? hint.textContent : '(no hint at all)';
+            assert(/filter does not reach/.test(said),
+                   `panel ${id} said "${said}"`);
+        });
+    });
+
     const unconfigured = await loadWith({
         panels: [{ id: 'a2', title: 'Nobody received', width: 4,
                    type: 'alerts_undelivered',

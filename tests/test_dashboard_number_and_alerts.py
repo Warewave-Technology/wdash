@@ -49,7 +49,8 @@ from tests.support import ModelledES, change_dashboard, grant, install_dashboard
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wdash.dashboard.panels import PanelError, normalise  # noqa: E402
-from wdash.hub.adapters import ElasticsearchLogSource  # noqa: E402
+from wdash.hub.adapters import (  # noqa: E402
+    ElasticsearchLogSource, VictoriaLogsSource)
 from wdash.models import Dashboard  # noqa: E402
 from wdash.store.schema import alert_history, alert_rules  # noqa: E402
 
@@ -516,6 +517,32 @@ class AlertPanelTest(_Board):
         panel = self.panels_by_id(response.get_json())["a1"]
         self.assertEqual([row["subject"] for row in panel["rows"]], ["then"])
 
+    def test_the_number_and_the_table_agree_about_a_window_that_ended(self):
+        """The two panels are read as one picture, so they may not disagree.
+
+        Measured before the fix: the table drew ('checkout', delivered=False,
+        'webhook refused: 500') while the number beside it read 0 under "of
+        the 1 alert in this window reached nobody" — because the same rule
+        and subject had spoken again after the window.
+        """
+        fired(self.app.store, minutes_ago=90, subject="checkout",
+              delivered=False, error="webhook refused: 500")
+        fired(self.app.store, minutes_ago=5, subject="checkout",
+              delivered=False, error="webhook refused: 500")
+        now = datetime.now(timezone.utc)
+        change_dashboard(self.app, self.dashboard,
+                         panels=[normalise(self.LIST), normalise(self.NUMBER)])
+        response = self.client.get(
+            f"/api/dashboard/{self.dashboard.id}/data",
+            query_string={"start": (now - timedelta(minutes=120)).isoformat(),
+                          "end": (now - timedelta(minutes=60)).isoformat()})
+        panels = self.panels_by_id(response.get_json())
+        self.assertEqual(
+            [(row["subject"], row["delivered"]) for row in panels["a1"]["rows"]],
+            [("checkout", False)])
+        self.assertEqual(panels["a2"]["number"], 1)
+        self.assertEqual(panels["a2"]["fired"], 1)
+
     def test_a_quiet_window_is_an_empty_list_rather_than_a_refusal(self):
         """A rule exists, so "nothing fired" is a real answer and the panel
         must not claim the question could not be asked."""
@@ -689,6 +716,54 @@ class AlertHistoryWindowTest(unittest.TestCase):
         self.assertEqual([row["subject"] for row in rows],
                          ["checkout", "checkout", "payments"])
 
+    def test_what_reached_nobody_in_the_window_counts_in_the_window(self):
+        """A later row must not empty an hour that was already broken.
+
+        "The last word per (rule, subject)" was taken over ALL time and the
+        window then applied to THAT row, so an alert that reached nobody
+        inside the window stopped counting as soon as the same rule and
+        subject spoke again after it — even when the later row failed too and
+        the channel is still broken. Two undelivered rows for `checkout`, a
+        window over the older one: the alerts table draws it with
+        Delivered = no, and the number beside it read 0.
+        """
+        # `search` already reached nobody 90 minutes ago. It speaks again
+        # now, and again nobody receives it — written AFTER, as the runner
+        # writes it, so the newer row is the newer id too. (Inserting the
+        # older row last hides the defect: `_outstanding` picks max(id) for
+        # the reason its docstring gives, and a fixture out of order makes
+        # the row inside the window the last word by accident.)
+        fired(self.store, minutes_ago=1, subject="search",
+              delivered=False, rule_id="f2-rule-search")
+        since = self.now - timedelta(minutes=100)
+        until = self.now - timedelta(minutes=60)
+
+        rows = self.history().recent(limit=100, since=since, until=until)
+        self.assertEqual([row["subject"] for row in rows], ["search"])
+        self.assertEqual([bool(row["delivered"]) for row in rows], [False])
+        self.assertEqual(self.history().count(undelivered_only=True,
+                                              since=since, until=until), 1)
+        # And the rows the count stands for, so the page that lists them and
+        # the panel that counts them cannot come apart.
+        self.assertEqual(
+            [row["subject"] for row in self.history().recent(
+                limit=100, undelivered_only=True, since=since, until=until)],
+            ["search"])
+
+    def test_a_delivery_after_the_window_does_not_quiet_the_window(self):
+        """The other half of the same rule. Somebody fixing the webhook now
+        does not make an hour last Tuesday one in which everybody was
+        reached — while a success INSIDE the window still drains it, which is
+        what the test above this one measures."""
+        fired(self.store, minutes_ago=90, subject="webhooks",
+              delivered=False, rule_id="f2-rule-webhooks")
+        fired(self.store, minutes_ago=2, subject="webhooks",
+              delivered=True, rule_id="f2-rule-webhooks")
+        self.assertEqual(self.history().count(
+            undelivered_only=True,
+            since=self.now - timedelta(minutes=100),
+            until=self.now - timedelta(minutes=60)), 2)
+
 
 # ---------------------------------------------------------------------------
 # The number, against the real backends
@@ -748,7 +823,7 @@ class NumberAgainstEveryLogBackendTest(unittest.TestCase):
         number nobody measured. Loki says so itself (`counted=False`), and a
         container fuller than the limit is skipped rather than half-counted.
         """
-        from wdash.hub import LogQuery
+        from wdash.hub import LogQuery, Terms
         from wdash.hub.query import DEFAULT_LOG_FIELDS
 
         for container in source.containers(scope):
@@ -772,9 +847,25 @@ class NumberAgainstEveryLogBackendTest(unittest.TestCase):
             # is the truth and not a dropped aggregation. They read back as
             # severity "UNSPECIFIED" — the adapter's word for a record that
             # has none — which is why a truthiness test is not enough.
-            if any(record.get("severity") not in (None, "", "UNSPECIFIED")
-                   for record in records):
-                return container, records
+            if not any(record.get("severity") not in (None, "", "UNSPECIFIED")
+                       for record in records):
+                continue
+            # And a container the source can actually GROUP BY. The lab holds
+            # `bad-logs-000001` — 7,931 records with `level` mapped as text —
+            # where the records carry a severity and the aggregation cannot
+            # run at all: the adapter says so in a note rather than answering,
+            # which is the UnaskableNumberTest case measured above through
+            # ModelledES. It is not a listing an aggregation can be compared
+            # against, and picking it failed this check for the one reason it
+            # is not about. A bucket list that comes back empty with NO
+            # reason still fails below, which is the emptiness this is for.
+            if source.aggregate(
+                    LogQuery(window=window, text="*", containers=(container,),
+                             limit=1),
+                    [Terms(name="probe", field="severity", size=1)],
+                    scope).reasons("probe"):
+                continue
+            return container, records
         return None, []
 
     def test_the_number_is_the_records_it_stands_for(self):
@@ -858,13 +949,266 @@ class TheEditorKnowsTheNewPanels(unittest.TestCase):
         self.assertIn("no extra request", said)
 
     def test_the_alert_rows_say_which_permission_they_need(self):
+        """Both rows NAME it. "the same permission" is a back-reference to a
+        caption an author who only wants the number never reads: the rows sit
+        in a list and only the chosen one is shown."""
         self.assertIn("monitors:read", self.caption("alerts"))
-        self.assertIn("permission", self.caption("alerts_undelivered"))
+        self.assertIn("monitors:read", self.caption("alerts_undelivered"))
 
     # What the form DOES about an emptied value box — warn on the row and
     # stop the submit — is measured where it happens, in
     # tests/dashboard_form_smoke.js ('clearing the value says so on the row'
     # and the two checks after it), against the script running in a DOM.
+
+
+# ---------------------------------------------------------------------------
+# What the review found: a zero the panel could not stand behind
+# ---------------------------------------------------------------------------
+
+#: What the lab's VictoriaLogs answers for
+#: `… | stats by (host) count() as hits | sort by (hits desc) | limit N`,
+#: measured on 2026-09-12 over 24h. The FIRST row carries no `host` at all —
+#: 76 records in that window have none — and `limit` is applied by
+#: VictoriaLogs, over rows, before the adapter ever sees them.
+VICTORIALOGS_HOST_ROWS = (
+    {"hits": "76"},
+    {"hits": "24", "host": "checkout-api-2"},
+    {"hits": "22", "host": "auth-service-2"},
+    {"hits": "21", "host": "auth-service-3"},
+    {"hits": "20", "host": "payment-service-2"},
+)
+
+
+class _VictoriaLogsOnTheWire(VictoriaLogsSource):
+    """The shipped adapter, replaying the lab's own rows.
+
+    Only the transport is replaced. `_terms` — the code that turns rows into
+    buckets, and DROPS a row carrying no value for the grouped field — runs
+    exactly as it ships, which is the point: a fake that returned buckets
+    would model the bug away.
+    """
+
+    def __init__(self):
+        super().__init__("http://victorialogs.invalid")
+
+    def _container_values(self, window=None, ttl=30.0):
+        return ["app"]
+
+    def _lines(self, path, params):
+        cut = re.search(r"\|\s*limit\s+(\d+)", params.get("query", "") or "")
+        rows = [dict(row) for row in VICTORIALOGS_HOST_ROWS]
+        return rows[:int(cut.group(1))] if cut else rows
+
+
+class CountBelowTheCutOnASourceThatCutsRowsTest(unittest.TestCase):
+    """A short bucket list is only a COMPLETE one when the source answered
+    with a bucket for every row it was asked for.
+
+    `len(buckets) >= COUNT_VALUES` reads "the list came back full" as "the
+    list was cut", and the two are the same statement only on a source whose
+    buckets are one-to-one with the rows it asked for. Elasticsearch's are
+    and Loki's are (it counts every value and cuts locally). VictoriaLogs
+    cuts server-side — `| sort by (hits desc) | limit N` — and the adapter
+    then drops every returned row that carries no value for the field, so a
+    CUT list comes back SHORT and the guard never fires. Measured on the lab
+    at 24h through the panel filler: a host holding 25 records answered
+    `{"number": 0}` under "records where host is …, in this window and this
+    board's query".
+
+    The fix is upstream of the guard: the panel's own aggregation asks for
+    the valueless records to be LABELLED, exactly as the terms panel beside
+    it already does, so every adapter returns one bucket per row it asked for
+    and a short list means a short list. Measured on the lab, `host` at 24h:
+
+        size   buckets, unlabelled   buckets, labelled
+           2                     1                   2
+           3                     2                   3
+           5                     4                   5
+          50                    15                  16   (15 real hosts)
+    """
+
+    def answer(self, value, cut):
+        from unittest import mock
+
+        from wdash.api import dashboard_routes as routes
+        from wdash.hub import LogQuery, Scope, TimeWindow
+
+        window = TimeWindow.of("24h")
+        panel = normalise({"id": "p1", "type": "count", "field": "host",
+                           "value": value, "title": "That host"})
+        with mock.patch.object(routes, "COUNT_VALUES", cut):
+            result = _VictoriaLogsOnTheWire().aggregate(
+                LogQuery(window=window, text="*", containers=("app",),
+                         limit=1),
+                routes._panel_aggregations([panel], window),
+                Scope.unrestricted())
+            return result.get("p1"), routes._count_panels([panel], result)["p1"]
+
+    def test_a_value_the_source_cut_off_is_refused_rather_than_zeroed(self):
+        """auth-service-2 holds 22 records and is the third row. Asked for
+        two, VictoriaLogs answers two rows — one of them valueless — and the
+        panel used to read the short list as a complete one."""
+        buckets, panel = self.answer("auth-service-2", cut=2)
+        self.assertEqual(len(buckets), 2,
+                         f"the source answered {[b.key for b in buckets]} "
+                         f"for a list it cut at 2")
+        self.assertNotIn("number", panel)
+        self.assertIn("auth-service-2", panel["error"])
+        self.assertIn("not a count of zero", panel["error"].lower())
+
+    def test_a_value_inside_the_cut_still_answers_its_count(self):
+        """The refusal must not swallow the panel: the number is still a
+        number for a value the list really holds."""
+        _, panel = self.answer("checkout-api-2", cut=2)
+        self.assertEqual(panel["number"], 24)
+
+    def test_a_value_with_no_records_is_still_a_measured_zero(self):
+        """And a complete list still answers 0 — refusing every miss would
+        make the panel useless for the question it is mostly asked."""
+        buckets, panel = self.answer("f2-host-that-does-not-exist", cut=50)
+        self.assertEqual(len(buckets), len(VICTORIALOGS_HOST_ROWS))
+        self.assertEqual(panel["number"], 0)
+
+
+@unittest.skipUnless(_reachable(LAB_VL, "/health"),
+                     f"needs the lab's VictoriaLogs ({LAB_VL})")
+class NumberBelowTheCutAgainstVictoriaLogsTest(unittest.TestCase):
+    """The same claim against the running server, not against its rows.
+
+    The module's other live check only ever compares `buckets[0]` — the
+    commonest value, the one value a terms list can never cut — so the
+    refusal path was never exercised against real data. This is that path.
+    """
+
+    CUT = 2
+
+    def source_and_query(self):
+        from wdash.hub import LogQuery, Scope, TimeWindow
+        from wdash.hub.adapters import VictoriaLogsSource
+
+        source = VictoriaLogsSource(LAB_VL)
+        scope = Scope.unrestricted()
+        window = TimeWindow.of("24h")
+        containers = tuple(source.containers(scope))
+        return source, scope, window, LogQuery(
+            window=window, text="*", containers=containers, limit=1)
+
+    def test_a_host_below_the_cut_is_named_rather_than_counted_as_zero(self):
+        from unittest import mock
+
+        from wdash.api import dashboard_routes as routes
+        from wdash.hub import Terms
+
+        source, scope, window, query = self.source_and_query()
+        whole = source.aggregate(
+            query, [Terms(name="all", field="host", size=500,
+                          missing="unknown")], scope).get("all")
+        below = [bucket for bucket in whole[self.CUT:]
+                 if str(bucket.key) != "unknown" and bucket.count > 0]
+        if not below:
+            self.skipTest(f"{LAB_VL} reports {len(whole)} values of host in "
+                          f"this window, too few to cut at {self.CUT}")
+
+        wanted = str(below[0].key)
+        panel = normalise({"id": "p1", "type": "count", "field": "host",
+                           "value": wanted, "title": "That host"})
+        with mock.patch.object(routes, "COUNT_VALUES", self.CUT):
+            result = source.aggregate(
+                query, routes._panel_aggregations([panel], window), scope)
+            answered = routes._count_panels([panel], result)["p1"]
+
+        self.assertNotIn(
+            "number", answered,
+            f"{LAB_VL} holds {below[0].count} records with host {wanted} and "
+            f"the panel answered {answered.get('number')!r}")
+        self.assertIn(wanted, answered["error"])
+
+
+class CountOnABoardThatMergesSourcesTest(_Board):
+    """A board reading every source at once cannot claim a cut it never saw.
+
+    `fanout.aggregate` merges the members' bucket lists by key, so the merged
+    list is the UNION of up to one list per source and its LENGTH is nobody's
+    cut: three sources returning twenty values each make sixty buckets with
+    no member anywhere near its ceiling. Refusing is still the safe
+    direction — a member that cut is invisible from here — but the sentence
+    has to be about the merge, because "not among the N commonest values in
+    this window" is a claim about a list that was never asked for.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from wdash.hub.adapters import ElasticsearchLogSource
+
+        self.second = ModelledES({"app-logs-000002": (
+            KEYWORD_MAPPING,
+            [_record(90 + n, host=f"east-{n}") for n in range(3)])})
+        self.hub.add_logs(ElasticsearchLogSource(self.second, name="east"))
+        change_dashboard(self.app, self.dashboard, source="*")
+
+    def records(self):
+        return [_record(n, host=f"west-{n}") for n in range(3)]
+
+    def ask(self, value, cut=4):
+        from unittest import mock
+
+        from wdash.api import dashboard_routes as routes
+
+        with mock.patch.object(routes, "COUNT_VALUES", cut):
+            return self.one([{"id": "p1", "type": "count", "field": "host",
+                              "value": value, "title": "Hosts"}], "p1")
+
+    def test_the_refusal_does_not_blame_a_cut_that_did_not_happen(self):
+        """Six values over two sources, neither of which returned four."""
+        panel = self.ask("f2-host-nowhere")
+        self.assertNotIn("number", panel)
+        self.assertNotIn("commonest values of host", panel["error"])
+        self.assertIn("merge", panel["error"])
+        self.assertIn("2 sources", panel["error"])
+
+    def test_a_value_one_member_holds_is_still_counted(self):
+        panel = self.ask("east-1")
+        self.assertEqual(panel["number"], 1)
+
+
+class AlertingSwitchedOffTest(_Board):
+    """Every rule on the instance is disabled, so nothing can fire.
+
+    The guard asked `rules.all()`, which returns disabled rules too, while
+    the evaluator that writes the history runs `rules.all(enabled_only=True)`
+    (alerts/runner.py:189). A board whose rules are all switched off
+    therefore passed the guard and was shown a quiet window — rows [] drawn
+    as "No alert fired in this window", and the number 0 — for a store in
+    which nothing can fire. That is the reading D26's third condition exists
+    to prevent, one step along.
+    """
+
+    def setUp(self):
+        super().setUp()
+        install_rule(self.app.store)
+        with self.app.store.engine.begin() as connection:
+            connection.execute(alert_rules.update().values(enabled=False))
+
+    def test_the_number_says_the_rules_are_off_rather_than_reading_zero(self):
+        panel = self.one([{"id": "a2", "type": "alerts_undelivered"}], "a2")
+        self.assertNotIn("number", panel)
+        self.assertIn("switched off", panel["error"])
+
+    def test_the_list_panel_says_the_same(self):
+        panel = self.one([{"id": "a1", "type": "alerts", "size": 10}], "a1")
+        self.assertNotIn("rows", panel)
+        self.assertIn("switched off", panel["error"])
+
+    def test_one_enabled_rule_is_enough_for_the_panels_to_answer(self):
+        """And the history a since-disabled rule wrote still reads by NAME:
+        the guard changes which rules count as configured, not which names a
+        row may be drawn with."""
+        install_rule(self.app.store, rule_id="f2-rule-live", name="Still on")
+        fired(self.app.store, minutes_ago=5, rule_id="f2-rule")
+        panel = self.one([{"id": "a1", "type": "alerts", "size": 10}], "a1")
+        self.assertNotIn("error", panel)
+        self.assertEqual([row["rule"] for row in panel["rows"]],
+                         ["Payments API"])
 
 
 if __name__ == "__main__":  # pragma: no cover

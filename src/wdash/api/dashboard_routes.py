@@ -983,8 +983,15 @@ def _alert_panels(panels, window, scope):
 
     try:
         # Borrowed from the Alerts page unchanged, so a row reads "Payments
-        # API" rather than a pair of uuids.
+        # API" rather than a pair of uuids. EVERY rule, including the
+        # disabled ones: history written by a rule somebody has since
+        # switched off must still read by name.
         rules = {rule["id"]: rule for rule in store.rules.all()}
+        # What can fire, which is a different list and the one the guard
+        # below is about. The evaluator that writes this history runs
+        # `rules.all(enabled_only=True)` (alerts/runner.py), so a rule that
+        # is switched off is not a rule that can have fired.
+        live = store.rules.all(enabled_only=True)
     except Exception as exc:
         current_app.logger.warning(f"Alert panel failed: {exc}")
         return refuse("Alert history could not be read.")
@@ -994,6 +1001,19 @@ def _alert_panels(panels, window, scope):
                       "fired. That is a gap in what is set up, not a quiet "
                       "window — configure a rule on the Alerts page and this "
                       "panel starts answering.")
+
+    if not live:
+        # The same failure one step along, and the one the first guard let
+        # through: asking `rules.all()` counts a switched-off rule as
+        # configured, so a board whose rules are all off drew an empty table
+        # under "No alert fired in this window" and a 0 beside it, for a
+        # store in which nothing can fire.
+        return refuse(f"{len(rules):,} alert rule{'' if len(rules) == 1 else 's'} "
+                      f"{'is' if len(rules) == 1 else 'are'} configured and "
+                      f"every one of them is switched off, so nothing can "
+                      f"fire. That is a gap in what is set up, not a quiet "
+                      f"window — switch one on from the Alerts page and this "
+                      f"panel starts answering.")
 
     history = store.alert_history
     listings = [p for p in wanted if p["type"] == "alerts"]
@@ -1141,12 +1161,27 @@ def _panel_aggregations(panels, window):
             # a search (a Loki total is the page size), not the batch's own
             # `total` (on Loki that is the largest aggregation's sum, and a
             # date histogram there overcounts), and not a new aggregation
-            # type. `missing` is deliberately left off: a synthetic bucket
-            # for records that have no value would be a value the source
-            # never reported, counted under a name somebody could then ask
-            # this panel for.
+            # type. It carries the same `missing` label the terms panel
+            # beside it uses, and that label is what makes the CUT visible:
+            # `_count_panels` reads a short bucket list as a complete one,
+            # which is only sound while the source answers with a bucket per
+            # row it asked for. VictoriaLogs cuts server-side (`| sort by
+            # (hits desc) | limit N`) and its adapter then drops every
+            # returned row carrying no value for the field, so an unlabelled
+            # list came back SHORT of the ceiling however hard it was cut —
+            # and a host below the cut was drawn as a confident 0. Measured
+            # on the lab at 24h over `host` (15 hosts, 76 records with none):
+            #
+            #     size  2  3  5  50      unlabelled  1  2  4  15
+            #                            labelled    2  3  5  16
+            #
+            # The cost is the one the terms panel already pays: records with
+            # no value are counted under a name, and an author may ask this
+            # panel for that name — where it now answers the same number the
+            # terms panel draws beside it, rather than two different ones.
             aggregations.append(Terms(
-                name=panel["id"], field=panel["field"], size=COUNT_VALUES))
+                name=panel["id"], field=panel["field"], size=COUNT_VALUES,
+                missing="unknown" if panel["field"] != "severity" else None))
         elif panel["type"] == "timeseries":
             sub = ()
             if panel.get("split_by"):
@@ -1172,7 +1207,23 @@ def _panel_aggregations(panels, window):
 COUNT_VALUES = MAX_SIZE
 
 
-def _count_panels(panels, result):
+def _merged_sources(dashboard):
+    """The member names of a fan-out log source, or () for a single source.
+
+    A board reading every source at once gets `FanOutLogSource`, whose
+    `aggregate` merges the members' bucket lists BY KEY — so the list a panel
+    reads is a union of up to one list per source, and its length is nobody's
+    cut. `_count_panels` needs to know that to say a true sentence about it.
+    """
+    try:
+        source = _logs(dashboard)
+    except SourceMissing:
+        return ()
+    return tuple(getattr(member, "name", "?")
+                 for member in getattr(source, "sources", ()) or ())
+
+
+def _count_panels(panels, result, merged=()):
     """Fill in the single-number panels from the batch that already ran.
 
     No round trip of its own: the panel's terms aggregation went out with
@@ -1195,6 +1246,22 @@ def _count_panels(panels, result):
     exactly as a value with no records does, and drawing a big confident 0
     over "this host is not in the fifty busiest" is the emptiness failure
     with a number on it.
+
+    "The list came back full" is the only evidence of a cut there is, and it
+    is evidence at all only because the aggregation labels the records that
+    carry no value (`_panel_aggregations`): without that, VictoriaLogs cut
+    its rows server-side, dropped the valueless ones on the way back and
+    handed this a SHORT list it read as complete — a measured 0 for a host
+    holding 25 records.
+
+    On a board reading several sources at once the length means less again:
+    `fanout.aggregate` merges the members' lists by key, so what arrives is
+    their UNION and no member's ceiling. Refusing is still the safe
+    direction — a member that cut is invisible from here — but the sentence
+    has to be about the merge, because "not among the 50 commonest values in
+    this window" describes a list nobody asked for. Measured on the lab over
+    three sources at size 14: members 6, 11 and 13 buckets, none of them
+    cut, merged list 21.
 
     The answer is sent as `number` rather than as `value`, because `value` is
     already on this panel: it is what the author asked to be counted, and it
@@ -1231,10 +1298,17 @@ def _count_panels(panels, result):
             continue
         if len(buckets) >= COUNT_VALUES:
             out[panel["id"]] = {"error": (
-                f"'{wants}' is not among the {COUNT_VALUES} commonest values "
-                f"of {panel['field']} in this window, and the count of a "
-                f"value further down the list was not asked for. This is not "
-                f"a count of zero."), "question": question}
+                (f"'{wants}' is not in the list of {panel['field']} values "
+                 f"this board merged from its {len(merged)} sources "
+                 f"({', '.join(merged)}). Each source reports only its own "
+                 f"commonest values, so a value missing from the merge "
+                 f"cannot be told apart from one that fell below a member's "
+                 f"cut."
+                 if merged else
+                 f"'{wants}' is not among the {COUNT_VALUES} commonest "
+                 f"values of {panel['field']} in this window, and the count "
+                 f"of a value further down the list was not asked for.")
+                + " This is not a count of zero."), "question": question}
             continue
         near = [b for b in buckets if str(b.key).lower() == wants.lower()]
         if near:
@@ -2413,7 +2487,8 @@ def api_dashboard_data(dashboard_id):
              # and no round trip — but it is filled HERE rather than in
              # `_panel_results` because a terms list is not what this panel
              # shows, and a value missing from it is a reason and not a zero.
-             **_count_panels(panels, result),
+             **_count_panels(panels, result,
+                             merged=_merged_sources(dashboard)),
              # The only LOG panel with a filler of its own: a list of records
              # is a search, not an aggregation, so it cannot ride the batch
              # above. It is still a log panel — it needs the containers, and

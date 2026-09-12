@@ -350,8 +350,8 @@ class AlertHistoryRepository:
                 delivered=bool(delivered),
                 delivery_error=(error or None)))
 
-    @staticmethod
-    def _outstanding():
+    @classmethod
+    def _outstanding(cls, since=None, until=None):
         """Rows that are the LAST word on their (rule, subject).
 
         "Never delivered" has to be a thing that can drain. Counting every
@@ -363,9 +363,28 @@ class AlertHistoryRepository:
         By the primary key rather than `at`: several rows for one subject can
         share a timestamp to the millisecond, and then max(at) picks whichever
         the dialect happens to return.
+
+        The last word IN THE WINDOW when there is one. Taking it over all
+        time and filtering that row afterwards answered a question about now
+        under a chart about then: an alert that reached nobody inside the
+        window stopped counting the moment the same rule and subject spoke
+        again AFTER the window — even when the later row failed too and
+        nothing had been fixed. Measured through the board on an absolute
+        past range: the alerts table drew ('checkout', delivered=no, "webhook
+        refused: 500") while the number beside it read 0 under "of the 1
+        alert in this window reached nobody". Only the END of a window can be
+        in the past (`TimeWindow.between` rounds it up), so this is exactly
+        the case `until` was added for.
+
+        The drain is unchanged, because the window bounds the candidates as
+        well as the answer: a failure retried successfully inside the window
+        is still the last word there and still counts 0. What no longer
+        happens is a window being called quiet because of something outside
+        it.
         """
         from sqlalchemy import func
         newest = (select(func.max(alert_history.c.id))
+                  .where(*cls._within(since, until))
                   .group_by(alert_history.c.rule_id, alert_history.c.subject))
         return (alert_history.c.delivered.is_(False),
                 alert_history.c.id.in_(newest))
@@ -402,7 +421,7 @@ class AlertHistoryRepository:
                since=None, until=None):
         query = select(alert_history).order_by(alert_history.c.at.desc())
         if undelivered_only:
-            query = query.where(*self._outstanding())
+            query = query.where(*self._outstanding(since, until))
         query = query.where(*self._within(since, until))
         query = query.limit(int(limit)).offset(int(offset))
         with self._engine.connect() as connection:
@@ -413,13 +432,14 @@ class AlertHistoryRepository:
         from sqlalchemy import func
         query = select(func.count()).select_from(alert_history)
         if undelivered_only:
-            # The window narrows WHICH rows are counted; it does not change
-            # what "never delivered" means. `_outstanding` is the Alerts
-            # page's own definition — the last word on each rule and subject
-            # — and computing it inside the window instead would make a
-            # failure that was retried and succeeded an hour ago come back as
-            # outstanding whenever somebody chose a shorter range.
-            query = query.where(*self._outstanding())
+            # The window narrows WHICH rows are counted and which rows get to
+            # be the last word, which are the same narrowing: a failure
+            # retried successfully inside the window is drained by the
+            # success, and one that was still failing when the window closed
+            # counts, whatever happened afterwards. `_outstanding` is the
+            # Alerts page's own definition — the last word on each rule and
+            # subject — and the page asks it unbounded, which is unchanged.
+            query = query.where(*self._outstanding(since, until))
         query = query.where(*self._within(since, until))
         with self._engine.connect() as connection:
             return connection.execute(query).scalar() or 0
