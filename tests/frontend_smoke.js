@@ -47,6 +47,9 @@ function assertEqual(actual, expected, message) {
 function makeWindow(fetchImpl) {
     const dom = new JSDOM(`<!doctype html><body>
         <form id="searchForm"><input id="query" name="query" value="*">
+          <select id="sourceSelect" name="source">
+            <option value="primary" selected>primary</option>
+            <option value="archive">archive</option></select>
           <select id="timeRange"><option value="1h" selected>1h</option>
           <option value="custom">custom</option></select>
           <input id="startTime"><input id="endTime">
@@ -241,6 +244,61 @@ check('a scoped page says which dashboard it is scoped to', () => {
     assert(!badge.classList.contains('d-none'), 'the badge stayed hidden');
     assert(/App board/.test(badge.textContent),
            `the badge said "${badge.textContent}"`);
+});
+
+// A dashboard may be pinned to a store of its own, and /api/search answers a
+// drill-down from THAT store — while this page's picker sat on its first
+// option and re-sent it with every later search, where the server quietly
+// preferred the dashboard's. The control said "primary", the records came
+// from "archive", and the per-record source badges disagreed with the picker
+// above them.
+
+check('a drill-down from a pinned dashboard names the store that answered', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.updateIndexInfo({
+        accessible_containers: ['app-logs-000001'],
+        dashboard: { id: 'board-7', name: 'App board', source: 'archive',
+                     containers: ['app-logs-000001'] },
+    });
+    const badge = w.document.getElementById('dashboardScopeBadge');
+    assert(/archive/.test(badge.textContent),
+           `the badge said "${badge.textContent}"`);
+});
+
+check('and moves the picker to it, so the next search agrees', () => {
+    const calls = [];
+    const w = makeWindow((url) => { calls.push(url); return new Promise(() => {}); });
+    const search = Object.create(w.__LogSearch.prototype);
+    search.searchForm = w.document.getElementById('searchForm');
+    search.scopedDashboard = 'board-7';
+    ['showLoading', 'hideError', 'displayResults', 'renderSourceBreakdown',
+     'loadFieldStats'].forEach(name => { search[name] = () => {}; });
+
+    assertEqual(w.document.getElementById('sourceSelect').value, 'primary',
+                'the picker did not start on its first option');
+    search.updateIndexInfo({
+        accessible_containers: ['app-logs-000001'],
+        dashboard: { id: 'board-7', name: 'App board', source: 'archive',
+                     containers: ['app-logs-000001'] },
+    });
+    assertEqual(w.document.getElementById('sourceSelect').value, 'archive',
+                'the picker still showed a store the answer did not come from');
+
+    search.performSearch();
+    assertEqual(new URL(calls[0], 'http://localhost').searchParams.get('source'),
+                'archive', `it asked ${calls[0]}`);
+});
+
+check('an unpinned drill-down leaves the picker alone', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.updateIndexInfo({
+        accessible_containers: ['a'],
+        dashboard: { id: 'board-7', name: 'App board', containers: ['a'] },
+    });
+    assertEqual(w.document.getElementById('sourceSelect').value, 'primary',
+                'a dashboard naming no source moved the picker anyway');
 });
 
 check('and an unscoped one says nothing', () => {

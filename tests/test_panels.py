@@ -552,6 +552,54 @@ class SourceFormTest(unittest.TestCase):
                          follow_redirects=True)
         self.assertEqual(self.stored().source, "primary")
 
+    def test_an_edit_that_carries_no_field_leaves_the_source_where_it_was(self):
+        """Absent is not the same as cleared.
+
+        The form returned `"source": ""` whether the select had been cleared
+        or had never been rendered, and both stores read "" as the deliberate
+        choice "the default source". So any POST without the field — every
+        edit through the UI on a single-source installation, and every
+        scripted one — silently repointed the dashboard at another store.
+        `visibility` has always used the other convention: absent means leave
+        it alone.
+        """
+        self.create(source="secondary")
+        board = self.stored()
+        self.client.post(f"/dashboard/{board.id}/edit",
+                         data={"name": "Board", "query": "*",
+                               "description": "edited",
+                               "index_patterns": ["*"]},
+                         follow_redirects=True)
+        # The edit applied...
+        self.assertEqual(self.stored().description, "edited")
+        # ...and took the source with it.
+        self.assertEqual(self.stored().source, "secondary")
+
+    def test_the_form_hides_the_field_when_there_is_only_one_source(self):
+        """Which is the installation the wipe above happened on: the select
+        is inside `{% if sources | length > 1 %}`, so the browser cannot send
+        it, and the edit arrived looking exactly like "put it back on the
+        default"."""
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource
+
+        self.create(source="secondary")
+        board = self.stored()
+        single = Hub()
+        single.add_logs(ElasticsearchLogSource(self.secondary, name="secondary"))
+        self.app.hub = single
+
+        page = self.client.get(f"/dashboard/{board.id}/edit").data.decode()
+        self.assertNotIn('name="source"', page)
+
+        self.client.post(f"/dashboard/{board.id}/edit",
+                         data={"name": "Board", "query": "*",
+                               "description": "edited from the only source",
+                               "index_patterns": ["*"]},
+                         follow_redirects=True)
+        self.assertEqual(self.stored().description, "edited from the only source")
+        self.assertEqual(self.stored().source, "secondary")
+
     def test_it_can_be_put_back_on_the_default(self):
         self.create(source="secondary")
         board = self.stored()

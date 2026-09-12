@@ -38,6 +38,21 @@ function paletteColour(name) {
 
 
 /**
+ * Which raw level names each stat card stands for.
+ *
+ * The authority is the server's `LEVEL_GROUPS` (api/dashboard_routes.py),
+ * which ships the finished query with every response; this is what a click
+ * made before the first response has landed falls back to, and it must say
+ * the same thing. `tests/test_dashboard_contract.py` compares the two.
+ */
+const LEVEL_GROUPS = {
+    error: ['ERROR', 'FATAL'],
+    warn: ['WARN', 'WARNING'],
+    info: ['INFO'],
+};
+
+
+/**
  * A chart value as a quoted string in the query language. Bucket keys are
  * whatever a log writer put in the document, and they went into the Logs
  * query between quotes with nothing escaped — a level of
@@ -788,21 +803,47 @@ class AsyncDashboard {
         return { start, end: new Date(start.getTime() + step) };
     }
 
+    /**
+     * The query behind a stat card, as the SERVER groups severities.
+     *
+     * The card's number and the card's click were written apart: the server
+     * sums ERROR and FATAL into one error count and WARN and WARNING into one
+     * warn count, and this file asked for `level:ERROR` and `level:WARN`. So
+     * the card opened fewer records than it displayed — against the lab, a
+     * card reading 3,086 opened 2,767, the 319 FATAL records it had counted
+     * being unreachable from the number that counted them.
+     *
+     * The grouping comes down with the counts, so the two move together.
+     * `LEVEL_GROUPS` at the top of this file is the same table for a click
+     * made before the first response has landed;
+     * `tests/test_dashboard_contract.py` fails if the two ever differ.
+     */
+    levelQuery(group) {
+        const fromServer = this.lastData?.level_queries?.[group];
+        if (fromServer) return fromServer;
+        const levels = LEVEL_GROUPS[group] || [String(group).toUpperCase()];
+        return `(${levels.map(level => `level:${level}`).join(' OR ')})`;
+    }
+
     setupStatCards() {
         const cards = [
-            ['cardTotal', {}],
-            ['cardError', { level: 'ERROR' }],
-            ['cardWarn', { level: 'WARN' }],
-            ['cardInfo', { level: 'INFO' }],
+            ['cardTotal', null],
+            ['cardError', 'error'],
+            ['cardWarn', 'warn'],
+            ['cardInfo', 'info'],
         ];
-        cards.forEach(([id, filter]) => {
+        cards.forEach(([id, group]) => {
             const el = document.getElementById(id);
             if (!el) return;
-            el.addEventListener('click', () => this.openLogs(filter));
+            // `extra` rather than `level`, because a card stands for a GROUP
+            // of levels and `level:` takes one value.
+            const open = () => this.openLogs(
+                group ? { extra: this.levelQuery(group) } : {});
+            el.addEventListener('click', open);
             el.addEventListener('keydown', e => {
                 if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    this.openLogs(filter);
+                    open();
                 }
             });
         });

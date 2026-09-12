@@ -68,16 +68,35 @@ def _search_dashboard():
     if not dashboard_id:
         return None
 
-    from .dashboard_routes import _load as _load_dashboard, _may_view
+    from .dashboard_routes import (UNCHECKED, VISIBLE,
+                                   _load as _load_dashboard,
+                                   _unreachable, _view_verdict)
     if not current_user.has_permission("dashboard:view"):
         return jsonify({"error": "Access denied: You do not have permission to "
                                  "view dashboards.",
                         "error_type": "permission_denied"}), 403
     dashboard = _load_dashboard(dashboard_id)
-    # Not there and not visible answer alike, as everywhere else: a distinct
-    # "you may not see this" turns the parameter into a way to find out which
-    # dashboards exist.
-    if not dashboard or not _may_view(dashboard):
+    if not dashboard:
+        return jsonify({"error": "Dashboard not found.",
+                        "error_type": "dashboard_not_found"}), 404
+
+    verdict, failure = _view_verdict(dashboard)
+    if verdict == UNCHECKED:
+        # The rule would have let this through; the source could not say what
+        # the dashboard reaches, so nobody knows. Answering "not found" made
+        # a drill-down from a shared dashboard report an outage as an absence
+        # — and the identical request without `dashboard=` answered 503 and
+        # named the source, in the same second. The author's own dashboard
+        # already answered 503 too, because the rule lets an author through
+        # without consulting the reach at all, so the same outage said two
+        # different things depending on who was clicking.
+        return jsonify(_unreachable(dashboard, failure)), 503
+    if verdict != VISIBLE:
+        # Not there and not visible answer alike, as everywhere else: a
+        # distinct "you may not see this" turns the parameter into a way to
+        # find out which dashboards exist. An outage does not widen this —
+        # a dashboard the rule hides is HIDDEN above whether or not the
+        # source answered.
         return jsonify({"error": "Dashboard not found.",
                         "error_type": "dashboard_not_found"}), 404
     return dashboard
@@ -425,7 +444,16 @@ def api_search():
         # is narrowed is a wrong number: the reader came here from a chart and
         # has every reason to think this is "the logs".
         payload["dashboard"] = {"id": dashboard.id, "name": dashboard.name,
-                                "containers": list(allowed)}
+                                "containers": list(allowed),
+                                # Which store answered. A dashboard may be
+                                # pinned to one, and this endpoint prefers it
+                                # over `?source=` — while the Logs page's own
+                                # picker sits on its first option and re-sends
+                                # that on every later search from the page. The
+                                # control said one store and the answer came
+                                # from another, with nothing on screen to say
+                                # so; the badge sets the picker from this.
+                                "source": source.name}
     return jsonify(payload)
 
 

@@ -269,15 +269,39 @@ class ListingTest(unittest.TestCase):
         """Measured before: as bob, with the catalogue raising, the page said
         '3 dashboards are not shown: either private to their authors, or
         covering data outside your access' and mentioned no outage at all.
-        The reader goes to an administrator for access they already have."""
+        The reader goes to an administrator for access they already have.
+
+        The count is 2, not 3: alice's SecretBoard is PRIVATE, so bob could
+        not see it whatever the source said, and counting it as "could not be
+        checked" promises it might appear once the backend is back. See
+        `test_a_private_dashboard_is_private_through_an_outage_too`.
+        """
         self.unreachable_source()
         client = self.client_for("bob", ["app-*"])
         said = self.notices(client)
 
-        self.assertIn("3 dashboards could not be checked", said)
+        self.assertIn("2 dashboards could not be checked", said)
         self.assertIn("elasticsearch", said)
-        self.assertNotIn("not shown", said,
-                         "an outage was counted as privacy or access")
+        self.assertNotIn("3 dashboards could not be checked", said)
+
+    def test_a_private_dashboard_is_private_through_an_outage_too(self):
+        """One source failing for everything — which is what an outage
+        actually looks like, as against the surgical one below.
+
+        `_visible` put every dashboard that failed `can_view` into `unchecked`
+        whenever the reach could not be read, without asking whether the
+        visibility rule would have hidden it anyway. Somebody else's PRIVATE
+        dashboard is hidden whatever its source says, and the page told bob
+        "there is no saying what they can reach", which reads as "they may
+        turn up when the backend is back". One of them never will.
+        """
+        self.unreachable_source()
+        client = self.client_for("bob", ["app-*"])
+        said = self.notices(client)
+
+        self.assertIn("1 dashboard is not shown", said)
+        self.assertIn("2 dashboards could not be checked", said)
+        self.assertEqual(self.names_seen(client), [])
 
     def test_the_two_counts_are_kept_apart(self):
         """One private dashboard and two that could not be checked: the page
@@ -309,6 +333,31 @@ class ListingTest(unittest.TestCase):
         said = self.notices(client)
         self.assertIn("1 dashboard is not shown", said)
         self.assertIn("2 dashboards could not be checked", said)
+
+    def test_an_outage_does_not_open_what_the_reach_was_holding_shut(self):
+        """The list page knows three answers now; the endpoints know two, and
+        UNCHECKED has to land on the closed side of that line.
+
+        AppBoard is alice's, shared, and bob sees it only because its data is
+        within his reach. With the catalogue down nobody can say that it is,
+        so the endpoints answer exactly as they do for a dashboard whose data
+        is outside his access. `test_an_unreachable_source_hides_rather_than
+        _reveals` says this for the listing; these are the doors the listing
+        is not.
+
+        Whether "not found" is the right WORD for it is a separate question —
+        /api/search?dashboard=<id> says 503 and names the source — but it
+        must not be "here you are".
+        """
+        self.unreachable_source()
+        board = self.ids["AppBoard"]
+        client = self.client_for("bob", ["app-*"])
+
+        for suffix in ("data", "stats", "recent-logs", "patterns", "timeline"):
+            with self.subTest(endpoint=suffix):
+                reply = client.get(f"/api/dashboard/{board}/{suffix}")
+                self.assertEqual(reply.status_code, 404)
+        self.assertEqual(client.get(f"/dashboard/{board}").status_code, 302)
 
     def test_the_author_still_sees_their_own_through_an_outage(self):
         """An outage hides what a dashboard reaches; it does not hide a

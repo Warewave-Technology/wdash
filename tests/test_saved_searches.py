@@ -258,6 +258,36 @@ class UnreadableFileTest(SavedSearchTestCase):
         self.assertIn({"nonsense": True}, self.rows())
         self.assertEqual(len(self.rows()), 4)
 
+    def test_a_row_that_is_not_a_search_at_all_is_skipped_by_every_verb(self):
+        """A row that is not even an object, which is what half a rewrite or
+        a hand-edit leaves behind.
+
+        Listing skips it and creating steps over it, because both go through
+        the loader. Deleting did neither: it filtered the raw rows with
+        `row.get('id')` and met a string, so DELETE was an AttributeError and
+        a 500 — the one verb that could not live with a file the other two
+        had been taught to read.
+        """
+        rows = self.other_peoples()
+        rows.append("junk-row")
+        rows.append({"id": "mine-1", "name": "mine", "query": "*",
+                     "time_range": "1h", "created_by": "owner"})
+        self.write(json.dumps(rows))
+
+        self.assertEqual([search["name"] for search in self.listed()], ["mine"])
+
+        missing = self.client.delete("/api/saved-searches/no-such-id")
+        self.assertEqual(missing.status_code, 404, missing.get_data(as_text=True))
+
+        reply = self.client.delete("/api/saved-searches/mine-1")
+        self.assertEqual(reply.status_code, 200, reply.get_data(as_text=True))
+        # Deleted, and the row nobody could read is still there to be
+        # recovered rather than swept up with it.
+        self.assertIn("junk-row", self.rows())
+        self.assertEqual(sorted(row["name"] for row in self.rows()
+                                if isinstance(row, dict)),
+                         ["alice's", "bob's"])
+
     def signed_in(self):
         """Another client for the same account — another worker's request."""
         client = self.app.test_client()

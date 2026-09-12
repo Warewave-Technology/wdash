@@ -660,10 +660,20 @@ class LogSearch {
         const scope = document.getElementById('dashboardScopeBadge');
         if (!scope) return;
         if (data.dashboard) {
+            // The SOURCE as well as the index count. A dashboard may be
+            // pinned to a store of its own, and /api/search answers a
+            // drill-down from that store while this page's picker still
+            // showed — and sent — its first option, which the server then
+            // ignored. Naming it here and moving the picker to match is what
+            // stops the control and the answer from disagreeing.
+            const source = data.dashboard.source;
             scope.textContent =
                 `Scoped to the "${data.dashboard.name}" dashboard`
-                + ` (${(data.dashboard.containers || []).length} indices)`;
+                + ` (${source ? `${source}, ` : ''}`
+                + `${(data.dashboard.containers || []).length} indices)`;
             scope.classList.remove('d-none');
+            const picker = document.getElementById('sourceSelect');
+            if (picker && source) picker.value = source;
         } else {
             scope.textContent = '';
             scope.classList.add('d-none');

@@ -620,13 +620,24 @@ class DrillDownScopeTest(unittest.TestCase):
         fields = {"@timestamp": {"type": "date"}, "message": {"type": "text"},
                   "level": {"type": "keyword"}, "service": {"type": "keyword"}}
 
-        def record(prefix, number):
+        def record(prefix, number, level="ERROR"):
             return {"_id": f"{prefix}-{number}",
-                    "@timestamp": "2026-09-01T10:00:00Z", "level": "ERROR",
+                    "@timestamp": "2026-09-01T10:00:00Z", "level": level,
                     "service": "api", "message": f"failure {number}"}
 
+        # The severity VARIANTS a stat card groups together. The error card
+        # counts ERROR and FATAL as one number and the warn card WARN and
+        # WARNING, so a cluster holding only ERROR cannot tell whether the
+        # click under the number asks for the same thing the number counted.
+        app = [record("app", n) for n in range(3)]
+        app += [record("app-fatal", n, "FATAL") for n in range(2)]
+        app += [record("app-warn", 0, "WARN"),
+                record("app-warning", 0, "WARNING"),
+                record("app-info", 0, "INFO")]
+
+        self.cluster, self.fields = Cluster, fields
         self.es = Cluster({
-            "app-logs-000001": (fields, [record("app", n) for n in range(3)]),
+            "app-logs-000001": (fields, app),
             "infra-logs-000001": (fields, [record("infra", n) for n in range(7)]),
         })
         self.app = create_app(TestConfig)
@@ -652,8 +663,20 @@ class DrillDownScopeTest(unittest.TestCase):
             session["_user_id"] = "1"
 
     def search(self, **params):
-        query = "&".join(f"{key}={value}" for key, value in params.items())
+        from urllib.parse import quote
+        query = "&".join(f"{key}={quote(str(value))}"
+                         for key, value in params.items())
         return self.client.get(f"/api/search?{self.WINDOW}&{query}").get_json()
+
+    def card_counts(self):
+        """The stat cards as the dashboard page draws them.
+
+        `30d` rather than `1h` only because the modelled records sit at a
+        fixed instant; it covers exactly the same records as `WINDOW`, which
+        the first assertion of the test below checks rather than assumes.
+        """
+        return self.client.get(
+            f"/api/dashboard/{DASH_ID}/data?time_range=30d").get_json()
 
     def test_the_role_really_does_reach_both_indices(self):
         """Otherwise the scoped numbers below would be right by accident."""
@@ -702,6 +725,180 @@ class DrillDownScopeTest(unittest.TestCase):
         self.assertEqual(reply.status_code, 404)
         self.assertEqual(len(self.es.requests), before,
                          "somebody else's private query was run")
+
+    def test_a_stat_card_opens_exactly_the_records_it_counted(self):
+        """WHERE the drill-down looked was fixed; WHAT it asked for was not.
+
+        `_level_counts` sums ERROR and FATAL into one error card and WARN and
+        WARNING into one warn card, and the click under the card asked for
+        `level:ERROR` and `level:WARN`. So the card still opened fewer records
+        than it showed — the same defect, on the same button. Measured against
+        the lab: the card read 3,093 and the drill-down returned 2,772, the
+        missing 321 being the FATAL records the card had counted.
+
+        The query travels WITH the counts now, derived from the same table,
+        so the two cannot be changed apart.
+        """
+        cards = self.card_counts()
+        # The two windows hold the same records: if they ever stop doing so,
+        # this says it rather than the numbers below quietly drifting.
+        self.assertEqual(self.search(q="*", dashboard=DASH_ID)["total"],
+                         cards["total_hits"])
+
+        expected = {"error": 5, "warn": 2, "info": 1}
+        for card, count in expected.items():
+            with self.subTest(card=card):
+                self.assertEqual(cards[f"{card}_count"], count)
+                opened = self.search(q=cards["level_queries"][card],
+                                     dashboard=DASH_ID)
+                self.assertEqual(opened["total"], count,
+                                 f"the {card} card counted {count} and opened "
+                                 f"{opened['total']}")
+
+    def test_the_severity_the_card_counts_is_more_than_its_first_name(self):
+        """Stated on its own, so the test above cannot pass by the grouping
+        being dropped from both halves at once."""
+        cards = self.card_counts()
+        narrow = self.search(q="level:ERROR", dashboard=DASH_ID)
+        self.assertLess(narrow["total"], cards["error_count"])
+        self.assertIn("FATAL", cards["level_queries"]["error"])
+        self.assertIn("WARNING", cards["level_queries"]["warn"])
+
+    def second_source(self):
+        """A second store, and a dashboard pinned to it — which a dashboard
+        may be since the source field exists."""
+        from wdash.hub.adapters import ElasticsearchLogSource
+
+        archive = self.cluster({"app-logs-000001": (self.fields, [
+            {"_id": f"old-{n}", "@timestamp": "2026-09-01T10:00:00Z",
+             "level": "ERROR", "service": "api", "message": "archived"}
+            for n in range(4)])})
+        self.app.hub.add_logs(
+            ElasticsearchLogSource(archive, name="archive"))
+        board = Dashboard(dashboard_id="archive-1", name="Archive board",
+                          description="", query="*", created_by="u",
+                          index_patterns=["app-logs-*"], source="archive")
+        self.app.dashboard_manager.dashboards["archive-1"] = board
+        return archive
+
+    def test_a_drill_down_says_which_source_answered_it(self):
+        """The Logs page's own source picker sits on its first option and is
+        re-sent with every later search from that page, where `api_search`
+        silently prefers the dashboard's source — so the control said one
+        store, the answer came from another, and nothing on screen corrected
+        it. The badge can only name the source if the source travels.
+        """
+        archive = self.second_source()
+        payload = self.search(q="*", dashboard="archive-1")
+
+        self.assertEqual(payload["total"], 4, payload)
+        self.assertEqual(payload["dashboard"]["source"], "archive")
+        # The same name the rest of the payload already carried, so the badge
+        # and the per-record source badges cannot disagree.
+        self.assertEqual(payload["source"], "archive")
+        self.assertGreater(len(archive.requests), 0,
+                           "the pinned source was not the one asked")
+
+    def test_an_unpinned_dashboard_still_names_the_source_it_used(self):
+        """Otherwise the badge would fall silent on exactly the installations
+        that have more than one store and only some dashboards pinned."""
+        self.second_source()
+        payload = self.search(q="*", dashboard=DASH_ID)
+        self.assertEqual(payload["dashboard"]["source"],
+                         self.app.hub.logs().name)
+
+    def shared_board(self):
+        """A dashboard somebody else wrote and shared — the ordinary case for
+        a drill-down, and the only one the outage below shows up on."""
+        board = Dashboard(dashboard_id="shared-1", name="Theirs",
+                          description="", query="*", created_by="someone-else",
+                          index_patterns=["app-logs-*"])
+        self.app.dashboard_manager.dashboards["shared-1"] = board
+        return board
+
+    def source_is_down(self):
+        source = self.app.hub.logs()
+        original = source.containers
+
+        def failing(scope, *args, **kwargs):
+            raise ConnectionError("cluster unreachable")
+        source.containers = failing
+        self.addCleanup(setattr, source, "containers", original)
+
+    def test_a_source_that_is_down_is_not_a_dashboard_that_is_not_there(self):
+        """The same request, with and without the parameter, at the same
+        moment, disagreed about what was wrong.
+
+        The visibility check reads the dashboard's reach to decide, and an
+        exception there left it with an empty reach — which for a shared
+        dashboard is indistinguishable from "none of its data is within your
+        access", so the drill-down answered 404 "Dashboard not found." while
+        the log store was merely down. The unscoped search, one line later,
+        answered 503 and named the source. A failure must not arrive wearing
+        the clothes of a boundary.
+        """
+        self.shared_board()
+        self.source_is_down()
+
+        scoped = self.client.get(
+            f"/api/search?{self.WINDOW}&q=*&dashboard=shared-1")
+        plain = self.client.get(f"/api/search?{self.WINDOW}&q=*")
+
+        self.assertEqual(plain.status_code, 503)
+        self.assertEqual(scoped.status_code, 503, scoped.get_json())
+        payload = scoped.get_json()
+        self.assertEqual(payload["error_type"], "elasticsearch_connection")
+        self.assertEqual(payload["source"], plain.get_json()["source"])
+        self.assertIn(payload["source"], payload["error"])
+
+    def test_a_dashboard_you_may_not_see_is_still_not_there_in_an_outage(self):
+        """The outage must not become a way to find out what exists: a
+        dashboard the rule hides is hidden for a reason the backend coming
+        back will not change, and it answers exactly as it did before."""
+        from wdash.dashboard.visibility import PRIVATE
+        private = Dashboard(dashboard_id="private-2", name="Fraud",
+                            description="", query="*", created_by="alice",
+                            index_patterns=["app-logs-*"], visibility=PRIVATE)
+        self.app.dashboard_manager.dashboards["private-2"] = private
+        self.source_is_down()
+
+        for dashboard_id in ("private-2", "no-such-board"):
+            with self.subTest(dashboard=dashboard_id):
+                reply = self.client.get(
+                    f"/api/search?{self.WINDOW}&q=*&dashboard={dashboard_id}")
+                self.assertEqual(reply.status_code, 404)
+                self.assertEqual(reply.get_json()["error_type"],
+                                 "dashboard_not_found")
+
+    def test_your_own_dashboard_answered_the_same_way_all_along(self):
+        """It did, which is what made the difference visible: the author got
+        503 from the very same outage that told everybody else 404."""
+        self.source_is_down()
+        reply = self.client.get(
+            f"/api/search?{self.WINDOW}&q=*&dashboard={DASH_ID}")
+        self.assertEqual(reply.status_code, 503)
+
+    def test_the_page_and_the_server_group_severities_the_same_way(self):
+        """The client keeps a copy for a click made before the first response
+        has landed. A copy that drifts is the defect again, arriving by a
+        different road, so the two are compared rather than trusted."""
+        import json
+        import re
+
+        source = os.path.join(os.path.dirname(__file__), "..", "static", "js",
+                              "async-dashboard.js")
+        with open(source) as handle:
+            text = handle.read()
+        block = re.search(r"const LEVEL_GROUPS = (\{.*?\});", text, re.S)
+        self.assertIsNotNone(block, "the client's fallback grouping is gone")
+        client_side = json.loads(
+            re.sub(r"(\w+):", r'"\1":', block.group(1)).replace("'", '"')
+            .replace(",\n}", "\n}").replace(",]", "]"))
+
+        from wdash.api.dashboard_routes import LEVEL_GROUPS
+        self.assertEqual({group: list(levels)
+                          for group, levels in LEVEL_GROUPS.items()},
+                         client_side)
 
     def test_a_dashboard_over_data_outside_your_access_says_which(self):
         """Not 'your role has no access to any indices': the role reaches

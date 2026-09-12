@@ -91,22 +91,44 @@ def _buckets(buckets):
     return [b.to_dict() for b in buckets]
 
 
-def _level_counts(buckets):
-    """Derive error/warn/info counts from level buckets.
+#: Which raw level names each stat card stands for.
+#:
+#: Deliberately broad: sources emit variants such as FATAL and WARNING, and
+#: users do not want those counted separately. One definition, because there
+#: used to be two — this one behind the NUMBER on the card, and `level:ERROR`
+#: written into the click that opens it — and they disagreed. Measured
+#: against the lab over seven days: the error card read 3,086 and opened
+#: 2,767, the cluster holding 2,766 ERROR and 319 FATAL in that window, so
+#: the FATAL records the card had counted could not be reached from the
+#: number counting them. `_level_queries` derives the click from this table.
+LEVEL_GROUPS = {
+    "error": ("ERROR", "FATAL"),
+    "warn": ("WARN", "WARNING"),
+    "info": ("INFO",),
+}
 
-    The mapping is deliberately broad: sources emit variants such as FATAL and
-    WARNING, and users do not want those counted separately.
-    """
-    counts = {"error": 0, "warn": 0, "info": 0}
+
+def _level_counts(buckets):
+    """Derive error/warn/info counts from level buckets."""
+    counts = {group: 0 for group in LEVEL_GROUPS}
     for bucket in buckets:
         level = str(bucket.key).upper()
-        if level in ("ERROR", "FATAL"):
-            counts["error"] += bucket.count
-        elif level in ("WARN", "WARNING"):
-            counts["warn"] += bucket.count
-        elif level == "INFO":
-            counts["info"] += bucket.count
+        for group, members in LEVEL_GROUPS.items():
+            if level in members:
+                counts[group] += bucket.count
+                break
     return counts
+
+
+def _level_queries():
+    """The query behind each stat card, in the language the Logs page speaks.
+
+    Parenthesised even for a single level, because the drill-down ANDs this
+    onto the dashboard's own query and `a AND b OR c` is not what the card
+    means.
+    """
+    return {group: "(" + " OR ".join(f"level:{level}" for level in members) + ")"
+            for group, members in LEVEL_GROUPS.items()}
 
 
 def _baseline_query(dashboard, allowed, time_range, narrow=None):
@@ -420,6 +442,51 @@ def _did_not_run(result):
 # Pages
 # --------------------------------------------------------------------------
 
+#: The three answers to "may this person see that this dashboard exists?".
+#: There used to be two, and one of them was doing the work of both: a
+#: dashboard hidden because the rule says so and a dashboard hidden because
+#: nobody could ask are different facts, and every screen that had only "no"
+#: had to pick one of them to say.
+VISIBLE, HIDDEN, UNCHECKED = "visible", "hidden", "unchecked"
+
+#: A stand-in for "suppose the source HAD answered, and it reached something".
+#: `can_view` only asks whether this list is empty, so the contents never
+#: leave `_decide` — it is the question "would the rule have hidden it
+#: anyway?" written in the one vocabulary the rule has.
+_SOME_REACH = ("<the source could not be asked>",)
+
+
+def _decide(dashboard, scope, username, is_admin):
+    """VISIBLE, HIDDEN or UNCHECKED, with the failure behind an UNCHECKED.
+
+    UNCHECKED is for a dashboard hidden ONLY because its source could not say
+    what it reaches. It is still hidden — a source being down must never open
+    the list up — but it is hidden for a reason that will go away, and the
+    reader deserves to be told which kind of hidden they are looking at.
+
+    The second `can_view` is what keeps the two apart. Failing the first one
+    during an outage does not mean the outage is why: somebody else's PRIVATE
+    dashboard is hidden whatever its store says. Asked again with the reach
+    granted, the rule answers the question the outage was hiding — "would you
+    have seen this if the backend were up?" — and only a yes is UNCHECKED.
+    """
+    try:
+        _, _, allowed = _targets(dashboard, scope)
+        failure = None
+    except Exception as exc:
+        # Cannot tell what it reaches — treat it as unreachable rather than
+        # visible. A source being down must not open the list up.
+        allowed, failure = [], exc
+
+    if can_view(dashboard, username, is_admin, allowed):
+        return VISIBLE, None
+    if failure is None:
+        return HIDDEN, None
+    if can_view(dashboard, username, is_admin, _SOME_REACH):
+        return UNCHECKED, failure
+    return HIDDEN, None
+
+
 def _visible(dashboards):
     """Split a list into what this person may know exists, and what could not
     be decided. Returns (visible, unchecked, sources).
@@ -432,6 +499,12 @@ def _visible(dashboards):
     as "not shown: either private to their authors, or covering data outside
     your access", which sends the reader to their administrator to ask for
     access they already have.
+
+    And then it said the second about all three, which is the same mistake
+    the other way up. One of them was alice's private dashboard: bob was told
+    "there is no saying what they can reach" about a dashboard he could never
+    have seen, so the count promised something the backend coming back would
+    not deliver.
     """
     scope = _scope()
     username = current_user.username
@@ -439,17 +512,10 @@ def _visible(dashboards):
 
     out, unchecked, sources = [], [], {}
     for dashboard in dashboards:
-        failure = None
-        try:
-            _, _, allowed = _targets(dashboard, scope)
-        except Exception as exc:
-            # Cannot tell what it reaches — treat it as unreachable rather than
-            # visible. A source being down must not open the list up.
-            allowed = []
-            failure = exc
-        if can_view(dashboard, username, is_admin, allowed):
+        verdict, failure = _decide(dashboard, scope, username, is_admin)
+        if verdict == VISIBLE:
             out.append(dashboard)
-        elif failure is not None:
+        elif verdict == UNCHECKED:
             unchecked.append(dashboard)
             sources[_source_name(dashboard)] = str(failure)
     return out, unchecked, sorted(sources)
@@ -484,14 +550,20 @@ def _unreachable(dashboard, exc):
             "details": str(exc)}
 
 
+def _view_verdict(dashboard):
+    """`_decide` for the current request. Returns (verdict, failure)."""
+    return _decide(dashboard, _scope(), current_user.username,
+                   current_user.has_permission("system:admin"))
+
+
 def _may_view(dashboard):
-    scope = _scope()
-    try:
-        _, _, allowed = _targets(dashboard, scope)
-    except Exception:
-        allowed = []
-    return can_view(dashboard, current_user.username,
-                    current_user.has_permission("system:admin"), allowed)
+    """The two-answer form, for the callers that only have two answers.
+
+    UNCHECKED is a no here, as it has always been. A caller that can say
+    something better than "not found" about a source that is down should ask
+    `_view_verdict` instead — `log_routes._search_dashboard` does.
+    """
+    return _view_verdict(dashboard)[0] == VISIBLE
 
 
 #: Enough that a normal installation never sees a second page, small enough
@@ -639,7 +711,7 @@ def _dashboard_form():
         return None, (f"There is no log source called '{source}'. "
                       f"Configured: {', '.join(_source_names()) or 'none'}.")
 
-    return {
+    fields = {
         "name": name,
         "description": (request.form.get("description") or "").strip(),
         "query": query,
@@ -647,11 +719,20 @@ def _dashboard_form():
         "panels": panels,
         "thresholds": thresholds,
         "visibility": request.form.get("visibility"),
-        # "" is a choice — "the default source" — and the stores read it as
-        # one. Omitting the key would mean "leave it alone", which is not what
-        # a form with the field cleared is saying.
-        "source": source,
-    }, None
+    }
+    # Present-and-empty and absent are DIFFERENT, and the key travels only for
+    # the first. Both stores read "" as the deliberate choice "the default
+    # source" and `None`/absent as "leave it alone", so returning "" whenever
+    # the field had not been rendered wiped the stored source on every edit:
+    # `dashboard_edit.html` hides the select inside `{% if sources|length > 1 %}`,
+    # so on a single-source installation the browser cannot send it and every
+    # edit through the UI repointed the dashboard at whatever the default
+    # source happens to be — quietly, which is the one thing `_logs()` and
+    # README's "reads from a source that is not configured" both exist to
+    # prevent. `visibility` above has always used this convention.
+    if "source" in request.form:
+        fields["source"] = source
+    return fields, None
 
 
 def _source_names():
@@ -898,6 +979,10 @@ def api_dashboard_data(dashboard_id):
         "error_count": counts["error"],
         "warn_count": counts["warn"],
         "info_count": counts["info"],
+        # And the query each of those numbers stands for, so the click that
+        # opens a card asks for what the card counted rather than for a
+        # severity name somebody typed into the client to match.
+        "level_queries": _level_queries(),
         # Error rate needs the total to mean anything on its own.
         "error_rate": (counts["error"] / result.total) if result.total else 0.0,
         "previous_period": previous,
@@ -980,6 +1065,7 @@ def api_dashboard_stats(dashboard_id):
                     "error_count": counts["error"],
                     "warn_count": counts["warn"],
                     "info_count": counts["info"],
+                    "level_queries": _level_queries(),
                     "queried_containers": allowed})
 
 

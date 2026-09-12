@@ -548,9 +548,18 @@ def create_app(config_class=Config):
                 # Answering 404 here would say "it is already gone", which is
                 # the one thing nobody can tell from an unreadable file.
                 return _searches_unreadable(exc, "this one was not deleted")
-            kept = [row for row in rows
-                    if not (row.get('id') == search_id
-                            and row.get('created_by') == current_user.username)]
+            def is_the_one(row):
+                # `isinstance` first, and not because a dict is likely: the
+                # loader already skips a row it cannot understand and the
+                # create path already steps over one, so a file holding
+                # something that is not an object at all reads and appends
+                # fine and then made THIS verb an AttributeError and a 500.
+                # One file, three verbs, one answer.
+                return (isinstance(row, dict)
+                        and row.get('id') == search_id
+                        and row.get('created_by') == current_user.username)
+
+            kept = [row for row in rows if not is_the_one(row)]
             if len(kept) == len(rows):
                 return jsonify({'error': 'Not found or not owned by you'}), 404
             try:

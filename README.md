@@ -29,8 +29,9 @@ issues carries an explicit authorization scope.
   by a field), top values of a field, and services from the trace store. Every
   count is compared against the preceding window of the same length, and every
   chart and stat card opens the log records behind it — inside the dashboard's
-  own index patterns, so the drill-down narrows what is on screen rather than
-  widening it. Log panels are answered
+  own index patterns and the store it reads from, and, for a severity card,
+  every level that number counted, so the drill-down narrows what is on screen
+  rather than widening it or trimming it. Log panels are answered
   in a single backend round trip however many there are. Optional thresholds
   say whether the dashboard is outside what its owner calls normal.
   A dashboard link carries its time range and filter, so what you share is the
@@ -495,7 +496,15 @@ whichever dashboard store is in use. Leaving it on the default is what every
 dashboard written before there was a choice means. One naming a source that is
 no longer configured reports that plainly instead of falling back to the
 default: quietly answering from a different store is how somebody concludes
-their data has disappeared.
+their data has disappeared. An edit that does not carry the field leaves the
+stored source alone, for the same reason — on an installation with one source
+the field is not even drawn.
+
+A drill-down from a dashboard that names a source is answered from that
+source, and the Logs screen names it in the scope badge and moves its own
+source picker to match. The picker was left on its first option while the
+server answered from the dashboard's, so the control on screen and the records
+under it disagreed.
 
 ### OpenTelemetry
 

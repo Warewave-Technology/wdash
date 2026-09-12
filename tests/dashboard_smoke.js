@@ -369,6 +369,55 @@ async function main() {
             assert(opened[3] === '(service:payments) AND level:ERROR', opened[3]));
     }
 
+    // A stat card must open the records it counted.
+    //
+    // The server sums ERROR and FATAL into the error card's number and WARN
+    // and WARNING into the warn card's, and the click asked for `level:ERROR`
+    // and `level:WARN`. Against the lab the error card read 3,093 and opened
+    // 2,772: the 321 FATAL records it had counted could not be reached from
+    // the number counting them. The grouping comes down with the counts now.
+    {
+        const w = makeDashboard(jsonResponse({}));
+        const dashboard = new w.AsyncDashboard('board-7');
+        const cards = ['cardTotal', 'cardError', 'cardWarn', 'cardInfo'];
+        cards.forEach(id => {
+            const el = w.document.createElement('div');
+            el.id = id;
+            w.document.body.appendChild(el);
+        });
+        dashboard.lastData = {
+            effective_query: 'env:prod',
+            level_queries: { error: '(level:ERROR OR level:FATAL)',
+                             warn: '(level:WARN OR level:WARNING)',
+                             info: '(level:INFO)' },
+        };
+        const opened = [];
+        w.open = (url) => opened.push(new URL(url, 'http://localhost')
+                                         .searchParams.get('query'));
+        dashboard.setupStatCards();
+        cards.forEach(id => w.document.getElementById(id).click());
+
+        check('the error card opens every severity it counted', () =>
+            assert(opened[1] === '(env:prod) AND (level:ERROR OR level:FATAL)',
+                   opened[1]));
+        check('and so does the warn card', () =>
+            assert(opened[2] === '(env:prod) AND (level:WARN OR level:WARNING)',
+                   opened[2]));
+        check('the info card is unchanged in meaning', () =>
+            assert(opened[3] === '(env:prod) AND (level:INFO)', opened[3]));
+        check('the total card still filters by nothing', () =>
+            assert(opened[0] === '(env:prod)', opened[0]));
+    }
+
+    // A card clicked before the first response has landed.
+    {
+        const w = makeDashboard(jsonResponse({}));
+        const dashboard = new w.AsyncDashboard('board-7');
+        check('a card clicked before any data still asks for the group', () =>
+            assert(dashboard.levelQuery('error') === '(level:ERROR OR level:FATAL)',
+                   dashboard.levelQuery('error')));
+    }
+
     // A drill-down must be answered inside the dashboard's own containers.
     // The query went across and the dashboard did not, and /api/search with
     // no dashboard searches every container the ROLE allows — so clicking a
