@@ -31,6 +31,41 @@ PASSWORD = "panel-editor-browser-password"
 #: alone is exactly how a title holding `&quot;` came back as a quote.
 SERVICE = 'checkout "eu" & <b>west</b>'
 
+#: How much room the Show select has for its selected option, and how much
+#: that option needs — measured in the select's own computed font, because a
+#: select clips silently: the text is in the DOM whatever the box is wide.
+SELECT_ROOM = """
+() => {
+  const row = [...document.querySelectorAll('#panelList .list-group-item')]
+      .find(r => r.querySelector('[data-key="service"]'));
+  const select = row.querySelector('[data-key="view"]');
+  const style = getComputedStyle(select);
+  const ruler = document.createElement('span');
+  ruler.style.cssText = 'position:absolute;visibility:hidden;white-space:pre';
+  ruler.style.font = style.font;
+  ruler.textContent = select.options[select.selectedIndex].textContent;
+  document.body.appendChild(ruler);
+  const text = ruler.getBoundingClientRect().width;
+  ruler.remove();
+  return {label: select.options[select.selectedIndex].textContent,
+          text: Math.round(text),
+          room: Math.round(select.getBoundingClientRect().width
+                           - parseFloat(style.paddingLeft)
+                           - parseFloat(style.paddingRight))};
+}
+"""
+
+#: The trace list's row against a row with no trace list in it.
+ROW_HEIGHTS = """
+() => {
+  const rows = [...document.querySelectorAll('#panelList .list-group-item')];
+  const trace = rows.find(r => r.querySelector('[data-key="service"]'));
+  const plain = rows.find(r => !r.querySelector('[data-key="service"]'));
+  return {trace: Math.round(trace.getBoundingClientRect().height),
+          plain: Math.round(plain.getBoundingClientRect().height)};
+}
+"""
+
 
 def _playwright():
     try:
@@ -195,6 +230,95 @@ class PanelsAuthoredInABrowserTest(unittest.TestCase):
             self.assertEqual(kinds["trace_list"]["view"], "recent",
                              json.dumps(again.panels))
             self.assertEqual(kinds["trace_list"]["service"], SERVICE)
+            browser.close()
+
+        self.assertEqual(threw, [], "the editor threw in the browser")
+
+    def test_the_editor_is_legible_at_the_width_it_is_drawn_at(self):
+        """Three things a DOM alone cannot answer, because none of them is in
+        it: how wide a control ends up, how tall a sentence makes its row, and
+        where the keyboard goes next.
+
+        Measured in Chromium at 1500x1100 on the real create form before this
+        was fixed. The trace list's three controls shared the four grid
+        columns the other types use for two, so the Show select came out 91px
+        wide with 56 of that its own padding and caret — 35px of room for a
+        label needing 92 — and all three of the panel's questions rendered as
+        "the". Which of "the slowest", "the newest" and "errors only" a panel
+        was on could not be read off the page at all.
+
+        The row also carried the whole ~180-character reason for the service
+        box stacked into one quarter-width column: 312px tall against 98 for
+        every other row, and the row being `align-items-end`, the Title
+        control sat at the bottom of a ten-line warning.
+
+        And `change` on the service box redrew the whole panel list, which
+        fires exactly as focus leaves — so a person typing a service name and
+        pressing Tab landed on the document body rather than on the Show
+        select beside it.
+        """
+        from playwright.sync_api import sync_playwright
+
+        threw = []
+        with sync_playwright() as play:
+            browser = play.chromium.launch()
+            page = browser.new_context(
+                viewport={"width": 1500, "height": 1100}).new_page()
+            page.on("pageerror", lambda e: threw.append(str(e)))
+            page.on("dialog", lambda d: d.dismiss())
+            self._sign_in(page)
+            page.goto(f"{self.base}/dashboard/create", wait_until="networkidle")
+            page.click('[data-add-panel="trace_list"]')
+
+            # What the select can actually show, against what its selected
+            # option needs, in the select's own font.
+            room = page.evaluate(SELECT_ROOM)
+            self.assertGreaterEqual(
+                room["room"], room["text"],
+                f"the Show select clips {room['label']!r}: {room['room']}px of "
+                f"room for {room['text']}px of label")
+
+            # What the row costs while the service box is empty. The reason it
+            # is empty is worth a sentence; the sentence belongs where there is
+            # room for it, which is the refusal, not a quarter-width column.
+            empty = page.evaluate(ROW_HEIGHTS)
+            row = page.locator("#panelList .list-group-item").nth(3)
+            service = row.locator('[data-key="service"]')
+            service.click()
+            page.keyboard.type("payment-service")
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(120)
+
+            landed = page.evaluate(
+                "() => ({key: (document.activeElement.dataset || {}).key,"
+                "        tag: document.activeElement.tagName})")
+            self.assertEqual(
+                landed, {"key": "view", "tag": "SELECT"},
+                "Tab out of the service box did not land on the Show select")
+
+            named = page.evaluate(ROW_HEIGHTS)
+            self.assertEqual(page.locator("[data-needs-service]").count(), 0,
+                             "the warning stayed after a service was named")
+            self.assertLessEqual(
+                empty["trace"] - named["trace"], 40,
+                f"the missing-service warning adds "
+                f"{empty['trace'] - named['trace']}px to the row")
+
+            # The menu is the only way to add five of the seven types without
+            # writing a dashboard's JSON by hand, so it has to be reachable on
+            # a phone rather than off the side of it.
+            page.set_viewport_size({"width": 390, "height": 900})
+            page.goto(f"{self.base}/dashboard/create", wait_until="networkidle")
+            fits = page.evaluate(
+                "() => ({menu: Math.round(document"
+                "          .querySelector('[data-add-panel]').parentElement"
+                "          .getBoundingClientRect().width),"
+                "        scroll: document.documentElement.scrollWidth,"
+                "        viewport: window.innerWidth})")
+            self.assertLessEqual(fits["menu"], fits["viewport"],
+                                 f"the add menu is wider than the phone: {fits}")
+            self.assertLessEqual(fits["scroll"], fits["viewport"],
+                                 f"the create form scrolls sideways: {fits}")
             browser.close()
 
         self.assertEqual(threw, [], "the editor threw in the browser")

@@ -95,7 +95,8 @@ class TheEditorOffersEveryPanelType(unittest.TestCase):
         self.assertNotIn("panel.type === 'trace_services'", self.script,
                          "the per-type ternary chain is back")
         for table in ("PANEL_CONTROLS", "ROW_CAPTIONS", "BLANK_PANELS",
-                      "VIEW_LABELS"):
+                      "SORT_LABELS", "TRACE_VIEW_LABELS",
+                      "MONITOR_VIEW_LABELS"):
             self.assertIn(f"const {table} = Object.assign(Object.create(null)",
                           self.script, f"{table} carries Object's prototype")
 
@@ -124,10 +125,17 @@ class TheEditorOffersEveryPanelType(unittest.TestCase):
         service, view and row count."""
         captions = re.search(r"ROW_CAPTIONS = Object\.assign.*?^\}\);",
                              self.script, re.S | re.M).group(0)
-        records = re.search(r"^ {4}records:(.*?)^ {4}\w+:", captions,
-                            re.S | re.M).group(1)
-        traces = re.search(r"^ {4}trace_list:(.*?)^ {4}\w+:", captions,
-                           re.S | re.M).group(1)
+        # Up to the next four-space key OR the end of the table: anchoring on
+        # a following key alone meant the last row of the table matched
+        # nothing, and the test raised AttributeError — a broken test rather
+        # than a missing sentence — the day somebody reordered it.
+        def caption(key):
+            found = re.search(r"^ {4}%s:(.*?)(?=^ {4}\w+:|^\}\);)" % key,
+                              captions, re.S | re.M)
+            self.assertIsNotNone(found, f"{key} has no row in ROW_CAPTIONS")
+            return found.group(1)
+
+        records, traces = caption("records"), caption("trace_list")
         self.assertIn("one more request", records)
         self.assertIn("request of its own", traces)
         self.assertIn("traces:read", traces)

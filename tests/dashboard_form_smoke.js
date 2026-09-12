@@ -442,6 +442,65 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
               list.querySelector('[data-key="view"]').innerHTML);
     }
 
+    // `errors` is in two of the option lists and is not the same question in
+    // both: on a trace list it is a VIEW — the traces that failed and no
+    // others — and on a trace_services panel it is an ORDERING over every
+    // service the window holds. panels.py says so where TRACE_LIST_VIEWS is
+    // defined ("'errors' is not an ordering"). One label table keyed by the
+    // bare value made the Sort by select read "errors only", which tells the
+    // author a panel that ranks all services by error count shows only errors.
+    {
+        const { d } = editorPage({ panels: [
+            { id: 'p1', type: 'trace_services', title: 'S', sort: 'spans',
+              size: 10, width: 6, height: 300 },
+            { id: 'p2', type: 'trace_list', title: 'T', service: 'pay',
+              view: 'slowest', size: 5, width: 6, height: 300 }] });
+        const labels = (index, key) => [...rows(d)[index]
+            .querySelector(`[data-key="${key}"]`).options]
+            .map(o => `${o.value}=${o.textContent.trim()}`).join(' ');
+        check('ordering services by errors is an ordering, not a filter',
+              labels(0, 'sort')
+              === 'spans=spans errors=errors error_rate=error rate',
+              labels(0, 'sort'));
+        check('and a trace list showing errors shows only those',
+              labels(1, 'view')
+              === 'slowest=the slowest recent=the newest errors=errors only',
+              labels(1, 'view'));
+    }
+
+    // A number box can be emptied, and `parseInt('')` is NaN — which
+    // JSON.stringify writes as `null`, and `normalise` reading `int(None)`
+    // refuses the panel for the WHOLE board. The refusal is not confined to
+    // that panel either: `_resubmitted` cannot re-render a list that fails to
+    // validate, so clearing this box and pressing Save threw away every other
+    // edit on the page, with only "size must be a number" said about it.
+    {
+        const { d } = editorPage({ panels: [
+            { id: 'p1', type: 'terms', title: 'Top', field: 'service',
+              size: 10, width: 6, height: 300 }] });
+        d.querySelector('[data-add-panel="records"]').click();
+
+        const title = rows(d)[0].querySelector('[data-key="title"]');
+        title.value = 'AN EDIT I MADE';
+        title.dispatchEvent(new d.defaultView.Event('change'));
+
+        const size = rows(d)[1].querySelector('[data-key="size"]');
+        size.value = '';
+        size.dispatchEvent(new d.defaultView.Event('change'));
+        check('an emptied row count is not posted as no number at all',
+              stored(d)[1].size === 10, d.getElementById('panelsField').value);
+        check('and the box shows what will be saved rather than staying empty',
+              size.value === '10', size.value);
+        check('so the edit made beside it is still there to save',
+              stored(d)[0].title === 'AN EDIT I MADE',
+              d.getElementById('panelsField').value);
+
+        size.value = '3';
+        size.dispatchEvent(new d.defaultView.Event('change'));
+        check('and a row count that IS a number is still the author’s',
+              stored(d)[1].size === 3, d.getElementById('panelsField').value);
+    }
+
     // A trace list with no service is a save the server refuses — and a
     // refusal re-renders the form from the STORED list, so the refused panel
     // and every edit made beside it disappear. The form has to say so first.

@@ -184,6 +184,34 @@ class ListingTest(unittest.TestCase):
                 reply = client.get(f"/api/dashboard/{dashboard}/data")
                 self.assertEqual(reply.status_code, 404)
 
+    def test_a_stored_query_that_does_not_parse_is_a_400_and_says_which(self):
+        """The half of the QueryError branch nothing measured.
+
+        `recent-logs` carried this test and was removed with the E1 package;
+        two of its siblings were re-pointed at /data and this one was not, so
+        a dashboard whose STORED query cannot be parsed had nothing holding it
+        to 400 `invalid_query` rather than to a Flask HTML 500. Measured by
+        mutating the branch to re-raise: the whole suite stayed green.
+
+        The message is measured too, and for the same reason: the ad-hoc `q`
+        filter and the dashboard's own query come out of ONE except-block and
+        say different things — "Invalid filter" is the reader's own typing,
+        "Invalid dashboard query" is the board's definition and a different
+        person's job to fix. tests/test_panel_reasons.py covers the `q` half;
+        this is the other one, and collapsing the two into one message is
+        likewise a mutation the suite did not catch.
+        """
+        manager = self.app.dashboard_manager
+        manager.create_dashboard("Bad", "", "service:(", "alice", ["app-*"])
+        bad = next(d.id for d in manager.get_all_dashboards()
+                   if d.name == "Bad")
+        client = self.client_for("alice", ["app-*"])
+        reply = client.get(f"/api/dashboard/{bad}/data")
+        self.assertEqual(reply.status_code, 400, reply.data[:200])
+        payload = reply.get_json()
+        self.assertEqual(payload["error_type"], "invalid_query")
+        self.assertIn("dashboard query", payload["error"])
+
     def test_a_reader_sees_only_dashboards_over_data_they_can_reach(self):
         client = self.client_for("bob", ["app-*"])
         self.assertEqual(self.names_seen(client), ["AppBoard"])

@@ -39,17 +39,31 @@ const TRACE_SORTS = ['spans', 'errors', 'error_rate'];
 const TRACE_LIST_VIEWS = ['slowest', 'recent', 'errors'];
 const MONITOR_VIEWS = ['status', 'availability'];
 
-/* What each of those reads as. A value missing from here shows as
- * itself rather than as nothing, because the value IS the stored
- * answer. */
-const VIEW_LABELS = Object.assign(Object.create(null), {
+/* What each of those reads as — a table PER LIST, not one table keyed by the
+ * bare value.
+ *
+ * `errors` is in two of the lists and means two different things: on a trace
+ * list it is a VIEW, the traces that failed and no others; on a trace_services
+ * panel it is an ORDERING over every service the window holds. panels.py says
+ * so where TRACE_LIST_VIEWS is defined — "'errors' is not an ordering" — and a
+ * single shared table made the Sort by select read "errors only", which is a
+ * different question from the one that panel answers.
+ *
+ * A value missing from its table shows as itself rather than as nothing,
+ * because the value IS the stored answer. */
+const SORT_LABELS = Object.assign(Object.create(null), {
+    spans: 'spans', errors: 'errors', error_rate: 'error rate',
+});
+const TRACE_VIEW_LABELS = Object.assign(Object.create(null), {
     slowest: 'the slowest', recent: 'the newest', errors: 'errors only',
+});
+const MONITOR_VIEW_LABELS = Object.assign(Object.create(null), {
     status: 'status right now', availability: 'availability over the window',
 });
 
-const optionsFor = (values, selected) => values.map(v =>
+const optionsFor = (values, labels, selected) => values.map(v =>
     `<option value="${v}"${v === selected ? ' selected' : ''}>${
-        VIEW_LABELS[v] || v.replace('_', ' ')}</option>`).join('');
+        labels[v] || v.replace('_', ' ')}</option>`).join('');
 
 const fieldOptions = (selected, allowNone) =>
     (allowNone ? '<option value="">(total only)</option>' : '') +
@@ -57,10 +71,19 @@ const fieldOptions = (selected, allowNone) =>
         `<option value="${f}"${f === selected ? ' selected' : ''}>${f}</option>`
     ).join('');
 
-/** Said on the row and again if the form is submitted without one. */
+/** Said if the form is submitted without one, where there is room to say why. */
 const SERVICE_NEEDED = 'A trace list needs a service to list traces for. '
     + 'Without one a Jaeger backend has to search every service it knows, on '
     + 'every refresh — so the save refuses the panel.';
+
+/* And what the ROW says while the box is empty. Short on purpose: this sits
+ * in a quarter-width column beside the box it is about, and the whole
+ * sentence above stacked into it made the trace list's row 312 pixels tall
+ * against 98 for every other row — which, the row being `align-items-end`,
+ * pushed the Title control to the bottom of a ten-line warning. The reason is
+ * worth saying where there is room for it: on the refusal. */
+const SERVICE_MISSING = '<div class="form-text text-warning mt-0" '
+    + 'data-needs-service>This panel needs a service.</div>';
 
 /* ------------------------------------------------------------------
  * The controls each panel type gets, keyed by type.
@@ -120,7 +143,7 @@ const PANEL_CONTROLS = Object.assign(Object.create(null), {
       <div class="col-md-2">
         <label class="form-label small mb-0">Sort by</label>
         <select class="form-select form-select-sm" data-key="sort">
-          ${optionsFor(TRACE_SORTS, panel.sort || 'spans')}
+          ${optionsFor(TRACE_SORTS, SORT_LABELS, panel.sort || 'spans')}
         </select>
       </div>
       <div class="col-md-2">
@@ -133,26 +156,39 @@ const PANEL_CONTROLS = Object.assign(Object.create(null), {
     // the save does not just refuse the panel: `_resubmitted` cannot
     // re-render a list that fails to validate, so it falls back to the
     // stored one and every other edit on the page goes with it.
+    //
+    // Three controls where every other type has at most two, so they take the
+    // four columns as TWO lines rather than as two cells. Measured in Chromium
+    // on the real create form: side by side, the Show select was 91px wide
+    // with 56px of that its own padding and caret — 35px for a label needing
+    // 92 — so all three of the panel's questions read "the", and which one the
+    // panel was on could not be read off the page at all. Stacked, the select
+    // gets the block's full width and the service box gets 294px rather than
+    // 150 for names like `checkout-eu-west`.
     trace_list: (panel) => {
         const named = (panel.service || '').trim();
         return `
-      <div class="col-md-2">
-        <label class="form-label small mb-0">Service</label>
-        <input type="text" class="form-control form-control-sm"
-               data-key="service" placeholder="name one"
-               value="${escapeAttr(panel.service || '')}">
-        ${named ? '' : `<div class="form-text text-warning mt-0"
-             data-needs-service>${escapeAttr(SERVICE_NEEDED)}</div>`}
-      </div>
-      <div class="col-md-2">
-        <label class="form-label small mb-0">Show</label>
-        <div class="input-group input-group-sm">
-          <select class="form-select form-select-sm" data-key="view">
-            ${optionsFor(TRACE_LIST_VIEWS, panel.view || 'slowest')}
-          </select>
-          <input type="number" class="form-control form-control-sm"
-                 style="max-width:4.5rem" data-key="size"
-                 min="1" max="50" value="${panel.size || 5}">
+      <div class="col-md-4">
+        <div class="row g-2">
+          <div class="col-12">
+            <label class="form-label small mb-0">Service</label>
+            <input type="text" class="form-control form-control-sm"
+                   data-key="service" placeholder="name one"
+                   value="${escapeAttr(panel.service || '')}">
+            <div data-service-warning>${named ? '' : SERVICE_MISSING}</div>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-0">Show</label>
+            <div class="input-group input-group-sm">
+              <select class="form-select form-select-sm" data-key="view">
+                ${optionsFor(TRACE_LIST_VIEWS, TRACE_VIEW_LABELS,
+                             panel.view || 'slowest')}
+              </select>
+              <input type="number" class="form-control form-control-sm"
+                     style="max-width:4.5rem" data-key="size"
+                     min="1" max="50" value="${panel.size || 5}">
+            </div>
+          </div>
         </div>
       </div>`;
     },
@@ -164,7 +200,7 @@ const PANEL_CONTROLS = Object.assign(Object.create(null), {
       <div class="col-md-2">
         <label class="form-label small mb-0">Show</label>
         <select class="form-select form-select-sm" data-key="view">
-          ${optionsFor(MONITOR_VIEWS, panel.view || 'status')}
+          ${optionsFor(MONITOR_VIEWS, MONITOR_VIEW_LABELS, panel.view || 'status')}
         </select>
       </div>
       <div class="col-md-2"></div>`,
@@ -239,14 +275,38 @@ function panelRow(panel, index) {
     row.querySelectorAll('[data-key]').forEach(input => {
         input.addEventListener('change', () => {
             const key = input.dataset.key;
-            panels[index][key] = key === 'size' || key === 'width' || key === 'height'
-                ? parseInt(input.value, 10) : input.value;
+            const numeric = key === 'size' || key === 'width' || key === 'height';
+            const number = numeric ? parseInt(input.value, 10) : null;
+
+            // An emptied number box is NOT a number. `parseInt('')` is NaN,
+            // JSON.stringify writes NaN as `null`, and `normalise` reading
+            // `int(None)` refuses the panel — which is not a refusal of the
+            // panel: `_resubmitted` cannot re-render a list that fails to
+            // validate, so it falls back to the stored one and every other
+            // edit on the page goes with it. Clearing the Rows box and
+            // pressing Save lost the author's whole panel list, and the only
+            // thing on the page about it was "size must be a number".
+            //
+            // The box goes back to the value that will be saved rather than
+            // the list going out with a hole in it — visible, and nothing is
+            // stored that was not shown.
+            if (numeric && Number.isNaN(number)) {
+                input.value = panels[index][key];
+                return;
+            }
+            panels[index][key] = numeric ? number : input.value;
+
             // The service is the one control whose value changes what the row
             // SAYS — the warning under it has to go when a service is typed,
-            // and come back if it is cleared again.
+            // and come back if it is cleared again. Only that sentence is
+            // rewritten: redrawing the whole list from here destroyed the node
+            // the keyboard was tabbing OUT of (`change` fires exactly as focus
+            // leaves), so a person typing a service name and pressing Tab was
+            // dropped to the document body instead of landing on the Show
+            // select beside it.
             if (key === 'service') {
-                drawPanels();
-                return;
+                row.querySelector('[data-service-warning]').innerHTML =
+                    panels[index][key].trim() ? '' : SERVICE_MISSING;
             }
             serialise();
         });

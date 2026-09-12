@@ -9,37 +9,43 @@
    aggregatable_fields, panel_heights, thresholds. #}
 <hr>
 <div class="mb-3">
-    <div class="d-flex justify-content-between align-items-center mb-2">
+    <div class="d-flex justify-content-between align-items-center mb-2 gap-2 flex-wrap">
         <label class="form-label mb-0">Panels</label>
-        <div class="btn-group btn-group-sm">
-            <button type="button" class="btn btn-outline-primary"
+        {# `d-flex flex-wrap` rather than `btn-group`, which does not wrap: at
+           five buttons the menu already ran 128px past a 390px phone, and the
+           two added with `records` and `trace_list` took that to 263px, so the
+           page scrolled sideways to reach the buttons that are now the only
+           way to add five of the seven types without writing JSON. The cost is
+           the joined corners. #}
+        <div class="d-flex flex-wrap gap-1 justify-content-end">
+            <button type="button" class="btn btn-sm btn-outline-primary"
                     data-add-panel="timeseries">
                 <i class="fas fa-chart-area"></i> Volume over time
             </button>
-            <button type="button" class="btn btn-outline-primary"
+            <button type="button" class="btn btn-sm btn-outline-primary"
                     data-add-panel="terms">
                 <i class="fas fa-chart-bar"></i> Top values
             </button>
             {# Both of these were panel types the SERVER accepted and this
                menu could not produce, so the only way to have one was to
                write the dashboard's JSON by hand. #}
-            <button type="button" class="btn btn-outline-primary"
+            <button type="button" class="btn btn-sm btn-outline-primary"
                     data-add-panel="records">
                 <i class="fas fa-list-ul"></i> Records
             </button>
-            <button type="button" class="btn btn-outline-info"
+            <button type="button" class="btn btn-sm btn-outline-info"
                     data-add-panel="trace_services">
                 <i class="fas fa-project-diagram"></i> Services (traces)
             </button>
-            <button type="button" class="btn btn-outline-info"
+            <button type="button" class="btn btn-sm btn-outline-info"
                     data-add-panel="trace_list">
                 <i class="fas fa-stream"></i> Trace list
             </button>
-            <button type="button" class="btn btn-outline-info"
+            <button type="button" class="btn btn-sm btn-outline-info"
                     data-add-panel="monitors">
                 <i class="fas fa-heart-pulse"></i> Monitors
             </button>
-            <button type="button" class="btn btn-outline-info"
+            <button type="button" class="btn btn-sm btn-outline-info"
                     data-add-panel="monitor_certificates">
                 <i class="fas fa-lock"></i> Certificates
             </button>
