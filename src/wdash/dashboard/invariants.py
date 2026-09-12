@@ -54,7 +54,14 @@ def _administers(definition):
             and ADMIN_PERMISSION in (definition.get("permissions") or []))
 
 
-def _few(names, limit=5):
+#: How many names a message shows before it starts counting instead. Public
+#: with `few()`: the configuration page builds the same kind of sentence, and
+#: reaching across a module boundary for a name with a leading underscore said
+#: one thing while the import said another.
+FEW = 5
+
+
+def few(names, limit=FEW):
     names = sorted(names)
     shown = ", ".join(names[:limit])
     return shown if len(names) <= limit else f"{shown} and {len(names) - limit} more"
@@ -135,7 +142,7 @@ def refuses_role_delete(roles, name, actor, default_role=None,
 
     mapped = [who for who, role in (user_roles or {}).items() if role == name]
     if mapped:
-        return (f"These mappings still give '{name}': {_few(mapped)}. Map them "
+        return (f"These mappings still give '{name}': {few(mapped)}. Map them "
                 f"to another role, or remove them, first.")
 
     # You before the local accounts: when the account holding it is yours,
@@ -150,7 +157,7 @@ def refuses_role_delete(roles, name, actor, default_role=None,
     holders = [account.get("username") for account in local_accounts or ()
                if account.get("role") == name and not account.get("disabled")]
     if holders:
-        return (f"The local account {_few(holders)} holds '{name}'. A local "
+        return (f"The local account {few(holders)} holds '{name}'. A local "
                 f"account whose role is gone falls back to the default role, "
                 f"which normally cannot administer — and a local account is "
                 f"the way back in when the identity provider is not. Move it "
@@ -165,8 +172,14 @@ def refuses_role_delete(roles, name, actor, default_role=None,
 #: field existed — is unknown, and is never claimed to be either one.
 _ARRIVED = {"directory": "ldap", "oidc": "oidc"}
 
+#: How each directory is named in a sentence. `auth.providers` has the same
+#: map; it is not imported here because the recovery tool imports this module
+#: and must run when Flask is not importable.
+_LABELS = {"ldap": "LDAP", "oidc": "OpenID Connect"}
 
-def refuses_directory_off(which, actor, roles, local_accounts=()):
+
+def refuses_directory_off(which, actor, roles, local_accounts=(),
+                          takes_over=None):
     """Why this directory must not be turned off, or None.
 
     The fourth way to lose administration, and the one the one-directory rule
@@ -180,6 +193,16 @@ def refuses_directory_off(which, actor, roles, local_accounts=()):
     "arrived through this one". An administrator who arrived through the other
     directory is allowed, because turning this one off is exactly how she
     resolves a conflict in her own favour.
+
+    `takes_over` is who the resolution hands the installation to on this very
+    save — {"name", "unusable"} or None — and it is the difference between a
+    lockout and a SWITCH. On an installation with both directories stored and
+    enabled, turning the one in force off is the whole of how an administrator
+    resolves the conflict, and it is the only in-page direction that exists:
+    enabling the other one is refused by the one-directory rule. Measured
+    before this was passed in: both directions refused, and the refusal said
+    "nobody would be able to open this page" while LDAP would have taken over
+    on that same save.
     """
     actor = actor or {}
     if actor.get("local_role") or actor.get("provider") == "local account":
@@ -189,13 +212,17 @@ def refuses_directory_off(which, actor, roles, local_accounts=()):
     if arrived is not None and arrived != which:
         return None
 
+    successor = takes_over or {}
+    if successor.get("name") and not successor.get("unusable"):
+        return None
+
     carriers = {role["name"] for role in _carriers(roles)}
     accounts = list(local_accounts or ())
     if any(account.get("role") in carriers and not account.get("disabled")
            for account in accounts):
         return None
 
-    label = {"ldap": "LDAP", "oidc": "OpenID Connect"}.get(which, which)
+    label = _LABELS.get(which, which)
     disabled = [account.get("username") for account in accounts
                 if account.get("role") in carriers and account.get("disabled")]
     way_back = (
@@ -203,11 +230,19 @@ def refuses_directory_off(which, actor, roles, local_accounts=()):
         f"{disabled[0]}." if disabled else
         "Give a local account an administering role first: python -m "
         "wdash.store.recover --grant-admin <username>.")
+    # What actually happens, rather than one sentence for two situations: an
+    # installation whose other directory would take over is not losing its
+    # last door, it is being handed to one that does not work.
+    what = (f"Turning {label} off would hand this installation to "
+            f"{_LABELS.get(successor['name'], successor['name'])}, and its "
+            f"saved settings cannot be used: {successor['unusable']}. Nobody "
+            f"would be able to open this page"
+            if successor.get("name") else
+            f"Turning {label} off would leave nobody able to open this page")
     return (f"You did not sign in with a local account, and no local account "
             f"here can administer WDash"
-            + (f" ({_few(disabled)} could, but is disabled)" if disabled else "")
-            + f". Turning {label} off would leave nobody able to open this "
-              f"page, so nothing was saved. {way_back}")
+            + (f" ({few(disabled)} could, but is disabled)" if disabled else "")
+            + f". {what}, so nothing was saved. {way_back}")
 
 
 def refuses_mapping_save(roles, default_role, mappings, actor):

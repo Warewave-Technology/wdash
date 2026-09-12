@@ -48,12 +48,34 @@ def _rule():
     return LABELS, LDAP_KEY, OIDC_KEY, resolve
 
 
+def _installation(store):
+    """Enough of an application for `auth.providers` to answer about.
+
+    It asks two things of one: `store`, and `config` for the OIDC variables —
+    which the application itself loads straight out of the environment. Built
+    here rather than importing the app, because this tool exists for the case
+    where the app cannot start, and because the alternative is a second copy
+    of "can this directory be used", which is the drift the whole package is
+    about.
+    """
+    class _Installation:
+        pass
+
+    installation = _Installation()
+    installation.store = store
+    installation.config = os.environ
+    return installation
+
+
+def _environment_oidc():
+    return bool(os.environ.get("OIDC_CLIENT_ID")
+                and os.environ.get("OIDC_DISCOVERY_URL"))
+
+
 def _directory_line(store):
     """Which directory would sign people in, as one line for --status."""
     labels, ldap_key, oidc_key, resolve = _rule()
-    environment = bool(os.environ.get("OIDC_CLIENT_ID")
-                       and os.environ.get("OIDC_DISCOVERY_URL"))
-    state = resolve(store.settings.all(prefix="auth."), environment)
+    state = resolve(store.settings.all(prefix="auth."), _environment_oidc())
     if state["in_force"] is None:
         return "Directory: (none — local accounts only)"
     where = ("on the page"
@@ -73,44 +95,93 @@ def use_directory(store, which):
     lets the environment configure it, which is the whole reason an
     installation can end up with two directories without anybody enabling a
     second one.
+
+    Two things it asks before it writes anything, both learned by measuring
+    what it used to do:
+
+      * whether the chosen directory CAN be used, from `why_unusable` — the
+        same answer the page and the banner read. It used to ask whether a
+        settings ROW existed, so on the commonest shape of all (a blank OIDC
+        card saved to suppress an environment provider) `--use-directory
+        oidc` enabled the blank row, disabled the LDAP that worked, and
+        printed "OpenID Connect is now the directory in force." Both
+        directories were then unusable: every directory user locked out, in a
+        message that said it had succeeded.
+      * whether a row is a CONFIGURATION or only an off-switch. A row holding
+        nothing but `enabled: False` is what turns an environment-configured
+        OIDC off; treating it as configuration made this tool one-way, since
+        the row it wrote itself then looked like a directory to put in force.
     """
-    labels, ldap_key, oidc_key, resolve = _rule()
+    labels, ldap_key, oidc_key, _ = _rule()
+    from ..auth.providers import directory as resolution, why_unusable
+
     if which not in ("ldap", "oidc", "none"):
         print(f"--use-directory takes ldap, oidc or none, not '{which}'.",
               file=sys.stderr)
         return 1
 
-    environment = bool(os.environ.get("OIDC_CLIENT_ID")
-                       and os.environ.get("OIDC_DISCOVERY_URL"))
+    environment = _environment_oidc()
     stored = {key: store.settings.get(key) for key in (ldap_key, oidc_key)}
 
-    if which == "ldap" and not stored[ldap_key]:
+    def typed(key):
+        """What somebody actually put in the card, `enabled` aside."""
+        return {field: value for field, value in (stored[key] or {}).items()
+                if field != "enabled" and value not in (None, "")}
+
+    # Nothing was ever typed into the OIDC card and the environment does
+    # configure one: the environment IS the configuration, and any stored row
+    # — the off-switch this tool and the page both write — suppresses it.
+    # Choosing OIDC therefore means removing that row, which is what lets the
+    # tool go back the way it came.
+    through_environment = (which == "oidc" and not typed(oidc_key)
+                           and environment)
+
+    if which == "ldap" and not typed(ldap_key):
         print("No LDAP settings are stored, so LDAP cannot be put in force. "
               "Configure it on the page first.", file=sys.stderr)
         return 1
-    if which == "oidc" and not stored[oidc_key] and not environment:
+    if which == "oidc" and not typed(oidc_key) and not environment:
         print("No OIDC settings are stored and the environment does not "
               "configure one, so OIDC cannot be put in force.", file=sys.stderr)
         return 1
 
-    for key, name in ((ldap_key, "ldap"), (oidc_key, "oidc")):
-        value = dict(stored[key] or {})
-        if name == which and not value and name == "oidc":
-            # In force through the environment: a stored row would suppress
-            # it, and an empty one would suppress it AND be incomplete.
-            store.settings.delete(key)
-            continue
-        value["enabled"] = (name == which)
-        store.settings.set(key, value, updated_by="recover")
+    if which != "none" and not through_environment:
+        unusable = why_unusable(_installation(store), which, if_enabled=True)
+        if unusable:
+            print(f"{labels[which]} is configured here but cannot be used as "
+                  f"it stands: {unusable}. Putting it in force would leave "
+                  f"this installation with no directory sign-in at all, so "
+                  f"nothing was changed. Fix it on the configuration page, or "
+                  f"choose the other directory.", file=sys.stderr)
+            return 1
 
-    state = resolve(store.settings.all(prefix="auth."), environment)
+    for key, name in ((ldap_key, "ldap"), (oidc_key, "oidc")):
+        row = stored[key]
+        if name == which:
+            if through_environment:
+                store.settings.delete(key)
+                continue
+            store.settings.set(key, {**row, "enabled": True},
+                               updated_by="recover")
+        elif row is not None:
+            store.settings.set(key, {**row, "enabled": False},
+                               updated_by="recover")
+        elif name == "oidc" and environment:
+            # Nothing stored, but the environment configures one, and turning
+            # that off means STORING the row that says so. LDAP has no
+            # environment path, so for it an absent row is already off and a
+            # written one would be a configuration that never existed —
+            # which then defeated this tool's own "not configured" guard.
+            store.settings.set(key, {"enabled": False}, updated_by="recover")
+
+    # Reported from `directory()` — what the sign-in page, the banner and the
+    # startup log all read — rather than from the rows this function just
+    # wrote, so success is claimed by the thing that decides it.
+    state = resolution(_installation(store))
     if state["in_force"] is None:
         print("No directory is in force. Local accounts still sign in.")
     else:
         print(f"{labels[state['in_force']]} is now the directory in force.")
-    if state["shadowed"]:
-        print(f"WARNING: {labels[state['shadowed']]} is still configured and "
-              f"not in use.")
     print("Ownership here is the username: whoever signs in as a name that "
           "already owns dashboards or holds a role mapping gets them.")
     return 0

@@ -178,6 +178,29 @@ def _reason(state, unusable):
     return " ".join(said) or None
 
 
+def why_unusable(app, which, if_enabled=False):
+    """Why `which` could not sign anybody in, or None — a clause, never a
+    setting.
+
+    Asked of EITHER directory, not only the one in force, because two callers
+    need it about a directory they are about to hand the installation to: the
+    page, before it accepts a save that turns the current one off, and the
+    recovery tool, before it puts one in force. A refusal that says "nobody
+    would be able to open this page" while the other directory would take over
+    on the same save is a false sentence, and the answer to "would it work?"
+    has to come from the same place as the answer to "would it take over?".
+
+    `if_enabled` asks it of a directory that is switched off, which is what
+    the recovery tool is looking at: a row saying `enabled: False` is not a
+    complaint about the settings, and silence there is how the tool came to
+    enable a blank card and leave an installation with no directory at all.
+    """
+    if which not in LABELS:
+        return None
+    effective = _ldap_effective if which == "ldap" else _oidc_effective
+    return effective(app, if_enabled)[1]
+
+
 def directory(app):
     """Which directory signs people in here, in names and a sentence.
 
@@ -186,10 +209,8 @@ def directory(app):
     decrypted secret through this path.
     """
     state = _state(app)
-    unusable = None
-    if state["in_force"] is not None:
-        _, unusable = (_ldap_effective(app) if state["in_force"] == "ldap"
-                       else _oidc_effective(app))
+    unusable = (why_unusable(app, state["in_force"])
+                if state["in_force"] is not None else None)
     return {**state, "unusable": unusable, "reason": _reason(state, unusable)}
 
 
@@ -271,17 +292,20 @@ def _claims(app, configured):
     return claims
 
 
-def _oidc_effective(app):
+def _oidc_effective(app, if_enabled=False):
     """(settings, why they cannot be used) for OIDC as configured here.
 
     The settings dict holds the decrypted client secret and must not be
     logged or put into a template. The second half is a clause for a person,
     and holds no setting at all.
+
+    `if_enabled` reads a switched-off row as though it were on, which is the
+    question asked of a directory nobody is using yet.
     """
     store = _store(app)
     if store is not None:
         stored = store.settings.get(OIDC_KEY)
-        if stored and stored.get("enabled"):
+        if stored is not None and (stored.get("enabled") or if_enabled):
             try:
                 secret = store.settings.secret(OIDC_KEY)
             except Exception as exc:
@@ -355,14 +379,18 @@ def ldap_settings(app):
     return _ldap_effective(app)[0]
 
 
-def _ldap_effective(app):
-    """(settings, why they cannot be used) for LDAP as configured here."""
+def _ldap_effective(app, if_enabled=False):
+    """(settings, why they cannot be used) for LDAP as configured here.
+
+    `if_enabled` reads a switched-off row as though it were on — see
+    `why_unusable`.
+    """
     store = _store(app)
     if store is None:
         return None, None
 
     stored = store.settings.get(LDAP_KEY)
-    if not stored or not stored.get("enabled"):
+    if not stored or not (stored.get("enabled") or if_enabled):
         return None, None
     if not stored.get("server") or not stored.get("base_dn"):
         logger.warning(

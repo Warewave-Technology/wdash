@@ -609,6 +609,22 @@ class DirectorySwitchTest(ConfigTestCase):
         self.assertIn("an unknown number of dashboards", page)
         self.assertNotIn("0 dashboards", page)
 
+    def test_the_audit_row_records_a_count_not_a_copy_of_the_directory(self):
+        """The flash was trimmed to a few names and the audit row was not, so
+        one save on an installation with a large directory wrote every
+        directory-owned name into one row. The trail should record what
+        happened, not the directory it happened to."""
+        self.app.store.settings.set(
+            "rbac.user_roles",
+            {"alice": "admin", **{f"mapped{n}": "admin" for n in range(40)}})
+
+        page = self.save(LDAP_FORM, enabled="on").get_data(as_text=True)
+        state = self.audited("LDAP settings updated")[0]["state"]
+        self.assertEqual(state["inherited"]["mappings"], 41)
+        self.assertEqual(state["inherited"]["name_count"], 41)
+        self.assertLessEqual(len(state["inherited"]["names"]), 5)
+        self.assertIn("and 36 more", page, "the sentence still counts them")
+
     def test_an_ordinary_re_save_says_nothing_about_inheritance(self):
         self.save(LDAP_FORM, enabled="on")
         page = self.save(LDAP_FORM, base_dn="dc=corp",
@@ -664,6 +680,56 @@ class TurningTheDirectoryOffTest(ConfigTestCase):
         self.arrive("oidc")
         self.turn_off()
         self.assertFalse(self.app.store.settings.get("auth.ldap")["enabled"])
+
+    def test_handing_over_to_the_other_directory_is_not_a_lockout(self):
+        """The shape the rule exists for, and the one it used to make
+        unresolvable: both directories stored and enabled, no enabled local
+        administrator, the actor arrived through the one in force. Turning it
+        off is a SWITCH — the other one takes over on the same save — and it
+        is the only in-page direction, because enabling the other one is
+        refused by the one-directory rule.
+
+        Measured before: refused, saying "Turning OpenID Connect off would
+        leave nobody able to open this page" while disabling auth.oidc in the
+        same process made directory()['in_force'] == 'ldap'. Both directions
+        refused, both rows left enabled, two "settings refused" rows.
+        """
+        self.app.store.settings.set("auth.oidc", {
+            "client_id": "wdash", "enabled": True,
+            "discovery_url": "https://idp/.well-known/openid-configuration"})
+        self.app.store.users.set_disabled("owner", True)
+        self.arrive("oidc")
+
+        page = self.client.post("/admin/auth", data=OIDC_FORM,
+                                follow_redirects=True).get_data(as_text=True)
+        self.assertNotIn("nobody able to open this page", page)
+        self.assertIs(self.app.store.settings.get("auth.oidc")["enabled"],
+                      False)
+        self.assertIn("LDAP is now the directory this installation signs "
+                      "people in through", page)
+        self.assertNotIn("OIDC settings refused",
+                         [row["action"] for row in
+                          self.app.store.audit.recent()])
+
+    def test_a_handover_to_a_directory_that_cannot_be_used_is_refused(self):
+        """The other half: the one that would take over is enabled but
+        half-filled, so nobody arrives through it either. Still refused —
+        and the sentence says that, rather than the one for an installation
+        whose last door is closing."""
+        self.app.store.settings.set("auth.ldap", {
+            "server": "", "base_dn": "dc=x", "enabled": True})
+        self.app.store.settings.set("auth.oidc", {
+            "client_id": "wdash", "enabled": True,
+            "discovery_url": "https://idp/.well-known/openid-configuration"})
+        self.app.store.users.set_disabled("owner", True)
+        self.arrive("oidc")
+
+        page = self.client.post("/admin/auth", data=OIDC_FORM,
+                                follow_redirects=True).get_data(as_text=True)
+        self.assertIn("hand this installation to LDAP", page)
+        self.assertIn("one of them is blank", page)
+        self.assertIs(self.app.store.settings.get("auth.oidc")["enabled"],
+                      True)
 
     def test_the_directory_that_is_not_in_force_is_never_guarded(self):
         """Only the directory actually signing people in can take anybody's

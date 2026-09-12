@@ -15,6 +15,7 @@ database — which is why `wdash.store.recover` exists as well.
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -28,6 +29,13 @@ def role(name, *permissions, groups=()):
     return {"name": name, "permissions": list(permissions),
             "groups": list(groups)}
 
+
+#: What an OIDC provider configured the old way — in the environment, with no
+#: settings row at all — looks like to the recovery tool.
+ENVIRONMENT_OIDC = {
+    "OIDC_CLIENT_ID": "env-client",
+    "OIDC_DISCOVERY_URL": "https://idp/.well-known/openid-configuration",
+}
 
 ADMIN = role("admin", "system:admin", "logs:read")
 CO_ADMIN = role("co-admin", "system:admin")
@@ -311,6 +319,31 @@ class DirectoryOffTest(unittest.TestCase):
             "oidc", self.arrived("oidc"), self.ROLES,
             [account(disabled=True)]))
 
+    def test_the_other_directory_taking_over_is_a_switch_not_a_lockout(self):
+        """Both stored and enabled, no enabled local administrator, and she
+        arrived through the one in force. Turning it off hands the
+        installation to the other one on the same save — that is the switch,
+        and on a conflicted installation it is the only in-page direction
+        there is, because enabling the other one is refused by the
+        one-directory rule. Measured before this: refused, in a sentence that
+        said nobody would be able to open this page."""
+        self.assertIsNone(refuses_directory_off(
+            "oidc", self.arrived("oidc"), self.ROLES, [account(disabled=True)],
+            {"name": "ldap", "unusable": None}))
+
+    def test_a_takeover_that_cannot_be_used_is_still_a_lockout(self):
+        """The other half of the same question: a directory that takes over
+        and does not work leaves the same nobody, so the rule still refuses —
+        but it says what is actually wrong rather than reusing the sentence
+        for a case this is not."""
+        refusal = refuses_directory_off(
+            "oidc", self.arrived("oidc"), self.ROLES, [account(disabled=True)],
+            {"name": "ldap", "unusable": "a server and a base DN are both "
+                                         "required and one of them is blank"})
+        self.assertIsNotNone(refusal)
+        self.assertIn("hand this installation to LDAP", refusal)
+        self.assertIn("one of them is blank", refusal)
+
     def test_a_session_that_does_not_say_is_refused_without_claiming(self):
         """Written before the provider was recorded. Refuse conservatively,
         but do not tell her she used a door she may not have used."""
@@ -481,6 +514,83 @@ class RecoveryToolTest(unittest.TestCase):
         self.assertIn("No LDAP settings are stored", output)
         self.assertIsNone(self.store.settings.get("auth.oidc"),
                           "a refusal must not have written the other flag")
+
+    def test_a_directory_that_cannot_be_used_is_not_put_in_force(self):
+        """The guard asked whether a settings ROW existed, not whether the
+        directory worked. Measured on a half-typed OIDC card beside a working
+        LDAP: rc 0, "OpenID Connect is now the directory in force.", the
+        blank card enabled, LDAP disabled — and oidc_settings() and
+        ldap_settings() both None, so every directory user was locked out by
+        the command documented as the way back in."""
+        self.store.settings.set("auth.ldap", {"enabled": True,
+                                              "server": "ldap://x",
+                                              "base_dn": "dc=x"})
+        self.store.settings.set("auth.oidc", {"client_id": "half-typed",
+                                              "discovery_url": "",
+                                              "enabled": False})
+        code, output = self.run_tool("--use-directory", "oidc")
+        self.assertEqual(code, 1)
+        self.assertIn("cannot be used as it stands", output)
+        self.assertIn("discovery URL", output, "it must name what is missing")
+        self.assertTrue(self.store.settings.get("auth.ldap")["enabled"],
+                        "the directory that worked was turned off anyway")
+        self.assertIs(self.store.settings.get("auth.oidc")["enabled"], False)
+
+    def test_a_half_typed_card_is_read_as_though_it_were_switched_on(self):
+        """The same question of the other directory, and the reason it has to
+        be asked of a row that is currently OFF: a row saying `enabled: false`
+        is not a complaint about its settings, so silence there is what let
+        the tool enable a card nobody could sign in through."""
+        with mock.patch.dict(os.environ, ENVIRONMENT_OIDC):
+            self.store.settings.set("auth.ldap", {"server": "",
+                                                  "base_dn": "dc=x",
+                                                  "enabled": False})
+            code, output = self.run_tool("--use-directory", "ldap")
+            self.assertEqual(code, 1)
+            self.assertIn("cannot be used as it stands", output)
+            self.assertIn("server and a base DN", output)
+            self.assertIs(self.store.settings.get("auth.ldap")["enabled"],
+                          False)
+            self.assertIsNone(self.store.settings.get("auth.oidc"),
+                              "a refusal must not have written the other flag")
+
+    def test_a_directory_that_was_never_configured_gets_no_row(self):
+        """It wrote `auth.ldap = {"enabled": False}` on an installation that
+        only ever had OIDC. That row is not a configuration — nothing was
+        typed into it and there is no environment LDAP for it to suppress —
+        but it then answered the tool's own "is it configured" guard, and
+        the next `--use-directory ldap` was accepted."""
+        with mock.patch.dict(os.environ, ENVIRONMENT_OIDC):
+            code, output = self.run_tool("--use-directory", "oidc")
+            self.assertEqual(code, 0, output)
+            self.assertIsNone(self.store.settings.get("auth.ldap"))
+
+            code, output = self.run_tool("--use-directory", "ldap")
+            self.assertEqual(code, 1)
+            self.assertIn("No LDAP settings are stored", output)
+
+    def test_the_row_that_suppresses_an_environment_provider_is_undone(self):
+        """A row holding nothing but `enabled: False` is an off-switch, not a
+        directory. Choosing OIDC again has to remove it, or the tool is
+        one-way: the row it writes to turn the environment's provider off is
+        the same row that would then be enabled, blank, as the directory in
+        force."""
+        self.store.settings.set("auth.ldap", {"enabled": True,
+                                              "server": "ldap://x",
+                                              "base_dn": "dc=x"})
+        with mock.patch.dict(os.environ, ENVIRONMENT_OIDC):
+            code, output = self.run_tool("--use-directory", "ldap")
+            self.assertEqual(code, 0, output)
+            self.assertEqual(self.store.settings.get("auth.oidc"),
+                             {"enabled": False})
+
+            code, output = self.run_tool("--use-directory", "oidc")
+            self.assertEqual(code, 0, output)
+            self.assertIn("OpenID Connect is now the directory in force",
+                          output)
+            self.assertIsNone(self.store.settings.get("auth.oidc"),
+                              "that row is what suppressed the environment")
+            self.assertFalse(self.store.settings.get("auth.ldap")["enabled"])
 
     def test_status_says_which_directory_would_sign_people_in(self):
         self.store.settings.set("auth.ldap", {"enabled": True,

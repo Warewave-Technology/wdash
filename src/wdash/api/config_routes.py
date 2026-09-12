@@ -27,9 +27,11 @@ from flask import (
 )
 from flask_login import current_user, login_required
 
-from ..auth.providers import LABELS, directory, refuses_second_directory
+from ..auth.providers import (
+    LABELS, directory, refuses_second_directory, why_unusable,
+)
 from ..dashboard.invariants import (
-    _few, refuses_directory_off, refuses_mapping_save, refuses_role_delete,
+    FEW, few, refuses_directory_off, refuses_mapping_save, refuses_role_delete,
     refuses_role_save,
 )
 from .access import source_names
@@ -803,8 +805,18 @@ def save_auth():
     before = directory(current_app)
     refusal = refuses_second_directory(current_app, which, value["enabled"])
     if refusal is None and not value["enabled"] and before["in_force"] == which:
+        # Who the resolution hands the installation to on this very save. On
+        # an installation with both stored and enabled, that handover is the
+        # switch, and it is the ONLY in-page direction there is: enabling the
+        # other one is refused by the rule above. Read from the same
+        # resolution, so the refusal cannot claim a lockout the resolution
+        # does not say.
+        takes_over = ({"name": before["shadowed"],
+                       "unusable": why_unusable(current_app,
+                                                before["shadowed"])}
+                      if before["shadowed"] else None)
         refusal = refuses_directory_off(which, _actor(), store.roles.all(),
-                                        store.users.all())
+                                        store.users.all(), takes_over)
     if refusal:
         flash(refusal, "error")
         _audit(f"{label} settings refused", subject=f"auth:{which}",
@@ -844,11 +856,12 @@ def save_auth():
 
     # The resulting state, as for roles and mappings: which provider this
     # installation trusted, and from when, is what an investigation asks.
+    recorded = _recorded(inherited)
     _audit(f"{label} settings updated", subject=f"auth:{which}",
            state={**value, "secret_replaced": secret is not None,
                   "directory_in_force": after["in_force"],
                   "directory_was": before["in_force"],
-                  **({"inherited": inherited} if switched else {})})
+                  **({"inherited": recorded} if switched else {})})
     if (before["in_force"], before["shadowed"]) != (after["in_force"],
                                                     after["shadowed"]):
         # Audited where it CHANGES, not only where the process starts:
@@ -858,7 +871,7 @@ def save_auth():
         _audit("directory in force changed", subject="auth",
                state={"was": before["in_force"], "now": after["in_force"],
                       "shadowed": after["shadowed"], "reason": after["reason"],
-                      **({"inherited": inherited} if switched else {})})
+                      **({"inherited": recorded} if switched else {})})
 
     flash(f"{label} settings saved and in force now — no restart needed."
           + (" " + _switch_sentence(before["in_force"], after["in_force"],
@@ -904,6 +917,21 @@ def _inherited(store):
             "names": sorted(set(owners or ()) | set(mapped))}
 
 
+def _recorded(inherited):
+    """What the audit row keeps of a switch: the counts, and the same few
+    names the sentence showed.
+
+    The full list is a copy of somebody's directory. An installation with
+    thousands of directory-owned dashboards wrote all of them into one row on
+    one save, while the sentence beside it was showing five — the trail should
+    record what happened, not the directory it happened to.
+    """
+    if inherited is None:
+        return None
+    return {**inherited, "names": inherited["names"][:FEW],
+            "name_count": len(inherited["names"])}
+
+
 def _switch_sentence(was, now, inherited):
     """What this installation just handed to the other directory."""
     said = (f"{LABELS[now]} is now the directory this installation signs "
@@ -914,7 +942,7 @@ def _switch_sentence(was, now, inherited):
                  f"{_plural(inherited['dashboards'], 'dashboard')} and "
                  f"{_plural(inherited['mappings'], 'role mapping')} belong to "
                  f"names that are not local accounts "
-                 f"({_few(inherited['names'])}), along with any saved searches "
+                 f"({few(inherited['names'])}), along with any saved searches "
                  f"those names own — counted by nobody, because the database "
                  f"repository has no read-them-all method on purpose. Whoever "
                  f"signs in as one of those names through {LABELS[now]} gets "

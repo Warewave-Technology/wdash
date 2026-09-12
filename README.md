@@ -225,7 +225,10 @@ other one. An installation that already has both gets a warning in the log at
 startup, a `two directories configured` audit row, and a banner on
 `/admin/config`; a resolution that changes while WDash is running is audited
 as `directory in force changed`. Turning off the directory you arrived through
-is refused when no enabled local account can administer, and
+is refused when no enabled local account can administer and no other directory
+would take over — a handover to one that is configured and works is the switch
+itself, and on an installation with both it is the only direction the page
+has, since enabling the second one is refused. Where it does refuse,
 `python -m wdash.store.recover --use-directory <ldap|oidc|none>`,
 `--enable <username>` and `--grant-admin <username>` are the way back from
 outside the application.
@@ -410,7 +413,12 @@ refused before its password is checked, so granting it a role was a way back
 that could not be taken. `--use-directory <ldap|oidc|none>` writes the
 directories' enabled flags, for the one case the page cannot reach — an
 installation that had two directories enabled at once, where the losing one
-held every administrator.
+held every administrator. It refuses a directory that cannot be used as it
+stands, naming the field that is blank or the secret that cannot be
+decrypted, rather than putting it in force and turning off the one that
+worked; and a stored row holding nothing but `enabled: false` is read as the
+off-switch it is, not as a configuration, so choosing OIDC again restores a
+provider configured in the environment.
 
 ### Authorization is resolved per request
 
