@@ -354,6 +354,12 @@
             <td class="text-muted" style="font-size:.8rem">
               {{ account.email or '—' }}</td>
             <td>
+              {# The role, and ONLY the role. The enabled switch used to ride
+                 on this form as a checkbox, and an unticked checkbox is
+                 indistinguishable from an absent one on the wire — so a
+                 submission that never mentioned the switch disabled the
+                 account, silently, and now signs that person out on their
+                 next request. It has its own control beside Delete. #}
               <form method="POST" class="d-flex align-items-center gap-2"
                     action="{{ url_for('config.save_account', username=account.username) }}">
                 <select class="form-select form-select-sm" name="role"
@@ -363,14 +369,7 @@
                       {% if role.name == account.role %}selected{% endif %}>{{ role.name }}</option>
                   {% endfor %}
                 </select>
-                <div class="form-check form-switch mb-0">
-                  <input class="form-check-input" type="checkbox" name="enabled"
-                         id="enabled-{{ account.username }}"
-                         {% if not account.disabled %}checked{% endif %}>
-                  <label class="form-check-label small"
-                         for="enabled-{{ account.username }}">Enabled</label>
-                </div>
-                <button class="btn btn-sm btn-outline-primary">Save</button>
+                <button class="btn btn-sm btn-outline-primary">Save role</button>
               </form>
               {# The two can disagree, and the reader cannot see why. A local
                  account's own role is what the resolver reads FIRST — before
@@ -413,6 +412,20 @@
               {{ account.last_login_at.strftime('%Y-%m-%d %H:%M')
                  if account.last_login_at else 'never' }}</td>
             <td class="text-end text-nowrap">
+              {# Its own act, and it says which one it is. Disabling ends a
+                 session the person is using, which is a different kind of
+                 thing from moving them to another role. #}
+              {% if account.disabled %}
+              <form method="POST" class="d-inline"
+                    action="{{ url_for('config.enable_account', username=account.username) }}">
+                <button class="btn btn-sm btn-outline-primary">Enable</button>
+              </form>
+              {% else %}
+              <form method="POST" class="d-inline"
+                    action="{{ url_for('config.disable_account', username=account.username) }}">
+                <button class="btn btn-sm btn-outline-secondary">Disable</button>
+              </form>
+              {% endif %}
               <button class="btn btn-sm btn-outline-secondary reset-password"
                       data-username="{{ account.username }}"
                       data-action="{{ url_for('config.reset_account_password', username=account.username) }}"

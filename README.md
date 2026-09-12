@@ -380,6 +380,18 @@ A password is written and never rendered back — not on the page and not in the
 audit trail, which is exported from this same screen. Deleting an account takes
 the confirmation every other destructive control here takes.
 
+Each act has its own control, and that is a rule rather than a layout: the
+role has a Save, and enabling, disabling, resetting a password, resetting an
+authenticator and deleting are each their own button and their own route. The
+enabled switch used to be a checkbox on the role form, read as "ticked or
+not" — and an unticked checkbox is indistinguishable from an absent one on the
+wire, so a submission that never mentioned the switch disabled the account,
+flashed "saved", and signed that person out on their next request. A route
+that cannot change the enabled state cannot be made to by any request at all,
+which a hidden marker beside the checkbox would not have given. The flash and
+the audit row name which act it was — `account role changed`, `account
+disabled`, `account enabled` — rather than all reading "saved".
+
 The installation refuses to be left without a local account that is enabled and
 can administer, and an administrator cannot do it to themselves by demoting,
 disabling or deleting their own account. Both are refused with a sentence

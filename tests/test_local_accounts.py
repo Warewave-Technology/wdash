@@ -66,11 +66,14 @@ class AccountPageTestCase(unittest.TestCase):
             "confirm": password if confirm is None else confirm},
             follow_redirects=True)
 
-    def save(self, username, role, enabled=True):
-        form = {"role": role}
-        if enabled:
-            form["enabled"] = "on"
-        return self.client.post(f"/admin/accounts/{username}", data=form,
+    def save(self, username, role):
+        """The role, which is all this form carries."""
+        return self.client.post(f"/admin/accounts/{username}",
+                                data={"role": role}, follow_redirects=True)
+
+    def switch(self, username, on):
+        word = "enable" if on else "disable"
+        return self.client.post(f"/admin/accounts/{username}/{word}",
                                 follow_redirects=True)
 
     def second_administrator(self, username="spare"):
@@ -105,10 +108,10 @@ class AccessTest(AccountPageTestCase):
         attempts = (
             ("/admin/accounts", {"username": "intruder", "role": "admin",
                                  "password": OTHER, "confirm": OTHER}),
-            # No `enabled`, so this save would disable the account.
-            ("/admin/accounts/spare", {"role": "admin"}),
+            ("/admin/accounts/spare", {"role": "viewer"}),
             ("/admin/accounts/spare/password", {"password": fresh,
                                                 "confirm": fresh}),
+            ("/admin/accounts/spare/disable", {}),
             ("/admin/accounts/spare/delete", {}),
         )
         for path, form in attempts:
@@ -119,9 +122,17 @@ class AccessTest(AccountPageTestCase):
                           "the account was created")
         spare = self.app.store.users.by_username("spare")
         self.assertIsNotNone(spare, "the account was deleted")
-        self.assertFalse(spare["disabled"], "the save went through")
+        self.assertEqual(spare["role"], "admin", "the role was changed")
+        self.assertFalse(spare["disabled"], "the account was disabled")
         self.assertIsNone(self.app.store.users.verify("spare", fresh),
                           "the password was reset")
+
+    def test_enabling_needs_it_too(self):
+        self.create(username="bob", role="viewer")
+        self.switch("bob", on=False)
+        self.demote()
+        self.client.post("/admin/accounts/bob/enable")
+        self.assertTrue(self.app.store.users.by_username("bob")["disabled"])
 
     def test_signing_out_is_not_a_way_round_it(self):
         self.client.get("/auth/logout")
@@ -237,27 +248,22 @@ class SaveTest(AccountPageTestCase):
             email=None, username="bob", groups=[], explicit="admin")
             .get("permissions"))
 
-    def test_disabling_stops_the_account_signing_in(self):
-        self.create(username="bob", role="viewer")
-        self.save("bob", "viewer", enabled=False)
-        self.assertTrue(self.app.store.users.by_username("bob")["disabled"])
-        self.assertIsNone(self.app.store.users.verify("bob", OTHER))
-
-    def test_re_enabling_lets_it_sign_in_again(self):
-        self.create(username="bob", role="viewer")
-        self.save("bob", "viewer", enabled=False)
-        self.save("bob", "viewer", enabled=True)
-        self.assertIsNotNone(self.app.store.users.verify("bob", OTHER))
-
     def test_every_save_is_audited_with_what_it_left_behind(self):
         self.create(username="bob", role="viewer")
-        self.save("bob", "admin", enabled=False)
+        self.save("bob", "admin")
         row = self.app.store.audit.recent(limit=1)[0]
-        self.assertEqual(row["action"], "account saved")
+        self.assertEqual(row["action"], "account role changed")
         self.assertEqual(row["subject"], "user:bob")
         self.assertEqual(row["state"]["role"], "admin")
-        self.assertTrue(row["state"]["disabled"])
+        self.assertEqual(row["state"]["previous_role"], "viewer")
         self.assertNotIn("password_hash", row["state"])
+
+    def test_the_flash_names_the_role_rather_than_saying_saved(self):
+        """Three controls on this row used to end in the same word. What a
+        save did is the thing somebody reading the flash is checking."""
+        self.create(username="bob", role="viewer")
+        response = self.save("bob", "admin")
+        self.assertIn(b"now holds &#39;admin&#39;", response.data)
 
     def test_a_role_that_does_not_exist_is_refused(self):
         self.create(username="bob", role="viewer")
@@ -267,6 +273,105 @@ class SaveTest(AccountPageTestCase):
 
     def test_an_account_that_is_gone_is_said_rather_than_500(self):
         response = self.save("ghost", "viewer")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"no local account called", response.data)
+
+
+class SwitchTest(AccountPageTestCase):
+    """Enabling and disabling, which is its own act and not a field on a save.
+
+    It rode on the role form as a checkbox, read as `not
+    request.form.get("enabled")` — and an unticked checkbox and an absent one
+    are the same thing on the wire, so a submission that never MENTIONED the
+    switch disabled the account. The template always rendered the box, so the
+    page was safe and every other caller was not; and since a disabled
+    account's open session now ends at once, the cost of the mistake is
+    somebody signed out by a save that said "saved".
+
+    The switch therefore moved out of that form rather than being propped up
+    with a hidden marker beside the box: a route that cannot change the
+    enabled state cannot be made to by any request at all.
+    """
+
+    def test_a_save_that_does_not_mention_the_switch_leaves_it_alone(self):
+        """The defect, as a test. It is the same shape as the dashboards'
+        `source` — present-and-empty and absent are DIFFERENT — and here the
+        consequence is a lockout rather than a repointed query."""
+        self.create(username="bob", role="viewer")
+        self.client.post("/admin/accounts/bob", data={"role": "admin"},
+                         follow_redirects=True)
+        account = self.app.store.users.by_username("bob")
+        self.assertEqual(account["role"], "admin", "the role did not change")
+        self.assertFalse(account["disabled"],
+                         "a form that never named the switch threw it")
+        self.assertIsNotNone(self.app.store.users.verify("bob", OTHER))
+
+    def test_nor_does_one_that_carries_a_stray_enabled_field(self):
+        """There is no reading of this form that can switch an account off:
+        the route does not have the capability at all."""
+        self.create(username="bob", role="viewer")
+        self.client.post("/admin/accounts/bob",
+                         data={"role": "viewer", "enabled": ""},
+                         follow_redirects=True)
+        self.assertFalse(self.app.store.users.by_username("bob")["disabled"])
+
+    def test_disabling_stops_the_account_signing_in(self):
+        self.create(username="bob", role="viewer")
+        self.switch("bob", on=False)
+        self.assertTrue(self.app.store.users.by_username("bob")["disabled"])
+        self.assertIsNone(self.app.store.users.verify("bob", OTHER))
+
+    def test_re_enabling_lets_it_sign_in_again(self):
+        self.create(username="bob", role="viewer")
+        self.switch("bob", on=False)
+        self.switch("bob", on=True)
+        self.assertIsNotNone(self.app.store.users.verify("bob", OTHER))
+
+    def test_the_flash_says_the_switch_was_thrown_and_what_it_costs(self):
+        """"Saved" said nothing about an account having just been switched
+        off, and the person it is about is signed out on their next request."""
+        self.create(username="bob", role="viewer")
+        response = self.switch("bob", on=False)
+        self.assertIn(b"is disabled", response.data)
+        self.assertIn(b"ends on its next request", response.data)
+
+        response = self.switch("bob", on=True)
+        self.assertIn(b"is enabled", response.data)
+
+    def test_the_audit_action_names_the_switch(self):
+        """Not "saved" for all three of them: the trail is read by somebody
+        asking what happened, and the action is the first thing they see."""
+        self.create(username="bob", role="viewer")
+        self.switch("bob", on=False)
+        row = self.app.store.audit.recent(limit=1)[0]
+        self.assertEqual(row["action"], "account disabled")
+        self.assertEqual(row["subject"], "user:bob")
+        self.assertTrue(row["state"]["disabled"])
+
+        self.switch("bob", on=True)
+        row = self.app.store.audit.recent(limit=1)[0]
+        self.assertEqual(row["action"], "account enabled")
+        self.assertFalse(row["state"]["disabled"])
+
+    def test_throwing_a_switch_that_is_already_there_changes_nothing(self):
+        self.create(username="bob", role="viewer")
+        response = self.switch("bob", on=True)
+        self.assertIn(b"already enabled", response.data)
+        self.assertNotIn("account enabled", self.audit_actions())
+
+    def test_the_row_offers_the_switch_the_account_is_not_at(self):
+        self.create(username="bob", role="viewer")
+        page = self.client.get("/admin/config").data.decode()
+        self.assertIn('action="/admin/accounts/bob/disable"', page)
+        self.assertNotIn('action="/admin/accounts/bob/enable"', page)
+
+        self.switch("bob", on=False)
+        page = self.client.get("/admin/config").data.decode()
+        self.assertIn('action="/admin/accounts/bob/enable"', page)
+        self.assertNotIn('action="/admin/accounts/bob/disable"', page)
+
+    def test_an_account_that_is_gone_is_said_rather_than_500(self):
+        response = self.switch("ghost", on=False)
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"no local account called", response.data)
 
@@ -303,6 +408,18 @@ class PasswordTest(AccountPageTestCase):
         self.client.post("/admin/accounts/bob/password", data={
             "password": "a-brand-new-long-password",
             "confirm": "a-different-long-password"}, follow_redirects=True)
+        self.assertIsNotNone(self.app.store.users.verify("bob", OTHER))
+
+    def test_a_post_with_no_password_at_all_sets_none(self):
+        """The other form this feature added, asked the same question: an
+        absent field must not be read as a deliberate empty one."""
+        self.create(username="bob", role="viewer")
+        before = self.app.store.users.by_username("bob")["password_hash"]
+        response = self.client.post("/admin/accounts/bob/password", data={},
+                                    follow_redirects=True)
+        self.assertIn(b"12 characters", response.data)
+        self.assertEqual(self.app.store.users.by_username("bob")["password_hash"],
+                         before)
         self.assertIsNotNone(self.app.store.users.verify("bob", OTHER))
 
     def test_resetting_your_own_password_is_allowed(self):
@@ -365,7 +482,7 @@ class OpenSessionTest(AccountPageTestCase):
         """Half a switch otherwise, and it is the half somebody reaches for
         when an account is being abused."""
         client = self.bob()
-        self.save("bob", "admin", enabled=False)
+        self.switch("bob", on=False)
         response = client.get("/logs")
         self.assertEqual(response.status_code, 302)
         self.assertIn("/auth/login", response.headers["Location"])
@@ -413,8 +530,10 @@ class InvariantTest(AccountPageTestCase):
         self.assertIn(b"administering role first", response.data)
 
     def test_the_last_administrator_cannot_be_disabled(self):
-        self.save("owner", "admin", enabled=False)
+        response = self.switch("owner", on=False)
+        self.assertIn(b"only local account", response.data)
         self.assertFalse(self.app.store.users.by_username("owner")["disabled"])
+        self.assertIn("account disable refused", self.audit_actions())
 
     def test_the_last_administrator_cannot_be_deleted(self):
         response = self.client.post("/admin/accounts/owner/delete",
@@ -432,7 +551,8 @@ class InvariantTest(AccountPageTestCase):
 
     def test_you_cannot_disable_yourself(self):
         self.second_administrator()
-        self.save("owner", "admin", enabled=False)
+        response = self.switch("owner", on=False)
+        self.assertIn(b"the account you are signed in with", response.data)
         self.assertFalse(self.app.store.users.by_username("owner")["disabled"])
 
     def test_you_cannot_delete_yourself(self):

@@ -1444,15 +1444,23 @@ def save_mappings():
 # every change including the refused ones.
 # ---------------------------------------------------------------------------
 
-def _account_state(account, **extra):
+def _account_state(account, was=None, **extra):
     """One account as an audit row records it.
 
     The hash is dropped as deliberately as the password is: an audit trail
     that carries password hashes is a cracking target with a retention policy,
     and the trail is exported from this same screen.
+
+    `was` is the value the change moved away from. The trail stores the
+    resulting state rather than a diff, which answers "what was it then"
+    without replaying history — and leaves "what did this row CHANGE"
+    needing the row before it. For a role that is one field, and one field is
+    worth carrying so that the answer is in the row somebody is reading.
     """
     state = {key: value for key, value in (account or {}).items()
              if key not in ("password_hash", "totp_secret")}
+    if was is not None:
+        state["previous_role"] = was
     state.update(extra)
     return state
 
@@ -1514,7 +1522,26 @@ def create_account():
 @config_bp.route("/accounts/<username>", methods=["POST"])
 @login_required
 def save_account(username):
-    """The role and the enabled switch, from one row's form."""
+    """The account's role, and nothing else.
+
+    It used to carry the enabled switch too, read as
+    `not request.form.get("enabled")` — so a submission that did not MENTION
+    the switch disabled the account. Measured: a POST of `role=admin` alone
+    left the account disabled, flashed "Account 'reader' saved." and signed
+    that person out on their very next request, because a disabled account's
+    open session now ends at once.
+
+    An unticked checkbox and an absent one are the same thing on the wire, so
+    there is no reading of this form that can tell them apart. The switch
+    therefore moved OUT of it, to `enable_account` and `disable_account`
+    below, rather than being propped up with a hidden marker beside the box:
+    a marker fixes this form and leaves the trap one level down for the next
+    one to fall into, while a route that cannot change the enabled state
+    cannot be made to by any request at all. It is also the shape this page
+    already uses for the acts whose consequences differ from an edit — the
+    password and the delete each have their own route — and switching an
+    account off is now one of those: it ends a session somebody is using.
+    """
     denied = _require_admin()
     if denied:
         return denied
@@ -1529,26 +1556,87 @@ def save_account(username):
     if role not in {definition["name"] for definition in store.roles.all()}:
         flash(f"There is no role called '{role}'. Nothing was saved.", "error")
         return _back()
-    disabled = not request.form.get("enabled")
 
+    # `disabled` is not passed, which is the invariant's own word for "leave
+    # it alone" — the same question a password reset asks.
     refusal = refuses_account_change(
         store.users.all(), store.roles.all(), account["username"], _actor(),
-        role=role, disabled=disabled,
+        role=role,
         user_roles=store.settings.get("rbac.user_roles", {}) or {},
         default_role=store.settings.get("rbac.default_role", "viewer"))
     if refusal:
         return _refused("account save", account["username"], refusal)
 
     store.users.set_role(account["username"], role)
-    store.users.set_disabled(account["username"], disabled)
     # The role a local account holds is what the resolver reads first, so a
     # change here has to reach the resolver the way a role edit does.
     store.rbac.invalidate()
     saved = store.users.by_username(account["username"])
-    _audit("account saved", subject=f"user:{account['username']}",
-           state=_account_state(saved))
-    flash(f"Account '{account['username']}' saved.", "success")
+    _audit("account role changed", subject=f"user:{account['username']}",
+           state=_account_state(saved, was=account["role"]))
+    # Named, not "saved": what a save did is the thing somebody reading the
+    # flash is checking, and this page now has three ways to change an
+    # account that all used to end in the same word.
+    flash(f"Account '{account['username']}' now holds '{role}'.", "success")
     return _back()
+
+
+def _switch(username, disabled):
+    """Enable or disable one account. The two routes below differ by a flag.
+
+    Its own act, not a field on the save above. Disabling ends that person's
+    open session on their next request, which is a different kind of thing
+    from moving them to another role, and the flash and the audit action say
+    which of the two happened rather than both reading "saved".
+    """
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    account = store.users.by_username(username)
+    if account is None:
+        flash(f"There is no local account called '{username}'.", "warning")
+        return _back()
+
+    word = "disable" if disabled else "enable"
+    if bool(account["disabled"]) == disabled:
+        flash(f"Account '{account['username']}' is already "
+              f"{'disabled' if disabled else 'enabled'}.", "info")
+        return _back()
+
+    refusal = refuses_account_change(
+        store.users.all(), store.roles.all(), account["username"], _actor(),
+        disabled=disabled,
+        user_roles=store.settings.get("rbac.user_roles", {}) or {},
+        default_role=store.settings.get("rbac.default_role", "viewer"))
+    if refusal:
+        return _refused(f"account {word}", account["username"], refusal)
+
+    store.users.set_disabled(account["username"], disabled)
+    store.rbac.invalidate()
+    _audit(f"account {word}d", subject=f"user:{account['username']}",
+           state=_account_state(store.users.by_username(account["username"])))
+    if disabled:
+        flash(f"Account '{account['username']}' is disabled. It cannot sign "
+              f"in, and a session it already had open ends on its next "
+              f"request.", "warning")
+    else:
+        flash(f"Account '{account['username']}' is enabled. It can sign in "
+              f"again, with its password and its authenticator.", "success")
+    return _back()
+
+
+@config_bp.route("/accounts/<username>/disable", methods=["POST"])
+@login_required
+def disable_account(username):
+    return _switch(username, disabled=True)
+
+
+@config_bp.route("/accounts/<username>/enable", methods=["POST"])
+@login_required
+def enable_account(username):
+    return _switch(username, disabled=False)
 
 
 @config_bp.route("/accounts/<username>/password", methods=["POST"])
