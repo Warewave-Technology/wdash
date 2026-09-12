@@ -1724,6 +1724,166 @@ async function main() {
         w.setInterval = real;
     }
 
+    // ---- one number, and what the alerting did ---------------------------
+    //
+    // A number is the panel with the least room to explain itself, and the
+    // one a reader trusts most, so every way it can be wrong has to LOOK
+    // wrong: a count nobody could make must not print 0, a value the
+    // aggregation could not reach must not print anything, and a measured
+    // zero must print zero rather than "No data in this window", which is a
+    // claim about the window and not about the value.
+
+    const NUMBER = {
+        id: 'n1', title: 'Checkout errors', type: 'count', width: 3,
+        field: 'severity', value: 'ERROR',
+    };
+    const QUESTION = 'records where severity is “ERROR”, in this window '
+                   + 'and this board’s query';
+
+    const number = await loadWith({
+        panels: [{ ...NUMBER, number: 1234, question: QUESTION }],
+    });
+    check('a single number draws the number it counted', () => {
+        const drawn = number.document.querySelector('[data-number]');
+        assert(drawn && /1,234/.test(drawn.textContent),
+               `the card read "${drawn && drawn.textContent}"`);
+    });
+    check('and says in words what it counted', () => {
+        const text = number.document.querySelector('.chart-container').textContent;
+        assert(/severity/.test(text) && /ERROR/.test(text),
+               `the card read "${text}"`);
+    });
+    check('a number panel stops spinning', () =>
+        assert(spinning(number) === 0, `${spinning(number)} spinner(s) left`));
+    check('the number hint does not promise a filter', () => {
+        const hint = number.document.querySelector('.panel-hint').textContent;
+        assert(!/filter by it/i.test(hint), `the hint reads "${hint}"`);
+        assert(/counted over this window/.test(hint), `the hint reads "${hint}"`);
+    });
+
+    const zero = await loadWith({
+        panels: [{ ...NUMBER, value: 'FATAL', number: 0,
+                   question: 'records where severity is “FATAL”, in this '
+                           + 'window and this board’s query' }],
+    });
+    check('a measured zero is drawn as zero, not as "no data"', () => {
+        const drawn = zero.document.querySelector('[data-number]');
+        assert(drawn && drawn.textContent.trim() === '0',
+               `the card read "${drawn && drawn.textContent}"`);
+        const empty = zero.document.querySelector('.panel-empty');
+        assert(empty.classList.contains('d-none'),
+               'the empty-window message was shown over a real answer');
+    });
+
+    const uncountable = await loadWith({
+        panels: [{ ...NUMBER, field: 'host', value: 'web-059',
+                   question: 'records where host is “web-059”',
+                   error: "'web-059' is not among the 50 commonest values of "
+                        + 'host in this window. This is not a count of zero.' }],
+    });
+    check('a value the aggregation could not reach prints the reason', () => {
+        const text = uncountable.document
+            .querySelector('.panel-empty small').textContent;
+        assert(/not among the 50 commonest/.test(text), `it said "${text}"`);
+    });
+    check('and draws no number at all beside it', () => {
+        const card = uncountable.document.querySelector('[data-panel-id="n1"]');
+        assert(!card.querySelector('[data-number]'), 'a number was drawn');
+        // `value` is the author's string. Read as the answer it would be
+        // `Number("web-059")`, and the card would read NaN.
+        assert(!/NaN/.test(card.textContent), `the card read "${card.textContent}"`);
+    });
+
+    const unfilled = await loadWith({ panels: [{ ...NUMBER }] });
+    check('a number nobody filled says so rather than sitting blank', () => {
+        const text = unfilled.document
+            .querySelector('.panel-empty small').textContent;
+        assert(/could not be counted/.test(text), `it said "${text}"`);
+    });
+
+    const ALERTS = { id: 'a1', title: 'What fired', type: 'alerts', width: 8 };
+    const alerts = await loadWith({
+        panels: [{
+            ...ALERTS, total: 4,
+            rows: [
+                { at: '2026-09-12T11:25:42Z', rule: 'Payments API',
+                  subject: 'Checkout probe', transition: 'firing',
+                  delivered: false,
+                  delivery_error: 'webhook refused: status 500' },
+                { at: '2026-09-12T11:20:42Z', rule: 'Payments API',
+                  subject: 'Checkout probe', transition: 'resolved',
+                  delivered: true, delivery_error: null },
+            ],
+        }],
+    });
+    check('an alerts panel draws a row per alert', () => {
+        const rows = alerts.document
+            .querySelectorAll('[data-panel-id="a1"] tbody tr');
+        assert(rows.length === 2, `${rows.length} row(s) drawn`);
+    });
+    check('an alert nobody received says so, with what went wrong', () => {
+        const cell = alerts.document.querySelector('[data-undelivered]');
+        assert(cell && /status 500/.test(cell.textContent),
+               `the row said "${cell && cell.textContent}"`);
+    });
+    check('the panel says how many fired beyond the rows it shows', () => {
+        const text = alerts.document
+            .querySelector('[data-panel-id="a1"] .chart-container').textContent;
+        assert(/Showing 2 of 4/.test(text), `the caption read "${text}"`);
+    });
+
+    const hostileAlert = await loadWith({
+        panels: [{
+            ...ALERTS, total: 1,
+            rows: [{ at: null, rule: '<img src=x onerror=alert(1)>',
+                     subject: '<script>bad()</script>', transition: 'firing',
+                     delivered: false, delivery_error: '<script>no()</script>' }],
+        }],
+    });
+    check('an alert row is text, not markup', () => {
+        assert(!hostileAlert.document.querySelector('#panelGrid img'),
+               'a rule name planted an img tag');
+        assert(!hostileAlert.document.querySelector('#panelGrid script'),
+               'a delivery error planted a script tag');
+    });
+
+    const quietAlerts = await loadWith({
+        panels: [{ ...ALERTS, total: 0, rows: [] }],
+    });
+    check('a window with no alert in it says that, and nothing more', () => {
+        const text = quietAlerts.document
+            .querySelector('.panel-empty small').textContent;
+        assert(/No alert fired in this window/.test(text),
+               `message was "${text}"`);
+    });
+
+    const undelivered = await loadWith({
+        panels: [{ id: 'a2', title: 'Nobody received', width: 4,
+                   type: 'alerts_undelivered', number: 3, fired: 12,
+                   question: 'of the 12 alerts in this window reached nobody' }],
+    });
+    check('the undelivered panel draws its number and what it is out of', () => {
+        const text = undelivered.document
+            .querySelector('.chart-container').textContent;
+        assert(/3/.test(text) && /of the 12 alerts/.test(text),
+               `the card read "${text}"`);
+    });
+
+    const unconfigured = await loadWith({
+        panels: [{ id: 'a2', title: 'Nobody received', width: 4,
+                   type: 'alerts_undelivered',
+                   error: 'No alert rule is configured, so nothing can have '
+                        + 'fired. That is a gap in what is set up, not a '
+                        + 'quiet window.' }],
+    });
+    check('no alert rule at all is a sentence, never a zero', () => {
+        const card = unconfigured.document.querySelector('[data-panel-id="a2"]');
+        assert(/No alert rule is configured/.test(card.textContent),
+               `the card read "${card.textContent}"`);
+        assert(!card.querySelector('[data-number]'),
+               'it drew a number for a question nobody could ask');
+    });
+
     console.log('');
     if (failures.length) {
         console.log(`${failures.length} dashboard check(s) failed\n`);

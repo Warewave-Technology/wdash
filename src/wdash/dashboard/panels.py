@@ -23,9 +23,10 @@ import uuid
 #: Panel kinds and the fields each one needs.
 #:
 #: `signal` records which source answers it, and it is now read rather than
-#: decorative: three signals are in this table — logs, traces, monitors — and
-#: a panel kind is filled, classified and kept off the log source's fate by
-#: the row alone, not by a special case threaded through the renderer.
+#: decorative: four signals are in this table — logs, traces, monitors,
+#: alerts — and a panel kind is filled, classified and kept off the log
+#: source's fate by the row alone, not by a special case threaded through the
+#: renderer.
 #: `needs_logs` and `dashboard_routes.FILLED_SIGNALS` are the two readers, and
 #: a row whose signal nothing fills fails the suite rather than a card.
 PANEL_TYPES = {
@@ -47,6 +48,13 @@ PANEL_TYPES = {
         "description": "The newest records the dashboard's query matches — "
                        "timestamp, severity, service, message.",
         "fields": ("size",),
+    },
+    "count": {
+        "label": "A single number",
+        "signal": "logs",
+        "description": "How many records in this window have one value of "
+                       "one field — one number, under a label of your own.",
+        "fields": ("field", "value"),
     },
     "trace_services": {
         "label": "Services by traffic",
@@ -73,6 +81,22 @@ PANEL_TYPES = {
         "signal": "monitors",
         "description": "What the checks saw on the wire, and how long each "
                        "certificate is still valid.",
+        "fields": (),
+    },
+    "alerts": {
+        "label": "Alerts that fired",
+        "signal": "alerts",
+        "description": "What WDash's own alerting said in this window — the "
+                       "rule, what it was about, and whether it was "
+                       "delivered.",
+        "fields": ("size",),
+    },
+    "alerts_undelivered": {
+        "label": "Alerts nobody received",
+        "signal": "alerts",
+        "description": "How many of this window's alerts never reached a "
+                       "channel. An alert nobody received reads as nothing "
+                       "being wrong.",
         "fields": (),
     },
 }
@@ -148,6 +172,12 @@ MAX_RECORDS = 25
 #: Rows a trace list panel shows unless it says otherwise. "The five slowest"
 #: is the question people ask; twenty-five of them is a list nobody reads.
 DEFAULT_TRACE_ROWS = 5
+
+#: Rows an alerts panel lists. Same ceiling as records and for the same
+#: reason: a row is a rule name, a subject and a delivery error, not two
+#: numbers, and a window with more alerts in it than this needs the Alerts
+#: page rather than a taller card.
+MAX_ALERT_ROWS = 25
 MIN_WIDTH = 3
 MAX_WIDTH = 12
 
@@ -323,6 +353,45 @@ def normalise(panel, panel_id=None):
         except (TypeError, ValueError):
             raise PanelError(f"'{title}': size must be a number.")
         out["size"] = max(1, min(MAX_RECORDS, size))
+
+    elif kind == "count":
+        # One number, and both halves of the question are required.
+        #
+        # A field, because the number has to come from an AGGREGATION: a
+        # search total is a floor on Loki (`counted=False`), and the batch's
+        # own `total` is whatever the largest aggregation in it summed to,
+        # which on a board of timeseries panels is Loki's overlapping
+        # `count_over_time` — measured against the lab over two Loki streams
+        # at 24h: 181, 199, 240, 309 and 565 at the five bucket sizes, over
+        # 170 records. A terms aggregation over one field answered 170 at
+        # every size, on all three backends.
+        #
+        # A value, because a terms aggregation is the only count available —
+        # no new aggregation type this round — and it counts VALUES. A panel
+        # that summed the whole terms list would be reporting "records whose
+        # service is one of the fifty commonest", under a label the author
+        # wrote, with no way to see the difference.
+        field = (panel.get("field") or "").strip()
+        if field not in AGGREGATABLE_FIELDS:
+            raise PanelError(
+                f"'{title}': cannot count by '{field}'. "
+                f"Available: {', '.join(AGGREGATABLE_FIELDS)}")
+        value = str(panel.get("value") or "").strip()
+        if not value:
+            raise PanelError(
+                f"'{title}': a single number counts one value of one field, "
+                f"so it needs the value to count — for example '{field}' is "
+                f"ERROR. Without one there is no question for the number to "
+                f"answer.")
+        out["field"] = field
+        out["value"] = value
+
+    elif kind == "alerts":
+        try:
+            size = int(panel.get("size", DEFAULT_SIZE))
+        except (TypeError, ValueError):
+            raise PanelError(f"'{title}': size must be a number.")
+        out["size"] = max(1, min(MAX_ALERT_ROWS, size))
 
     elif kind == "trace_list":
         service = (panel.get("service") or "").strip()

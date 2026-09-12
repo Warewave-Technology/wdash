@@ -36,7 +36,7 @@ from ..dashboard.thresholds import (
 )
 from ..dashboard.visibility import PRIVATE, VISIBILITIES, can_view, explain
 from ..dashboard.panels import (
-    AGGREGATABLE_FIELDS, MONITOR_VIEWS, PANEL_HEIGHTS, PanelError,
+    AGGREGATABLE_FIELDS, MAX_SIZE, MONITOR_VIEWS, PANEL_HEIGHTS, PanelError,
     check_group_by, default_panels, needs_logs, normalise_all, signal_of,
 )
 from ..hub.aggregation import AggregationResult
@@ -86,7 +86,11 @@ _HEATMAP_BARS = 24
 #: and it shares the log source's fate. A log-signal panel with no
 #: aggregation and no filler reads its empty result out of the batch, which
 #: is the same "No data in this window" the set above exists to prevent.
-FILLED_SIGNALS = frozenset({"logs", "traces", "monitors"})
+#:
+#: "alerts" is `_alert_panels`, off WDash's own store. Like traces and
+#: monitors it needs the window and the caller's scope and nothing else, so
+#: it is filled in an Elasticsearch outage too.
+FILLED_SIGNALS = frozenset({"logs", "traces", "monitors", "alerts"})
 
 
 def _logs(dashboard=None):
@@ -924,6 +928,125 @@ def _monitor_panels(panels, scope, window):
     return out
 
 
+#: Panel kinds WDash's own alert history answers.
+_ALERT_PANELS = ("alerts", "alerts_undelivered")
+
+
+def _alert_panels(panels, window, scope):
+    """Fill in the panels off WDash's own alert history.
+
+    A fourth source, and the cheapest one on the board: it is the store the
+    application is already sitting on, so these panels need no log, trace or
+    monitor backend and a deployment with none of them can still carry them.
+    At most four queries however many alert panels a board holds — the rule
+    names, the window's rows, how many fired and how many of those reached
+    nobody — and none at all if it holds none.
+
+    `monitors:read` is checked HERE, on the scope, at panel-fill time, for
+    the same two reasons `_monitor_panels` checks it: a shared dashboard must
+    not become a way to read alert history a role was never granted, and a
+    colleague who lacks the permission must still be able to read the rest of
+    the board, so it refuses THIS PANEL with a reason rather than widening
+    the dashboard's visibility rule. The permission is `monitors:read`
+    because that is the one the Alerts page itself asks for
+    (`alert_routes.history`) — a board that invented a second answer to "who
+    may see what fired" would be a second place to get it wrong.
+
+    The window is honoured in the STORE (`since`/`until`), not by filtering
+    rows here: "the last 100 alerts, of which these fell in the hour" is a
+    different and much more expensive question than "the alerts in this
+    hour", and it gets the row count wrong as soon as the window is quiet.
+
+    And a board with no alert RULE on it is told so rather than shown a zero.
+    "Nothing fired" and "nothing can fire" are the two readings of the same
+    empty answer, and the one that matters — alerting is not configured — is
+    the one a 0 hides.
+    """
+    wanted = [p for p in panels if p["type"] in _ALERT_PANELS]
+    if not wanted:
+        return {}
+
+    def refuse(reason, only=None):
+        return {p["id"]: {"error": reason} for p in (only or wanted)}
+
+    if not scope.has("monitors:read"):
+        return refuse("Alert history needs the monitors:read permission, "
+                      "which this role does not have — the same permission "
+                      "the Alerts page asks for. The rest of this dashboard "
+                      "is unaffected.")
+
+    store = getattr(current_app, "store", None)
+    if store is None:
+        return refuse("WDash's own store is not available, so what fired "
+                      "cannot be read. That is a gap in what can be read "
+                      "here, not a window in which nothing fired.")
+
+    try:
+        # Borrowed from the Alerts page unchanged, so a row reads "Payments
+        # API" rather than a pair of uuids.
+        rules = {rule["id"]: rule for rule in store.rules.all()}
+    except Exception as exc:
+        current_app.logger.warning(f"Alert panel failed: {exc}")
+        return refuse("Alert history could not be read.")
+
+    if not rules:
+        return refuse("No alert rule is configured, so nothing can have "
+                      "fired. That is a gap in what is set up, not a quiet "
+                      "window — configure a rule on the Alerts page and this "
+                      "panel starts answering.")
+
+    history = store.alert_history
+    listings = [p for p in wanted if p["type"] == "alerts"]
+    numbers = [p for p in wanted if p["type"] == "alerts_undelivered"]
+    try:
+        fired = history.count(since=window.start, until=window.end)
+        # One search for however many listing panels the board holds, at the
+        # largest of them, sliced per panel — the shape `_records_panels`
+        # already uses.
+        rows = (history.recent(limit=max(p["size"] for p in listings),
+                               since=window.start, until=window.end)
+                if listings else [])
+        undelivered = (history.count(undelivered_only=True,
+                                     since=window.start, until=window.end)
+                       if numbers else 0)
+    except Exception as exc:
+        current_app.logger.warning(f"Alert panel failed: {exc}")
+        return refuse("Alert history could not be read.")
+
+    def row(entry):
+        rule = rules.get(entry["rule_id"]) or {}
+        return {
+            "at": entry["at"].isoformat() if entry["at"] else None,
+            "rule": rule.get("name") or entry["rule_id"],
+            # The name it had when it fired, which is what the row is about:
+            # history is most often read about something since renamed or
+            # deleted.
+            "subject": entry.get("subject_label") or entry["subject"],
+            "transition": entry["transition"],
+            "delivered": bool(entry["delivered"]),
+            "delivery_error": entry.get("delivery_error"),
+        }
+
+    out = {}
+    for panel in listings:
+        out[panel["id"]] = {"rows": [row(e) for e in rows[:panel["size"]]],
+                            "total": fired}
+    for panel in numbers:
+        out[panel["id"]] = {
+            "number": undelivered,
+            # The number is meaningless without what it is out of, and the
+            # panel says which definition of "never delivered" it is using:
+            # the Alerts page's own, the last word on each rule and subject,
+            # so the board and the page cannot report two different numbers
+            # for one question.
+            "question": (f"of the {fired:,} alert"
+                         f"{'' if fired == 1 else 's'} in this window "
+                         f"reached nobody"),
+            "fired": fired,
+        }
+    return out
+
+
 def _without_log_containers(dashboard, scope, window, time_range, failure, status):
     """Answer the panels the log source is not needed for, and say why the
     rest are empty. Returns (payload, status) for jsonify.
@@ -981,6 +1104,7 @@ def _without_log_containers(dashboard, scope, window, time_range, failure, statu
     filled = _trace_panels(standalone, window, scope)
     filled.update(_trace_list_panels(standalone, window, scope))
     filled.update(_monitor_panels(standalone, scope, window))
+    filled.update(_alert_panels(standalone, window, scope))
     for panel in panels:
         if needs_logs(panel):
             filled[panel["id"]] = {"buckets": [], "error": reason}
@@ -1009,9 +1133,21 @@ def _panel_aggregations(panels, window):
     """
     aggregations = []
     for panel in panels:
-        if panel["type"] not in ("timeseries", "terms"):
+        if panel["type"] not in ("timeseries", "terms", "count"):
             continue          # answered by another source
-        if panel["type"] == "timeseries":
+        if panel["type"] == "count":
+            # A single number rides the batch as a terms aggregation over
+            # its own field, named after the panel like every other one. Not
+            # a search (a Loki total is the page size), not the batch's own
+            # `total` (on Loki that is the largest aggregation's sum, and a
+            # date histogram there overcounts), and not a new aggregation
+            # type. `missing` is deliberately left off: a synthetic bucket
+            # for records that have no value would be a value the source
+            # never reported, counted under a name somebody could then ask
+            # this panel for.
+            aggregations.append(Terms(
+                name=panel["id"], field=panel["field"], size=COUNT_VALUES))
+        elif panel["type"] == "timeseries":
             sub = ()
             if panel.get("split_by"):
                 sub = (Terms(name="split", field=panel["split_by"], size=10),)
@@ -1023,6 +1159,106 @@ def _panel_aggregations(panels, window):
                 name=panel["id"], field=panel["field"], size=panel["size"],
                 missing="unknown" if panel["field"] != "severity" else None))
     return aggregations
+
+
+#: How many values of the field a single-number panel's terms aggregation
+#: asks for.
+#:
+#: It is a ceiling on how far down the list the panel can find the value it
+#: was asked about, and NOT a licence to guess past it: a value that is not
+#: among these is refused by name rather than reported as zero. Fifty is the
+#: same bound a terms panel may be set to, so the number panel can reach any
+#: value a terms panel on the same board could have drawn.
+COUNT_VALUES = MAX_SIZE
+
+
+def _count_panels(panels, result):
+    """Fill in the single-number panels from the batch that already ran.
+
+    No round trip of its own: the panel's terms aggregation went out with
+    every other panel's, named after the panel, so this is a lookup in the
+    result — which is what makes a number affordable on a board that already
+    has six charts on it.
+
+    The whole panel is one claim, so the four ways it can end are separate
+    on purpose:
+
+      * the value is there                  -> the count
+      * the aggregation could not run       -> its reason, never a number
+      * the value is absent and the list is
+        COMPLETE (short of the ceiling)     -> a real zero
+      * the value is absent and the list
+        came back FULL                      -> refused by name
+
+    The last is the one that would otherwise lie. A terms aggregation
+    returns the commonest values; a value below the cut comes back missing,
+    exactly as a value with no records does, and drawing a big confident 0
+    over "this host is not in the fifty busiest" is the emptiness failure
+    with a number on it.
+
+    The answer is sent as `number` rather than as `value`, because `value` is
+    already on this panel: it is what the author asked to be counted, and it
+    is a string. One key holding "ERROR" on a refusal and 7 on an answer
+    would reach the client as `Number("ERROR")` — a card reading NaN in the
+    one case the panel exists to report honestly.
+
+    The case-insensitive near miss is the same failure one step earlier.
+    Severity is written ERROR by Elasticsearch and error by Loki and
+    VictoriaLogs (measured on the lab at 24h), so an author who types the
+    wrong casing gets a zero that is arithmetically true about a value that
+    does not exist. Named rather than silently matched: two keys differing
+    only in case are two values, and summing them would invent a total the
+    source never reported.
+    """
+    wanted = [p for p in panels if p["type"] == "count"]
+    out = {}
+    for panel in wanted:
+        question = _count_question(panel)
+        reasons = list(result.reasons(panel["id"]))
+        if reasons:
+            # A field this source cannot aggregate has no count, and "0" is
+            # an answer to a question that was never asked.
+            out[panel["id"]] = {"error": " ".join(reasons),
+                                "question": question}
+            continue
+
+        buckets = result.get(panel["id"])
+        wants = panel["value"]
+        exact = [b for b in buckets if str(b.key) == wants]
+        if exact:
+            out[panel["id"]] = {"number": sum(b.count for b in exact),
+                                "question": question}
+            continue
+        if len(buckets) >= COUNT_VALUES:
+            out[panel["id"]] = {"error": (
+                f"'{wants}' is not among the {COUNT_VALUES} commonest values "
+                f"of {panel['field']} in this window, and the count of a "
+                f"value further down the list was not asked for. This is not "
+                f"a count of zero."), "question": question}
+            continue
+        near = [b for b in buckets if str(b.key).lower() == wants.lower()]
+        if near:
+            other = near[0]
+            out[panel["id"]] = {"error": (
+                f"No record has {panel['field']} exactly '{wants}' in this "
+                f"window. {other.count:,} have '{other.key}', which differs "
+                f"only in case — this source writes it that way."),
+                "question": question}
+            continue
+        out[panel["id"]] = {"number": 0, "question": question}
+    return out
+
+
+def _count_question(panel):
+    """What a single-number panel's number is the answer to.
+
+    Written here rather than in the client, because it is a statement about
+    what was counted and it belongs beside the counting. The title is the
+    author's — "Checkout errors" — and a big number under a title nobody
+    else wrote is a number nobody else can check.
+    """
+    return (f"records where {panel['field']} is “{panel['value']}”, "
+            f"in this window and this board's query")
 
 
 def _panel_results(panels, result, extra=None):
@@ -2171,6 +2407,13 @@ def api_dashboard_data(dashboard_id):
             {**_trace_panels(panels, query.window, scope),
              **_trace_list_panels(panels, query.window, scope),
              **_monitor_panels(panels, scope, query.window),
+             **_alert_panels(panels, query.window, scope),
+             # A log panel with no chart: the number is read out of the
+             # batch above rather than fetched, so it costs one aggregation
+             # and no round trip — but it is filled HERE rather than in
+             # `_panel_results` because a terms list is not what this panel
+             # shows, and a value missing from it is a reason and not a zero.
+             **_count_panels(panels, result),
              # The only LOG panel with a filler of its own: a list of records
              # is a search, not an aggregation, so it cannot ride the batch
              # above. It is still a log panel — it needs the containers, and

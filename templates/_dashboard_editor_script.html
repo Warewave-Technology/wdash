@@ -144,6 +144,17 @@ const SERVICE_NEEDED = 'A trace list needs a service to list traces for. '
 const SERVICE_MISSING = '<div class="form-text text-warning mt-0" '
     + 'data-needs-service>This panel needs a service.</div>';
 
+/** The same pair for the single-number panel, whose value is required for the
+ * same reason: one number answers one question, and "how many records have
+ * this field at all" is a question a terms aggregation cannot answer without
+ * claiming the values below its cut do not exist. */
+const VALUE_NEEDED = 'A single number counts one value of one field, so it '
+    + 'needs the value to count — for example severity is ERROR. '
+    + 'Without one there is no question for the number to answer, and the '
+    + 'save refuses the panel.';
+const VALUE_MISSING = '<div class="form-text text-warning mt-0" '
+    + 'data-needs-value>This panel needs a value.</div>';
+
 /* ------------------------------------------------------------------
  * The controls each panel type gets, keyed by type.
  *
@@ -197,6 +208,40 @@ const PANEL_CONTROLS = Object.assign(Object.create(null), {
                data-key="size" min="1" max="25" value="${panel.size || 10}">
       </div>
       <div class="col-md-2"></div>`,
+
+    // A field and the value to count in it. Both are required — the server
+    // refuses the panel without a value — so the row says so while the box
+    // is empty and the submit guard below stops the save, for the same
+    // reason the trace list does: a refused save re-renders from the STORED
+    // list and takes every other edit on the page with it.
+    count: (panel) => `
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Count by</label>
+        <select class="form-select form-select-sm" data-key="field">
+          ${fieldOptions(panel.field, false)}
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Value</label>
+        <input type="text" class="form-control form-control-sm"
+               data-key="value" placeholder="ERROR"
+               value="${escapeAttr(panel.value || '')}">
+        <div data-value-warning>${
+            (panel.value || '').trim() ? '' : VALUE_MISSING}</div>
+      </div>`,
+
+    // Rows, capped at MAX_ALERT_ROWS the way records is: a row is a rule
+    // name, a subject and a delivery error, and a window with more alerts in
+    // it than this needs the Alerts page.
+    alerts: (panel) => `
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Rows</label>
+        <input type="number" class="form-control form-control-sm"
+               data-key="size" min="1" max="25" value="${panel.size || 10}">
+      </div>
+      <div class="col-md-2"></div>`,
+
+    alerts_undelivered: () => '<div class="col-md-4"></div>',
 
     trace_services: (panel) => `
       <div class="col-md-2">
@@ -275,6 +320,16 @@ const PANEL_CONTROLS = Object.assign(Object.create(null), {
 const ROW_CAPTIONS = Object.assign(Object.create(null), {
     terms: 'Top values',
     timeseries: 'Volume over time',
+    count: 'One number — how many records in the window have this value '
+           + 'of this field; it rides the same aggregation batch as the '
+           + 'charts, so it costs no extra request, and a value that is not '
+           + 'among the 50 commonest is refused rather than shown as zero',
+    alerts: 'Alerts that fired — from WDash’s own store, so it '
+            + 'costs no backend request and answers in a log outage; it '
+            + 'needs monitors:read to read',
+    alerts_undelivered: 'Alerts nobody received — the same store and '
+            + 'the same permission, counted the way the Alerts page counts '
+            + 'it',
     records: 'Recent records — the board’s own query and window, newest '
              + 'first; a search rather than an aggregation, so it costs '
              + 'one more request, shared by every records panel here',
@@ -367,6 +422,12 @@ function panelRow(panel, index) {
                 row.querySelector('[data-service-warning]').innerHTML =
                     panels[index][key].trim() ? '' : SERVICE_MISSING;
             }
+            // The number panel's value is the other control the server
+            // refuses the panel without, so its row says so the same way.
+            if (key === 'value') {
+                row.querySelector('[data-value-warning]').innerHTML =
+                    panels[index][key].trim() ? '' : VALUE_MISSING;
+            }
             serialise();
         });
     });
@@ -447,6 +508,16 @@ const BLANK_PANELS = Object.assign(Object.create(null), {
     monitor_certificates: { type: 'monitor_certificates',
                             title: 'TLS certificates', width: 6,
                             height: 300 },
+    // A real question rather than an empty one: severity is ERROR is the
+    // number people add this panel for, it saves as it stands, and the
+    // author changes either half. Narrow and short — it is one number.
+    count: { type: 'count', title: 'Errors', field: 'severity',
+             value: 'ERROR', width: 3, height: 180 },
+    alerts: { type: 'alerts', title: 'Alerts that fired', size: 10,
+              width: 8, height: 300 },
+    alerts_undelivered: { type: 'alerts_undelivered',
+                          title: 'Alerts nobody received', width: 4,
+                          height: 180 },
 });
 
 document.querySelectorAll('[data-add-panel]').forEach(button => {
@@ -470,6 +541,16 @@ document.querySelector('form').addEventListener('submit', (event) => {
         event.preventDefault();
         alert(`${SERVICE_NEEDED}\n\nWaiting for a service: `
               + nameless.map(p => `“${p.title || 'Traces'}”`).join(', '));
+        return;
+    }
+    // The second control the server refuses a panel over, caught for the
+    // same reason and separately, so each refusal says which box is empty.
+    const valueless = panels.filter(
+        p => p.type === 'count' && !(p.value || '').trim());
+    if (valueless.length) {
+        event.preventDefault();
+        alert(`${VALUE_NEEDED}\n\nWaiting for a value: `
+              + valueless.map(p => `“${p.title || 'One number'}”`).join(', '));
     }
 });
 

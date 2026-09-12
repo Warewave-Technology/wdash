@@ -266,6 +266,9 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
           <button type="button" data-add-panel="trace_list"></button>
           <button type="button" data-add-panel="monitors"></button>
           <button type="button" data-add-panel="monitor_certificates"></button>
+          <button type="button" data-add-panel="count"></button>
+          <button type="button" data-add-panel="alerts"></button>
+          <button type="button" data-add-panel="alerts_undelivered"></button>
           <!-- Not in the real menu: a stand-in for the next panel type,
                put on the page by whoever forgets to write its blank. -->
           <button type="button" data-add-panel="a_type_from_the_future"></button>
@@ -566,6 +569,69 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
         check('and then the form submits, with the service in the field',
               !second.defaultPrevented && stored(d)[1].service === 'payment-service'
               && said.length === 1, d.getElementById('panelsField').value);
+    }
+
+    // The single number's value is the other box the server refuses a panel
+    // without, and it loses the same edit when it does. A blank count panel
+    // arrives with a value already in it — severity is ERROR, the number
+    // people add the panel for — so the way to reach the refusal is to clear
+    // the box, which is exactly how somebody meaning to type their own gets
+    // there.
+    {
+        const { d, said } = editorPage({ panels: [
+            { id: 'p1', type: 'terms', title: 'Top', field: 'service',
+              size: 10, width: 6, height: 300 }] });
+        d.querySelector('[data-add-panel="count"]').click();
+
+        check('a new number panel counts something on the way in',
+              stored(d)[1].field === 'severity' && stored(d)[1].value === 'ERROR',
+              d.getElementById('panelsField').value);
+        check('and says nothing is missing while it does',
+              !rows(d)[1].querySelector('[data-needs-value]'),
+              rows(d)[1].textContent);
+
+        const box = rows(d)[1].querySelector('[data-key="value"]');
+        box.value = '';
+        box.dispatchEvent(new d.defaultView.Event('change'));
+        check('clearing the value says so on the row',
+              rows(d)[1].querySelector('[data-needs-value]')
+              && /needs a value/.test(rows(d)[1].textContent),
+              rows(d)[1].textContent);
+
+        const submit = new d.defaultView.Event('submit', { cancelable: true });
+        d.querySelector('form').dispatchEvent(submit);
+        check('and submitting is stopped, with the reason and the panel named',
+              submit.defaultPrevented && said.length === 1
+              && /needs the value to count/.test(said[0])
+              && /Errors/.test(said[0]), JSON.stringify(said));
+
+        box.value = 'FATAL';
+        box.dispatchEvent(new d.defaultView.Event('change'));
+        check('typing one takes the warning off the row',
+              !rows(d)[1].querySelector('[data-needs-value]'),
+              rows(d)[1].textContent);
+
+        const second = new d.defaultView.Event('submit', { cancelable: true });
+        d.querySelector('form').dispatchEvent(second);
+        check('and then the form submits, with the value in the field',
+              !second.defaultPrevented && stored(d)[1].value === 'FATAL'
+              && said.length === 1, d.getElementById('panelsField').value);
+    }
+
+    // The alert panels have nothing to refuse: both save as they are added.
+    {
+        const { d, said } = editorPage({ panels: [
+            { id: 'p1', type: 'terms', title: 'Top', field: 'service',
+              size: 10, width: 6, height: 300 }] });
+        d.querySelector('[data-add-panel="alerts"]').click();
+        d.querySelector('[data-add-panel="alerts_undelivered"]').click();
+        const submit = new d.defaultView.Event('submit', { cancelable: true });
+        d.querySelector('form').dispatchEvent(submit);
+        check('an alerts board submits as it was built',
+              !submit.defaultPrevented && said.length === 0
+              && stored(d).map(p => p.type).join(',')
+                 === 'terms,alerts,alerts_undelivered',
+              d.getElementById('panelsField').value);
     }
 
     // The service is free text, and it goes into a quoted attribute.

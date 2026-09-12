@@ -84,6 +84,13 @@ const PANEL_HINTS = Object.assign(Object.create(null), {
     // cost the board, so a hint promising somewhere to go would be the same
     // untrue sentence the other way round.
     records: 'The newest records this board matches, on the board',
+    // Not a click either, and the caption under the number says what was
+    // counted — a number whose question is only in the author's title is a
+    // number nobody else can check.
+    count: 'One value of one field, counted over this window',
+    alerts: 'What WDash’s own alerting said in this window',
+    alerts_undelivered: 'The last word on each rule and subject, counted as '
+                        + 'the Alerts page counts it',
     trace_services: 'Click a service to open it in the Traces page',
     trace_list: 'Click a trace to open its waterfall in this window',
     monitors: 'Click a check to open it in the Monitors page',
@@ -811,6 +818,22 @@ class AsyncDashboard {
 
         if (panel.type === 'monitor_certificates') {
             this.drawCertificateTable(panel, slot);
+            this.removePanelOverlay(slot);
+            return;
+        }
+
+        // Two questions, one drawing: "how many records have this value" and
+        // "how many of this window's alerts reached nobody" are both one
+        // number under one sentence, and the sentence comes from the server
+        // with the number it explains.
+        if (panel.type === 'count' || panel.type === 'alerts_undelivered') {
+            this.drawNumber(panel, slot);
+            this.removePanelOverlay(slot);
+            return;
+        }
+
+        if (panel.type === 'alerts') {
+            this.drawAlertTable(panel, slot);
             this.removePanelOverlay(slot);
             return;
         }
@@ -1656,6 +1679,104 @@ class AsyncDashboard {
         container.classList.remove('d-none');
         container.style.overflowY = 'auto';
         return container;
+    }
+
+    /**
+     * One number, and the sentence saying what it counted.
+     *
+     * Zero is a real answer here and is drawn as `0`, never as "No data in
+     * this window": the panel asked how many records have one value, and
+     * none is the answer. What is NOT drawn as a number is a question that
+     * could not be asked — a field this source cannot aggregate, a value
+     * below the terms cut, a permission the role does not have — which
+     * arrives as `error` and is printed where the number would be. That is
+     * why the server sends `number` absent rather than 0 in those cases:
+     * `panel.number || 0` here would have turned every one of them into a
+     * confident zero. And it is `number` and not `value` because `value` is
+     * the count panel's own definition — the string the author asked to be
+     * counted — so one key would have drawn `Number("ERROR")`: NaN.
+     *
+     * The caption is the server's sentence, not the author's title. A big
+     * number under "Checkout" is a number only its author can check.
+     */
+    drawNumber(panel, slot) {
+        if (panel.number === null || panel.number === undefined) {
+            // Nothing filled this panel. Reachable only by forgetting a
+            // filler, which is the failure the signal table exists to catch
+            // — and an unfilled number panel must not fall through to a
+            // blank card that reads as calm.
+            this.panelMessage(panel.id, 'This number could not be counted.');
+            return;
+        }
+
+        const container = this.panelBody(slot);
+        // No scrollbar around two lines of text.
+        container.style.overflowY = 'hidden';
+        container.innerHTML =
+            '<div class="d-flex flex-column justify-content-center '
+            + 'align-items-center text-center h-100">'
+            + `<div class="fw-bold" style="font-size:2.5rem;line-height:1.1"
+                     data-number>${Number(panel.number).toLocaleString()}</div>`
+            + `<div class="text-muted mt-1" style="font-size:.75rem">${
+                escapeHtml(panel.question || '')}</div>`
+            + '</div>';
+    }
+
+    /**
+     * What WDash's own alerting said in this window.
+     *
+     * An empty table is drawn as "no alert fired in this window" and not as
+     * anything vaguer, because the OTHER reading of an empty answer — no
+     * rule is configured, so nothing can fire — is refused by the server
+     * with that sentence instead. By the time rows reach here, alerting
+     * exists and this window was quiet.
+     *
+     * Whether a row was delivered is the column the panel exists for: an
+     * alert nobody received reads as nothing being wrong, and the failure
+     * that sent it nowhere is written on the row that failed.
+     */
+    drawAlertTable(panel, slot) {
+        const rows = panel.rows || [];
+
+        if (!rows.length) {
+            this.panelMessage(panel.id, 'No alert fired in this window.');
+            return;
+        }
+
+        const container = this.panelBody(slot);
+        const escape = escapeHtml;
+        const total = Number(panel.total || rows.length);
+        const caption = `Showing ${rows.length.toLocaleString()} of ${
+            total.toLocaleString()} in this window`;
+
+        container.innerHTML =
+            `<div class="text-muted mb-1" style="font-size:.7rem">${
+                escape(caption)}</div>` +
+            '<table class="table table-sm mb-0" style="font-size:.75rem">' +
+            '<thead><tr><th>Time</th><th>Rule</th><th>About</th>' +
+            '<th>What</th><th>Delivered</th></tr></thead><tbody>' +
+            rows.map(row => {
+                const when = row.at ? new Date(row.at).toLocaleString() : '';
+                const firing = row.transition === 'firing';
+                const said = row.delivered
+                    ? '<span class="text-muted">yes</span>'
+                    : `<span class="text-danger" data-undelivered title="${
+                        escape(row.delivery_error || '')}">no${
+                        row.delivery_error
+                            ? ` — ${escape(row.delivery_error)}` : ''
+                      }</span>`;
+                return `<tr>
+                    <td class="text-nowrap">${escape(when)}</td>
+                    <td>${escape(row.rule || '')}</td>
+                    <td class="text-truncate" style="max-width:12rem"
+                        title="${escape(row.subject || '')}">${
+                        escape(row.subject || '')}</td>
+                    <td class="${firing ? 'text-danger' : 'text-success'}">${
+                        escape(row.transition || '')}</td>
+                    <td class="text-truncate" style="max-width:14rem">${
+                        said}</td>
+                    </tr>`;
+            }).join('') + '</tbody></table>';
     }
 
     /**

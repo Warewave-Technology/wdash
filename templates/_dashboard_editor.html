@@ -33,6 +33,12 @@
                     data-add-panel="records">
                 <i class="fas fa-list-ul"></i> Records
             </button>
+            {# A number rides the same batch as the charts: one aggregation,
+               no round trip of its own. #}
+            <button type="button" class="btn btn-sm btn-outline-primary"
+                    data-add-panel="count">
+                <i class="fas fa-hashtag"></i> One number
+            </button>
             <button type="button" class="btn btn-sm btn-outline-info"
                     data-add-panel="trace_services">
                 <i class="fas fa-project-diagram"></i> Services (traces)
@@ -48,6 +54,16 @@
             <button type="button" class="btn btn-sm btn-outline-info"
                     data-add-panel="monitor_certificates">
                 <i class="fas fa-lock"></i> Certificates
+            </button>
+            {# WDash's own store answers these two, so a deployment with no
+               log backend at all can still carry them. #}
+            <button type="button" class="btn btn-sm btn-outline-info"
+                    data-add-panel="alerts">
+                <i class="fas fa-bell"></i> Alerts
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-info"
+                    data-add-panel="alerts_undelivered">
+                <i class="fas fa-bell-slash"></i> Undelivered alerts
             </button>
         </div>
     </div>
@@ -72,6 +88,8 @@
         and monitors are other sources: the first panel from each costs one
         more request, and every further panel from it costs nothing &mdash;
         except a trace list, which asks per service, view and row count.
+        The alert panels read WDash&rsquo;s own store, so they cost no
+        backend request at all and answer even when the log source does not.
     </div>
 </div>
 

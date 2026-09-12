@@ -370,19 +370,56 @@ class AlertHistoryRepository:
         return (alert_history.c.delivered.is_(False),
                 alert_history.c.id.in_(newest))
 
-    def recent(self, limit=100, offset=0, undelivered_only=False):
+    @staticmethod
+    def _within(since, until):
+        """The window, as where-clauses on `at`.
+
+        Neither bound is a default. The Alerts page asks for the last N
+        alerts EVER and paginates them, which is the right question for a
+        page you open once you already suspect something; a dashboard set to
+        "Last 1 hour" asking the same question would put last month's alerts
+        under an hour's charts.
+
+        Both bounds, not just `since`: a dashboard can be pointed at an
+        absolute range that ended in the past, and a since-only filter would
+        answer "last Tuesday 14:00 until now" for a board reading
+        14:00-15:00. Measured on both dialects with rows five minutes to four
+        hours old — 5 rows, 3 inside a one-hour window, 1 inside an absolute
+        60-100 minutes-ago window, SQLite and Postgres agreeing exactly.
+
+        `at` is stored as `DateTime(timezone=True)`: a timestamptz on
+        Postgres, and a naive UTC string on SQLite, where an aware UTC bind
+        compares correctly because `record` writes UTC too.
+        """
+        clauses = []
+        if since is not None:
+            clauses.append(alert_history.c.at >= since)
+        if until is not None:
+            clauses.append(alert_history.c.at <= until)
+        return clauses
+
+    def recent(self, limit=100, offset=0, undelivered_only=False,
+               since=None, until=None):
         query = select(alert_history).order_by(alert_history.c.at.desc())
         if undelivered_only:
             query = query.where(*self._outstanding())
+        query = query.where(*self._within(since, until))
         query = query.limit(int(limit)).offset(int(offset))
         with self._engine.connect() as connection:
             return [dict(r, at=_aware(r["at"])) for r in
                     connection.execute(query).mappings().all()]
 
-    def count(self, undelivered_only=False):
+    def count(self, undelivered_only=False, since=None, until=None):
         from sqlalchemy import func
         query = select(func.count()).select_from(alert_history)
         if undelivered_only:
+            # The window narrows WHICH rows are counted; it does not change
+            # what "never delivered" means. `_outstanding` is the Alerts
+            # page's own definition — the last word on each rule and subject
+            # — and computing it inside the window instead would make a
+            # failure that was retried and succeeded an hour ago come back as
+            # outstanding whenever somebody chose a shorter range.
             query = query.where(*self._outstanding())
+        query = query.where(*self._within(since, until))
         with self._engine.connect() as connection:
             return connection.execute(query).scalar() or 0
