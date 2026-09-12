@@ -915,6 +915,15 @@ docker run -d wdash-browser \
   process. Http checks keep the wider limit — sockets and memory are bounded
   by different things, and dropping the shared limit to two would make an
   agent with two hundred http monitors a hundred times slower round them.
+- **A TLS setting needs an agent new enough to read it.** "Trust this
+  certificate" and "do not verify — expiry only" are sent to every agent
+  assigned to the check, and an agent older than this release ignores the
+  setting: it verifies against the public roots, so the check stays down with
+  the OpenSSL message and no sentence about the box that would answer it.
+  Nothing leaks that way — WDash withholds an expiry-only check's headers,
+  cookies and credentials before they reach any agent, whatever its version —
+  but the setting does nothing until the probe is upgraded. Nothing on the
+  Checks table says so yet; the agent's own row reports its version.
 - **Failure screenshots are kept for a week**, results for thirty days.
   `monitoring.screenshot_retention_days` changes it. "Step 4 failed" a month
   later is still a data point; the picture of a login page from a month ago is

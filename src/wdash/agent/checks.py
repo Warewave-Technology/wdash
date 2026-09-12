@@ -106,12 +106,17 @@ def _http_with(client, monitor):
     timeout = monitor.get("timeout_seconds") or 10
     assertions = monitor.get("assertions") or {}
     tls = monitor.get("tls") or {}
-    secure = str(monitor.get("target") or "").lower().startswith("https://")
+    # The address and any credential written into it, separated before
+    # anything else looks at either: `requests` keeps `user:password@` in the
+    # prepared URL, so a mount prefix built without it never matches and a
+    # request given `auth=None` sends it anyway. See `_split_userinfo`.
+    target, address_auth = _split_userinfo(monitor.get("target") or "")
+    secure = target.lower().startswith("https://")
     # Mounted on this monitor's own origin and nowhere else, so a hop anywhere
     # else gets the session's default adapter and the public roots — the same
     # rule `_at_home` applies to what the check was given to send.
     if secure and _mode(tls) == VERIFY and tls.get("certificate"):
-        _trust(client, monitor["target"], tls)
+        _trust(client, target, tls)
     # The waiver, likewise bounded to its own origin: "do not verify" was
     # chosen about THIS endpoint, and a redirect somewhere else is asked for
     # as a stranger would ask.
@@ -136,6 +141,14 @@ def _http_with(client, monitor):
         credentials = (auth.get("username") or "", auth.get("password") or "")
     elif auth.get("type") == "bearer" and auth.get("token"):
         headers["Authorization"] = f"Bearer {auth['token']}"
+    if credentials is None and address_auth and not waive:
+        # What `requests` used to do for itself off the URL, done here so
+        # that it is bounded like the rest: the configured boxes win when
+        # both are filled, which is the order `prepare_auth` already used,
+        # and a check that does not verify sends neither. The store refuses
+        # to save that last combination, so a row holding it was hand-edited
+        # or written by an older build.
+        credentials = address_auth
 
     # What this check's OWN handshake did, recorded on its own whether or not
     # a certificate could be read afterwards — an http:// target, an agent
@@ -145,7 +158,7 @@ def _http_with(client, monitor):
     # "not a verified one", which covers the failure path and the waiver.
     verified = False if secure else None
     try:
-        response = _get_following(client, monitor["target"], headers,
+        response = _get_following(client, target, headers,
                                   credentials, request.get("cookies") or None,
                                   deadline, waive)
     except _Overran as exc:
@@ -157,7 +170,7 @@ def _http_with(client, monitor):
                        f"the redirects did not finish within {timeout}s "
                        f"({hops} hop(s) followed)",
                        duration_us=int((time.monotonic() - clock) * 1_000_000),
-                       tls=_certificate(monitor["target"], timeout),
+                       tls=_certificate(target, timeout),
                        handshake_verified=verified)
     except Exception as exc:
         elapsed = int((time.monotonic() - clock) * 1_000_000)
@@ -170,7 +183,7 @@ def _http_with(client, monitor):
         return _result(monitor, started, "down",
                        _redact(_reason(exc, tls), request),
                        duration_us=elapsed,
-                       tls=_certificate(monitor["target"], timeout),
+                       tls=_certificate(target, timeout),
                        handshake_verified=verified)
     if secure:
         # The exchange completed. In verify mode that means a verified
@@ -205,8 +218,8 @@ def _http_with(client, monitor):
     except Exception as exc:
         elapsed = int((time.monotonic() - clock) * 1_000_000)
         return _result(monitor, started, "down",
-                       _redact(f"reading the response failed: {_reason(exc)}",
-                               request),
+                       _redact(f"reading the response failed: "
+                               f"{_reason(exc, tls)}", request),
                        duration_us=elapsed, http_status=response.status_code,
                        handshake_verified=verified)
     finally:
@@ -230,9 +243,9 @@ def _http_with(client, monitor):
                         f"{timeout}s timeout"),
                        duration_us=elapsed,
                        http_status=response.status_code,
-                       tls=_certificate(monitor["target"], timeout),
+                       tls=_certificate(target, timeout),
                        handshake_verified=verified)
-    certificate = _certificate(monitor["target"], timeout)
+    certificate = _certificate(target, timeout)
     failure = _assert_http(response, body, elapsed, assertions)
     return _result(monitor, started, "down" if failure else "up", failure,
                    duration_us=elapsed, http_status=response.status_code,
@@ -304,8 +317,11 @@ def _origin_prefixes(url):
     from urllib.parse import urlsplit
     parts = urlsplit(url)
     scheme = (parts.scheme or "").lower()
-    # Userinfo is stripped by `prepare_url` into the auth argument, so it is
-    # not part of what `get_adapter` matches on either.
+    # Userinfo is NOT stripped by `prepare_url` — measured, `get_adapter` is
+    # given `https://svc:P4SS@host/` and matches its prefixes against that.
+    # So it is taken out HERE and taken out of the request too
+    # (`_split_userinfo`, called before any of this): a prefix carrying a
+    # password would match, and put the password in a dictionary key.
     netloc = (parts.netloc or "").lower().rpartition("@")[2]
     if not scheme or not netloc:
         return ()
@@ -315,6 +331,45 @@ def _origin_prefixes(url):
         if implied:
             prefixes.add(f"{scheme}://{netloc}:{implied}/")
     return tuple(sorted(prefixes))
+
+
+def _split_userinfo(url):
+    """(the URL with no `user:password@`, (user, password) or None).
+
+    Split at the source, because `requests` treats the userinfo form as a
+    place to keep a credential rather than as part of the address, and two
+    things follow from that. It has no way to say "no authentication":
+    passing `auth=None` makes `PreparedRequest.prepare_auth` fall back to
+    `get_auth_from_url`, so a target written `https://svc:P4SS@host/` put a
+    real `Authorization: Basic` header on the wire over a connection an
+    expiry-only check had deliberately not verified — measured, the listener
+    logged `Basic c3ZjOlA0U1NXMFJE`. And `prepare_url` KEEPS the userinfo in
+    the prepared URL, so `Session.get_adapter` matches against
+    `https://svc:P4SS@host/`: a certificate mounted on the address without
+    it was silently never used, which is the same silent-ignore shape as the
+    port prefix below.
+
+    Both stop being possible once the address and the credential are two
+    things: the URL that goes on the wire never carries one, and the
+    credential travels as an argument, through the same `_at_home` gate as
+    every other thing this check was given to send.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return url, None
+    if "@" not in (parts.netloc or ""):
+        return url, None
+    from urllib.parse import unquote
+    return (urlunsplit(parts._replace(
+        netloc=parts.netloc.rsplit("@", 1)[-1])),
+        (unquote(parts.username or ""), unquote(parts.password or "")))
+
+
+def _without_userinfo(url):
+    """The address alone. What "this check sends nothing" means for a URL."""
+    return _split_userinfo(url)[0]
 
 
 def _trust(client, target, tls):
@@ -451,6 +506,12 @@ def _get_following(client, url, headers, credentials, cookies, deadline,
         if left <= 0:
             raise _Overran(hop)
         own = _at_home(home, current)
+        if waive and own:
+            # The one hop this check does not verify carries NOTHING, and a
+            # password in the address is the channel no `auth=None` can
+            # close: `requests` reads it back off the URL. Taken out of the
+            # URL itself, which is the only place it can be taken out of.
+            current = _without_userinfo(current)
         options = dict(
             # Never zero: a timeout of 0 is "no timeout" to `requests`, which
             # is the opposite of what a spent budget means.
@@ -625,13 +686,49 @@ def _reason(exception, tls=None):
     return f"{type(exception).__name__}: {exception}"
 
 
+#: How much of the innermost error is kept. Long enough for every OpenSSL
+#: reason; short enough that a page is not a wall of urllib3.
+_REASON_LIMIT = 160
+
+
 def _innermost(exception):
-    """urllib3 wraps its errors three deep; only the last one says anything."""
+    """urllib3 wraps its errors three deep; only the last one says anything.
+
+    Ends on a whole word and never on half a bracket, because a sentence is
+    appended to this. Two ways it used not to. The wrapper strip takes the
+    closing parenthesis of `(_ssl.c:1081)` with the brackets urllib3 nested
+    around it, and the 160-character cap lands mid-token on the longer
+    messages — measured, both produced
+
+        ...self-signed certificate (_ssl.c:1081 — this check verifies the
+        certificate, and nothing it trusts vouches for this one.
+
+    where the advice reads as a continuation of a half-written line number.
+    The line number is OpenSSL's own source file and answers nothing, so
+    what is left is the sentence and then the advice.
+    """
     text = str(exception)
     for marker in ("Caused by ", "NewConnectionError(", "SSLError("):
         if marker in text:
             text = text.split(marker, 1)[1]
-    return text.strip("()'\" ")[:160]
+    text = text.lstrip("('\" ")
+    # The brackets urllib3 nested around the message, and NOT the ones the
+    # message itself uses: a plain strip took the `)` of `(_ssl.c:1081)` with
+    # them and left the reason ending on half a bracket. A closing bracket
+    # that has an opening one to belong to stays.
+    while text and text[-1] in ")'\" ":
+        if text[-1] == ")" and text.count(")") <= text.count("("):
+            break
+        text = text[:-1]
+    if len(text) > _REASON_LIMIT:
+        cut = text[:_REASON_LIMIT]
+        # Back to the last space, and no further: a single unbroken token
+        # longer than the limit has no boundary to find, and returning ""
+        # for it would turn a long reason into no reason at all. This is
+        # also what drops `(_ssl.c:1028` — one token, no spaces in it —
+        # rather than leaving the advice to read as its continuation.
+        text = cut.rsplit(" ", 1)[0] if " " in cut else cut
+    return text.rstrip(" ,;:-—")
 
 
 # ---------------------------------------------------------------------------

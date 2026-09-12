@@ -1707,12 +1707,16 @@ def _certificates(scratch):
     return out
 
 
-def _tls_listener(cert_path, key_path, redirect_to=None):
+def _tls_listener(cert_path, key_path, redirect_to=None, seen=None):
     """A real HTTPS server on 127.0.0.1. Returns it; shut it down after.
 
     Real rather than faked, because everything this file asserts about trust
     is a property of OpenSSL, urllib3 and requests together — a fake session
     would assert what the test author believed those three do.
+
+    `seen` collects the Authorization header of every request, because "this
+    check sends nothing" is a claim about the WIRE and nothing else can
+    settle it.
     """
     import ssl as _ssl
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1721,9 +1725,17 @@ def _tls_listener(cert_path, key_path, redirect_to=None):
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            if redirect_to:
+            if seen is not None:
+                seen.append(self.headers.get("Authorization"))
+            # `redirect_to` may be a function of the server, so a listener can
+            # redirect to ITSELF — which is the only way to have a hop that is
+            # still at the monitor's own origin, and therefore still waived.
+            # Never on `/next`, or that redirect would never end.
+            location = (redirect_to(server) if callable(redirect_to)
+                        else redirect_to)
+            if location and self.path != "/next":
                 self.send_response(302)
-                self.send_header("Location", redirect_to)
+                self.send_header("Location", location)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
@@ -1824,6 +1836,50 @@ class TlsSettingTest(StoreTestCase):
                                             "username": "svc"}},
                           tls={"mode": "expiry_only"})
         self.assertIn("svc", str(caught.exception))
+
+    def test_a_password_in_the_address_counts_as_something_it_would_send(self):
+        """The fourth channel, and the one in none of the other three: a
+        password typed into the URL is not in `secrets`, not in `headers` and
+        not in `auth`, and `requests` prepares it into a real Authorization
+        header off the URL itself. Measured before this refusal existed: the
+        check saved cleanly with has_credentials False and the listener
+        logged `Basic c3ZjOlA0U1NXMFJE`."""
+        with self.assertRaises(MonitoringError) as caught:
+            self._monitor(target="https://svc:P4SSW0RD@payments.internal/health",
+                          tls={"mode": "expiry_only"})
+        self.assertIn("svc", str(caught.exception))
+        self.assertNotIn("P4SSW0RD", str(caught.exception))
+
+    def test_an_address_with_a_password_and_no_user_name_counts_too(self):
+        """`https://:t0ken@host/` is how a token gets written into a URL, and
+        it is a credential with nobody's name on it — so the refusal names
+        the address rather than an account that is not there."""
+        with self.assertRaises(MonitoringError) as caught:
+            self._monitor(target="https://:P4SSW0RD@payments.internal/health",
+                          tls={"mode": "expiry_only"})
+        self.assertIn("address", str(caught.exception))
+        self.assertNotIn("P4SSW0RD", str(caught.exception))
+
+    def test_forgetting_what_it_sends_cannot_empty_the_address(self):
+        """So the refusal names the address rather than the tick: "Forget
+        what this check sends" empties the request, and the password here is
+        not in the request."""
+        monitor = self._monitor(
+            target="https://svc:P4SSW0RD@payments.internal/health")
+        with self.assertRaises(MonitoringError) as caught:
+            self.store.monitors.update(monitor["id"], forget_request=True,
+                                       tls={"mode": "expiry_only"})
+        self.assertIn("address", str(caught.exception))
+        self.assertEqual(self.store.monitors.get(monitor["id"])["tls"], {})
+
+    def test_taking_it_out_of_the_address_lets_the_same_save_through(self):
+        """The remedy the refusal names has to work, or it is a dead end."""
+        monitor = self._monitor(
+            target="https://svc:P4SSW0RD@payments.internal/health")
+        saved = self.store.monitors.update(
+            monitor["id"], target="https://payments.internal/health",
+            tls={"mode": "expiry_only"})
+        self.assertEqual(saved["tls"]["mode"], "expiry_only")
 
     def test_a_check_that_sends_nothing_may_stop_verifying(self):
         """The refusal has to refuse a combination, not the setting."""
@@ -2001,6 +2057,33 @@ class JourneyTlsTest(StoreTestCase):
             journey_secrets={}, tls={"mode": "expiry_only"})
         self.assertEqual(monitor["tls"]["mode"], "expiry_only")
 
+    def test_a_journey_whose_address_carries_a_password_may_not_waive_it(self):
+        """A journey has no secret box to be asked about here — the password
+        is in the URL of its first step. Measured: Chromium answers a 401
+        challenge with it, over a context launched with
+        ignore_https_errors=True."""
+        with self.assertRaises(MonitoringError) as caught:
+            self._journey(
+                steps=[{"kind": "goto",
+                        "value": "https://svc:P4SSW0RD@payments.internal/"},
+                       {"kind": "expect_text", "value": "hello"}],
+                journey_secrets={}, tls={"mode": "expiry_only"})
+        self.assertIn("svc", str(caught.exception))
+        self.assertNotIn("P4SSW0RD", str(caught.exception))
+
+    def test_every_step_a_journey_goes_to_is_asked_the_same_question(self):
+        """Not only the first. The address on the form is step one's, and
+        step four is just as much a request this check makes."""
+        with self.assertRaises(MonitoringError) as caught:
+            self._journey(
+                steps=[{"kind": "goto", "value": "https://payments.internal/"},
+                       {"kind": "click", "selector": "#next"},
+                       {"kind": "goto",
+                        "value": "https://svc:P4SSW0RD@payments.internal/admin"},
+                       {"kind": "expect_text", "value": "hello"}],
+                journey_secrets={}, tls={"mode": "expiry_only"})
+        self.assertIn("svc", str(caught.exception))
+
     def test_an_expected_name_on_a_journey_is_refused(self):
         """Measured: a pinned key is accepted whatever name the certificate
         carries, so a name typed here would be stored and never consulted."""
@@ -2043,11 +2126,29 @@ class TlsTrustTest(unittest.TestCase):
             cls.certificates["leaf_crt"], cls.certificates["leaf_key"],
             redirect_to=f"https://127.0.0.1:{cls.other_port}/next")
         cls.redirect_port = cls.elsewhere.server_address[1]
+        # A listener that writes down what it was sent: "this check sends
+        # nothing" is a claim about the wire.
+        cls.seen = []
+        cls.watching = _tls_listener(cls.certificates["leaf_crt"],
+                                     cls.certificates["leaf_key"],
+                                     seen=cls.seen)
+        cls.watched_port = cls.watching.server_address[1]
+        # And one that sends the check back to ITSELF with a password in the
+        # Location: still the monitor's own origin, so still the hop that is
+        # not verified.
+        cls.hops = []
+        cls.hopping = _tls_listener(
+            cls.certificates["leaf_crt"], cls.certificates["leaf_key"],
+            redirect_to=lambda server: (f"https://svc:P4SSW0RD@127.0.0.1:"
+                                        f"{server.server_address[1]}/next"),
+            seen=cls.hops)
+        cls.hopping_port = cls.hopping.server_address[1]
 
     @classmethod
     def tearDownClass(cls):
         import shutil
-        for server in (cls.ours, cls.theirs, cls.elsewhere):
+        for server in (cls.ours, cls.theirs, cls.elsewhere, cls.watching,
+                       cls.hopping):
             server.shutdown()
             server.server_close()
         shutil.rmtree(cls.scratch, ignore_errors=True)
@@ -2100,6 +2201,72 @@ class TlsTrustTest(unittest.TestCase):
         self.assertIs(result["handshake_verified"], False)
         self.assertEqual(result["tls"]["common_name"], "payments.internal")
         self.assertTrue(result["tls"]["not_after"])
+
+    def test_a_password_in_the_address_does_not_reach_a_waived_listener(self):
+        """The channel `auth=None` cannot close: `requests` reads the
+        credential back off the URL (`prepare_auth` falls back to
+        `get_auth_from_url`), so the only way to send nothing is to take it
+        out of the URL. Measured with the address left as written: the
+        listener logged `Basic c3ZjOlA0U1NXMFJE` over the connection this
+        check had deliberately not verified.
+
+        The store refuses to save this combination, so a row in it was
+        written by an older build or by hand — and the wire is the last place
+        it can be stopped.
+        """
+        from wdash.agent.checks import run_check
+        self.seen.clear()
+        result = run_check({
+            "id": "m1", "name": "payments", "kind": "http",
+            "target": f"https://svc:P4SSW0RD@127.0.0.1:{self.watched_port}/",
+            "timeout_seconds": 5, "assertions": {}, "request": {},
+            "tls": {"mode": "expiry_only"}})
+        self.assertEqual(result["status"], "up", result["error"])
+        self.assertEqual(self.seen, [None])
+
+    def test_nor_one_a_redirect_puts_back_into_the_address(self):
+        """The hop is where it can come back: the target is split once, and
+        then the endpoint answers `302 Location: https://svc:P4SS@…/next` to
+        its own origin, which is still the hop this check does not verify. A
+        credential in a Location header came from whatever answered — asked
+        for again over the same unverified connection is exactly what "sends
+        nothing" has to rule out."""
+        from wdash.agent.checks import run_check
+        self.hops.clear()
+        result = run_check({
+            "id": "m1", "name": "payments", "kind": "http",
+            "target": f"https://127.0.0.1:{self.hopping_port}/",
+            "timeout_seconds": 5, "assertions": {}, "request": {},
+            "tls": {"mode": "expiry_only"}})
+        self.assertEqual(result["status"], "up", result["error"])
+        self.assertEqual(self.hops, [None, None])
+
+    def test_a_verifying_check_still_sends_what_its_address_carries(self):
+        """The boundary of the rule above, and it is deliberate: a check that
+        verified the certificate knows which endpoint it is talking to, so a
+        credential in its address is treated exactly like one typed into the
+        authentication boxes. Only the unverified hop carries nothing."""
+        from wdash.agent.checks import run_check
+        self.seen.clear()
+        result = run_check({
+            "id": "m1", "name": "payments", "kind": "http",
+            "target": f"https://svc:P4SSW0RD@127.0.0.1:{self.watched_port}/",
+            "timeout_seconds": 5, "assertions": {}, "request": {},
+            "tls": {"certificate": self.certificates["ca_pem"],
+                    "expected_name": "payments.internal"}})
+        self.assertEqual(result["status"], "up", result["error"])
+        self.assertEqual(self.seen, ["Basic c3ZjOlA0U1NXMFJE"])
+
+    def test_a_name_the_certificate_does_not_carry_is_refused(self):
+        """The name is asserted, not decorative. urllib3 falls back to the
+        address when `assert_hostname` is absent, so a regression here makes
+        checks go DOWN rather than trust more — which is why nothing caught
+        it: every other case in this class names the right one."""
+        result = self._check({"certificate": self.certificates["ca_pem"],
+                              "expected_name": "billing.internal"})
+        self.assertEqual(result["status"], "down")
+        self.assertIn("billing.internal", result["error"])
+        self.assertIs(result["handshake_verified"], False)
 
     def test_the_waiver_does_not_travel_to_the_redirect(self):
         """Bounded to the monitor's own origin, exactly as its credentials
@@ -2265,6 +2432,77 @@ class TlsReasonTest(unittest.TestCase):
         self.assertNotIn("expiry only", sentence)
         self.assertNotIn("Name the certificate", sentence)
 
+    #: What urllib3 really hands over, wrappers and all. Both of these are
+    #: copied from a failure measured against a local listener.
+    NESTED = ("HTTPSConnectionPool(host='127.0.0.1', port=61234): Max retries "
+              "exceeded with url: / (Caused by SSLError("
+              "SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] "
+              "certificate verify failed: self-signed certificate "
+              "(_ssl.c:1081)')))")
+    LONG = ("HTTPSConnectionPool(host='127.0.0.1', port=61234): Max retries "
+            "exceeded with url: / (Caused by SSLError("
+            "SSLCertVerificationError(1, \"[SSL: CERTIFICATE_VERIFY_FAILED] "
+            "certificate verify failed: Hostname mismatch, certificate is not "
+            "valid for 'localhost'. (_ssl.c:1028)\")))")
+
+    def test_the_reason_a_sentence_is_appended_to_ends_on_a_whole_one(self):
+        """The unwrapping used to take the closing bracket of
+        `(_ssl.c:1081)` along with the brackets urllib3 nested around it, so
+        the advice read as the continuation of a half-written line number:
+        "...self-signed certificate (_ssl.c:1081 — this check verifies the
+        certificate". A bracket the message itself opened is now closed."""
+        head = self._reason(self.NESTED).split(" — ")[0]
+        self.assertIn("self-signed certificate", head)
+        self.assertEqual(head.count("("), head.count(")"), head)
+
+    def test_a_reason_past_the_cap_is_cut_at_a_word(self):
+        """The other way it happened: the 160-character cap landing inside
+        `(_ssl.c:1028)`. Cut back to the last whole word, so the sentence
+        that follows starts after one."""
+        head = self._reason(
+            self.LONG,
+            {"mode": "verify", "certificate": "-----BEGIN CERTIFICATE-----"}
+        ).split(" — ")[0]
+        self.assertTrue(head.endswith("'localhost'."), head)
+        self.assertNotIn("_ssl.c", head)
+
+    def test_a_handshake_that_fails_while_the_body_is_read_is_told_which(self):
+        """The one path that used to call `_reason` with no setting, so the
+        same exception produced a different sentence depending on which loop
+        it was raised in — and the wrong one: a check that ALREADY names a
+        certificate was told to name one. Rare (the handshake is usually over
+        by the time the body is read) and still the difference between advice
+        that answers the failure and advice that repeats what was done."""
+        import requests
+
+        from wdash.agent.checks import _http_with
+
+        class Response:
+            status_code = 200
+            headers = {}
+
+            def iter_content(self, size):
+                raise requests.exceptions.SSLError(
+                    "certificate verify failed: self-signed certificate")
+
+            def close(self):
+                pass
+
+        class Client:
+            def get(self, url, **options):
+                return Response()
+
+        result = _http_with(Client(), {
+            "id": "m1", "kind": "http", "target": "https://127.0.0.1:1/",
+            "timeout_seconds": 2, "assertions": {"body_contains": "x"},
+            "request": {},
+            "tls": {"mode": "verify",
+                    "certificate": "-----BEGIN CERTIFICATE-----"}})
+        self.assertEqual(result["status"], "down")
+        self.assertIn("reading the response failed", result["error"])
+        self.assertIn("did not sign", result["error"])
+        self.assertNotIn("Name the certificate to trust", result["error"])
+
 
 class WithheldFromTheAgentTest(unittest.TestCase):
     """What /api/agent/config refuses to send, and why it is loud about it.
@@ -2338,6 +2576,60 @@ class WithheldFromTheAgentTest(unittest.TestCase):
                        "svc"):
             self.assertNotIn(secret, body)
         self.assertIn("billing", "\n".join(logged.output))
+
+    def test_nor_a_password_written_into_the_address(self):
+        """The one channel `request` cannot hold: a credential in the URL is
+        not in `request` and not in `secrets`, and `requests` reads it
+        straight back off the address. Withheld here as well as stripped by
+        the agent, because this endpoint is where it would leave the
+        database — and an agent old enough not to strip it would put it on
+        the wire."""
+        monitor = self.app.store.monitors.create(
+            name="billing", kind="http",
+            target="https://svc:P4SSW0RD@billing.internal/",
+            interval_seconds=60, timeout_seconds=10)
+        self._hand_edit(monitor["id"], {"mode": "expiry_only"})
+
+        with self.assertLogs("wdash.api.agent_routes", "ERROR") as logged:
+            response = self.client.get("/api/agent/config",
+                                       headers=self.headers)
+        body = response.get_data(as_text=True)
+        check = response.get_json()["monitors"][0]
+        self.assertEqual(check["target"], "https://billing.internal/")
+        self.assertNotIn("P4SSW0RD", body)
+        self.assertIn("billing", "\n".join(logged.output))
+
+    def test_a_journey_in_that_state_keeps_its_steps_but_not_the_password(self):
+        """A journey's address is its first step's, so the same hole is in
+        the step list."""
+        monitor = self.app.store.monitors.create(
+            name="Sign in", kind="browser", target=None, interval_seconds=60,
+            timeout_seconds=30,
+            steps=[{"kind": "goto",
+                    "value": "https://svc:P4SSW0RD@payments.internal/"},
+                   {"kind": "expect_text", "value": "hello"}])
+        self._hand_edit(monitor["id"], {"mode": "expiry_only"})
+
+        response = self.client.get("/api/agent/config", headers=self.headers)
+        check = response.get_json()["monitors"][0]
+        self.assertEqual(check["steps"][0]["value"],
+                         "https://payments.internal/")
+        self.assertEqual(check["steps"][1]["kind"], "expect_text")
+        self.assertNotIn("P4SSW0RD", response.get_data(as_text=True))
+
+    def test_a_verifying_check_keeps_the_address_it_was_given(self):
+        """The withholding is about the setting, not about the address: a
+        check that verifies the certificate knows what it is talking to and
+        may sign in."""
+        monitor = self.app.store.monitors.create(
+            name="billing", kind="http",
+            target="https://svc:P4SSW0RD@billing.internal/",
+            interval_seconds=60, timeout_seconds=10)
+        self.assertIsNotNone(monitor)
+        response = self.client.get("/api/agent/config", headers=self.headers)
+        check = response.get_json()["monitors"][0]
+        self.assertEqual(check["target"],
+                         "https://svc:P4SSW0RD@billing.internal/")
 
     def test_a_journey_in_that_state_is_not_handed_its_secrets(self):
         monitor = self.app.store.monitors.create(

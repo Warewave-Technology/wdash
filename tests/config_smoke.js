@@ -817,6 +817,50 @@ function type(w, id, value) {
     check('a check that sends nothing is not offered a way to stop',
           hidden('forgetField'));
 
+    // Hidden is not enough: `d-none` hides a box and the browser still
+    // submits what is in it. Ticking "do not verify" over a pasted
+    // certificate posted the certificate anyway, and the save was refused —
+    // "Naming a certificate to trust and then not verifying it are opposite
+    // instructions" — about a textarea that was no longer on screen. A
+    // disabled control is not submitted, and keeps its value for when the
+    // block comes back.
+    checks.document.querySelector('.edit-monitor')
+        .dispatchEvent(new checks.Event('click'));
+    check('a refusable certificate is on screen and enabled to begin with',
+          !hidden('tlsCertificateField')
+          && !checks.document.getElementById('monitorTlsCertificate').disabled);
+    checks.document.getElementById('monitorTlsExpiryOnly').checked = true;
+    checks.document.getElementById('monitorTlsExpiryOnly')
+        .dispatchEvent(new checks.Event('change'));
+    check('ticking "do not verify" stops the certificate being submitted',
+          checks.document.getElementById('monitorTlsCertificate').disabled);
+    check('and the expected name with it',
+          checks.document.getElementById('monitorTlsExpectedName').disabled);
+    check('the certificate is kept, not thrown away',
+          checks.document.getElementById('monitorTlsCertificate').value
+              .includes('BEGIN CERTIFICATE'));
+    checks.document.getElementById('monitorTlsVerify').checked = true;
+    checks.document.getElementById('monitorTlsVerify')
+        .dispatchEvent(new checks.Event('change'));
+    check('and comes back, enabled, when verification does',
+          !checks.document.getElementById('monitorTlsCertificate').disabled
+          && checks.document.getElementById('monitorTlsCertificate').value
+              .includes('BEGIN CERTIFICATE'));
+
+    checks.document.getElementById('monitorKind').value = 'tcp';
+    checks.applyMonitorKind();
+    check('a tcp check submits no TLS setting at all',
+          checks.document.getElementById('monitorTlsCertificate').disabled
+          && checks.document.getElementById('monitorTlsExpiryOnly').disabled);
+    checks.document.getElementById('monitorKind').value = 'browser';
+    checks.applyMonitorKind();
+    check('a journey submits no expected name',
+          checks.document.getElementById('monitorTlsExpectedName').disabled);
+    check('nor a tick to forget what it sends',
+          checks.document.getElementById('monitorForgetRequest').disabled);
+    checks.document.getElementById('monitorKind').value = 'http';
+    checks.applyMonitorKind();
+
     checks.document.getElementById('addMonitorBtn')
         .dispatchEvent(new checks.Event('click'));
     check('a new check starts by verifying',

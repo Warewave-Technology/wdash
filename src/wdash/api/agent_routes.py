@@ -87,7 +87,7 @@ def config():
             unreadable.add(m["id"])
         checks.append({
             "id": m["id"], "name": m["name"], "kind": m["kind"],
-            "target": m["target"],
+            "target": _target_for(m),
             "interval_seconds": m["interval_seconds"],
             "timeout_seconds": m["timeout_seconds"],
             "assertions": m["assertions"],
@@ -132,6 +132,56 @@ def _expiry_only(monitor):
     """Whether this check was told not to verify the certificate."""
     from ..store.monitoring import EXPIRY_ONLY, tls_mode
     return tls_mode(monitor.get("tls")) == EXPIRY_ONLY
+
+
+def _without_userinfo(url):
+    """A URL with any `user:password@` taken out of it."""
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return url
+    if "@" not in (parts.netloc or ""):
+        return url
+    return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[-1]))
+
+
+def _target_for(monitor):
+    """The address this check is given, with no credential written into it.
+
+    The fourth channel, and the one `_request_for` cannot reach: a password
+    in the ADDRESS is not in `request` and not in `secrets`, and `requests`
+    reads it straight back off the URL. So "an expiry-only check is sent
+    nothing it would send" has to cover the target as well, or the one place
+    any of this leaves the database hands it over anyway.
+    """
+    target = monitor.get("target")
+    if not _expiry_only(monitor):
+        return target
+    stripped = _without_userinfo(target)
+    if stripped != target:
+        # Loud for the same reason the request is: the store refuses to SAVE
+        # this pair, so a row holding it was hand-edited or written by an
+        # older build, and the check failing to sign in an hour later says
+        # nothing about why.
+        logger.error(
+            f"check '{monitor.get('name')}' does not verify the certificate, "
+            f"so the credentials written into its address were not sent to "
+            f"the agent")
+    return stripped
+
+
+def _steps_for(monitor, steps):
+    """A journey's steps, with no credential written into a `goto`."""
+    if not _expiry_only(monitor):
+        return steps
+    out = []
+    for step in steps:
+        step = dict(step or {})
+        if step.get("kind") == "goto":
+            step["value"] = _without_userinfo(step.get("value"))
+        out.append(step)
+    return out
 
 
 def _request_for(store, monitor):
@@ -192,7 +242,7 @@ def _journey_for(store, monitor):
     """
     if monitor.get("kind") != "browser":
         return {}
-    out = {"steps": monitor.get("steps") or []}
+    out = {"steps": _steps_for(monitor, monitor.get("steps") or [])}
     if _expiry_only(monitor):
         # Same rule as an http check's headers, and the same reason: a
         # journey that does not verify the certificate types its password

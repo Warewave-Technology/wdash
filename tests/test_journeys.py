@@ -1304,18 +1304,53 @@ def _private_chain(scratch):
                 leaf_key.public_key()), critical=False)
             .sign(ca_key, hashes.SHA256()))
 
-    cert_path = os.path.join(scratch, "leaf.crt")
-    key_path = os.path.join(scratch, "leaf.key")
-    with open(cert_path, "wb") as handle:
-        handle.write(leaf.public_bytes(serialization.Encoding.PEM))
-    with open(key_path, "wb") as handle:
-        handle.write(leaf_key.private_bytes(
-            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption()))
+    # And one that has already expired, signed by the same authority. A pin
+    # waives EVERY certificate error for that key, expiry included — measured
+    # — so this is the certificate that tells the browser and the clock
+    # apart.
+    expired_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    expired = (x509.CertificateBuilder()
+               .subject_name(x509.Name([x509.NameAttribute(
+                   NameOID.COMMON_NAME, "payments.internal")]))
+               .issuer_name(ca_name).public_key(expired_key.public_key())
+               .serial_number(x509.random_serial_number())
+               .not_valid_before(now - dt.timedelta(days=400))
+               .not_valid_after(now - dt.timedelta(days=25))
+               .add_extension(x509.SubjectAlternativeName([
+                   x509.DNSName("payments.internal"),
+                   x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                   critical=False)
+               .add_extension(x509.BasicConstraints(ca=False, path_length=None),
+                              critical=True)
+               .add_extension(x509.AuthorityKeyIdentifier
+                              .from_issuer_public_key(ca_key.public_key()),
+                              critical=False)
+               .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+                   expired_key.public_key()), critical=False)
+               .sign(ca_key, hashes.SHA256()))
+
+    def write(name, certificate, private):
+        cert_path = os.path.join(scratch, f"{name}.crt")
+        key_path = os.path.join(scratch, f"{name}.key")
+        with open(cert_path, "wb") as handle:
+            handle.write(certificate.public_bytes(serialization.Encoding.PEM))
+        with open(key_path, "wb") as handle:
+            handle.write(private.private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()))
+        return cert_path, key_path
+
+    cert_path, key_path = write("leaf", leaf, leaf_key)
+    expired_cert_path, expired_key_path = write("expired", expired,
+                                                expired_key)
     return {
         "ca_pem": ca.public_bytes(serialization.Encoding.PEM).decode(),
         "leaf_pem": leaf.public_bytes(serialization.Encoding.PEM).decode(),
         "cert_path": cert_path, "key_path": key_path,
+        "expired_pem": expired.public_bytes(
+            serialization.Encoding.PEM).decode(),
+        "expired_cert_path": expired_cert_path,
+        "expired_key_path": expired_key_path,
     }
 
 
@@ -1417,6 +1452,81 @@ class JourneyTlsOptionsTest(unittest.TestCase):
         self.assertTrue(result["tls"]["not_after"])
         self.assertIs(result["handshake_verified"], False)
 
+    ADDRESS = "https://svc:P4SSW0RD@payments.internal/login"
+
+    def _goto(self, tls):
+        """The URL the browser was actually asked to open."""
+        page = _FakePage()
+        run_journey({"id": "m1", "timeout_seconds": 30, "target": self.ADDRESS,
+                     "steps": [{"kind": "goto", "value": self.ADDRESS},
+                               {"kind": "expect_text", "value": "hello"}],
+                     "tls": tls}, launcher=_Launcher(page))
+        return page.calls[0][1][0]
+
+    def test_a_waived_journey_does_not_type_the_password_in_its_address(self):
+        """"Expiry only sends nothing" has to cover the address as well:
+        measured, Chromium answers a 401 challenge with the user name and
+        password from the URL it was given, over a context launched with
+        ignore_https_errors=True. The store refuses to save the combination,
+        so a row holding it was hand-edited or written by an older build."""
+        self.assertEqual(self._goto({"mode": "expiry_only"}),
+                         "https://payments.internal/login")
+
+    def test_a_verifying_journey_keeps_what_its_address_carries(self):
+        """The boundary, and it is the point of the pin: a journey that
+        verified the certificate — or pinned the endpoint's own public key —
+        knows what it is talking to, and may sign in."""
+        self.assertEqual(self._goto({}), self.ADDRESS)
+
+    def test_a_pin_over_an_expired_certificate_is_not_called_verified(self):
+        """A pin waives EVERY certificate error for that key, expiry
+        included: measured against Chromium 151, a journey pinned to a
+        certificate that expired twenty-five days ago loads the page and
+        comes up. Calling that handshake verified puts a verdict saying the
+        certificate was good beside the expiry chip saying it was not —
+        the browser and the clock disagreeing on one row. The expiry is still
+        read, still shown and still alerted on; the verdict is False.
+        """
+        scratch = tempfile.mkdtemp()
+        try:
+            chain = _private_chain(scratch)
+            server = _https_server(chain["expired_cert_path"],
+                                   chain["expired_key_path"])
+            port = server.server_address[1]
+            try:
+                result, _ = self._run({"certificate": chain["expired_pem"]},
+                                      target=f"https://127.0.0.1:{port}/")
+            finally:
+                server.shutdown()
+                server.server_close()
+        finally:
+            import shutil
+            shutil.rmtree(scratch, ignore_errors=True)
+        self.assertEqual(result["status"], "up", result["error"])
+        self.assertIs(result["handshake_verified"], False)
+        # And the clock it disagreed with is on the result, as it has to be:
+        # this is the check that reports the expiry.
+        self.assertTrue(result["tls"]["not_after"])
+
+    def test_a_pin_over_a_certificate_in_date_still_counts_as_verified(self):
+        """The other side of the same rule: the endpoint proved it holds the
+        private key for exactly the public key this monitor names."""
+        scratch = tempfile.mkdtemp()
+        try:
+            chain = _private_chain(scratch)
+            server = _https_server(chain["cert_path"], chain["key_path"])
+            port = server.server_address[1]
+            try:
+                result, _ = self._run({"certificate": chain["leaf_pem"]},
+                                      target=f"https://127.0.0.1:{port}/")
+            finally:
+                server.shutdown()
+                server.server_close()
+        finally:
+            import shutil
+            shutil.rmtree(scratch, ignore_errors=True)
+        self.assertIs(result["handshake_verified"], True)
+
     def test_an_http_journey_says_nothing_about_a_handshake(self):
         result, _ = self._run(target="http://payments.internal/login")
         self.assertIsNone(result["handshake_verified"])
@@ -1482,18 +1592,24 @@ class PinnedCertificateTest(unittest.TestCase):
         cls.server = _https_server(cls.chain["cert_path"],
                                    cls.chain["key_path"])
         cls.url = f"https://127.0.0.1:{cls.server.server_address[1]}/"
+        cls.expired_server = _https_server(cls.chain["expired_cert_path"],
+                                           cls.chain["expired_key_path"])
+        cls.expired_url = (f"https://127.0.0.1:"
+                           f"{cls.expired_server.server_address[1]}/")
 
     @classmethod
     def tearDownClass(cls):
         import shutil
-        cls.server.shutdown()
-        cls.server.server_close()
+        for server in (cls.server, cls.expired_server):
+            server.shutdown()
+            server.server_close()
         shutil.rmtree(cls.scratch, ignore_errors=True)
 
-    def _journey(self, tls):
+    def _journey(self, tls, url=None):
+        url = url or self.url
         return run_journey({"id": "m1", "timeout_seconds": 45,
-                            "target": self.url, "tls": tls,
-                            "steps": [{"kind": "goto", "value": self.url},
+                            "target": url, "tls": tls,
+                            "steps": [{"kind": "goto", "value": url},
                                       {"kind": "expect_text",
                                        "value": "hello"}]})
 
@@ -1521,3 +1637,16 @@ class PinnedCertificateTest(unittest.TestCase):
         result = self._journey({"mode": "expiry_only"})
         self.assertEqual(result["status"], "up", result["error"])
         self.assertIs(result["handshake_verified"], False)
+
+    def test_the_pin_gets_an_expired_certificate_through_and_says_so(self):
+        """The measurement behind the verdict rule: Chromium's waiver for a
+        pinned key covers ERR_CERT_DATE_INVALID too, so the page loads over a
+        certificate that expired twenty-five days ago. The journey is up —
+        the site really did answer — and the handshake is NOT called
+        verified, because the clock says otherwise and one row must not carry
+        both claims."""
+        result = self._journey({"certificate": self.chain["expired_pem"]},
+                               url=self.expired_url)
+        self.assertEqual(result["status"], "up", result["error"])
+        self.assertIs(result["handshake_verified"], False)
+        self.assertTrue(result["tls"]["not_after"])

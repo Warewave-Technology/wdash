@@ -140,17 +140,49 @@ def _refused_certificate(message):
     return any(marker in text for marker in _REFUSED)
 
 
-def _verdict(monitor, tls, failure):
+def _expired(certificate):
+    """Whether the certificate that was read has already expired.
+
+    Read from the timestamp rather than a rounded day count, the same rule
+    the page applies: a certificate that expired an hour ago rounds to zero
+    days, and zero days is "expires today".
+    """
+    from datetime import datetime, timezone
+    moment = (certificate or {}).get("not_after")
+    if not moment:
+        return False
+    try:
+        when = datetime.fromisoformat(str(moment))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when < datetime.now(timezone.utc)
+
+
+def _verdict(monitor, tls, failure, certificate=None):
     """Whether this journey's navigation completed a verified handshake.
 
     None for a journey that makes no handshake, False for the waiver and for
     a certificate the browser refused, True otherwise — including a pinned
     one, where the endpoint proved it holds the private key for exactly the
     public key this monitor names.
+
+    With ONE exception, and it is the reason the certificate is passed in:
+    `--ignore-certificate-errors-spki-list` waives every certificate error
+    for that key, expiry included. Measured against Chromium 151 and the
+    lab's :18444, a journey pinned to a certificate that expired on
+    2026-08-18 loaded the page and reported `up`. Calling that handshake
+    verified would have the browser and the clock disagreeing on one row —
+    the expiry chip beside a verdict that says the certificate was good — so
+    a pinned run over an expired certificate says False. The expiry itself is
+    still read, still shown and still alerted on.
     """
     if not str(monitor.get("target") or "").lower().startswith("https://"):
         return None
     if _mode(tls) == EXPIRY_ONLY or _refused_certificate(failure):
+        return False
+    if (tls or {}).get("certificate") and _expired(certificate):
         return False
     return True
 
@@ -212,7 +244,7 @@ def run_journey(monitor, secrets=None, launcher=None, now=None):
         browser = launcher or _chromium
         with browser(ignore_https_errors=waive, certificate_pins=pins) as page:
             failure, shot = _walk(page, steps, plan, secrets, hidden, budget,
-                                  clock)
+                                  clock, waive)
     except ImportError:
         # Reached by a Playwright that is on the path and will not import — a
         # half-installed one, a missing shared object. An agent that has no
@@ -230,10 +262,14 @@ def run_journey(monitor, secrets=None, launcher=None, now=None):
                        f"the browser could not start: {_clean(exc, hidden)}",
                        _since(clock), plan)
 
+    # Read before the verdict is decided rather than beside it: a pinned run
+    # is only as verified as the clock says, and the clock is in here.
+    certificate = _certificate_of(monitor)
     return _result(monitor, started, "down" if failure else "up",
                    _tls_advice(failure or "", tls), _since(clock), plan,
-                   screenshot=shot, tls=_certificate_of(monitor),
-                   handshake_verified=_verdict(monitor, tls, failure))
+                   screenshot=shot, tls=certificate,
+                   handshake_verified=_verdict(monitor, tls, failure,
+                                               certificate))
 
 
 class _chromium:
@@ -306,8 +342,13 @@ class _chromium:
         return False
 
 
-def _walk(page, steps, plan, secrets, hidden, budget, clock):
-    """Run the steps in order. Returns (failure message, screenshot or None)."""
+def _walk(page, steps, plan, secrets, hidden, budget, clock, waive=False):
+    """Run the steps in order. Returns (failure message, screenshot or None).
+
+    `waive` is the monitor's "expiry only", carried this far for one reason:
+    a journey that does not verify sends nothing, and an address written
+    `https://svc:P4SS@host/login` is a credential no secret box knows about.
+    """
     for step, row in zip(steps, plan):
         left = budget - (time.monotonic() - clock)
         if left <= 0:
@@ -319,7 +360,7 @@ def _walk(page, steps, plan, secrets, hidden, budget, clock):
         timeout = min(step.timeout, int(left * 1000))
         step_clock = time.monotonic()
         try:
-            _do(page, step, secrets, timeout)
+            _do(page, step, secrets, timeout, waive)
         except Exception as exc:
             row["status"] = STEP_FAILED
             row["duration_us"] = _since(step_clock)
@@ -331,12 +372,20 @@ def _walk(page, steps, plan, secrets, hidden, budget, clock):
     return None, None
 
 
-def _do(page, step, secrets, timeout):
+def _do(page, step, secrets, timeout, waive=False):
     """One step. Raises with a sentence somebody can act on."""
     kind = step.kind
     value = resolve(step, secrets)
 
     if kind == "goto":
+        if waive:
+            from .checks import _without_userinfo
+            # Measured: Chromium answers a 401 challenge with the user name
+            # and password from the address it was given, so a journey that
+            # does not verify the certificate typed a credential into
+            # whatever answered. The store refuses to save one; a row from an
+            # older build or a hand-edited one stops here.
+            value = _without_userinfo(value)
         response = page.goto(value, timeout=timeout, wait_until="load")
         # A journey whose first page 500s should not spend the rest of its
         # steps failing to find selectors on an error page.

@@ -2411,6 +2411,34 @@ class WhatThePageSaysAboutVerificationTest(unittest.TestCase):
             self.assertNotIn("expiry only", row)
             self.assertNotIn("not verified", row)
 
+    def _detail(self, monitor_id):
+        return self.client.get(
+            f"/monitors/{monitor_id}?window=1h").get_data(as_text=True)
+
+    def test_the_detail_page_says_it_when_the_check_does_not_verify(self):
+        """The page somebody opens when a check is down or an expiry is
+        close. Without the chip its certificate card is indistinguishable
+        from a verified check's — and the certificate on it was read on a
+        second, deliberately unverified connection."""
+        page = self._detail("waived")
+        self.assertIn("TLS certificate", page)
+        self.assertIn("expiry only", page)
+
+    def test_the_detail_page_says_when_the_last_handshake_failed(self):
+        page = self._detail("failed")
+        self.assertIn("not verified", page)
+        self.assertNotIn("expiry only", page)
+
+    def test_a_verified_detail_page_carries_no_chip_at_all(self):
+        page = self._detail("verified")
+        self.assertNotIn("expiry only", page)
+        self.assertNotIn("not verified", page)
+
+    def test_a_detail_page_from_a_source_that_cannot_say_says_nothing(self):
+        page = self._detail("heartbeat")
+        self.assertNotIn("expiry only", page)
+        self.assertNotIn("not verified", page)
+
     def test_the_api_carries_both_facts(self):
         payload = self.client.get(
             "/api/monitors?window=1h").get_json()

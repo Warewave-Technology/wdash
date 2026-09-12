@@ -571,7 +571,54 @@ def _sends(public, has_secrets):
     return out
 
 
-def _refuse_unverified_request(mode, kind, public, has_secrets):
+def _credentials_in_address(*addresses):
+    """The user name one of these URLs carries, or "".
+
+    `https://svc:P4SS@host/` counts.
+
+    The fourth channel, and the one that is in none of the others: a password
+    typed into the ADDRESS is not in `secrets`, not in `request.headers` and
+    not in `auth`, so a rule asked only about those says a check sends
+    nothing while `requests` prepares `Authorization: Basic …` from the URL
+    itself (`PreparedRequest.prepare_auth` falls back to
+    `get_auth_from_url`). Measured: a monitor targeting
+    `https://svc:P4SSW0RD@host/` saved as expiry_only sent
+    `Basic c3ZjOlA0U1NXMFJE` over the connection it had deliberately not
+    verified. The repository already knows targets carry passwords —
+    `config_routes._without_password` exists for the audit row.
+
+    A journey is asked about every `goto` it makes, not only its first: the
+    address on the form is step one's, and step four is just as much a
+    request this check makes.
+    """
+    from urllib.parse import urlsplit
+    for address in addresses:
+        try:
+            parts = urlsplit(address or "")
+        except ValueError:
+            # An address this malformed is refused by `validate`; saying "no
+            # credentials" here would be a claim about a string nobody parsed.
+            continue
+        if parts.username or parts.password:
+            return parts.username or "the account in its address"
+    return ""
+
+
+def _addresses_of(kind, target, steps):
+    """Every address this check will ask for, as configured.
+
+    One place, because the http answer and the journey answer are not the
+    same: a journey's target is its FIRST step's URL, and the rule below is
+    about all of them.
+    """
+    if kind != BROWSER:
+        return (target,)
+    return tuple((step or {}).get("value") or ""
+                 for step in (steps or ())
+                 if (step or {}).get("kind") == "goto")
+
+
+def _refuse_unverified_request(mode, kind, public, has_secrets, addresses=()):
     """A check that does not verify must send nothing. Both directions.
 
     Evaluated against the state the save WOULD LEAVE BEHIND rather than the
@@ -582,6 +629,18 @@ def _refuse_unverified_request(mode, kind, public, has_secrets):
     """
     if mode != EXPIRY_ONLY:
         return
+    account = _credentials_in_address(*addresses)
+    if account:
+        # Its own refusal rather than one more entry in `_sends`, because the
+        # remedy is a different one: "Forget what this check sends" empties
+        # the request and cannot touch the address, and a journey — which has
+        # no such tick at all — carries this in the URL of its first step.
+        raise MonitoringError(
+            f"The address of this check carries credentials for "
+            f"'{account}', and a check that does not verify the certificate "
+            f"would send them to whatever answered. Take them out of the "
+            f"address and put them in the credential boxes, or leave "
+            f"verification on.")
     if kind == BROWSER:
         if has_secrets:
             raise MonitoringError(
@@ -700,7 +759,10 @@ class MonitorRepository:
                 "Headers, cookies and authentication apply to http checks only.")
 
         setting = split_tls(tls, kind, target)
-        _refuse_unverified_request(tls_mode(setting), kind, public, bool(secret))
+        steps_rows = [x.as_dict() for x in steps] if steps else None
+        _refuse_unverified_request(
+            tls_mode(setting), kind, public, bool(secret),
+            _addresses_of(kind, target, steps_rows))
 
         now = _now()
         row = {
@@ -711,7 +773,7 @@ class MonitorRepository:
             "request": public,
             "secrets": self._seal(secret),
             "tls": setting,
-            "steps": [x.as_dict() for x in steps] if steps else None,
+            "steps": steps_rows,
             "labels": labels or {},
             "enabled": True,
             "created_by": created_by,
@@ -826,8 +888,11 @@ class MonitorRepository:
         after_secrets = (bool(values["secrets"]) if "secrets" in values
                          else current["has_credentials"])
         after_tls = values["tls"] if "tls" in values else current["tls"]
-        _refuse_unverified_request(tls_mode(after_tls), kind, after_request,
-                                   after_secrets)
+        after_steps = (values["steps"] if "steps" in values
+                       else current["steps"])
+        _refuse_unverified_request(
+            tls_mode(after_tls), kind, after_request, after_secrets,
+            _addresses_of(kind, target, after_steps))
         values["updated_at"] = _now()
 
         with self._engine.begin() as connection:

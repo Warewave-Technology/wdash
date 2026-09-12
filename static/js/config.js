@@ -840,6 +840,24 @@ function fillMonitor(monitor) {
 }
 
 /**
+ * Show or hide one block of the TLS section, and disable what it holds.
+ *
+ * The two go together for one reason: a refusal that names a box nobody can
+ * see cannot be acted on. Hiding alone leaves the value in the form and the
+ * browser posts it — measured, a check whose certificate textarea had just
+ * been hidden by "do not verify" still submitted the certificate and the
+ * save was refused about it.
+ */
+function setTls(selector, hide) {
+    document.querySelectorAll(selector).forEach(element => {
+        element.classList.toggle('d-none', hide);
+        element.querySelectorAll('input, textarea, select').forEach(field => {
+            field.disabled = hide;
+        });
+    });
+}
+
+/**
  * Show the request and response-header fields only for http checks.
  *
  * A tcp check opens a socket. Headers and auth on one are boxes somebody
@@ -857,23 +875,21 @@ function applyMonitorKind() {
     // whatever name the certificate carries.
     const expiryOnly = document.getElementById(
         'monitorTlsExpiryOnly')?.checked;
-    document.querySelectorAll('[data-tls]').forEach(element => {
-        element.classList.toggle('d-none', kind === 'tcp');
-    });
-    document.querySelectorAll('[data-tls-verify]').forEach(element => {
-        element.classList.toggle('d-none', kind === 'tcp' || expiryOnly);
-    });
-    document.querySelectorAll('[data-tls-name]').forEach(element => {
-        element.classList.toggle('d-none', kind !== 'http' || expiryOnly);
-    });
+    // Hidden AND disabled, together, always. `d-none` hides a box; it does
+    // not stop the browser submitting what is in it. So ticking "do not
+    // verify" over a pasted certificate posted the certificate anyway and
+    // the save was refused with "Naming a certificate to trust and then not
+    // verifying it are opposite instructions" — about a textarea that was no
+    // longer on screen. A disabled control is not submitted, and its value
+    // is still there when the block comes back.
+    setTls('[data-tls]', kind === 'tcp');
+    setTls('[data-tls-verify]', kind === 'tcp' || expiryOnly);
+    setTls('[data-tls-name]', kind !== 'http' || expiryOnly);
     // Offered only where there is something to forget, and never for a
     // journey: its secrets are named by its steps, so forgetting one leaves
     // a step with nothing to type — which would make the escape hatch a way
     // to break a check.
-    document.querySelectorAll('[data-forget]').forEach(element => {
-        element.classList.toggle('d-none',
-                                 !monitorSends || kind === 'browser');
-    });
+    setTls('[data-forget]', !monitorSends || kind === 'browser');
     document.querySelectorAll('[data-browser-only]').forEach(element => {
         element.classList.toggle('d-none', kind !== 'browser');
     });

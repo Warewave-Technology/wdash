@@ -147,7 +147,23 @@
 {% if monitor.certificate %}
 {% set c = monitor.certificate %}
 <div class="card mb-4">
-    <div class="card-header"><i class="fas fa-lock"></i> TLS certificate</div>
+    <div class="card-header"><i class="fas fa-lock"></i> TLS certificate
+        {# The same two chips the list carries, and this is the page somebody
+           opens when a check is down or an expiry is close: without them the
+           certificate below reads as one a check verified, when it may have
+           been read on a second, deliberately unverified connection. The
+           mode comes from the DEFINITION and the verdict from the last run,
+           so a source that cannot say either way says nothing at all. #}
+        {% if monitor.tls_mode == 'expiry_only' %}
+        <span class="badge target-chip"
+              title="This check does not verify the certificate. The expiry below is all it can vouch for, and it sends nothing."
+        >expiry only</span>
+        {% elif c.verified == false %}
+        <span class="badge target-chip"
+              title="This check verifies the certificate and its last run did not complete a verified handshake with this endpoint. The certificate below was read without verification."
+        >not verified</span>
+        {% endif %}
+    </div>
     <div class="card-body">
         <div class="row g-3">
             <div class="col-md-3">
