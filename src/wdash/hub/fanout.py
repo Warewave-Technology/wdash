@@ -370,6 +370,19 @@ class FanOutLogSource(LogSource):
             if error is not None or result is None:
                 failed = True
                 warnings.append(f"{source.name} failed: {error}")
+                # A member that died outright is the one partial answer that
+                # showed a wrong number as a right one: the survivors' counts
+                # were drawn with no mark on the panel at all, so a chart
+                # short by an unknown amount was the answer, with one line
+                # above the grid as the only clue. Measured: two members, one
+                # raising, gave `notes={}` and a panel carrying 40 of an
+                # unknown total. Every aggregation it was ASKED for is short,
+                # which is exactly what the panel can say — the trace panels
+                # have marked their rows this way since traces arrived.
+                for aggregation in aggregations or ():
+                    notes.setdefault(aggregation.name, []).append(
+                        f"{source.name} did not answer, so these counts are "
+                        f"a lower bound")
                 continue
             if result.failed:
                 failed = True

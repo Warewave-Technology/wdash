@@ -34,7 +34,7 @@ from ..dashboard.thresholds import (
 )
 from ..dashboard.visibility import VISIBILITIES, can_view, explain
 from ..dashboard.panels import (
-    AGGREGATABLE_FIELDS, PanelError, needs_logs, normalise_all,
+    AGGREGATABLE_FIELDS, PanelError, needs_logs, normalise_all, signal_of,
 )
 from ..hub.aggregation import AggregationResult
 
@@ -46,6 +46,19 @@ dashboard_bp = Blueprint("dashboards", __name__)
 #: default. It did — adding "15m" and "6h" to the picker left both collapsing
 #: into a single bucket, which renders as one dot.
 _HEATMAP_BARS = 24
+
+#: The signals this route knows how to answer, and nothing more.
+#:
+#: "logs" rides the batched aggregation; "traces" is `_trace_panels`. A panel
+#: type registered in `PANEL_TYPES` with any other signal has nothing to fill
+#: it, and the cost of forgetting that is the one failure this package exists
+#: to remove: `_panel_results` would read the panel's id out of the LOG
+#: result, find nothing, and send an empty bucket list, which the client
+#: draws as "No data in this window" — a claim about the data, made about a
+#: question nobody asked. So a panel no filler answered gets a reason
+#: instead, and `tests.test_panel_reasons` fails the day a row is added here
+#: without one.
+FILLED_SIGNALS = frozenset({"logs", "traces"})
 
 
 def _logs(dashboard=None):
@@ -301,17 +314,24 @@ def _without_log_containers(dashboard, scope, time_range, failure, status):
     """Answer the panels the log source is not needed for, and say why the
     rest are empty. Returns (payload, status) for jsonify.
 
-    The log source decided the whole page. `_targets` resolves ITS containers
-    before a single panel is filled, so three things that have nothing to do
+    The log source decided the whole page. Six things that have nothing to do
     with a trace panel took it down with them: the log backend unreachable
-    (503, and the client's `showLoadError` then wipes the grid), the dashboard
-    naming a source that is gone (400), and a scope that reaches none of the
-    dashboard's containers (200 with `panels: []`, an empty grid under one
-    sentence). A trace panel needs the window and the caller's scope and
-    nothing else — `_trace_panels` has had that shape since traces arrived —
-    and the monitor, certificate and alert panels coming after it are the same
-    shape again. An operator opens a board in an Elasticsearch outage
-    precisely to tell a dead shipper from a quiet night.
+    while resolving containers (503, and the client's `showLoadError` then
+    wipes the grid), the dashboard naming a source that is gone (400), a
+    scope that reaches none of the dashboard's containers (200 with
+    `panels: []`, an empty grid under one sentence), a filter the query
+    language refuses (400), a search that ran and failed (502) and a search
+    that raised on the way (an HTML 500 out of Flask, with no payload at
+    all). The last three are the ones a running worker meets: an
+    Elasticsearch catalogue that has fetched its index list once keeps
+    serving it through an outage, so `_targets` succeeds and the failure
+    arrives at the search.
+
+    A trace panel needs the window and the caller's scope and nothing else —
+    `_trace_panels` has had that shape since traces arrived — and the
+    monitor, certificate and alert panels coming after it are the same shape
+    again. An operator opens a board in an Elasticsearch outage precisely to
+    tell a dead shipper from a quiet night.
 
     So: fill what can be filled, and give every panel that cannot a reason of
     its own instead of an empty card.
@@ -409,6 +429,22 @@ def _panel_results(panels, result, extra=None):
         rendered = dict(panel)
         if panel["id"] in extra:
             rendered.update(extra[panel["id"]])
+        elif not needs_logs(panel):
+            # Nothing filled this panel and its question never goes to the log
+            # source, so the log result holds no answer to look up — reading
+            # it there produced `buckets: []`, which is "No data in this
+            # window" on screen. Measured by registering a panel type with
+            # signal "monitors" and no filler: status 200 and a card reading
+            # that the window was quiet, with no error, no warning and
+            # nothing anywhere saying the question had not been asked.
+            #
+            # `needs_logs` classifies a panel; it does not fill one. This is
+            # the second half, and it is deliberately the DEFAULT for
+            # forgetting: the next panel type is a row in `PANEL_TYPES` plus
+            # a filler, and getting only as far as the row costs a visible
+            # error rather than a plausible empty chart.
+            rendered["buckets"] = []
+            rendered["error"] = f"No {signal_of(panel)} backend is configured."
         else:
             rendered["buckets"] = _buckets(result.get(panel["id"]))
             reasons = list(result.reasons(panel["id"]))
@@ -1075,8 +1111,16 @@ def api_dashboard_data(dashboard_id):
     except QueryError as exc:
         message = (f"Invalid filter: {exc}" if narrow
                    else f"Invalid dashboard query: {exc}")
-        return jsonify({"error": message,
-                        "error_type": "invalid_query"}), 400
+        # A filter the log query language cannot parse is the log source's
+        # problem, and it is the one door of the four that a typo opens: the
+        # trace panel beside it never honoured `q` in the first place, and
+        # answering 400 for the whole board took it down for a quote nobody
+        # closed. A board of log panels alone still answers 400 — there is
+        # nothing to show and the status line is what the client reads.
+        payload, status = _without_log_containers(
+            dashboard, scope, time_range,
+            {"error": message, "error_type": "invalid_query"}, 400)
+        return jsonify(payload), status
     # Both windows go out in ONE batch. The comparison is a separate query —
     # it covers a different time range — but not a separate round trip.
     try:
@@ -1100,10 +1144,31 @@ def api_dashboard_data(dashboard_id):
         batch.append((baseline_query,
                       [Terms(name=LEVELS_AGGREGATION, field="severity", size=10)]))
 
-    results = _logs(dashboard).multi_aggregate(batch, scope)
+    # The door a running worker actually walks through. `_targets` asks the
+    # source for its container list, and the Elasticsearch catalogue serves a
+    # STALE list indefinitely once it has fetched one (elasticsearch.py:226)
+    # rather than pretending the cluster is empty — so in an ordinary outage
+    # `_targets` SUCCEEDS and the failure lands here instead. Measured on the
+    # lab: with the client replaced by a dead one and the catalogue warm,
+    # `containers()` still answered 11 indices while this returned 502 with
+    # no `panels` key at all, and the client's `showLoadError` wiped the grid
+    # — the trace panel with it. Only a worker that has never read the index
+    # list reaches the earlier door.
+    try:
+        results = _logs(dashboard).multi_aggregate(batch, scope)
+    except Exception as exc:
+        # And a search that RAISES rather than answering `failed` reached no
+        # handler at all: Flask answered an HTML 500, so the browser got no
+        # payload, no panel and no sentence.
+        current_app.logger.warning(f"Dashboard search failed: {exc}")
+        payload, status = _without_log_containers(
+            dashboard, scope, time_range, _unreachable(dashboard, exc), 503)
+        return jsonify(payload), status
     result = results[0]
     if _did_not_run(result):
-        return jsonify(_did_not_run(result)), 502
+        payload, status = _without_log_containers(
+            dashboard, scope, time_range, _did_not_run(result), 502)
+        return jsonify(payload), status
     previous = _compare(result, results[1], baseline_query) if len(results) > 1 else None
 
     counts = _level_counts(result.get(LEVELS_AGGREGATION))

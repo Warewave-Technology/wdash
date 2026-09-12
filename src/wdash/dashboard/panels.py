@@ -75,6 +75,18 @@ def signals(panels):
     return {PANEL_TYPES[panel["type"]]["signal"] for panel in panels}
 
 
+def signal_of(panel):
+    """Which source answers this panel, as a name fit to say out loud.
+
+    `needs_logs` is enough to classify a panel; it is not enough to fill one.
+    A panel type whose signal nothing fills yet has to SAY that, and saying
+    it needs the signal's name — so this is the other half of the row, and
+    the reason a forgotten filler reads as an error rather than as an empty
+    card.
+    """
+    return PANEL_TYPES[panel["type"]]["signal"]
+
+
 def needs_logs(panel):
     """Does this panel's question go to the log source?
 

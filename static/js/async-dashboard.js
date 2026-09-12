@@ -96,6 +96,33 @@ function quoted(value) {
         .replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 }
 
+/**
+ * The kinds of error where the log half did not answer at all.
+ *
+ * A board whose log source is down answers 200 now, so that the panels that
+ * CAN answer are drawn — and the page-level sentence, which used to arrive
+ * through `showLoadError` in red, arrived through the success arm in yellow
+ * instead. The cards say why they are empty either way, so this was never a
+ * lie; it read like a caveat rather than an outage, which is not what a
+ * backend that never answered is.
+ *
+ * The two kinds deliberately NOT here are answers: `no_accessible_containers`
+ * means the scope really does reach none of the dashboard's indices, and
+ * `invalid_query` means the filter really is a typo. Both keep the caution
+ * tone they have always had.
+ */
+const BACKEND_FAILURES = Object.assign(Object.create(null), {
+    elasticsearch_connection: true,
+    source_missing: true,
+    query_failed: true,
+});
+
+/** How loudly to say what came back with the data. */
+function messageTone(data) {
+    if (!data.error) return 'info';
+    return BACKEND_FAILURES[data.error_type] ? 'danger' : 'warning';
+}
+
 /** Bare when the parser reads it as itself, quoted otherwise. Levels were
  *  written bare, and a bare level stays what it was. */
 function queryValue(value) {
@@ -280,7 +307,7 @@ class AsyncDashboard {
             // page, which is where the reader is looking.
             this.render(data);
             this.showMessage(data.error || '', data.warnings,
-                             data.error ? 'warning' : 'info');
+                             messageTone(data));
 
             if (lastUpdatedEl && !this.pending) {
                 lastUpdatedEl.textContent = new Date().toLocaleString();
@@ -455,7 +482,18 @@ class AsyncDashboard {
         // support.
         const hint = slot.querySelector('.panel-hint');
         const notes = (panel.warnings || []).filter(Boolean);
-        if (panel.partial) {
+        // Only where there are numbers for it to qualify. A panel with
+        // nothing to draw prints its reason where the chart would be
+        // (`renderPanel`, `drawServiceTable`), and a header saying the same
+        // sentence two lines above that is one fact twice in one card —
+        // which is what an unanswerable Elasticsearch panel looked like.
+        // The same test `renderPanel` makes before it prints the reason
+        // instead of a chart, so the two cannot drift into saying it twice
+        // or into saying it nowhere: an all-zero series draws no chart
+        // either.
+        const drawn = (panel.rows || []).length > 0 ||
+            (panel.buckets || []).reduce((sum, b) => sum + (b.count || 0), 0) > 0;
+        if (panel.partial && drawn) {
             hint.className = 'text-warning panel-hint';
             hint.textContent = notes.length
                 ? `Incomplete: ${notes.join('; ')}`

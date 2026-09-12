@@ -287,6 +287,36 @@ async function main() {
         assert(/No accessible indices/.test(text), `the page said "${text}"`);
     });
 
+    // How loudly the page says it. A board whose log source is down answers
+    // 200 now — so that the trace panel beside it is drawn — and that moved
+    // the sentence from `showLoadError`, which paints it red, to the success
+    // arm, which painted every explanation yellow. A backend that never
+    // answered is not a caveat.
+    const deadBackend = await loadWith({
+        error: 'Unable to connect to lab-es. Please check the connection.',
+        error_type: 'elasticsearch_connection',
+        panels: [{ ...PANEL, buckets: [], error: 'Unable to connect.' }],
+    });
+    check('a backend that did not answer is a red banner', () => {
+        const box = deadBackend.document.getElementById('dashboardMessage');
+        assert(box.classList.contains('alert-danger'),
+               `the banner was "${box.className}"`);
+    });
+
+    // And the two that are ANSWERS keep the caution tone they have always
+    // had: the scope really does reach none of these indices, and the filter
+    // really is a typo.
+    const outOfScope = await loadWith({
+        error: 'No accessible indices for dashboard data.',
+        error_type: 'no_accessible_containers',
+        total_hits: 0, panels: [],
+    });
+    check('a scope that reaches nothing stays a caution', () => {
+        const box = outOfScope.document.getElementById('dashboardMessage');
+        assert(box.classList.contains('alert-warning'),
+               `the banner was "${box.className}"`);
+    });
+
     // A panel that could not be ANSWERED, as opposed to one that was answered
     // with nothing. 'No data in this window' is a claim about the data; a
     // Loki terms over a field that is not a label, or an Elasticsearch
@@ -309,6 +339,39 @@ async function main() {
     check('an unanswerable panel stops spinning', () =>
         assert(spinning(unanswerable) === 0,
                `${spinning(unanswerable)} spinner(s) left`));
+
+    // And says it ONCE. The server marks the panel `partial` as well as
+    // sending the reason, so the header read "Incomplete: 'host' is not a
+    // Loki label on these streams" two lines above the same sentence where
+    // the chart would be. The caveat earns its place beside numbers — a
+    // service list short by one store — and there are none here.
+    check('an unanswerable panel says its reason once, not twice', () => {
+        const slot = unanswerable.document.querySelector('[data-panel-id="p1"]');
+        const hint = slot.querySelector('.panel-hint').textContent;
+        const body = slot.querySelector('.panel-empty small').textContent;
+        assert(/not a Loki label/.test(body), `the card said "${body}"`);
+        assert(!/not a Loki label/.test(hint) && !/Incomplete/.test(hint),
+               `the header said "${hint}" over a card already saying it`);
+    });
+
+    // A series of zeroes is not something to draw either: renderPanel prints
+    // the reason in the body for it too, so the header must not repeat it
+    // there.
+    const flatline = await loadWith({
+        total_hits: 0,
+        panels: [{ ...PANEL, type: 'timeseries', partial: true,
+                   warnings: ['one shipper did not answer'],
+                   buckets: [{ key: '10:00', count: 0 },
+                             { key: '11:00', count: 0 }] }],
+    });
+    check('an all-zero series says its reason once too', () => {
+        const slot = flatline.document.querySelector('[data-panel-id="p1"]');
+        const hint = slot.querySelector('.panel-hint').textContent;
+        const body = slot.querySelector('.panel-empty small').textContent;
+        assert(/one shipper did not answer/.test(body),
+               `the card said "${body}"`);
+        assert(!/Incomplete/.test(hint), `the header said "${hint}"`);
+    });
 
     // And the case that must NOT change: a window that really is quiet still
     // says so, because a panel with no reason has nothing better to print.

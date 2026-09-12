@@ -648,6 +648,10 @@ class VictoriaLogsSource(LogSource):
         buckets, warnings, total = {}, [], 0
         notes = {}
         failed = False
+        #: Field names present in this window, read at most once and only if
+        #: some terms aggregation comes back empty. `None` means "not asked
+        #: yet"; a failed read leaves it empty and this claims nothing.
+        present = None
 
         for aggregation in aggregations or ():
             try:
@@ -658,6 +662,28 @@ class VictoriaLogsSource(LogSource):
                     rows = self._terms(expression, query, aggregation)
                     buckets[aggregation.name] = rows
                     total = max(total, sum(row.count for row in rows))
+                    if not rows:
+                        # The only panel-level reason a DASHBOARD could ever
+                        # reach on VictoriaLogs. `_panel_aggregations` emits
+                        # DateHistogram and Terms and nothing else, and both
+                        # are supported — so the unsupported-type arm below
+                        # is unreachable from a board, and until now a VL
+                        # panel grouping by a field these logs do not carry
+                        # drew "No data in this window". Measured live
+                        # against the lab at :9428, where `environment` is
+                        # one of the four AGGREGATABLE_FIELDS and the logs
+                        # carry `env`: 0 buckets, no note, no warning.
+                        #
+                        # Only when the count came back empty, so the extra
+                        # round trip is paid by the panel that has nothing to
+                        # show and never by a board that answered.
+                        if present is None:
+                            present = self._field_names(expression, query)
+                        reason = self._absent_field(aggregation, present)
+                        if reason:
+                            warnings.append(reason)
+                            notes.setdefault(
+                                aggregation.name, []).append(reason)
                 else:
                     reason = (f"{type(aggregation).__name__} is not supported "
                               f"by VictoriaLogs")
@@ -675,6 +701,48 @@ class VictoriaLogsSource(LogSource):
 
         return AggregationResult(buckets=buckets, total=total, failed=failed,
                                  warnings=tuple(warnings), notes=notes)
+
+    def _field_names(self, expression, query):
+        """Which fields these records carry, in this window.
+
+        The same endpoint `fields()` uses for the query builder, asked the
+        narrower question: `fields()` passes `query=*` and no window, and
+        "somewhere in the whole store" is not what a panel over this window
+        was refused for. An empty set when the read fails, so a second
+        failure is never reported as a missing field.
+        """
+        try:
+            body = self._json("/select/logsql/field_names",
+                              {"query": expression, **self._window(query)})
+        except Exception as exc:
+            logger.warning(f"VictoriaLogs field names could not be read "
+                           f"while explaining an empty panel: {exc}")
+            return frozenset()
+        return frozenset(entry.get("value")
+                         for entry in body.get("values") or ()
+                         if entry.get("value"))
+
+    def _absent_field(self, aggregation, present):
+        """Why an empty terms answer is empty, or None if it is just quiet.
+
+        A field the records do carry, holding no value in this window, IS an
+        empty window and says so — the distinction this whole carrier exists
+        for runs the other way too, and inventing a reason for a quiet hour
+        would be the same fault mirrored.
+
+        Severity is asked across every field a level may have been written
+        in (`_severity_terms`), so it is absent only when all of them are.
+        """
+        if not present:
+            return None
+        if aggregation.field in ("severity", "severity_text"):
+            wanted = _SEVERITY_FIELDS
+        else:
+            wanted = (self._field_for(aggregation.field),)
+        if any(name in present for name in wanted):
+            return None
+        return (f"'{aggregation.field}' is not a field on these logs and "
+                f"cannot be counted by value")
 
     def histogram(self, query, scope):
         """Volume over time, as the hub asks for it.

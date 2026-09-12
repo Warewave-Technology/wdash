@@ -544,6 +544,418 @@ class LogOutageTest(_Board):
                          "no container was queried, so zero is the answer")
 
 
+class _WithTraces(_Board):
+    """A board whose trace half is healthy, whatever the log half does."""
+
+    MAPPING = KEYWORD_MAPPING
+
+    #: One panel of each half. The log panel is answerable on this cluster,
+    #: so anything it says about itself is about the failure being measured.
+    BOTH = [{"id": "logs-1", "type": "terms", "field": "service"},
+            {"id": "traces-1", "type": "trace_services", "sort": "spans"}]
+    LOGS_ONLY = [{"id": "logs-1", "type": "terms", "field": "service"}]
+
+    def with_traces(self):
+        from wdash.hub.models import Service
+        self.hub.add_traces(_Traces())
+        self.hub.traces().services = lambda window, scope: [
+            Service(name="payments", span_count=12, error_count=1)]
+
+    def board_with(self, panels, query):
+        """The same board, asked with a filter in the URL."""
+        from tests.support import change_dashboard
+        change_dashboard(self.app, self.dashboard, panels=normalise_all(panels))
+        response = self.client.get(f"/api/dashboard/b1/data?q={query}")
+        return response, response.get_json()
+
+
+class WarmCatalogueOutageTest(_WithTraces):
+    """The outage a running worker actually meets.
+
+    Filling the panels once `_targets` raises shuts the door a COLD worker
+    walks through. Elasticsearch's index catalogue keeps serving the list it
+    already has right through an outage — deliberately, because an empty list
+    reads as "you have access to nothing" — so `containers()` goes on
+    answering and the failure arrives at the SEARCH instead.
+
+    Measured live against the lab with the client replaced by a dead one and
+    the catalogue warm: 502, no `panels` key in the body at all, and
+    `showLoadError` then wiped the grid — the trace panel with it, in exactly
+    the outage this package exists for. `containers()` answered 11 indices
+    from cache throughout.
+    """
+
+    def search_fails(self):
+        """The containers still answer; the search comes back failed."""
+        source = self.hub.logs()
+        original = source.multi_aggregate
+
+        def failing(batch, scope):
+            from wdash.hub.aggregation import AggregationResult
+            return [AggregationResult(failed=True,
+                                      warnings=("connection refused",))
+                    for _ in batch]
+        source.multi_aggregate = failing
+        self.addCleanup(setattr, source, "multi_aggregate", original)
+
+    def search_raises(self):
+        """And the shape that reached no handler at all."""
+        source = self.hub.logs()
+        original = source.multi_aggregate
+
+        def raising(batch, scope):
+            raise ConnectionError("cluster unreachable mid-search")
+        source.multi_aggregate = raising
+        self.addCleanup(setattr, source, "multi_aggregate", original)
+
+    def test_a_failed_search_does_not_take_the_trace_panel_with_it(self):
+        self.with_traces()
+        self.search_fails()
+        response, payload = self.board(self.BOTH)
+
+        self.assertEqual(response.status_code, 200, payload)
+        panels = self.panels_by_id(payload)
+        self.assertEqual([row["name"] for row in panels["traces-1"]["rows"]],
+                         ["payments"])
+
+    def test_the_log_panel_says_why_after_a_failed_search(self):
+        self.with_traces()
+        self.search_fails()
+        _, payload = self.board(self.BOTH)
+
+        panels = self.panels_by_id(payload)
+        self.assertIn("connection refused", panels["logs-1"]["error"])
+        self.assertEqual(panels["logs-1"]["buckets"], [])
+
+    def test_the_counts_are_absent_after_a_failed_search(self):
+        """The same rule as the other doors: a number that did not run is
+        withheld, not sent as zero. `total_hits: 0` here would be "no traffic"
+        printed over a search that never answered."""
+        self.with_traces()
+        self.search_fails()
+        _, payload = self.board(self.BOTH)
+
+        for key in ("total_hits", "error_count", "warn_count", "info_count",
+                    "error_rate"):
+            self.assertNotIn(key, payload)
+
+    def test_a_board_of_log_panels_alone_still_answers_502(self):
+        """Nothing can be shown, and the status line is where the client
+        reads that."""
+        self.with_traces()
+        self.search_fails()
+        response, _ = self.board(self.LOGS_ONLY)
+
+        self.assertEqual(response.status_code, 502)
+
+    def test_a_search_that_raises_is_not_an_html_500(self):
+        """It reached no handler: Flask answered its own error page, so the
+        browser got no payload, no panel and no sentence."""
+        self.with_traces()
+        self.search_raises()
+        response, payload = self.board(self.BOTH)
+
+        self.assertEqual(response.status_code, 200, payload)
+        panels = self.panels_by_id(payload)
+        self.assertEqual(len(panels["traces-1"]["rows"]), 1)
+        self.assertIn("Unable to connect", panels["logs-1"]["error"])
+
+
+class RefusedFilterTest(_WithTraces):
+    """A filter nobody closed the quote on is the log query's problem.
+
+    The trace panel beside it never honoured `q` — `_trace_panels` is handed
+    the window and the scope and nothing else — so a typo took down a panel
+    that was not filtered by it.
+    """
+
+    def test_a_filter_that_cannot_be_parsed_costs_the_log_panels_only(self):
+        self.with_traces()
+        response, payload = self.board_with(self.BOTH, '%22unbalanced')
+
+        self.assertEqual(response.status_code, 200, payload)
+        self.assertEqual(payload["error_type"], "invalid_query")
+        panels = self.panels_by_id(payload)
+        self.assertEqual(len(panels["traces-1"]["rows"]), 1)
+        self.assertIn("Invalid filter", panels["logs-1"]["error"])
+
+    def test_a_board_of_log_panels_alone_still_answers_400(self):
+        """The request really was bad, and a board with nothing else on it
+        has nothing to answer with."""
+        self.with_traces()
+        response, _ = self.board_with(self.LOGS_ONLY, '%22unbalanced')
+
+        self.assertEqual(response.status_code, 400)
+
+
+class UnfilledSignalTest(_WithTraces):
+    """What a panel type registered without a filler draws.
+
+    `needs_logs` classifies a panel; it does not fill one. A row in
+    `PANEL_TYPES` with a new signal got as far as being called standalone,
+    was handed to `_trace_panels` (which fills `trace_services` and nothing
+    else), and fell through `_panel_results` to `buckets: []` — which the
+    client draws as "No data in this window". No error, no warning: the
+    forbidden failure, as the DEFAULT for forgetting half the work.
+    """
+
+    def register(self, signal="monitors"):
+        from wdash.dashboard import panels as panel_module
+        panel_module.PANEL_TYPES["monitor_grid"] = {
+            "label": "Monitors", "signal": signal,
+            "description": "Checks and their state.", "fields": ()}
+        self.addCleanup(panel_module.PANEL_TYPES.pop, "monitor_grid", None)
+
+    def test_a_panel_no_filler_answered_says_so(self):
+        self.register()
+        _, payload = self.board([
+            {"id": "logs-1", "type": "terms", "field": "service"},
+            {"id": "mon-1", "type": "monitor_grid"}])
+
+        panel = self.panels_by_id(payload)["mon-1"]
+        self.assertIn("monitors", panel.get("error", ""))
+        self.assertEqual(panel["buckets"], [])
+
+    def test_it_says_so_in_an_outage_too(self):
+        """The path the package added is the one a later panel type will be
+        read through first."""
+        self.register()
+        source = self.hub.logs()
+        original = source.containers
+
+        def failing(scope, *args, **kwargs):
+            raise ConnectionError("cluster unreachable")
+        source.containers = failing
+        self.addCleanup(setattr, source, "containers", original)
+
+        _, payload = self.board([
+            {"id": "logs-1", "type": "terms", "field": "service"},
+            {"id": "mon-1", "type": "monitor_grid"}])
+
+        panel = self.panels_by_id(payload)["mon-1"]
+        self.assertIn("monitors", panel.get("error", ""))
+
+    def test_a_panel_type_that_reads_logs_is_unaffected(self):
+        """A new row whose signal IS logs rides the batch like the rest, and
+        must not be told a backend is missing."""
+        self.register(signal="logs")
+        _, payload = self.board([{"id": "mon-1", "type": "monitor_grid"}])
+
+        panel = self.panels_by_id(payload)["mon-1"]
+        self.assertNotIn("error", panel)
+
+    def test_every_registered_signal_has_a_filler(self):
+        """So that adding the row and forgetting the filler fails here,
+        rather than on a card that says the window was quiet."""
+        from wdash.api.dashboard_routes import FILLED_SIGNALS
+        from wdash.dashboard.panels import PANEL_TYPES
+
+        unfilled = sorted({row["signal"] for row in PANEL_TYPES.values()}
+                          - set(FILLED_SIGNALS))
+        self.assertEqual(unfilled, [], f"{unfilled} has no filler in "
+                                       f"api_dashboard_data")
+
+
+class FanOutLowerBoundTest(unittest.TestCase):
+    """A member that died outright, rather than one that refused a panel.
+
+    The refusing member files its own reasons and they survive the merge.
+    A member that never answered files nothing, so the survivors' counts were
+    drawn as the answer: a chart short by an unknown amount, unmarked, with
+    one line above the grid as the only clue. `_trace_panels` has marked its
+    rows for this since traces arrived.
+    """
+
+    def build(self):
+        from wdash.hub import Capability
+        from wdash.hub.aggregation import AggregationResult, Bucket
+        from wdash.hub.fanout import FanOutLogSource
+
+        class Answers:
+            name = "es-a"
+            backend = "elasticsearch"
+            capabilities = frozenset({Capability.AGGREGATION})
+
+            def supports(self, capability):
+                return capability in self.capabilities
+
+            def containers(self, scope):
+                return ["app-logs-000001"]
+
+            def aggregate(self, query, aggregations, scope):
+                return AggregationResult(
+                    total=40,
+                    buckets={agg.name: [Bucket(key="payments", count=40)]
+                             for agg in aggregations})
+
+        class Dead(Answers):
+            name = "lab-loki"
+            backend = "loki"
+
+            def containers(self, scope):
+                return ["stream-1"]
+
+            def aggregate(self, query, aggregations, scope):
+                raise RuntimeError("refused")
+
+        return FanOutLogSource([Answers(), Dead()], name="everything")
+
+    def result(self):
+        return self.build().aggregate(
+            LogQuery(window=WINDOW, text="*", containers=()),
+            [Terms(name="panel-1", field="service", size=10)],
+            Scope.unrestricted())
+
+    def test_the_dead_member_marks_the_panel_it_was_asked_for(self):
+        result = self.result()
+
+        self.assertEqual(list(result.notes), ["panel-1"])
+        self.assertIn("lower bound", result.reasons("panel-1")[0])
+        self.assertTrue(result.reasons("panel-1")[0].startswith("lab-loki"),
+                        result.reasons("panel-1"))
+
+    def test_the_counts_that_did_arrive_are_kept(self):
+        """A lower bound is still an answer; throwing it away would be the
+        opposite mistake."""
+        result = self.result()
+
+        self.assertEqual([(b.key, b.count) for b in result.get("panel-1")],
+                         [("payments", 40)])
+
+    def test_the_panel_goes_out_marked_incomplete(self):
+        from wdash.api.dashboard_routes import _panel_results
+
+        panels = normalise_all([{"id": "panel-1", "type": "terms",
+                                 "field": "service"}])
+        rendered = _panel_results(panels, self.result())[0]
+
+        self.assertTrue(rendered["partial"])
+        self.assertIn("lower bound", rendered["warnings"][0])
+        self.assertEqual(rendered["buckets"],
+                         [{"key": "payments", "count": 40}])
+
+    def test_the_page_still_names_the_member_that_failed(self):
+        """The page-level sentence is unchanged: a reader looking at the
+        alert above the grid needs it too."""
+        self.assertEqual(list(self.result().warnings),
+                         ["lab-loki failed: refused"])
+
+
+class VictoriaLogsEmptyPanelTest(unittest.TestCase):
+    """The only panel-level reason a DASHBOARD can reach on VictoriaLogs.
+
+    `_panel_aggregations` emits DateHistogram and Terms, both of which the VL
+    adapter supports, so its unsupported-type note is unreachable from a
+    board. What a board CAN do is group by a field these logs do not carry:
+    `environment` is one of the four AGGREGATABLE_FIELDS, and the lab's
+    VictoriaLogs writes `env`. Measured live at :9428 before: buckets=0,
+    notes={}, warnings=[] — "No data in this window" for a question
+    VictoriaLogs could not answer.
+    """
+
+    def build(self, harness=None):
+        from tests.test_conformance_victorialogs import FakeVictoriaLogs
+        from wdash.hub.adapters.victorialogs import VictoriaLogsSource
+
+        self.harness = harness or FakeVictoriaLogs()
+        return VictoriaLogsSource("http://vl:9428", name="victorialogs",
+                                  stream_field="service",
+                                  session=self.harness)
+
+    def terms(self, field, name="panel-5", harness=None):
+        import datetime as dt
+
+        now = dt.datetime(2026, 8, 4, 12, tzinfo=dt.timezone.utc)
+        return self.build(harness).aggregate(
+            LogQuery(window=TimeWindow.exact(now - dt.timedelta(hours=1), now),
+                     text="*"),
+            [Terms(name=name, field=field, size=10)], Scope.unrestricted())
+
+    def test_a_field_these_logs_do_not_carry_is_filed_under_its_panel(self):
+        """The fake answers `field_names` with the fields it actually holds
+        — `_msg`, `level`, `service` — so this turns on the NAME asked for."""
+        result = self.terms("host")
+
+        self.assertEqual(result.get("panel-5"), [])
+        self.assertIn("not a field on these logs",
+                      result.reasons("panel-5")[0])
+        self.assertIn("'host'", result.reasons("panel-5")[0])
+
+    def test_the_page_gets_the_sentence_too(self):
+        self.assertTrue(any("not a field on these logs" in warning
+                            for warning in self.terms("host").warnings))
+
+    def test_a_field_that_is_there_is_not_accused(self):
+        """`service` is carried and counted: a panel that answered must not
+        be told its field does not exist."""
+        result = self.terms("service")
+
+        self.assertTrue(result.get("panel-5"))
+        self.assertEqual(result.notes, {})
+
+    def test_severity_is_asked_across_every_field_it_may_be_written_in(self):
+        """`_severity_terms` groups by all four fields a level may have been
+        written in, so `severity` is absent only when all four are. A
+        deployment writing `severity_text` and no `level` carries the field
+        this panel counts — asking after the neutral name, or after the one
+        field `_field_for` maps it to, would accuse a quiet window instead.
+        """
+        result = self.terms("severity", harness=_QuietVictoriaLogs(
+            names=("_msg", "service", "severity_text")))
+
+        self.assertEqual(result.get("panel-5"), [])
+        self.assertEqual(result.notes, {})
+
+    def test_a_field_list_that_could_not_be_read_is_not_an_accusation(self):
+        """The second failure must not be reported as a missing field: not
+        knowing which fields exist is not knowing that this one does not."""
+        result = self.terms("host", harness=_QuietVictoriaLogs(names=None))
+
+        self.assertEqual(result.get("panel-5"), [])
+        self.assertEqual(result.notes, {})
+
+
+class _QuietVictoriaLogs:
+    """A VictoriaLogs that counted nothing, over a field list you choose.
+
+    `names=None` is the list that could not be read at all — the failure the
+    reason must not be invented from. Everything else is the real fake's job;
+    only the two answers this turns on are given here, and they answer the
+    field names they are ASKED for rather than a fixed list.
+    """
+
+    def __init__(self, names=()):
+        self._names = names
+
+    def post(self, url, data=None, headers=None, auth=None, timeout=None,
+             verify=None):
+        from tests.test_conformance_victorialogs import FakeResponse
+
+        if "field_names" in url:
+            if self._names is None:
+                return FakeResponse(text="unavailable", status_code=503)
+            return FakeResponse(payload={"values": [
+                {"value": name, "hits": 1} for name in self._names]})
+        if "field_values" in url:
+            # The containers. An empty list here ends `aggregate` before it
+            # counts anything, and both of these tests then measure nothing
+            # — which is how the first version of them passed two mutations
+            # aimed straight at the branch they exist for.
+            return FakeResponse(payload={"values": [
+                {"value": "api-gateway", "hits": 1}]})
+        # `/query` answers with JSON lines, and this window held none. A
+        # blank body, not an empty string: `FakeResponse` treats "" as
+        # "no text given" and sends `{}`, which is ONE row carrying no
+        # fields — enough for `_severity_terms` to answer UNSPECIFIED 0 and
+        # for this fixture to stop measuring what it was written for.
+        return FakeResponse(text="\n")
+
+    def get(self, url, auth=None, timeout=None, verify=None):
+        from tests.test_conformance_victorialogs import FakeResponse
+
+        return FakeResponse(text="OK")
+
+
 class _Traces:
     """The smallest trace source the panel filler will accept."""
 
