@@ -523,11 +523,30 @@ def load_user_from_session():
         user_data.get('groups') or []
     )
 
+    explicit = user_data.get('local_role')
+    store = _store()
+    if store is not None and user_data.get('provider') == 'local account':
+        # Read now, not taken from the cookie. `local_role` was written at
+        # sign-in and never looked at again, which is the same frozen
+        # authorization that moving permissions out of the session was for:
+        # demoting a local account changed nothing until that person happened
+        # to sign out, and the refusal that says "this would lock you out
+        # immediately" was not true of the only role that wins.
+        #
+        # An account that has been deleted or disabled ends the session here
+        # rather than at its next sign-in. Disabling an account that stays
+        # signed in is half a switch, and it is the half somebody reaches for
+        # when an account is being abused.
+        account = store.users.by_username(user.username)
+        if account is None or account['disabled']:
+            return None
+        explicit = account['role']
+
     resolver = _resolver()
     if resolver is not None:
         return user.apply(resolver.resolve(
             email=user.email, username=user.username, groups=user.groups,
-            explicit=user_data.get('local_role')))
+            explicit=explicit))
 
     # No store: a deployment still on the YAML file. Not a fallback to
     # something permissive — the same file the resolver replaced.

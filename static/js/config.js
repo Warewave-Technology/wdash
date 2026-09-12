@@ -279,6 +279,28 @@ document.querySelectorAll('.edit-role').forEach(button => {
 
 
 /* ------------------------------------------------------------------------
+ * Local accounts.
+ *
+ * One password dialog serves every row, so the row has to say which account
+ * it is about — both to the form, as its action, and to the person, in the
+ * heading. A shared dialog that keeps the last account's action is how a
+ * password reset lands on the wrong account, and neither the page nor the
+ * audit row would look wrong afterwards.
+ * ---------------------------------------------------------------------- */
+document.querySelectorAll('.reset-password').forEach(button => {
+    button.addEventListener('click', () => {
+        const form = document.getElementById('passwordForm');
+        const who = document.getElementById('passwordFor');
+        if (form) { form.setAttribute('action', button.dataset.action); }
+        // textContent, not innerHTML: a username is somebody else's input.
+        if (who) { who.textContent = button.dataset.username; }
+        form?.querySelectorAll('input[type=password]')
+            .forEach(field => { field.value = ''; });
+    });
+});
+
+
+/* ------------------------------------------------------------------------
  * Boundary fields.
  *
  * These stay free text, and that is a decision rather than an omission.

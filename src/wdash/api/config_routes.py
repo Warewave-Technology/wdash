@@ -31,14 +31,14 @@ from ..auth.providers import (
     LABELS, directory, refuses_second_directory, why_unusable,
 )
 from ..dashboard.invariants import (
-    FEW, few, refuses_directory_off, refuses_mapping_save, refuses_role_delete,
-    refuses_role_save,
+    FEW, few, refuses_account_change, refuses_directory_off,
+    refuses_mapping_save, refuses_role_delete, refuses_role_save,
 )
 from .access import source_names
 from ..hub import Scope, TimeWindow
 from ..permissions import grouped as permission_groups
 from ..permissions import normalise as normalise_permissions
-from ..store import SOURCE_KINDS, SourceError
+from ..store import SOURCE_KINDS, SourceError, WeakPassword
 from ..alerts.evaluate import RULE_KINDS
 from ..store.alerting import AlertingError
 from ..store.monitoring import MONITOR_KINDS, MonitoringError
@@ -360,6 +360,11 @@ def config_page():
         monitor_kinds=MONITOR_KINDS,
         step_kinds=journey_step_kinds(),
         roles=store.roles.all(),
+        # The local accounts, on the Authentication tab. Read here rather
+        # than in the template so the page cannot ask the database while it
+        # renders — and so the one list answers both the table and the
+        # "which of these names a mapping also names" note beside the role.
+        local_accounts=store.users.all(),
         permission_groups=permission_groups(),
         default_role=store.settings.get("rbac.default_role", "viewer"),
         user_roles=store.settings.get("rbac.user_roles", {}) or {},
@@ -1420,6 +1425,198 @@ def save_mappings():
            state={"default_role": default_role, "user_roles": mappings})
     flash("Role mappings saved.", "success")
     return redirect(url_for("config.config_page"))
+
+
+# ---------------------------------------------------------------------------
+# Local accounts
+#
+# On the Authentication tab rather than beside Roles, because that tab is the
+# page's one answer to "how do people get in" — OIDC, LDAP, and the sentence
+# at the bottom saying local accounts are not a directory. Until now that
+# sentence pointed at something no screen in the product could show: an
+# account could only be made by first-run setup or by `python -m
+# wdash.store.recover`, so the break-glass path was the one path with no way
+# to see who held it. Roles & access answers a different question — what a
+# role may reach — and a role is not a person.
+#
+# The same three rules as every other handler here: `system:admin` per
+# request, a password written and never rendered back, and an audit row for
+# every change including the refused ones.
+# ---------------------------------------------------------------------------
+
+def _account_state(account, **extra):
+    """One account as an audit row records it.
+
+    The hash is dropped as deliberately as the password is: an audit trail
+    that carries password hashes is a cracking target with a retention policy,
+    and the trail is exported from this same screen.
+    """
+    state = {key: value for key, value in (account or {}).items()
+             if key not in ("password_hash", "totp_secret")}
+    state.update(extra)
+    return state
+
+
+def _back():
+    return redirect(url_for("config.config_page"))
+
+
+def _refused(action, username, refusal):
+    """Say no in the project's idiom: the reason, an audit row, no write."""
+    _audit(f"{action} refused", subject=f"user:{username}",
+           state={"reason": refusal})
+    flash(refusal, "error")
+    return _back()
+
+
+@config_bp.route("/accounts", methods=["POST"])
+@login_required
+def create_account():
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    username = (request.form.get("username") or "").strip()
+    email = (request.form.get("email") or "").strip()
+    role = (request.form.get("role") or "").strip()
+    password = request.form.get("password") or ""
+    confirm = request.form.get("confirm") or ""
+
+    if not username:
+        flash("A username is required. Nothing was saved.", "error")
+        return _back()
+    # Chosen rather than typed, and checked anyway: a role that does not exist
+    # grants nothing, silently, and the account would land on the default role
+    # with nothing on any page to say why.
+    if role not in {definition["name"] for definition in store.roles.all()}:
+        flash(f"There is no role called '{role}'. Nothing was saved.", "error")
+        return _back()
+    if password != confirm:
+        flash("The two passwords do not match. Nothing was saved.", "error")
+        return _back()
+
+    try:
+        account = store.users.create(username, password, role, email=email)
+    except WeakPassword as exc:
+        flash(str(exc), "error")
+        return _back()
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return _back()
+
+    _audit("account created", subject=f"user:{account['username']}",
+           state=_account_state(account))
+    flash(f"Local account '{account['username']}' created.", "success")
+    return _back()
+
+
+@config_bp.route("/accounts/<username>", methods=["POST"])
+@login_required
+def save_account(username):
+    """The role and the enabled switch, from one row's form."""
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    account = store.users.by_username(username)
+    if account is None:
+        flash(f"There is no local account called '{username}'.", "warning")
+        return _back()
+
+    role = (request.form.get("role") or "").strip()
+    if role not in {definition["name"] for definition in store.roles.all()}:
+        flash(f"There is no role called '{role}'. Nothing was saved.", "error")
+        return _back()
+    disabled = not request.form.get("enabled")
+
+    refusal = refuses_account_change(
+        store.users.all(), store.roles.all(), account["username"], _actor(),
+        role=role, disabled=disabled,
+        user_roles=store.settings.get("rbac.user_roles", {}) or {},
+        default_role=store.settings.get("rbac.default_role", "viewer"))
+    if refusal:
+        return _refused("account save", account["username"], refusal)
+
+    store.users.set_role(account["username"], role)
+    store.users.set_disabled(account["username"], disabled)
+    # The role a local account holds is what the resolver reads first, so a
+    # change here has to reach the resolver the way a role edit does.
+    store.rbac.invalidate()
+    saved = store.users.by_username(account["username"])
+    _audit("account saved", subject=f"user:{account['username']}",
+           state=_account_state(saved))
+    flash(f"Account '{account['username']}' saved.", "success")
+    return _back()
+
+
+@config_bp.route("/accounts/<username>/password", methods=["POST"])
+@login_required
+def reset_account_password(username):
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    account = store.users.by_username(username)
+    if account is None:
+        flash(f"There is no local account called '{username}'.", "warning")
+        return _back()
+
+    password = request.form.get("password") or ""
+    if password != (request.form.get("confirm") or ""):
+        flash("The two passwords do not match. Nothing was saved.", "error")
+        return _back()
+    try:
+        store.users.set_password(account["username"], password)
+    except WeakPassword as exc:
+        flash(str(exc), "error")
+        return _back()
+
+    # What was set is not recorded, anywhere. The row says that a reset
+    # happened and who did it, which is the auditable fact; the value is not
+    # one, and an audit trail this page can export is the last place for it.
+    _audit("account password reset", subject=f"user:{account['username']}",
+           state={"username": account["username"]})
+    flash(f"The password for '{account['username']}' was reset.", "success")
+    return _back()
+
+
+@config_bp.route("/accounts/<username>/delete", methods=["POST"])
+@login_required
+def delete_account(username):
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    account = store.users.by_username(username)
+    if account is None:
+        flash(f"There is no local account called '{username}'.", "warning")
+        return _back()
+
+    refusal = refuses_account_change(
+        store.users.all(), store.roles.all(), account["username"], _actor(),
+        deleting=True,
+        user_roles=store.settings.get("rbac.user_roles", {}) or {},
+        default_role=store.settings.get("rbac.default_role", "viewer"))
+    if refusal:
+        return _refused("account delete", account["username"], refusal)
+
+    try:
+        store.users.delete(account["username"])
+    except ValueError as exc:
+        # The repository's own last-account rule. Reachable when the last
+        # account is not an administrator, which the invariant above says
+        # nothing about.
+        return _refused("account delete", account["username"], str(exc))
+
+    store.rbac.invalidate()
+    _audit("account deleted", subject=f"user:{account['username']}",
+           state=_account_state(account))
+    flash(f"Local account '{account['username']}' deleted.", "success")
+    return _back()
 
 
 # ---------------------------------------------------------------------------

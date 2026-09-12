@@ -141,6 +141,21 @@ function build() {
          "jaeger": ["traces"], "tempo": ["traces"],
          "victorialogs": ["logs"]}
       </script>
+      <!-- Local accounts. One password dialog serves every row, so the row
+           has to say which account it is about — to the form as its action,
+           and to the person in the heading. A dialog keeping the last row's
+           action resets the wrong account's password, and nothing on the
+           page or in the audit row would look wrong afterwards. -->
+      <button class="reset-password" id="resetBob" data-username="bob"
+              data-action="/admin/accounts/bob/password"></button>
+      <button class="reset-password" id="resetEve"
+              data-username="&lt;img src=x&gt;"
+              data-action="/admin/accounts/eve/password"></button>
+      <form id="passwordForm">
+        <input type="password" name="password"><input type="password" name="confirm">
+      </form>
+      <code id="passwordFor"></code>
+
       <form></form></body>`,
       { runScripts: 'outside-only', url: 'http://localhost/admin/config' });
 
@@ -877,6 +892,33 @@ function type(w, id, value) {
     checks.applyMonitorKind();
     check('a journey may name a certificate but not a name',
           !hidden('tlsCertificateField') && hidden('tlsNameField'));
+
+    console.log('\nlocal accounts');
+    const accounts = build().w;
+    const resetForm = accounts.document.getElementById('passwordForm');
+    const resetWho = accounts.document.getElementById('passwordFor');
+    resetForm.querySelector('input[name=password]').value = 'left-behind';
+
+    check('a password dialog opened from nowhere has no action',
+          !resetForm.getAttribute('action'));
+
+    accounts.document.getElementById('resetBob')
+        .dispatchEvent(new accounts.Event('click'));
+    check('the dialog points at the account whose row opened it',
+          resetForm.getAttribute('action') === '/admin/accounts/bob/password');
+    check('and says whose password it is about', resetWho.textContent === 'bob');
+    check('a password left in the box from last time is cleared',
+          resetForm.querySelector('input[name=password]').value === '');
+
+    accounts.document.getElementById('resetEve')
+        .dispatchEvent(new accounts.Event('click'));
+    check('opening a second row repoints it rather than keeping the first',
+          resetForm.getAttribute('action') === '/admin/accounts/eve/password');
+    // A username is somebody else's input, and it is written into the
+    // heading. textContent, never innerHTML.
+    check('a username is written as text, not as markup',
+          resetWho.children.length === 0
+          && resetWho.textContent === '<img src=x>');
 
     console.log(failures.length ? `\n${failures.length} failure(s)`
                                 : '\nall role editor checks passed');

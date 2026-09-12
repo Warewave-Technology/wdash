@@ -122,6 +122,16 @@ So that a report can say what it got past:
 * Argon2 for local passwords, SHA-256 for agent tokens, Fernet for stored
   secrets — and a refusal to store a secret at all when no encryption key is
   configured, rather than writing it as text;
+* local accounts managed from the product, under Authentication on the
+  configuration page: an administrator can see who holds one, when it was last
+  used, create one, change its role, disable it, reset its password and delete
+  it. A password set here is never rendered back and never reaches an audit
+  row. The account's role and its enabled flag are read from the store on
+  every request rather than from the session cookie, so disabling or demoting
+  one takes effect on that person's next request rather than at their next
+  sign-in. The installation refuses to be left with no enabled local account
+  that can administer, and an administrator cannot demote, disable or delete
+  their own;
 * sign-in throttling per account, per address and per pair, applied before
   the password is checked so a lockout also stops the guessing — the
   account-wide limit counting guesses only, so an address knocking on a

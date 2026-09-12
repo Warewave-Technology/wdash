@@ -287,7 +287,7 @@ installation as on a new one.
 ### The configuration page
 
 `/admin/config` (requires `system:admin`) holds data sources, the identity
-provider settings, and roles.
+provider settings, local accounts, and roles.
 
 Three rules run through it:
 
@@ -308,6 +308,36 @@ backends actually live.
 
 `config/rbac.yaml` is imported once into the database on a fresh installation
 and ignored afterwards, so an edit made here is never overwritten by a restart.
+
+#### Local accounts
+
+**Authentication → Local accounts** lists every local account with its role,
+whether it is enabled, when it was created and when it last signed in, and can
+create one, change its role, disable and re-enable it, reset its password and
+delete it. It sits on that tab because that tab is the page's one answer to
+"how do people get in"; a role is not a person, which is what Roles & access
+is about. Until it existed an account could only be made by first-run setup or
+by `python -m wdash.store.recover`, so the break-glass path was the one door
+with no window: nobody could see who held an account or that a contractor's
+was still enabled.
+
+A password is written and never rendered back — not on the page and not in the
+audit trail, which is exported from this same screen. Deleting an account takes
+the confirmation every other destructive control here takes.
+
+The installation refuses to be left without a local account that is enabled and
+can administer, and an administrator cannot do it to themselves by demoting,
+disabling or deleting their own account. Both are refused with a sentence
+naming what would break, an audit row, and nothing saved.
+
+Where a name also has a mapping under "Who gets which role", the row says so
+and says the account's own role wins — because it does, and the two can
+disagree with nothing on either page to explain why.
+
+Directory accounts are not listed and cannot be managed here. LDAP and OIDC
+principals are authenticated at the provider and have no row in this database
+at all; storing a shadow copy would give "what may this person do" two answers
+and guarantee they drift apart.
 
 ## Access control
 
@@ -397,9 +427,10 @@ rejected.
 
 **`system:admin` is not a superuser.** It grants no access to logs or traces on
 its own. That has a consequence worth knowing: nothing else can recover from
-losing it, so three invariants refuse any change that would leave nobody able
+losing it, so four invariants refuse any change that would leave nobody able
 to administer — editing a role's permissions or its groups, deleting a role,
-and reassigning yourself through the mappings table. "Would this lock me out?"
+reassigning yourself through the mappings table, and demoting, disabling or
+deleting a local account on the accounts card. "Would this lock me out?"
 is answered by the resolver's own rule, groups and all, applied to the picture
 after the change. A refused attempt is recorded alongside the successful ones.
 
@@ -412,8 +443,8 @@ If it happens anyway, `python -m wdash.store.recover --status` says who can
 administer and `--grant-admin <username>` puts one account back. The recovery
 role grants no data access; it exists to reach the configuration page.
 `--set-role <username> <role>` moves a local account to a role that exists —
-which is how a role a local account holds is freed to be deleted, since the
-page has no control for a local account's role. `--enable <username>` undoes a
+the same thing the accounts card does, for the case where nobody can open it.
+`--enable <username>` undoes a
 disabled account, which `--grant-admin` never did: a disabled account is
 refused before its password is checked, so granting it a role was a way back
 that could not be taken. `--use-directory <ldap|oidc|none>` writes the
@@ -441,7 +472,12 @@ coordination between them.
 Users are mapped to roles by email, username or identity-provider group, and
 anyone unmapped falls back to the default role. A local account's role is
 stored with the account and beats every mapping, which is what makes it the way
-back in.
+back in — and it is read from the store on every request, like everything else.
+It used to be written into the session cookie at sign-in and never read again,
+which made the one role that wins the order the one thing still frozen there:
+demoting or disabling a local account changed nothing until that person
+happened to sign out. An account that is disabled or deleted now stops being
+able to do anything on its next request, not at its next sign-in.
 
 ### Before you save a role
 

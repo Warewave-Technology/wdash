@@ -220,6 +220,22 @@ class UserRepository:
                 .values(password_hash=hash_password(password)))
         return result.rowcount > 0
 
+    def set_role(self, username, role):
+        """Move an account to a role. Returns whether a row was touched.
+
+        The role is NOT validated here, and deliberately: the recovery tool
+        creates the role it grants, and this repository has no opinion about
+        which names exist. Whoever offers a choice — the accounts card, the
+        CLI — checks the name against `roles.all()` first, because a role
+        that does not exist grants nothing, silently.
+        """
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                users.update()
+                .where(users.c.username == (username or "").strip().lower())
+                .values(role=role))
+        return result.rowcount > 0
+
     def set_disabled(self, username, disabled):
         with self._engine.begin() as connection:
             result = connection.execute(

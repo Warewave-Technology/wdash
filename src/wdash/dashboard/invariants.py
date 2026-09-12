@@ -167,6 +167,109 @@ def refuses_role_delete(roles, name, actor, default_role=None,
     return None
 
 
+def _enabled_administrators(accounts, roles, user_roles, default_role):
+    """The local accounts that could sign in AND reach the configuration page.
+
+    Both halves matter. A disabled account holding an administering role is
+    not a way back in — `verify()` refuses it before the password is checked
+    — and an enabled account whose role cannot administer is not one either.
+    Which role an account lands on is asked of the resolver rather than read
+    off the row: a stored role that no longer exists falls through to the
+    mappings and then to the default, and that fall-through is exactly the
+    case where reading the column gives the wrong answer.
+    """
+    names = []
+    for account in accounts or ():
+        if account.get("disabled"):
+            continue
+        _, definition = _lands_on(roles, user_roles, default_role, {
+            "email": account.get("email"),
+            "username": account.get("username"),
+            "local_role": account.get("role")})
+        if _administers(definition):
+            names.append(account.get("username"))
+    return names
+
+
+def _to_an_account(role, disabled, deleting):
+    """What the edit does, as the subject of a sentence."""
+    if deleting:
+        return "Deleting it"
+    parts = []
+    if disabled:
+        parts.append("disabling it")
+    if role is not None:
+        parts.append(f"moving it to '{role}'")
+    if not parts:
+        return "This change"
+    return " and ".join(parts).capitalize()
+
+
+def refuses_account_change(accounts, roles, username, actor, role=None,
+                           disabled=None, deleting=False, user_roles=None,
+                           default_role=None):
+    """Why this change to a local account must not be saved, or None.
+
+    The fifth way to lose administration, and the one an accounts page in the
+    product creates: until there was one, a local account could only be made
+    by first-run setup or by the recovery tool, and neither can demote,
+    disable or delete the account that reaches this page. Now a form can.
+
+    Asked as "what would this edit leave behind?" rather than carried as a
+    second copy of the reasoning: the caller hands over the accounts as they
+    stand and the edit as it was asked for, and this builds the picture
+    AFTER it. `role=None` and `disabled=None` mean "unchanged", which is what
+    lets a password reset ask the same question and be told nothing is wrong.
+
+    Two rules, and the order matters for the same reason it does in
+    `refuses_role_save`: "nobody would be left able to administer" is a
+    property of the system and "you would lock yourself out" is a property of
+    the person asking, and when both are true the system one is the sentence
+    that says what is actually wrong.
+
+    An installation that ALREADY has no enabled local administrator is not
+    refused: the first rule fires on the change that empties the set, not on
+    every change made afterwards. Refusing there would make the page unable
+    to repair a store somebody had already broken with `--set-role`.
+    """
+    name = (username or "").strip().lower()
+
+    after = []
+    for account in accounts or ():
+        if account.get("username") != name:
+            after.append(account)
+            continue
+        if deleting:
+            continue
+        after.append({**account,
+                      "role": account.get("role") if role is None else role,
+                      "disabled": (account.get("disabled") if disabled is None
+                                   else bool(disabled))})
+
+    what = _to_an_account(role, disabled, deleting)
+    had = _enabled_administrators(accounts, roles, user_roles, default_role)
+    left = _enabled_administrators(after, roles, user_roles, default_role)
+
+    if had and not left:
+        return (f"'{name}' is the only local account that is enabled and can "
+                f"administer WDash. {what} would leave nobody able to sign in "
+                f"locally and open this page — and a local account is the way "
+                f"back in when the identity provider is not. Give another "
+                f"local account an administering role first.")
+
+    actor = actor or {}
+    mine = ((actor.get("provider") == "local account"
+             or actor.get("local_role"))
+            and (actor.get("username") or "").strip().lower() == name)
+    if mine and name not in left:
+        return (f"'{name}' is the account you are signed in with. {what} "
+                f"would lock you out of this page immediately, and nothing on "
+                f"it can undo that. Ask another administrator, or run "
+                f"python -m wdash.store.recover --grant-admin {name}.")
+
+    return None
+
+
 #: What the session records about the door somebody came through, as the
 #: directory it names. Anything else — including a session written before the
 #: field existed — is unknown, and is never claimed to be either one.

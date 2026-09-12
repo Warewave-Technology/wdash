@@ -20,8 +20,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wdash.dashboard.invariants import (  # noqa: E402
-    refuses_directory_off, refuses_mapping_save, refuses_role_delete,
-    refuses_role_save,
+    refuses_account_change, refuses_directory_off, refuses_mapping_save,
+    refuses_role_delete, refuses_role_save,
 )
 
 
@@ -598,6 +598,137 @@ class RecoveryToolTest(unittest.TestCase):
                                               "base_dn": "dc=x"})
         _, output = self.run_tool("--status")
         self.assertIn("Directory: LDAP", output)
+
+
+class AccountChangeTest(unittest.TestCase):
+    """The fifth way to lose administration: the accounts page.
+
+    Until there was one, a local account could only be made by first-run setup
+    or by the recovery tool, and neither can demote, disable or delete the
+    account that reaches the configuration page. A form can, which is what
+    this rule is for.
+    """
+
+    ROLES = [ADMIN, CO_ADMIN, VIEWER]
+
+    def test_an_ordinary_demotion_is_allowed_while_another_admin_remains(self):
+        self.assertIsNone(refuses_account_change(
+            [account("owner", "admin"), account("bob", "co-admin")],
+            self.ROLES, "bob", local("admin"), role="viewer"))
+
+    def test_the_last_enabled_administrator_cannot_be_demoted(self):
+        refusal = refuses_account_change(
+            [account("owner", "admin"), account("bob", "viewer")],
+            self.ROLES, "owner", person("carol"), role="viewer")
+        self.assertIn("only local account", refusal)
+        self.assertIn("way back in", refusal)
+        self.assertIn("viewer", refusal)
+
+    def test_the_last_enabled_administrator_cannot_be_disabled(self):
+        refusal = refuses_account_change(
+            [account("owner", "admin")], self.ROLES, "owner", person("carol"),
+            disabled=True)
+        self.assertIn("Disabling it", refusal)
+
+    def test_the_last_enabled_administrator_cannot_be_deleted(self):
+        refusal = refuses_account_change(
+            [account("owner", "admin")], self.ROLES, "owner", person("carol"),
+            deleting=True)
+        self.assertIn("Deleting it", refusal)
+
+    def test_an_account_already_disabled_does_not_count_as_a_way_back_in(self):
+        """A disabled account holding an administering role is not one:
+        `verify()` refuses it before the password is checked."""
+        refusal = refuses_account_change(
+            [account("owner", "admin"),
+             account("spare", "admin", disabled=True)],
+            self.ROLES, "owner", person("carol"), deleting=True)
+        self.assertIsNotNone(refusal)
+
+    def test_re_enabling_the_spare_first_makes_the_demotion_allowed(self):
+        self.assertIsNone(refuses_account_change(
+            [account("owner", "admin"), account("spare", "admin")],
+            self.ROLES, "owner", person("carol"), deleting=True))
+
+    def test_you_cannot_demote_yourself(self):
+        refusal = refuses_account_change(
+            [account("owner", "admin"), account("bob", "co-admin")],
+            self.ROLES, "owner", local("admin", "owner"), role="viewer")
+        self.assertIn("the account you are signed in with", refusal)
+        self.assertIn("recover --grant-admin owner", refusal)
+
+    def test_you_cannot_disable_yourself(self):
+        self.assertIn("lock you out", refuses_account_change(
+            [account("owner", "admin"), account("bob", "co-admin")],
+            self.ROLES, "owner", local("admin", "owner"), role="admin",
+            disabled=True))
+
+    def test_you_cannot_delete_yourself(self):
+        self.assertIn("lock you out", refuses_account_change(
+            [account("owner", "admin"), account("bob", "co-admin")],
+            self.ROLES, "owner", local("admin", "owner"), deleting=True))
+
+    def test_a_directory_administrator_may_edit_the_account_of_that_name(self):
+        """"Yours" is the account you signed in WITH, not a name that matches.
+        A session says which door it came through, and this one is not local."""
+        self.assertIsNone(refuses_account_change(
+            [account("owner", "admin"), account("bob", "co-admin")],
+            self.ROLES, "bob",
+            {"username": "bob", "provider": "oidc", "groups": []},
+            role="viewer"))
+
+    def test_the_system_rule_is_reported_before_the_personal_one(self):
+        """Both are true when you are the only administrator. "Nobody would be
+        left" is what is actually wrong; "you would be locked out" is what it
+        means for one person."""
+        refusal = refuses_account_change(
+            [account("owner", "admin")], self.ROLES, "owner",
+            local("admin", "owner"), deleting=True)
+        self.assertIn("only local account", refusal)
+
+    def test_a_password_reset_changes_nothing_and_is_never_refused(self):
+        """The same question, asked with no edit: role and disabled unchanged
+        must not read as "moved to None" or "disabled"."""
+        self.assertIsNone(refuses_account_change(
+            [account("owner", "admin")], self.ROLES, "owner",
+            local("admin", "owner")))
+
+    def test_re_enabling_an_account_is_never_refused(self):
+        self.assertIsNone(refuses_account_change(
+            [account("owner", "admin"), account("bob", "viewer", disabled=True)],
+            self.ROLES, "bob", local("admin", "owner"), role="viewer",
+            disabled=False))
+
+    def test_an_installation_already_without_one_is_not_frozen(self):
+        """`--set-role` can leave a store with no administering local account.
+        Refusing every edit from there would make the page unable to repair
+        what the command line broke."""
+        self.assertIsNone(refuses_account_change(
+            [account("owner", "viewer"), account("bob", "viewer")],
+            self.ROLES, "bob", person("carol"), role="viewer", disabled=True))
+
+    def test_an_account_that_does_not_exist_breaks_nothing(self):
+        self.assertIsNone(refuses_account_change(
+            [account("owner", "admin")], self.ROLES, "ghost", person("carol"),
+            deleting=True))
+
+    def test_a_role_that_no_longer_exists_falls_through_to_the_mapping(self):
+        """The stored role is not read off the row: a name nothing defines
+        resolves through the mappings and then the default, exactly as it does
+        at sign-in. Read off the row, `owner` is not an administrator and this
+        delete is refused — for a reason that is not true of the installation
+        the person would be left with."""
+        self.assertIsNone(refuses_account_change(
+            [account("owner", "gone"), account("bob", "admin")],
+            self.ROLES, "bob", person("carol"), deleting=True,
+            user_roles={"owner": "admin"}, default_role="viewer"))
+
+    def test_a_role_that_no_longer_exists_and_maps_nowhere_is_not_a_way_back(self):
+        refusal = refuses_account_change(
+            [account("owner", "gone"), account("bob", "admin")],
+            self.ROLES, "bob", person("carol"), deleting=True,
+            user_roles={"owner": "viewer"}, default_role="viewer")
+        self.assertIn("only local account", refusal)
 
 
 if __name__ == "__main__":
