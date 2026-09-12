@@ -76,10 +76,21 @@ class DashboardRepository:
             ).mappings().first()
         return self._to_model(row) if row else None
 
+    #: Newest first, and then by id so the answer does not move.
+    #:
+    #: A bulk migration out of the JSON file preserves `created_at`, which the
+    #: file store wrote to the second — so a deployment that moves in arrives
+    #: with whole runs of dashboards sharing one timestamp. `created_at DESC`
+    #: alone puts those in whatever order the database felt like returning,
+    #: and the dashboards page then reshuffles between loads for no reason
+    #: anybody can see. The id breaks the tie: arbitrary, but the same
+    #: arbitrary every time.
+    _NEWEST_FIRST = (dashboards.c.created_at.desc(), dashboards.c.id.asc())
+
     def get_all_dashboards(self):
         with self._engine.connect() as connection:
             rows = connection.execute(
-                select(dashboards).order_by(dashboards.c.created_at.desc())
+                select(dashboards).order_by(*self._NEWEST_FIRST)
             ).mappings().all()
         return [self._to_model(row) for row in rows]
 
@@ -87,7 +98,7 @@ class DashboardRepository:
         with self._engine.connect() as connection:
             rows = connection.execute(
                 select(dashboards).where(dashboards.c.created_by == username)
-                .order_by(dashboards.c.created_at.desc())).mappings().all()
+                .order_by(*self._NEWEST_FIRST)).mappings().all()
         return [self._to_model(row) for row in rows]
 
     # ---------- writing ----------

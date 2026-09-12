@@ -963,6 +963,12 @@ Stated plainly, because they affect whether this fits your deployment:
   `--allow-missing-dashboards`, `--allow-missing-searches` or
   `--allow-missing` for both, for a deployment that really has none.
 
+  The metadata database it writes into is `DATABASE_URL`, read the way the
+  application reads it — `.env` included, which is where `cp .env.example
+  .env` leaves it. `--database-url` overrides that; the start-up warning
+  deliberately does not print one, because on Postgres that address carries
+  a password and the warning goes to the log.
+
   A saved-searches file nobody named is not required: the application writes
   it on the first save, so its absence means nobody has saved a search, and
   the run says so and carries on. Neither JSON file is required with

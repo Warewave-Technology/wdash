@@ -22,14 +22,21 @@ import contextlib
 import io
 import json
 import os
+import shutil
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
+from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, SRC)
 
+import wdash.app as app_module  # noqa: E402
 from wdash.app import create_app, files_left_behind  # noqa: E402
-from wdash.config import Config  # noqa: E402
+from wdash.config import Config, DEFAULT_DASHBOARD_FILE  # noqa: E402
 from wdash.store import SecretBox, Store  # noqa: E402
 
 PASSWORD = "a-sufficiently-long-password"
@@ -570,6 +577,463 @@ class TheMigrationCarriesEverythingTest(_Installation):
 
     def owner_id(self, app):
         return app.store.users.by_username("owner")["id"]
+
+
+class ThePrintedCommandFindsTheConfiguredDatabaseTest(_Installation):
+    """The command the warning prints, run the way an operator runs it.
+
+    The warning does not print --database-url on purpose: that address
+    carries a password on Postgres and this line goes into a log. So the
+    command has to find the metadata database by itself, the same way the
+    application does — and `--database-url` defaulted from `os.environ` at
+    the moment argparse built the flag, before anything had imported
+    `wdash.config` and therefore before `load_dotenv()` had run.
+
+    A deployment that keeps DATABASE_URL in `.env` — `cp .env.example .env`
+    is the README's own quick start — ran exactly what it was told to run,
+    was shown "Dashboards: 1 moved" and "Done", and its configured store was
+    never opened. The records landed in a brand-new `data/wdash.db` beside
+    the working directory, so the next start printed the same warning again:
+    a loop with a success message in it, on the one path this package
+    advertises.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # A deployment directory of its own, with the package reachable
+        # underneath it — `load_dotenv()` walks up from wdash/config.py, so
+        # this is what makes the .env found here THIS deployment's and not
+        # some other checkout's.
+        self.deployment = tempfile.mkdtemp(prefix="wdash-a2-deployment-")
+        os.symlink(SRC, os.path.join(self.deployment, "src"))
+        self.configured = os.path.join(self.deployment, "metadata", "wdash.db")
+        os.makedirs(os.path.dirname(self.configured))
+        with open(os.path.join(self.deployment, ".env"), "w") as handle:
+            handle.write(f"DATABASE_URL=sqlite:///{self.configured}\n")
+        # Laid out the way a deployment is: the JSON files under data/, which
+        # is also where `sqlite:///data/wdash.db` lands when nothing resolves
+        # the configured address.
+        self.data = os.path.join(self.deployment, "data")
+        os.makedirs(self.data)
+        self.dashboards = os.path.join(self.data, "dashboards.json")
+        self.searches = os.path.join(self.data, "saved_searches.json")
+        self.stray = os.path.join(self.data, "wdash.db")
+
+    def tearDown(self):
+        shutil.rmtree(self.deployment, ignore_errors=True)
+        super().tearDown()
+
+    def printed_command(self, said):
+        return said.split("migrate_cli", 1)[1].splitlines()[0].split()
+
+    def test_it_runs_against_the_database_the_dot_env_names(self):
+        self.write_dashboards([self.a_dashboard(name="On the wall")])
+        app = create_app(self.config())
+        said = files_left_behind(app.store, self.dashboards)
+        arguments = self.printed_command(said)
+
+        environment = dict(os.environ)
+        for key in ("DATABASE_URL", "DASHBOARD_STORAGE",
+                    "DASHBOARD_STORAGE_FILE", "WDASH_NO_DOTENV"):
+            environment.pop(key, None)
+        environment["PYTHONPATH"] = os.path.join(self.deployment, "src")
+        done = subprocess.run(
+            [sys.executable, "-m", "wdash.store.migrate_cli"] + arguments,
+            cwd=self.deployment, env=environment, capture_output=True,
+            text=True)
+        told = done.stdout + done.stderr
+
+        self.assertEqual(done.returncode, 0, told)
+        self.assertIn("1 moved", told)
+        self.assertFalse(
+            os.path.exists(self.stray),
+            "the migration made itself a database beside the working "
+            f"directory instead of opening the configured one:\n{told}")
+        self.assertTrue(
+            os.path.exists(self.configured),
+            f"it reported a successful move and never opened the database "
+            f"this deployment configured:\n{told}")
+        # Read as a file, not through `Store`: this asserts WHICH database
+        # the separate process wrote to, and on a Postgres run the suite
+        # swaps every SQLite address in THIS process for a schema of its own.
+        with contextlib.closing(sqlite3.connect(self.configured)) as opened:
+            self.assertEqual(
+                [row[0] for row in
+                 opened.execute("select name from wdash_dashboards")],
+                ["On the wall"])
+
+    def test_the_printed_command_still_carries_no_database_address(self):
+        """The other way to make the command work is to print the address
+        into the warning, and the warning goes to the log. Base commit
+        0b10034 is about exactly that."""
+        self.write_dashboards([self.a_dashboard()])
+        app = create_app(self.config())
+        said = files_left_behind(app.store, self.dashboards)
+        self.assertNotIn("--database-url", said)
+
+    def test_the_flag_defaults_to_the_configuration_not_to_the_environment(self):
+        """The fault without the subprocess: what the default is READ from.
+        `os.environ` at the moment argparse builds the flag is not the
+        configuration this deployment runs on."""
+        from wdash.store import migrate_cli
+
+        self.write_dashboards([self.a_dashboard()])
+        wanted = f"sqlite:///{os.path.join(self.directory, 'elsewhere.db')}"
+        opened = []
+        real = migrate_cli.Store
+
+        class Spy:
+            @staticmethod
+            def open(url=None, **keywords):
+                opened.append(url)
+                return real.open(f"sqlite:///{self.database}", **keywords)
+
+        with mock.patch.object(migrate_cli, "Store", Spy), \
+                mock.patch.object(Config, "DATABASE_URL", wanted):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(out):
+                code = migrate_cli.main(["--dashboards", self.dashboards])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertEqual(opened, [wanted])
+
+    def test_an_address_on_the_command_line_still_wins(self):
+        """The flag is the override, not the other way round."""
+        from wdash.store import migrate_cli
+
+        self.write_dashboards([self.a_dashboard()])
+        opened = []
+        real = migrate_cli.Store
+
+        class Spy:
+            @staticmethod
+            def open(url=None, **keywords):
+                opened.append(url)
+                return real.open(f"sqlite:///{self.database}", **keywords)
+
+        with mock.patch.object(migrate_cli, "Store", Spy), \
+                mock.patch.object(Config, "DATABASE_URL", "sqlite:///ignored"):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(out):
+                migrate_cli.main(["--database-url", "sqlite:///said-so",
+                                  "--dashboards", self.dashboards])
+        self.assertEqual(opened, ["sqlite:///said-so"])
+
+
+class AnUnrecognisedSettingIsRefusedTest(_Installation):
+    """A value that is neither 'database' nor 'file'.
+
+    It used to reach the JSON file store without a word. Harmless while
+    'file' was the default and held the data; now the data is in the
+    database, so one transposed letter showed an empty dashboard list and an
+    empty saved-search list with nothing logged — "there is nothing" and "we
+    looked somewhere else" made indistinguishable, which is the defect this
+    whole package exists to remove.
+    """
+
+    def a_dashboard_in_the_database(self):
+        store = Store.open(f"sqlite:///{self.database}")
+        store.dashboards.create_dashboard(
+            name="On the wall", description="", query="*",
+            created_by="owner", index_patterns=["*"])
+
+    def test_a_transposed_letter_is_refused_rather_than_shown_as_empty(self):
+        self.a_dashboard_in_the_database()
+        with self.assertRaises(RuntimeError) as refused:
+            create_app(self.config(storage="databse"))
+        said = str(refused.exception)
+        self.assertIn("databse", said, "the refusal does not name the value")
+        self.assertIn("'database'", said)
+        self.assertIn("'file'", said)
+
+    def test_an_abbreviation_is_refused_too(self):
+        self.a_dashboard_in_the_database()
+        with self.assertRaises(RuntimeError):
+            create_app(self.config(storage="db"))
+
+    def test_a_trailing_space_still_names_the_database(self):
+        """Only the environment path stripped, so 'database ' off a config
+        object was a different store from 'database'."""
+        app = create_app(self.config(storage="database "))
+        self.assertIs(app.dashboard_manager, app.store.dashboards)
+
+    def test_a_key_carrying_nothing_means_the_default(self):
+        """An empty value is what Config makes of an empty environment
+        variable, and it means "not set" there. Refusing it would turn an
+        unset variable in a Kubernetes ConfigMap into a start-up failure."""
+        for nothing in ("", None):
+            with self.subTest(value=nothing):
+                app = create_app(self.config(DASHBOARD_STORAGE=nothing,
+                                             SECRET_KEY=f"empty-{nothing}"))
+                self.assertIs(app.dashboard_manager, app.store.dashboards)
+
+    def test_the_two_values_that_are_known_still_work(self):
+        """A refusal that refuses everything is not an improvement."""
+        from wdash.dashboard import DashboardManager
+
+        on_database = create_app(self.config(storage="database"))
+        self.assertIs(on_database.dashboard_manager,
+                      on_database.store.dashboards)
+        self.assertIsInstance(
+            create_app(self.config(storage="file",
+                                   SECRET_KEY="still-file")).dashboard_manager,
+            DashboardManager)
+
+
+class ATestAppLeavesNoDirectoryBehindTest(_Installation):
+    """The TESTING redirect away from the packaged data/ directory.
+
+    It has to happen before the storage branch — both halves need the path,
+    the file store to write to it and the start-up check to read it — but
+    only the half that WRITES needs a directory to be there. Making one per
+    test app left 1,225 of them behind per suite run against the 26 apps
+    that use the file store, on a machine already holding a quarter of a
+    million.
+    """
+
+    def under_its_own_temporary_directory(self, root, **extra):
+        """create_app with tempfile pointed somewhere this test owns, and
+        the packaged dashboards path, which is what triggers the redirect."""
+        previous = tempfile.tempdir
+        tempfile.tempdir = root
+        try:
+            app = create_app(self.config(
+                DASHBOARD_STORAGE_FILE=DEFAULT_DASHBOARD_FILE, **extra))
+        finally:
+            tempfile.tempdir = previous
+        return app, sorted(name for name in os.listdir(root)
+                           if name.startswith("wdash-test-"))
+
+    def test_a_database_app_makes_no_directory_it_will_never_open(self):
+        root = os.path.join(self.directory, "tmp")
+        os.makedirs(root)
+        app, made = self.under_its_own_temporary_directory(root)
+        self.assertIs(app.dashboard_manager, app.store.dashboards)
+        self.assertEqual(made, [], "a test app that runs entirely on the "
+                                   "database made a directory nothing opens")
+
+    def test_the_check_is_handed_a_path_under_a_directory_that_is_not_there(self):
+        """The redirect did not go; only the directory did. What the check
+        reads still has to be somewhere other than the repository's data/,
+        and it has to read as "no file" — which a path whose directory does
+        not exist does."""
+        root = os.path.join(self.directory, "tmp")
+        os.makedirs(root)
+        seen = []
+        real = app_module.files_left_behind
+
+        def watched(store, dashboards_file):
+            seen.append(dashboards_file)
+            return real(store, dashboards_file)
+
+        previous = tempfile.tempdir
+        tempfile.tempdir = root
+        try:
+            with mock.patch.object(app_module, "files_left_behind", watched):
+                create_app(self.config(
+                    DASHBOARD_STORAGE_FILE=DEFAULT_DASHBOARD_FILE))
+        finally:
+            tempfile.tempdir = previous
+
+        self.assertEqual(len(seen), 1, seen)
+        self.assertTrue(seen[0].startswith(root),
+                        f"the check was pointed at {seen[0]}, not at a path "
+                        f"of this test run's own")
+        self.assertFalse(os.path.exists(os.path.dirname(seen[0])),
+                         "a directory was made for a path only ever read")
+
+    def test_a_file_app_still_gets_a_directory_of_its_own_and_can_write(self):
+        """The isolation is the point of the redirect and must not go with
+        the litter: `save_dashboards` treats a missing directory as the
+        failure it is, so the half that writes makes one."""
+        root = os.path.join(self.directory, "tmp")
+        os.makedirs(root)
+        first, _ = self.under_its_own_temporary_directory(
+            root, storage="file", SECRET_KEY="one")
+        second, made = self.under_its_own_temporary_directory(
+            root, storage="file", SECRET_KEY="two")
+
+        self.assertEqual(len(made), 2, made)
+        self.assertNotEqual(first.dashboard_manager.storage_path,
+                            second.dashboard_manager.storage_path)
+        first.dashboard_manager.create_dashboard(
+            "One", "", "*", "owner", ["*"])
+        self.assertTrue(os.path.exists(first.dashboard_manager.storage_path))
+        self.assertEqual(
+            [d.name for d in second.dashboard_manager.get_all_dashboards()],
+            [], "one test app could see another's dashboards")
+
+
+class TheCheckReadsTheFilesBeforeTheDatabaseTest(_Installation):
+    """Every worker runs the start-up check at every start.
+
+    The ordinary answer — a database installation with no JSON files at all
+    — used to cost two full id columns off a store that may hold thousands
+    of rows, read before anything looked at whether there was a file to
+    compare them against.
+    """
+
+    def test_no_files_means_the_id_columns_are_never_scanned(self):
+        app = create_app(self.config())
+        calls = []
+        real = app_module._stored_ids
+
+        def counted(store):
+            calls.append(store)
+            return real(store)
+
+        with mock.patch.object(app_module, "_stored_ids", counted):
+            self.assertIsNone(files_left_behind(app.store, self.dashboards))
+            self.assertEqual(calls, [], "the database was read to answer a "
+                                        "question about files that are not "
+                                        "there")
+
+            self.write_dashboards([self.a_dashboard()])
+            self.assertIsNotNone(files_left_behind(app.store, self.dashboards))
+            self.assertEqual(len(calls), 1, "and it still reads them when "
+                                            "there is something to compare")
+
+    def test_an_empty_file_is_still_nothing_to_compare(self):
+        self.write_dashboards([])
+        self.write_searches([])
+        app = create_app(self.config())
+        calls = []
+        real = app_module._stored_ids
+
+        def counted(store):
+            calls.append(store)
+            return real(store)
+
+        with mock.patch.object(app_module, "_stored_ids", counted):
+            self.assertIsNone(files_left_behind(app.store, self.dashboards))
+        self.assertEqual(calls, [])
+
+    def test_a_file_that_cannot_be_read_is_not_mistaken_for_no_file(self):
+        """`[]` and only `[]` is "nothing here". None is a file nobody could
+        read, and short-circuiting on falsiness would make it silent — the
+        failure looking like emptiness again, one layer down."""
+        with open(self.dashboards, "w") as handle:
+            handle.write("{not json")
+        app = create_app(self.config())
+        self.assertIn("cannot be read",
+                      files_left_behind(app.store, self.dashboards))
+
+
+class TheOrderOfTheDashboardsPageTest(_Installation):
+    """What an installation sees the moment after it migrates.
+
+    The file store returned insertion order; the database returns newest
+    first, so a board that moves in sees its list invert once. That is the
+    order this store has always had and it is the wanted one. What was not
+    wanted is what a bulk migration does to it: `created_at` is preserved to
+    the second, so whole runs of dashboards arrive sharing one timestamp and
+    `created_at DESC` alone left their order to the database — the page
+    reshuffling between loads for no reason anybody can see.
+    """
+
+    def test_records_of_the_same_age_come_back_in_one_fixed_order(self):
+        store = Store.open(f"sqlite:///{self.database}")
+        moment = datetime(2026, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        for identifier in ("c-third", "a-first", "b-second"):
+            store.dashboards.create_dashboard(
+                name=identifier, description="", query="*",
+                created_by="owner", index_patterns=["*"],
+                dashboard_id=identifier, created_at=moment)
+
+        self.assertEqual(
+            [d.id for d in store.dashboards.get_all_dashboards()],
+            ["a-first", "b-second", "c-third"])
+        self.assertEqual(
+            [d.id for d in store.dashboards.get_user_dashboards("owner")],
+            ["a-first", "b-second", "c-third"])
+
+    def test_a_newer_dashboard_is_still_first(self):
+        """The tie-break is a tie-break, not the order."""
+        store = Store.open(f"sqlite:///{self.database}")
+        store.dashboards.create_dashboard(
+            name="older", description="", query="*", created_by="owner",
+            index_patterns=["*"], dashboard_id="a-older",
+            created_at=datetime(2026, 1, 15, 10, 0, tzinfo=timezone.utc))
+        store.dashboards.create_dashboard(
+            name="newer", description="", query="*", created_by="owner",
+            index_patterns=["*"], dashboard_id="z-newer",
+            created_at=datetime(2026, 2, 15, 10, 0, tzinfo=timezone.utc))
+        self.assertEqual(
+            [d.id for d in store.dashboards.get_all_dashboards()],
+            ["z-newer", "a-older"])
+
+
+class RunShellScriptTest(unittest.TestCase):
+    """`run.sh` made an empty `data/dashboards.json` on every start.
+
+    Harmless while the file store was the default and that file was the
+    store. Now it is a decoy: it says `[]` beside a database holding the
+    dashboards, and it is the first thing whoever goes looking next finds.
+
+    Nothing under tests/ read this script at all, so the guard that stopped
+    it went in unpinned. The block is lifted out and run on its own rather
+    than asserted about as text — the whole script installs dependencies and
+    starts the application, and a test that only greps cannot tell a guard
+    from a comment.
+    """
+
+    def setUp(self):
+        self.path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "run.sh"))
+        with open(self.path) as handle:
+            self.script = handle.read()
+
+    def guard(self):
+        """The `if` block that creates the file, lifted out of the script."""
+        lines = self.script.splitlines()
+        opens = [index for index, line in enumerate(lines)
+                 if line.startswith("if ") and "dashboards.json" in line]
+        self.assertEqual(len(opens), 1,
+                         f"{self.path} no longer has exactly one block "
+                         f"creating dashboards.json")
+        start = opens[0]
+        end = next(index for index in range(start, len(lines))
+                   if lines[index].strip() == "fi")
+        return "\n".join(lines[start:end + 1])
+
+    def after_the_guard(self, **environment):
+        """Where data/dashboards.json would be, having run the block."""
+        scratch = tempfile.mkdtemp(prefix="wdash-a2-run-sh-")
+        self.addCleanup(shutil.rmtree, scratch, True)
+        chosen = dict(os.environ)
+        chosen.pop("DASHBOARD_STORAGE", None)
+        chosen.update(environment)
+        done = subprocess.run(["bash", "-c", self.guard()], cwd=scratch,
+                              env=chosen, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return os.path.join(scratch, "data", "dashboards.json")
+
+    def test_a_deployment_that_says_nothing_gets_no_empty_dashboards_file(self):
+        self.assertFalse(
+            os.path.exists(self.after_the_guard()),
+            "an empty JSON file was left beside the store that holds the "
+            "dashboards")
+
+    def test_a_file_deployment_still_gets_its_empty_dashboards_file(self):
+        """DASHBOARD_STORAGE=file behaves exactly as it did, start-up script
+        included."""
+        made = self.after_the_guard(DASHBOARD_STORAGE="file")
+        self.assertTrue(os.path.exists(made))
+        with open(made) as handle:
+            self.assertEqual(json.load(handle), [])
+
+    def test_a_database_deployment_said_out_loud_gets_none_either(self):
+        self.assertFalse(
+            os.path.exists(self.after_the_guard(DASHBOARD_STORAGE="database")))
+
+    def test_the_script_reads_dot_env_before_it_decides(self):
+        """The setting usually lives in `.env`, not in the shell that runs
+        this. Read afterwards it would be unset here whatever the deployment
+        configured, and a file deployment would lose its file."""
+        self.assertLess(self.script.index("source .env"),
+                        self.script.index("DASHBOARD_STORAGE"),
+                        "run.sh decides before it has read .env")
 
 
 if __name__ == "__main__":      # pragma: no cover - the suite runs this

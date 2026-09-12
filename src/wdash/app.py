@@ -130,13 +130,25 @@ def files_left_behind(store, dashboards_file):
     and "could not tell" are different sentences.
     """
     searches_file = saved_searches_beside(dashboards_file)
+
+    # The files are read before the database is, and the ids only when there
+    # is something to compare them against. Every worker runs this at every
+    # start, and the ordinary answer — a database installation with no JSON
+    # files at all — is now two `os.path.exists` calls rather than two full
+    # id columns off a store that may hold thousands of rows. `[]` and only
+    # `[]` is "nothing here": None is a file that could not be read, and that
+    # one still has to be reported.
+    rows = {path: _json_rows(path) for path in (dashboards_file, searches_file)}
+    if all(found == [] for found in rows.values()):
+        return None
+
     dashboard_ids, search_ids = _stored_ids(store)
 
     lines = []
     for path, present, one, many in (
             (dashboards_file, dashboard_ids, "dashboard", "dashboards"),
             (searches_file, search_ids, "saved search", "saved searches")):
-        outstanding = _left_behind(_json_rows(path), present)
+        outstanding = _left_behind(rows[path], present)
         if outstanding is None:
             lines.append(f"{os.path.abspath(path)} cannot be read, so "
                          f"whether it holds {many} nobody can see is unknown")
@@ -341,13 +353,31 @@ def create_app(config_class=Config):
     #
     # Compared against the literal default so an explicitly configured path
     # is never discarded.
+    #
+    # A path, not a directory. `mkdtemp` here made one per test app and left
+    # it there — 1,225 per suite run, against the 26 apps that actually use
+    # the file store, on a machine already holding a quarter of a million of
+    # them. Only the half that WRITES needs the directory to exist, and it
+    # says so in its own branch below; the check only reads, and a path whose
+    # directory is not there reads as "no file", which is the truth about a
+    # test run.
     storage_file = app.config['DASHBOARD_STORAGE_FILE']
-    if app.config.get('TESTING') and storage_file == DEFAULT_DASHBOARD_FILE:
+    isolated = bool(app.config.get('TESTING')) and \
+        storage_file == DEFAULT_DASHBOARD_FILE
+    if isolated:
         import tempfile
-        storage_file = os.path.join(tempfile.mkdtemp(prefix="wdash-test-"),
+        from uuid import uuid4
+        storage_file = os.path.join(tempfile.gettempdir(),
+                                    f"wdash-test-{uuid4().hex}",
                                     "dashboards.json")
 
-    storage = str(app.config.get('DASHBOARD_STORAGE', 'database')).lower()
+    # `or`, not a default argument: a config object that carries the key with
+    # nothing in it means "not set", which is exactly what Config makes of an
+    # empty environment variable. Stripped for the same reason — only the
+    # environment path stripped before, so 'database ' off a config object
+    # was a different store from 'database'.
+    storage = str(app.config.get('DASHBOARD_STORAGE') or 'database')
+    storage = storage.strip().lower()
     if storage == 'database':
         dashboard_manager = store.dashboards
         try:
@@ -369,9 +399,34 @@ def create_app(config_class=Config):
             "  PYTHONPATH=src python -m wdash.store.migrate_cli \\\n"
             "      --from-elasticsearch $ELASTICSEARCH_URL\n"
             "then unset DASHBOARD_STORAGE — 'database' is the default.")
-    else:
+    elif storage == 'file':
+        # The only branch that writes to the path, so the only one that needs
+        # the directory to be there. Made here, and only when this run
+        # redirected the path itself: `save_dashboards` treats a missing
+        # directory as the failure it is, and a deployment that names a
+        # directory it did not create should hear that rather than have one
+        # made behind it.
+        if isolated:
+            os.makedirs(os.path.dirname(storage_file), exist_ok=True)
         dashboard_manager = DashboardManager(storage_file)
-    
+    else:
+        # A value nobody recognises used to fall through to the JSON file
+        # store without a word. That was survivable while 'file' was the
+        # default and held the data; now the data is in the database, so one
+        # transposed letter showed an empty dashboard list AND an empty
+        # saved-search list with nothing logged — "there is nothing" and "we
+        # looked somewhere else" made indistinguishable, which is the whole
+        # reason this package exists. Refused the way 'elasticsearch' above
+        # is refused, and for the same reason.
+        raise RuntimeError(
+            f"DASHBOARD_STORAGE={app.config.get('DASHBOARD_STORAGE')!r} is "
+            f"not a value WDash knows. It is 'database' — the default, where "
+            f"dashboards and saved searches live — or 'file', the JSON store, "
+            f"which is still supported. Refused rather than falling through "
+            f"to the file store: that would have shown an empty dashboard "
+            f"list and an empty saved-search list for data that is in the "
+            f"database, and nothing would have said why.")
+
     # Store services in app context
     app.es_client = es_client
     app.dashboard_manager = dashboard_manager

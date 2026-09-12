@@ -30,6 +30,12 @@ absolute paths are printed before anything is read, and a file this run will
 open that is not there stops it instead of counting as none: "0 moved" is the
 answer this command must never give when it never looked.
 
+With no --database-url the metadata database is DATABASE_URL, read the way
+the application reads it and therefore including `.env`. The command the
+start-up warning prints carries no --database-url on purpose — on Postgres
+that address holds a password and the warning goes to the log — so this has
+to find the same store the application opens, by itself.
+
 Two files are deliberately not required. A --from-elasticsearch run opens
 neither JSON file, and a saved-searches path nobody named is created by the
 application on the first save — so its absence beside a dashboards file means
@@ -193,9 +199,36 @@ def _files(arguments):
     return dashboards, searches
 
 
+def _database_url(arguments):
+    """The metadata database this writes into, as the application reads it.
+
+    Defaulted after parsing, from `Config`, for the same reason `--dashboards`
+    is: `os.environ` at the moment argparse builds the flag is not the
+    configuration this deployment runs on. `wdash.config` calls
+    `load_dotenv()` when it is imported and nothing here has imported it yet,
+    so a deployment that keeps DATABASE_URL in `.env` — which is the README's
+    own quick start, `cp .env.example .env` — had this default to None and
+    land on `sqlite:///data/wdash.db` beside whatever directory the command
+    was run from.
+
+    That is the one path this command exists for. The start-up warning prints
+    a command without --database-url, deliberately: a Postgres URL carries a
+    password and this is printed into a log. So the operator ran exactly what
+    they were told to run, were shown "Dashboards: 1 moved" and "Done", and
+    the configured store was never touched — and the next start printed the
+    same warning again, which is a loop with a success message in it.
+    """
+    from ..config import Config
+
+    return arguments.database_url or Config.DATABASE_URL
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
+    parser.add_argument("--database-url", default=None,
+                        help="metadata database (default: DATABASE_URL, read "
+                             "the way the application reads it, .env "
+                             "included)")
     # Defaulted after parsing, from the same configuration the application
     # reads. The literals that used to be here — data/dashboards.json and
     # data/saved_searches.json, relative to wherever the command was run —
@@ -280,7 +313,7 @@ def main(argv=None):
 
     # Pass the RBAC file so an import run before the first app start does not
     # seed built-in defaults and thereby shadow the roles somebody wrote.
-    store = Store.open(arguments.database_url,
+    store = Store.open(_database_url(arguments),
                        rbac_file=os.environ.get("RBAC_CONFIG_FILE",
                                                 "config/rbac.yaml"))
     print(f"Metadata store: {store.describe()}")

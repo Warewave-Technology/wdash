@@ -156,17 +156,25 @@ class Config:
     # The file store keeps everything in one JSON document, so two workers
     # editing different dashboards at the same moment lose one of the edits —
     # silently, since both writes succeed. Measured here, three trials each:
-    # 4 processes x 8 creates reported 32 successes and left 9 rows in the
-    # file, every trial; the same 32 into SQLite reported 32 and left 32,
-    # every trial. The metadata database is opened and migrated
-    # before this setting is read, so 'file' does not avoid a database, it
-    # adds a second store beside one that is always there.
+    # 4 processes x 8 creates reported 32 successes every trial and left 8,
+    # 9 and 11 rows in the file; the same 32 into SQLite reported 32 and left
+    # 32, every trial. How much is lost varies with the timing, which is the
+    # point — the SQLite half is the invariant one, and a re-run of the file
+    # half will land somewhere else in that range. The metadata database is
+    # opened and migrated before this setting is read, so 'file' does not
+    # avoid a database, it adds a second store beside one that is always
+    # there.
     #
     # 'file' remains supported and behaves exactly as it always has. An
     # installation that has JSON files and never set this is told at
     # start-up, by name and with the command to run — see
-    # `_files_left_behind` in app.py — rather than shown an empty list.
+    # `files_left_behind` in app.py — rather than shown an empty list.
     # Move the existing files in with `python -m wdash.store.migrate_cli`.
+    #
+    # Anything that is neither 'database' nor 'file' is refused at start-up
+    # rather than quietly served from the file store: a transposed letter
+    # here used to show an empty dashboard list for data sitting in the
+    # database.
     #
     # 'elasticsearch' was a third option and has been removed; app.py refuses
     # it at start-up rather than falling through to the file store. This
