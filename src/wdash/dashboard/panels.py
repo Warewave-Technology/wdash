@@ -40,11 +40,25 @@ PANEL_TYPES = {
         "description": "The most common values of a field.",
         "fields": ("field", "size"),
     },
+    "records": {
+        "label": "Recent records",
+        "signal": "logs",
+        "description": "The newest records the dashboard's query matches — "
+                       "timestamp, severity, service, message.",
+        "fields": ("size",),
+    },
     "trace_services": {
         "label": "Services by traffic",
         "signal": "traces",
         "description": "Span counts and error rates per service, from traces.",
         "fields": ("size", "sort"),
+    },
+    "trace_list": {
+        "label": "Traces for one service",
+        "signal": "traces",
+        "description": "Individual requests through one service — the "
+                       "slowest, the newest, or only the ones that failed.",
+        "fields": ("service", "view", "size"),
     },
     "monitors": {
         "label": "Monitor status",
@@ -65,6 +79,12 @@ PANEL_TYPES = {
 #: How a trace service panel is ordered.
 TRACE_SORTS = ("spans", "errors", "error_rate")
 
+#: What a trace list panel asks. Three questions people open the traces page
+#: for, named rather than expressed as a sort plus a flag: "errors" is not an
+#: ordering, and a panel offering `sort` and `only_errors` separately would
+#: put four combinations on a board where three are ever asked for.
+TRACE_LIST_VIEWS = ("slowest", "recent", "errors")
+
 #: What a monitor panel asks. Two questions, one panel type and one fetch:
 #: "is it up now" and "was it up all week" come out of the SAME listing —
 #: `MonitorPoint.down` and `.checks` ride along with the current state — so
@@ -83,6 +103,19 @@ AGGREGATABLE_FIELDS = ("severity", "service", "host", "environment")
 
 DEFAULT_SIZE = 10
 MAX_SIZE = 50
+
+#: Rows a records panel will list.
+#:
+#: Lower than MAX_SIZE on purpose: a bucket is two numbers and a record is a
+#: message, a resource map and an attribute map. Measured on the lab over
+#: `app-logs-000001` at 24h: 381 bytes of JSON per record against 41 per
+#: terms bucket, so a board of four records panels at MAX_SIZE would put
+#: 76 kB on the wire for four cards 300 pixels tall.
+MAX_RECORDS = 25
+
+#: Rows a trace list panel shows unless it says otherwise. "The five slowest"
+#: is the question people ask; twenty-five of them is a list nobody reads.
+DEFAULT_TRACE_ROWS = 5
 MIN_WIDTH = 3
 MAX_WIDTH = 12
 
@@ -195,6 +228,47 @@ def normalise(panel, panel_id=None):
         except (TypeError, ValueError):
             raise PanelError(f"'{title}': size must be a number.")
         out["field"] = field
+        out["size"] = max(1, min(MAX_SIZE, size))
+
+    elif kind == "records":
+        try:
+            size = int(panel.get("size", DEFAULT_SIZE))
+        except (TypeError, ValueError):
+            raise PanelError(f"'{title}': size must be a number.")
+        out["size"] = max(1, min(MAX_RECORDS, size))
+
+    elif kind == "trace_list":
+        service = (panel.get("service") or "").strip()
+        if not service:
+            # Required, and the reason is a cost rather than taste. Jaeger
+            # cannot answer "every trace": with no service named it lists the
+            # services and then searches each one (jaeger.py:307-322, bounded
+            # at MAX_SERVICE_FANOUT = 20). Measured on the lab's 7-service
+            # Jaeger at 24h: 8 HTTP requests and 52 ms with no service named,
+            # 1 request and 3 ms with one — and every dashboard refresh pays
+            # it again. An installation past the bound loses the traces that
+            # ran only through the rest, which reads as a quieter hour.
+            #
+            # Refused here rather than defaulted, because the panel would be
+            # affordable on Elasticsearch and Tempo and ruinous on Jaeger:
+            # a board that answers one question on one backend and a
+            # different, more expensive one on another is not a panel anyone
+            # can reason about.
+            raise PanelError(
+                f"'{title}': a trace list needs a service to list traces "
+                f"for. Without one, a Jaeger backend has to search every "
+                f"service it knows, on every refresh.")
+        view = (panel.get("view") or TRACE_LIST_VIEWS[0]).strip()
+        if view not in TRACE_LIST_VIEWS:
+            raise PanelError(
+                f"'{title}': cannot show '{view}'. "
+                f"Available: {', '.join(TRACE_LIST_VIEWS)}")
+        try:
+            size = int(panel.get("size", DEFAULT_TRACE_ROWS))
+        except (TypeError, ValueError):
+            raise PanelError(f"'{title}': size must be a number.")
+        out["service"] = service
+        out["view"] = view
         out["size"] = max(1, min(MAX_SIZE, size))
 
     elif kind == "trace_services":

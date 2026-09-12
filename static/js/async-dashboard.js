@@ -80,7 +80,12 @@ const LEVEL_GROUPS = {
 const PANEL_HINTS = Object.assign(Object.create(null), {
     timeseries: 'Click a segment to open those records in the Logs page',
     terms: 'Click a value to open those records in the Logs page',
+    // Not a click. This panel exists so that reading the records does not
+    // cost the board, so a hint promising somewhere to go would be the same
+    // untrue sentence the other way round.
+    records: 'The newest records this board matches, on the board',
     trace_services: 'Click a service to open it in the Traces page',
+    trace_list: 'Click a trace to open its waterfall in this window',
     monitors: 'Click a check to open it in the Monitors page',
     monitor_certificates: 'Click a row to open that check in the Monitors page',
 });
@@ -563,6 +568,18 @@ class AsyncDashboard {
 
         if (panel.type === 'trace_services') {
             this.drawServiceTable(panel, slot);
+            this.removePanelOverlay(slot);
+            return;
+        }
+
+        if (panel.type === 'trace_list') {
+            this.drawTraceList(panel, slot);
+            this.removePanelOverlay(slot);
+            return;
+        }
+
+        if (panel.type === 'records') {
+            this.drawRecordTable(panel, slot);
             this.removePanelOverlay(slot);
             return;
         }
@@ -1190,6 +1207,139 @@ class AsyncDashboard {
                             '_blank');
             });
         });
+    }
+
+    /**
+     * The newest records the board matches, on the board.
+     *
+     * The panel this replaces was a CLICK: to see a record behind a number
+     * you left for the Logs page in another tab and lost the board. The
+     * rows here are the same query the charts were drawn from, ad-hoc filter
+     * and all, so the table and the bars above it cannot disagree.
+     *
+     * The footer is the honest half. A source that reports a match count
+     * says "10 of 5,015"; Loki returns up to a limit and stops, so its total
+     * is the number returned and saying "10 of 10" would invent a fact about
+     * the window. `counted` comes from the source and decides which sentence
+     * is printed — never the numbers, because len(rows) === total is also
+     * what a quiet hour on Elasticsearch looks like.
+     */
+    drawRecordTable(panel, slot) {
+        const rows = panel.rows || [];
+        const notes = (panel.warnings || []).filter(Boolean);
+
+        if (!rows.length) {
+            // A store that did not answer is not an empty window, and this
+            // panel is read as evidence for the numbers above it.
+            this.panelMessage(panel.id, notes.length
+                ? notes.join('; ')
+                : 'No records in this window');
+            return;
+        }
+
+        const container = this.panelBody(slot);
+        const escape = escapeHtml;
+        const shown = rows.length.toLocaleString();
+        const caption = panel.counted
+            ? `Showing ${shown} of ${(panel.total || 0).toLocaleString()} matching records`
+            : `Showing ${shown} — this source does not report a match count`;
+
+        container.innerHTML =
+            `<div class="text-muted mb-1" style="font-size:.7rem">${
+                escape(caption)}</div>` +
+            '<table class="table table-sm mb-0" style="font-size:.75rem">' +
+            '<thead><tr><th>Time</th><th>Severity</th><th>Service</th>' +
+            '<th>Message</th></tr></thead><tbody>' +
+            rows.map(row => {
+                const level = String(row.severity || '').toUpperCase();
+                const tone = (level === 'ERROR' || level === 'FATAL') ? 'text-danger'
+                           : (level === 'WARN' || level === 'WARNING') ? 'text-warning'
+                           : 'text-muted';
+                const when = row.timestamp
+                    ? new Date(row.timestamp).toLocaleString()
+                    : '';
+                // severity_text is what the source called it; severity is the
+                // normalised form the board counted by. The raw one is shown
+                // because "WARNING" becoming "WARN" on screen is a change
+                // nobody asked for, and the title carries both.
+                const shownLevel = row.severity_text || row.severity || '';
+                return `<tr>
+                    <td class="text-nowrap">${escape(when)}</td>
+                    <td class="${tone}" title="${escape(row.severity || '')}">${
+                        escape(shownLevel)}</td>
+                    <td>${escape(row.service || '')}</td>
+                    <td class="text-truncate" style="max-width:22rem" title="${
+                        escape(row.body || '')}">${escape(row.body || '')}</td>
+                    </tr>`;
+            }).join('') + '</tbody></table>';
+    }
+
+    /**
+     * Individual traces for one service: the slowest, the newest, or the
+     * ones that failed.
+     *
+     * A row's click opens the waterfall carrying the window being looked at
+     * and the store that answered. Both matter: a trace detail page opened
+     * at the default range reports a trace from last Tuesday as missing, and
+     * one opened with no source looks in whichever store is first and
+     * reports a Jaeger trace as missing for the same reason.
+     */
+    drawTraceList(panel, slot) {
+        const rows = panel.rows || [];
+        const notes = (panel.warnings || []).filter(Boolean);
+
+        if (!rows.length) {
+            this.panelMessage(panel.id, panel.partial
+                ? (notes.join('; ')
+                   || 'No traces could be read: a store did not answer.')
+                : `No trace through ${panel.service} in this window`);
+            return;
+        }
+
+        const container = this.panelBody(slot);
+        const escape = escapeHtml;
+        // The window these rows came from, not the picker's current value:
+        // the two differ while a change is still loading, and the link has
+        // to open the window the row was found in.
+        const range = this.lastData?.time_range
+            || document.getElementById('timeRange')?.value || '1h';
+
+        container.innerHTML =
+            '<table class="table table-sm mb-0" style="font-size:.75rem">' +
+            '<thead><tr><th>Trace</th><th>Operation</th>' +
+            '<th class="text-end">Duration</th></tr></thead><tbody>' +
+            rows.map(row => {
+                const tone = row.has_error ? 'text-danger' : '';
+                return `<tr data-trace="${escape(row.trace_id)}" data-source="${
+                        escape(row.source || '')}" role="button" class="${tone}">
+                    <td><code>${escape(String(row.trace_id).slice(0, 12))}</code>${
+                        row.has_error
+                            ? ' <span title="This trace has an error">!</span>'
+                            : ''}</td>
+                    <td class="text-truncate" style="max-width:14rem" title="${
+                        escape(`${row.service || ''} ${row.name || ''}`)}">${
+                        escape(row.name || '')}</td>
+                    <td class="text-end text-nowrap">${
+                        AsyncDashboard.duration(row.duration_us)}</td></tr>`;
+            }).join('') + '</tbody></table>';
+
+        container.querySelectorAll('[data-trace]').forEach(row => {
+            row.addEventListener('click', () => {
+                const params = new URLSearchParams({ time_range: range });
+                if (row.dataset.source) params.set('source', row.dataset.source);
+                window.open(`/traces/${encodeURIComponent(row.dataset.trace)}?${
+                    params.toString()}`, '_blank');
+            });
+        });
+    }
+
+    /** Microseconds, in the unit a reader can compare two rows in. */
+    static duration(microseconds) {
+        const us = Number(microseconds);
+        if (!Number.isFinite(us)) return '';
+        if (us >= 1000000) return `${(us / 1000000).toFixed(2)} s`;
+        if (us >= 1000) return `${(us / 1000).toFixed(1)} ms`;
+        return `${Math.round(us)} µs`;
     }
 
     /**

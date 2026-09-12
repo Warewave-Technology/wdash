@@ -1118,6 +1118,134 @@ async function main() {
                counted.document.getElementById('errorRate').textContent);
     });
 
+    // ------------------------------------------------------ records table
+    //
+    // The footer is a claim about the BACKEND, not about the rows. Measured
+    // against the lab at 24h: Elasticsearch answers 10 of 5,015 and
+    // VictoriaLogs 10 of 681 with counted=true, while Loki returns up to its
+    // limit and stops — 10 records, total 10, counted=false. "10 of 10" from
+    // Loki is a total nobody measured, and it reads as "that is all there
+    // was".
+    const RECORD = {
+        timestamp: '2026-09-11T10:00:00.000Z', severity: 'ERROR',
+        severity_text: 'ERROR', service: 'payments', body: 'boom',
+    };
+    const counting = await loadWith({
+        panels: [{ id: 'r1', type: 'records', title: 'Recent', width: 6,
+                   rows: [RECORD, { ...RECORD, body: 'again' }],
+                   total: 5015, counted: true }],
+    });
+    check('a counted records panel prints the match count', () => {
+        const text = counting.document.querySelector(
+            '[data-panel-id="r1"] .chart-container').textContent;
+        assert(/Showing 2 of 5,015/.test(text), `the caption read "${text}"`);
+    });
+    check('a records panel draws a row per record', () => {
+        const rows = counting.document.querySelectorAll(
+            '[data-panel-id="r1"] tbody tr');
+        assert(rows.length === 2, `${rows.length} rows drawn`);
+        assert(/payments/.test(rows[0].textContent), rows[0].textContent);
+    });
+    check('a records panel stops spinning', () =>
+        assert(spinning(counting) === 0, `${spinning(counting)} spinner(s) left`));
+
+    const uncounted = await loadWith({
+        panels: [{ id: 'r1', type: 'records', title: 'Recent', width: 6,
+                   rows: [RECORD], total: 1, counted: false,
+                   warnings: ['Loki reports no match count'] }],
+    });
+    check('a source that reports no match count never says "1 of 1"', () => {
+        const text = uncounted.document.querySelector(
+            '[data-panel-id="r1"] .chart-container').textContent;
+        assert(!/of 1\b/.test(text), `the caption read "${text}"`);
+        assert(/does not report a match count/.test(text),
+               `the caption read "${text}"`);
+    });
+
+    // A record body is whatever a log writer put in the document.
+    const nasty = await loadWith({
+        panels: [{ id: 'r1', type: 'records', title: 'Recent', width: 6,
+                   rows: [{ ...RECORD, body: '<img src=x onerror=alert(1)>',
+                            service: '<b>x</b>' }],
+                   total: 1, counted: true }],
+    });
+    check('a record is text in the table, not markup', () => {
+        const cell = nasty.document.querySelector('[data-panel-id="r1"] tbody tr');
+        assert(!cell.querySelector('img') && !cell.querySelector('b'),
+               'a record body was rendered as markup');
+        assert(/onerror=alert\(1\)/.test(cell.textContent), cell.textContent);
+    });
+
+    const unread = await loadWith({
+        panels: [{ id: 'r1', type: 'records', title: 'Recent', width: 6,
+                   rows: [], total: 0, counted: true,
+                   partial: true, warnings: ['lab-loki did not answer'] }],
+    });
+    check('a records panel that could not be read does not say the window was quiet', () => {
+        const text = unread.document.querySelector(
+            '[data-panel-id="r1"] .panel-empty small').textContent;
+        assert(/did not answer/.test(text), `it said "${text}"`);
+    });
+
+    // ------------------------------------------------------- trace list
+    //
+    // The click carries the window being looked at and the store that
+    // answered. Without the range the detail page opens at its own default
+    // and reports a trace from last Tuesday as missing; without the source a
+    // Jaeger trace is looked for in whichever store is first.
+    const traceBoard = await loadWith({
+        time_range: '24h',
+        panels: [{ id: 't1', type: 'trace_list', title: 'Slowest', width: 6,
+                   service: 'payments', view: 'slowest',
+                   rows: [{ trace_id: 'abc123def456789', service: 'payments',
+                            name: 'GET /pay', start: '2026-09-11T10:00:00.000Z',
+                            duration_us: 9000, has_error: true,
+                            source: 'lab-jaeger' }] }],
+    });
+    check('a trace list draws its rows', () => {
+        const rows = traceBoard.document.querySelectorAll(
+            '[data-panel-id="t1"] tbody tr');
+        assert(rows.length === 1, `${rows.length} rows drawn`);
+        assert(/9\.0 ms/.test(rows[0].textContent), rows[0].textContent);
+    });
+    check('a trace row opens the waterfall in the window being looked at', () => {
+        const opened = [];
+        traceBoard.open = (url) => opened.push(new URL(url, 'http://localhost'));
+        traceBoard.document.querySelector('[data-trace]').click();
+        assert(opened.length === 1, 'the row opened nothing');
+        assert(opened[0].pathname === '/traces/abc123def456789',
+               opened[0].pathname);
+        assert(opened[0].searchParams.get('time_range') === '24h',
+               `it sent ${opened[0].search}`);
+        assert(opened[0].searchParams.get('source') === 'lab-jaeger',
+               `it sent ${opened[0].search}`);
+    });
+    check('a trace list stops spinning', () =>
+        assert(spinning(traceBoard) === 0, `${spinning(traceBoard)} spinner(s) left`));
+
+    const noTraces = await loadWith({
+        panels: [{ id: 't1', type: 'trace_list', title: 'Slowest', width: 6,
+                   service: 'payments', view: 'slowest', rows: [] }],
+    });
+    check('an empty trace list names the service it asked about', () => {
+        const text = noTraces.document.querySelector(
+            '[data-panel-id="t1"] .panel-empty small').textContent;
+        assert(/payments/.test(text), `it said "${text}"`);
+    });
+
+    // Every panel type ships with a caption, and neither of these two is a
+    // click promise the panel does not keep: the records table exists so
+    // that reading the records does NOT cost the board.
+    check('the new panels carry a caption that is true of them', () => {
+        const records = counting.document.querySelector(
+            '[data-panel-id="r1"] .panel-hint').textContent;
+        const traces = traceBoard.document.querySelector(
+            '[data-panel-id="t1"] .panel-hint').textContent;
+        assert(records && !/click/i.test(records), `records hint: "${records}"`);
+        assert(/click/i.test(traces) && /waterfall/i.test(traces),
+               `trace hint: "${traces}"`);
+    });
+
     // One rule, two copies: the link a cell opens is built in JavaScript and
     // the route's converter is Python. MonitorLinkTest holds the same ids to
     // the same strings on the Python side.

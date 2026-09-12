@@ -22,10 +22,10 @@ from datetime import timedelta
 
 from .access import request_scope
 from ..hub import (
-    Capability, DateHistogram, LogQuery, Scope, Terms, TimeWindow,
+    Capability, DateHistogram, LogQuery, Scope, Terms, TimeWindow, TraceQuery,
 )
 from ..hub.models import DOWN, UNKNOWN, UP
-from ..hub.query import DEFAULT_LOG_FIELDS
+from ..hub.query import DEFAULT_LOG_FIELDS, SORT_RECENT, SORT_SLOWEST
 from ..dashboard import DashboardStorageError
 from ..store.objects import ObjectConflict as DashboardConflict
 from ..hub.query_language import QueryError, parse
@@ -46,6 +46,12 @@ from ..hub.aggregation import AggregationResult
 # contradict ElasticsearchMonitorSource.containers, which says in as many
 # words that monitor visibility is a permission and not an index pattern.
 from . import monitor_routes
+# And the trace boundary comes from the Traces page for the same reason: a
+# dashboard that decided for itself which services a role may see would give
+# the product two answers to one question. `_may_see_service` asks each
+# member source by name, which is what makes a rule written for one source
+# count there and nowhere else.
+from . import trace_routes
 
 dashboard_bp = Blueprint("dashboards", __name__)
 
@@ -71,6 +77,14 @@ _HEATMAP_BARS = 24
 #: "monitors" was the worked example of that failure when this set was
 #: written — a row registered with no filler, measured as a card reading
 #: quiet. It has a filler now, and the guard is the same guard.
+#:
+#: One caveat this set cannot express: a "logs" panel is not necessarily
+#: answered by the batch. A records panel asks for RECORDS, which is a search
+#: and not an aggregation, so it has a filler of its own (`_records_panels`)
+#: while still being a log panel in every other way — it needs the containers
+#: and it shares the log source's fate. A log-signal panel with no
+#: aggregation and no filler reads its empty result out of the batch, which
+#: is the same "No data in this window" the set above exists to prevent.
 FILLED_SIGNALS = frozenset({"logs", "traces", "monitors"})
 
 
@@ -319,6 +333,177 @@ def _trace_panels(panels, window, scope):
         if partial:
             rendered["partial"] = True
             rendered["warnings"] = notes
+        out[panel["id"]] = rendered
+    return out
+
+
+#: Which TraceQuery each trace-list view asks for.
+#:
+#: "errors" is not an ordering — it is the newest list with the successful
+#: requests taken out — so the mapping is written once here rather than as an
+#: `if` in the filler that the next view would be forgotten in.
+_TRACE_LIST_QUERIES = {
+    "slowest": (SORT_SLOWEST, False),
+    "recent": (SORT_RECENT, False),
+    "errors": (SORT_RECENT, True),
+}
+
+
+def _trace_list_panels(panels, window, scope):
+    """Fill in the trace-LIST panels: individual traces, one service each.
+
+    A different question from `_trace_panels` and a different request. That
+    one calls `traces.services(...)`, which answers "how much traffic, how
+    many errors, per service"; a list of individual requests comes from
+    `traces.search(...)`, which is a separate adapter method and a separate
+    round trip. It cannot ride the other panel's call, so the cost is one
+    request per distinct question on the board — panels asking the same
+    thing share one, which is what the grouping below is for.
+
+    Every panel names a service (`panels.normalise` refuses one that does
+    not), and that is what keeps the cost honest on Jaeger: with no service
+    named it searches every service it knows, measured at 8 HTTP requests
+    against the lab's 7-service Jaeger versus 1 with a service named.
+
+    `traces:read` and the service boundary are checked HERE, at the moment
+    the panel is filled, the same shape `_monitor_panels` uses: a shared
+    dashboard must not become a way to read traces for a service a role was
+    never granted, and a colleague who lacks the permission must still be
+    able to read the rest of the board. So the PANEL is refused with a
+    reason, never the dashboard.
+    """
+    wanted = [p for p in panels if p["type"] == "trace_list"]
+    if not wanted:
+        return {}
+
+    def refuse(reason, only=None):
+        return {p["id"]: {"error": reason} for p in (only or wanted)}
+
+    if not scope.has("traces:read"):
+        return refuse("Traces need the traces:read permission, which this "
+                      "role does not have. The rest of this dashboard is "
+                      "unaffected.")
+
+    hub = getattr(current_app, "hub", None)
+    traces = hub.traces() if hub else None
+    if traces is None or not traces.supports(Capability.TRACE_SEARCH):
+        return refuse("No trace backend that can list traces is configured.")
+
+    out, groups = {}, {}
+    for panel in wanted:
+        service = panel["service"]
+        if not trace_routes._may_see_service(scope, traces, service):
+            # Named, because the reader is the person who has to ask for it.
+            # An empty table here would read as "that service ran nothing".
+            out[panel["id"]] = {"error": (
+                f"Your role cannot see traces for '{service}'. That is a "
+                f"boundary, not an empty window.")}
+            continue
+        groups.setdefault(
+            (service, panel["view"], panel["size"]), []).append(panel)
+
+    for (service, view, size), members in groups.items():
+        sort, only_errors = _TRACE_LIST_QUERIES[view]
+        query = TraceQuery(window=window, service=service, sort=sort,
+                           only_errors=only_errors, limit=size)
+        try:
+            found = traces.search(query, scope)
+        except Exception as exc:
+            # The reason travels. Tempo refuses a window over 168 hours
+            # outright — measured on the lab, the dashboard's own "Last 7
+            # days" comes back "range specified by start and end exceeds
+            # 168h0m0s" — and a card reading "no traces" would send the
+            # reader looking for a service that had stopped.
+            current_app.logger.warning(f"Trace list panel failed: {exc}")
+            out.update(refuse(f"Traces could not be read: {exc}", members))
+            continue
+
+        rows = []
+        for summary in found:
+            # The fan-out stamps this; a single source does not know it is
+            # being asked by name. Filled in for the same reason the traces
+            # page fills it: the row's link carries the source, and without
+            # it the detail page looks in whichever store is first and
+            # reports a Jaeger trace as missing.
+            if getattr(summary, "source", None) is None:
+                summary.source = traces.name
+            rows.append(summary.to_dict())
+
+        completeness = trace_routes._completeness(found)
+        for panel in members:
+            rendered = {"rows": rows}
+            if completeness["partial"]:
+                # Tempo and Jaeger sort the rows they fetched rather than the
+                # window, and a store that did not answer is not a quieter
+                # hour. `_completeness` is what already carries both.
+                rendered["partial"] = True
+                rendered["warnings"] = completeness["warnings"]
+            out[panel["id"]] = rendered
+    return out
+
+
+def _records_panels(panels, query, dashboard, scope):
+    """Fill in the records panels: the newest records the board matches.
+
+    ONE search for however many records panels the board holds. They all ask
+    the same question — the dashboard's effective query over the window,
+    newest first — so the only thing that differs is how many rows each shows,
+    and the search runs at the largest of them and is sliced. Two records
+    panels are one round trip, not two.
+
+    The query is the SAME `LogQuery` the charts were built from, ad-hoc filter
+    and all: a records table that disagreed with the chart beside it is worse
+    than no table, and `q` is the door that disagreement would come through.
+    The window is the charts' window too, alignment included. `TimeWindow.of`
+    widens a range by up to one bucket and `query.py` says to use `exact` when
+    listing raw records — which is right for a page of records on its own, and
+    wrong here: measured on the lab at 24h, the aligned window holds 5,015
+    records and the exact one 5,005, and those ten records are counted by
+    every bar on the board. The list has to hold what the bars count.
+
+    `total` and `counted` both ship, because the footer is a claim about the
+    backend. Measured at 24h over the lab: Elasticsearch 10 of 5,015 with
+    counted=True, VictoriaLogs 10 of 681 counted=True, and Loki 10 records
+    with total=10 and counted=False — Loki returns up to a limit and stops,
+    so "10 of 10" would be a total nobody measured.
+    """
+    wanted = [p for p in panels if p["type"] == "records"]
+    if not wanted:
+        return {}
+
+    limit = max(panel["size"] for panel in wanted)
+    try:
+        page = _logs(dashboard).search(
+            LogQuery(window=query.window, text=query.text,
+                     containers=query.containers, limit=limit,
+                     fields=DEFAULT_LOG_FIELDS, filter=query.filter),
+            scope)
+    except Exception as exc:
+        # A search that failed is not a window with nothing in it, and this
+        # one runs after the aggregation batch has already answered — so the
+        # rest of the board is on screen and only this card is empty.
+        current_app.logger.warning(f"Records panel failed: {exc}")
+        return {p["id"]: {"error": "The records could not be read."}
+                for p in wanted}
+
+    rows = [record.to_dict() for record in page.records]
+    notes = [str(note) for note in (page.warnings or ()) if note]
+
+    out = {}
+    for panel in wanted:
+        rendered = {
+            "rows": rows[:panel["size"]],
+            "total": page.total,
+            # Not inferred from the numbers: `len(rows) == total` is true of
+            # a quiet hour on Elasticsearch too, and calling that uncounted
+            # would print "this source does not report a total" about a
+            # source that does.
+            "counted": bool(page.counted),
+        }
+        if notes:
+            rendered["warnings"] = notes
+        if page.partial:
+            rendered["partial"] = True
         out[panel["id"]] = rendered
     return out
 
@@ -594,6 +779,7 @@ def _without_log_containers(dashboard, scope, time_range, failure, status):
     # source is not needed for. `standalone` rather than `panels`, so a
     # filler is never handed a panel that belongs to another source.
     filled = _trace_panels(standalone, window, scope)
+    filled.update(_trace_list_panels(standalone, window, scope))
     filled.update(_monitor_panels(standalone, scope, window))
     for panel in panels:
         if needs_logs(panel):
@@ -1429,7 +1615,14 @@ def api_dashboard_data(dashboard_id):
         "panels": _panel_results(
             panels, result,
             {**_trace_panels(panels, query.window, scope),
-             **_monitor_panels(panels, scope, query.window)}),
+             **_trace_list_panels(panels, query.window, scope),
+             **_monitor_panels(panels, scope, query.window),
+             # The only LOG panel with a filler of its own: a list of records
+             # is a search, not an aggregation, so it cannot ride the batch
+             # above. It is still a log panel — it needs the containers, and
+             # it dies with the log source rather than drawing an empty table
+             # through an outage.
+             **_records_panels(panels, query, dashboard, scope)}),
         "dashboard_patterns": dashboard.index_patterns,
         "resolved_containers": _shown(resolved, allowed),
         "total_resolved": len(resolved),
