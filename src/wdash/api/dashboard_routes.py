@@ -107,6 +107,18 @@ LEVEL_GROUPS = {
     "info": ("INFO",),
 }
 
+#: The name the stat cards' severity aggregation rides under in the batch.
+#:
+#: Named once because it was written twice and spelled two ways: the batch
+#: built `_levels` and the comparison asked for `log_levels`, which no result
+#: carries, so the previous window's error, warning and info counts were the
+#: empty list's — zero — and the page printed "none in previous period" under
+#: all three. Measured on the demo at 24h: previous_period held 19,732
+#: records, of which the cluster really had ERROR 1,750 + FATAL 220, WARN
+#: 2,372 and INFO 13,737. The per-panel endpoints below keep `log_levels`:
+#: that one is a KEY IN THEIR JSON, not an internal name.
+LEVELS_AGGREGATION = "_levels"
+
 
 def _level_counts(buckets):
     """Derive error/warn/info counts from level buckets."""
@@ -161,8 +173,8 @@ def _compare(current, before, baseline_query):
     if before is None or getattr(before, "failed", False):
         return None
 
-    counts = _level_counts(before.get("log_levels"))
-    now_counts = _level_counts(current.get("log_levels"))
+    counts = _level_counts(before.get(LEVELS_AGGREGATION))
+    now_counts = _level_counts(current.get(LEVELS_AGGREGATION))
 
     def change(now, then):
         if not then:
@@ -957,13 +969,13 @@ def api_dashboard_data(dashboard_id):
     aggregations = _panel_aggregations(panels, query.window)
     # The stat cards are not a panel: they are the summary every dashboard
     # carries, so their aggregation is always present regardless of the list.
-    aggregations.append(Terms(name="_levels", field="severity", size=10))
+    aggregations.append(Terms(name=LEVELS_AGGREGATION, field="severity", size=10))
     batch = [(query, aggregations)]
 
     baseline_query = _baseline_query(dashboard, allowed, time_range, narrow)
     if baseline_query is not None:
         batch.append((baseline_query,
-                      [Terms(name="_levels", field="severity", size=10)]))
+                      [Terms(name=LEVELS_AGGREGATION, field="severity", size=10)]))
 
     results = _logs(dashboard).multi_aggregate(batch, scope)
     result = results[0]
@@ -971,7 +983,7 @@ def api_dashboard_data(dashboard_id):
         return jsonify(_did_not_run(result)), 502
     previous = _compare(result, results[1], baseline_query) if len(results) > 1 else None
 
-    counts = _level_counts(result.get("_levels"))
+    counts = _level_counts(result.get(LEVELS_AGGREGATION))
     payload = {
         "total_hits": result.total,
         # The counts the stat cards need ship in this response too, so the

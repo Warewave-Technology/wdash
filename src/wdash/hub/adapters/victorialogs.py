@@ -665,17 +665,48 @@ class VictoriaLogsSource(LogSource):
         return result.get("timeline")
 
     def _terms(self, expression, query, aggregation):
+        """The most frequent values of a field, counted over the RECORDS.
+
+        Not `field_values`, which is where this started: its `limit` is
+        applied to the field's values BEFORE they are counted, and a field
+        holding more distinct values than the limit comes back with every
+        `hits` at zero. `size` is 10 by default, so the Top Services panel
+        every new dashboard is born with reported silence over data the
+        panel beside it was counting in the same request — measured on the
+        lab over 2026-09-01..09-13, where `service` has 22 values: ten of
+        them alphabetically, all at 0, beside a volume panel counting 2,103
+        records. It renders as "No data in this window", not as a visibly
+        absurd chart, which is why nobody reported it.
+
+        `stats by` counts first, exactly as `_severity_terms` does and for a
+        related reason, so the truncation to `size` happens here — after
+        `_merge_buckets` has both summed the collisions normalising can
+        create and put the biggest first.
+        """
         if aggregation.field in ("severity", "severity_text"):
             return self._severity_terms(expression, query, aggregation)
         field = self._field_for(aggregation.field)
-        body = self._json("/select/logsql/field_values", {
-            "query": expression, "field": field,
-            "limit": getattr(aggregation, "size", 10) or 10,
+        rows = self._lines("/select/logsql/query", {
+            "query": f"{expression} | stats by ({_field_name(field)}) "
+                     f"count() as hits",
             **self._window(query)})
-        return _merge_buckets(
-            (self._bucket_key(aggregation.field, entry.get("value")),
-             int(entry.get("hits") or 0))
-            for entry in body.get("values") or ())
+        size = getattr(aggregation, "size", 10) or 10
+        #: A row carrying none of the grouped field comes back with the field
+        #: absent. Elasticsearch labels those with `missing` and this dropped
+        #: them, so the same panel over the same records disagreed by however
+        #: many rows never carried the field.
+        missing = getattr(aggregation, "missing", None)
+        counted = []
+        for row in rows:
+            value = row.get(field)
+            if value is None or value == "":
+                if missing is None:
+                    continue
+                value = missing
+            else:
+                value = self._bucket_key(aggregation.field, value)
+            counted.append((value, int(float(row.get("hits") or 0))))
+        return _merge_buckets(counted)[:size]
 
     def _severity_terms(self, expression, query, aggregation):
         """Levels counted over every field one may have been written in.

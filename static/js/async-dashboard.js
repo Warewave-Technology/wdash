@@ -53,6 +53,29 @@ const LEVEL_GROUPS = {
 
 
 /**
+ * What clicking inside a panel actually does, by panel type.
+ *
+ * The hint used to be one ternary: 'Click a segment to open those records'
+ * for a timeseries and 'Click a value to filter by it' for EVERYTHING else.
+ * Nothing filters. A terms click opens the Logs page in a new tab and a
+ * trace-services click opens the Traces page in one — so the sentence under
+ * a Top Services card promised a behaviour this dashboard has never had,
+ * and the existing trace panel wore it too.
+ *
+ * A TABLE, not a default: a panel type that is not named here says nothing,
+ * because the honest hint for a panel whose click does nothing yet is no
+ * hint at all. A new panel type inherits silence and adds its own line when
+ * it has a click to describe — which is the opposite of what the ternary
+ * did, where every type added inherited the promise.
+ */
+const PANEL_HINTS = {
+    timeseries: 'Click a segment to open those records in the Logs page',
+    terms: 'Click a value to open those records in the Logs page',
+    trace_services: 'Click a service to open it in the Traces page',
+};
+
+
+/**
  * A chart value as a quoted string in the query language. Bucket keys are
  * whatever a log writer put in the document, and they went into the Logs
  * query between quotes with nothing escaped — a level of
@@ -430,9 +453,7 @@ class AsyncDashboard {
                 : 'Incomplete: a store did not answer, so these are a lower bound.';
         } else {
             hint.className = 'text-muted panel-hint';
-            hint.textContent =
-                panel.type === 'timeseries' ? 'Click a segment to open those records'
-                                            : 'Click a value to filter by it';
+            hint.textContent = PANEL_HINTS[panel.type] || '';
         }
         hint.style.fontSize = '.7rem';
         return slot;

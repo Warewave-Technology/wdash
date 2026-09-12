@@ -10,6 +10,7 @@ can list field values.
 import datetime as dt
 import json
 import os
+import re
 import sys
 import unittest
 
@@ -21,6 +22,20 @@ from wdash.hub.adapters.victorialogs import VictoriaLogsSource  # noqa: E402
 from wdash.hub.source import Capability  # noqa: E402
 
 SERVICES = ["api-gateway", "auth-service", "checkout-api", "payment-service"]
+
+#: What the fake holds, as RECORDS rather than as a canned answer per
+#: endpoint. `field_values` and `stats by` are two views of one table, and a
+#: fake that answers them from two hardcoded lists cannot tell an adapter
+#: that reads the right one from an adapter that reads the wrong one — which
+#: is how ten services all counting zero passed the suite. Nine records:
+#: level info 7 / error 2, service api-gateway 4 / auth-service 3 /
+#: checkout-api 1 / payment-service 1.
+RECORDS = (
+    [{"service": "api-gateway", "level": "info"}] * 4
+    + [{"service": "auth-service", "level": "info"}] * 3
+    + [{"service": "checkout-api", "level": "error"}] * 1
+    + [{"service": "payment-service", "level": "error"}] * 1
+)
 
 #: The shape VictoriaLogs actually returns, taken from a running instance
 #: rather than from what an adapter would find convenient.
@@ -156,6 +171,48 @@ def _by_level(expression, values):
     return _filter_keeps(expression, rows)
 
 
+def _stats_by(fields):
+    """`| stats by (...) count() as hits` over RECORDS.
+
+    One row per combination of values the records actually hold; a field a
+    record does not carry is absent from its row, which is what VictoriaLogs
+    returns and what the adapter has to read a missing value out of.
+    """
+    counts = {}
+    for record in RECORDS:
+        key = tuple(record.get(field) for field in fields)
+        counts[key] = counts.get(key, 0) + 1
+    rows = []
+    for key, count in counts.items():
+        row = {field: value for field, value in zip(fields, key)
+               if value is not None}
+        row["hits"] = str(count)
+        rows.append(row)
+    return rows
+
+
+def _field_values(field, limit):
+    """`/select/logsql/field_values`, including the part that made D5.
+
+    Measured on the lab's VictoriaLogs v1.9.1 over 2026-09-01..09-13, where
+    `service` holds 22 values: `limit=50` answered with every value and its
+    real hits, biggest first; `limit=10` answered with ten values in byte
+    order and **hits 0 for every one of them**. The limit is applied before
+    the counting, so asking for the top ten of a field with more than ten
+    values is asking for a list of names with no numbers.
+    """
+    counts = {}
+    for record in RECORDS:
+        value = record.get(field)
+        if value:
+            counts[value] = counts.get(value, 0) + 1
+    if len(counts) > limit:
+        return [{"value": value, "hits": 0}
+                for value in sorted(counts)[:limit]]
+    return [{"value": value, "hits": count} for value, count in
+            sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
+
+
 class FakeResponse:
     def __init__(self, text="", status_code=200, payload=None):
         self.status_code = status_code
@@ -224,11 +281,8 @@ class FakeVictoriaLogs(Harness):
             field = (data or {}).get("field")
             if self._values_present == []:
                 return FakeResponse(payload={"values": []})
-            if field == "service":
-                return FakeResponse(payload={"values": [
-                    {"value": name, "hits": 3} for name in SERVICES]})
-            return FakeResponse(payload={"values": [
-                {"value": "info", "hits": 7}, {"value": "error", "hits": 2}]})
+            return FakeResponse(payload={"values": _field_values(
+                field, int((data or {}).get("limit") or 10))})
 
         if "field_names" in path:
             return FakeResponse(payload={"values": [
@@ -250,12 +304,19 @@ class FakeVictoriaLogs(Harness):
                  "timestamps": ["2026-08-04T11:59:00Z"],
                  "values": [2], "total": 2}]})
 
-        if "| stats by (" in ((data or {}).get("query") or ""):
+        grouped = re.search(r"\| stats by \(([^)]*)\)",
+                            (data or {}).get("query") or "")
+        if grouped:
             # `stats by` returns one row per combination of the grouped
-            # fields, with the fields a row does not carry simply absent.
-            return FakeResponse(text="\n".join(json.dumps(row) for row in [
-                {"level": "info", "hits": "7"},
-                {"level": "error", "hits": "2"}]))
+            # fields, with the fields a row does not carry simply absent —
+            # grouped by the fields it was ASKED for. It used to answer with
+            # levels whatever the query said, so an adapter grouping by
+            # `service` got level rows back and a panel could be wrong in
+            # either direction without the fake noticing.
+            fields = [name.strip().strip('"')
+                      for name in grouped.group(1).split(",")]
+            return FakeResponse(text="\n".join(
+                json.dumps(row) for row in _stats_by(fields)))
 
         return FakeResponse(text="\n".join(json.dumps(row) for row in ROWS))
 
@@ -511,6 +572,99 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
         from wdash.hub import Scope
         buckets = self.source.histogram(self._query(), Scope.unrestricted())
         self.assertTrue(buckets)
+
+    # --- top values ---
+
+    def test_top_values_are_counted_over_records_not_listed_from_a_field(self):
+        """`field_values` applies its limit BEFORE it counts.
+
+        Measured on the lab's VictoriaLogs v1.9.1 over 2026-09-01..09-13,
+        where `service` holds 22 values: at the panel's default size of 10
+        the endpoint answered with ten values in byte order and hits 0 for
+        every one — so the Top Services panel every new dashboard is born
+        with summed to zero and the client drew "No data in this window",
+        beside a volume panel counting 2,103 of the same records in the same
+        request. Asked for 50 the same endpoint answered auth-service 440,
+        checkout-api 409, payment-service 400. `stats by` counts first, so
+        the size is applied to a ranking instead of to a value list.
+        """
+        from wdash.hub import Scope
+        from wdash.hub.aggregation import Terms
+
+        result = self.source.aggregate(
+            self._query(), [Terms(name="t", field="service", size=2)],
+            Scope.unrestricted())
+
+        self.assertEqual(
+            [(bucket.key, bucket.count) for bucket in result.get("t")],
+            [("api-gateway", 4), ("auth-service", 3)],
+            "the top two of four services, with the counts the records hold")
+        self.assertEqual(
+            self._sent()["params"]["query"],
+            'service:in("api-gateway", "auth-service", "checkout-api", '
+            '"payment-service") | stats by (service) count() as hits')
+
+    def test_a_value_that_arrives_after_a_bigger_one_is_still_ranked(self):
+        """Truncation happens after the sort, not as the rows arrive.
+
+        `stats by` returns its groups in no particular order, so cutting the
+        list at `size` where it is read would answer with whichever two
+        VictoriaLogs happened to send first.
+        """
+        from wdash.hub import Scope
+        from wdash.hub.aggregation import Terms
+
+        original = self.harness.post
+
+        def reversed_rows(url, data=None, **kwargs):
+            response = original(url, data=data, **kwargs)
+            if "| stats by (" in ((data or {}).get("query") or ""):
+                rows = [json.loads(line) for line in response.text.splitlines()]
+                return FakeResponse(text="\n".join(
+                    json.dumps(row) for row in reversed(rows)))
+            return response
+
+        self.harness.post = reversed_rows
+        result = self.source.aggregate(
+            self._query(), [Terms(name="t", field="service", size=2)],
+            Scope.unrestricted())
+        self.assertEqual(
+            [(bucket.key, bucket.count) for bucket in result.get("t")],
+            [("api-gateway", 4), ("auth-service", 3)])
+
+    def test_records_carrying_no_value_are_labelled_when_the_panel_asks(self):
+        """`missing` is part of the neutral model and this dropped it.
+
+        Elasticsearch puts records without the field into a bucket named by
+        `missing`; `field_values` never mentions them, so the same panel over
+        the same records disagreed by however many rows never carried the
+        field. `stats by` returns them as a row with the field absent.
+        """
+        from wdash.hub import Scope
+        from wdash.hub.aggregation import Terms
+
+        original = self.harness.post
+
+        def with_a_nameless_row(url, data=None, **kwargs):
+            response = original(url, data=data, **kwargs)
+            if "| stats by (" in ((data or {}).get("query") or ""):
+                return FakeResponse(text=response.text + "\n"
+                                    + json.dumps({"hits": "5"}))
+            return response
+
+        self.harness.post = with_a_nameless_row
+        labelled = self.source.aggregate(
+            self._query(),
+            [Terms(name="t", field="service", size=10, missing="unknown")],
+            Scope.unrestricted())
+        self.assertIn(("unknown", 5),
+                      [(b.key, b.count) for b in labelled.get("t")])
+
+        plain = self.source.aggregate(
+            self._query(), [Terms(name="t", field="service", size=10)],
+            Scope.unrestricted())
+        self.assertNotIn("", [bucket.key for bucket in plain.get("t")],
+                         "a row with no value became a bucket with no name")
 
     # --- severity ---
 

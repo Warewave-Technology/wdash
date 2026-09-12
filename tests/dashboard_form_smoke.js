@@ -40,10 +40,21 @@ function script(template) {
     return found[1];
 }
 
-/** The form, with the search API answering `answer` (or failing). */
-function build(template, answer) {
+/**
+ * The form, with the search API answering `answer` (or failing).
+ *
+ * `sourceValue` is what the Log source select is left on — '' being the
+ * default, and `null` the deployment with one source configured, where the
+ * template renders no select at all.
+ */
+function build(template, answer, sourceValue = null) {
+    const select = sourceValue === null ? '' :
+        `<select id="source">
+           <option value="" ${sourceValue ? '' : 'selected'}>Default (es)</option>
+           <option value="lab-victorialogs" ${sourceValue ? 'selected' : ''}>vl</option>
+         </select>`;
     const dom = new JSDOM(`<!doctype html><body>
-      <input id="query" value="level:ERROR">
+      <input id="query" value="level:ERROR">${select}
       <div><select id="index_patterns" multiple>
         <option value="*" selected>*</option></select></div>
       <button id="testQuery"></button><div id="testResults"></div></body>`,
@@ -103,6 +114,58 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
         check('a failed request is text',
               !broken.w.document.getElementById('planted4'),
               broken.w.document.getElementById('testResults').innerHTML);
+
+        // The button sent q, size and the window and nothing else, so the
+        // test always ran against the DEFAULT source whatever the Source
+        // select said — /api/search takes `source` and would have honoured
+        // it. Measured on the demo over 2026-09-11..09-12: the default
+        // answered 30,647 where the selected VictoriaLogs holds 1,742.
+        const chosen = build(template, {
+            total: 1742, records: [],
+            sources: [{ name: 'lab-victorialogs', exact: true }] },
+            'lab-victorialogs');
+        chosen.w.document.getElementById('testQuery').click();
+        await settle();
+        const asked = new URL(chosen.asked[0], 'http://localhost').searchParams;
+        check('it tests the source the form has selected',
+              asked.get('source') === 'lab-victorialogs', chosen.asked[0]);
+        check('and says which store answered',
+              chosen.w.document.getElementById('testResults')
+                  .textContent.includes('lab-victorialogs'),
+              chosen.w.document.getElementById('testResults').textContent);
+
+        const byDefault = build(template, {
+            total: 30647, records: [],
+            sources: [{ name: 'elasticsearch-logs', exact: true }] }, '');
+        byDefault.w.document.getElementById('testQuery').click();
+        await settle();
+        check('the default is left unnamed rather than guessed at',
+              !new URL(byDefault.asked[0], 'http://localhost')
+                  .searchParams.has('source'), byDefault.asked[0]);
+
+        const alone = build(template, {
+            total: 7, records: [], sources: [{ name: 'es', exact: true }] });
+        alone.w.document.getElementById('testQuery').click();
+        await settle();
+        check('a deployment with one source has no select and still tests',
+              !new URL(alone.asked[0], 'http://localhost')
+                  .searchParams.has('source')
+              && alone.w.document.getElementById('testResults')
+                  .textContent.includes('7 matching'),
+              alone.w.document.getElementById('testResults').textContent);
+
+        // Loki cannot count: `total` is the page it returned, and `exact`
+        // says so. Presenting that as "5 matching records" is the same
+        // falsehood in a smaller place.
+        const uncounted = build(template, {
+            total: 5, records: [],
+            sources: [{ name: 'lab-loki', exact: false }] }, 'lab-victorialogs');
+        uncounted.w.document.getElementById('testQuery').click();
+        await settle();
+        check('a total that is only a floor says so',
+              uncounted.w.document.getElementById('testResults')
+                  .textContent.includes('at least 5 matching'),
+              uncounted.w.document.getElementById('testResults').textContent);
     }
 
     // The edit page's panel editor, its second script. A title went into a

@@ -537,10 +537,57 @@ async function main() {
         panels: [{ ...TRACE, rows: [{ name: 'api', span_count: 10,
                                       error_count: 0, error_rate: 0 }] }],
     });
-    check('a whole service list keeps its ordinary hint', () => {
+    // This check used to pin the defect: it asserted the service list wore
+    // 'Click a value to filter by it', which was the hint the client set for
+    // everything that is not a timeseries. Nothing filters — a click here
+    // opens the Traces page in a new tab.
+    check('a whole service list says what its click does', () => {
         const hint = whole.document
             .querySelector('[data-panel-id="t1"] .panel-hint').textContent;
-        assert(/Click a value/.test(hint), `the panel said "${hint}"`);
+        assert(/Traces page/.test(hint) && !/filter by it/.test(hint),
+               `the panel said "${hint}"`);
+    });
+
+    // The hint every panel type added after this one inherits. A terms
+    // panel's click calls openLogs, which opens the Logs page in a new tab:
+    // it does not narrow this board and never has.
+    const hinted = await loadWith({
+        total_hits: 12,
+        panels: [{ ...PANEL, field: 'service',
+                   buckets: [{ key: 'api', count: 12 }] }],
+    });
+    check('a top-values panel promises the Logs page, not a filter', () => {
+        const hint = hinted.document
+            .querySelector('[data-panel-id="p1"] .panel-hint').textContent;
+        assert(/Logs page/.test(hint) && !/filter by it/.test(hint),
+               `the panel said "${hint}"`);
+    });
+
+    // The half that decides what the next six panel types inherit: a type
+    // the table does not name makes no promise at all, rather than falling
+    // through to the promise this whole check exists to remove.
+    const novel = await loadWith({
+        total_hits: 3,
+        panels: [{ id: 'n1', title: 'Monitors', type: 'monitor_grid', width: 6,
+                   buckets: [{ key: 'checkout', count: 3 }] }],
+    });
+    check('a panel type with no described click says nothing', () => {
+        const hint = novel.document
+            .querySelector('[data-panel-id="n1"] .panel-hint').textContent;
+        assert(hint === '', `the panel said "${hint}"`);
+    });
+
+    // And the warning still outranks the hint, whatever the type.
+    const novelPartial = await loadWith({
+        total_hits: 3,
+        panels: [{ id: 'n1', title: 'Monitors', type: 'monitor_grid', width: 6,
+                   partial: true, warnings: ['one check did not answer'],
+                   buckets: [{ key: 'checkout', count: 3 }] }],
+    });
+    check('an incomplete panel of an unknown type still says so', () => {
+        const hint = novelPartial.document
+            .querySelector('[data-panel-id="n1"] .panel-hint').textContent;
+        assert(/one check did not answer/.test(hint), `the panel said "${hint}"`);
     });
 
     check('a severity takes its colour from the palette', () =>

@@ -461,15 +461,27 @@ class SinglePanelRequestTest(DashboardContractTest):
         from wdash.hub.query import TimeWindow
 
         class Aggregation:
-            def __init__(self, total, levels):
+            """Answers BY NAME, which is how D4 survived 123 green tests.
+
+            The fixture this replaces ignored the name it was handed and
+            returned its buckets whatever was asked for. `_compare` asks for
+            an aggregation the batch does not build, and against that fixture
+            it looked like it was reading the levels it wanted — while on the
+            page it read the empty list, and the previous period's error,
+            warning and info counts were zero for every dashboard.
+            """
+
+            def __init__(self, total, buckets):
                 self.total = total
-                self._levels = levels
+                self.buckets = buckets
+                self.asked = []
 
-            def get(self, _name):
-                return self._levels
+            def get(self, name):
+                self.asked.append(name)
+                return self.buckets.get(name, [])
 
-        now = Aggregation(100, [Bucket(key="ERROR", count=6)])
-        empty = Aggregation(0, [])
+        now = Aggregation(100, {"_levels": [Bucket(key="ERROR", count=6)]})
+        empty = Aggregation(0, {})
         moment = dt.datetime(2026, 8, 4, tzinfo=dt.timezone.utc)
         baseline = type("Q", (), {"window": TimeWindow.exact(moment, moment)})()
 
@@ -478,6 +490,9 @@ class SinglePanelRequestTest(DashboardContractTest):
         self.assertEqual(compared["error_rate"], 0.0, "0/0 must not raise")
         self.assertTrue(all(v is None for v in compared["change"].values()),
                         "no baseline means no percentage")
+        self.assertEqual(now.asked, ["_levels"],
+                         "the comparison read an aggregation by a name the "
+                         "batch does not build")
 
     def test_comparison_is_omitted_when_its_sub_query_fails(self):
         """A broken baseline must cost the comparison, not the dashboard.
@@ -517,6 +532,129 @@ class SinglePanelRequestTest(DashboardContractTest):
 
         self.assertIsNotNone(payload["previous_period"])
         self.assertEqual(payload["previous_period"]["total_hits"], 0)
+
+
+def _window_of(body):
+    """The range a search body is bounded by, as (gte, lte)."""
+    for clause in (body.get("query") or {}).get("bool", {}).get("must", ()):
+        if "range" in clause:
+            span = clause["range"]["@timestamp"]
+            return span["gte"], span["lte"]
+    raise AssertionError(f"no time range in {body}")
+
+
+class WindowedES(FakeES):
+    """Two windows with different levels in them.
+
+    The shared fake answers every window identically, so a comparison
+    reading the aggregation the batch builds and a comparison reading a name
+    nothing builds would print the same numbers for the current window and
+    the same zeroes were impossible to tell from a real drop. Which body is
+    the baseline is decided by the WINDOW it carries, not by its place in the
+    batch.
+
+    Earlier: INFO 40, WARN 8, ERROR 3, FATAL 1 over 60 records. Current, from
+    FakeES: INFO 80, WARN 12, ERROR 6, FATAL 2 over 100.
+    """
+
+    EARLIER = [{"key": "INFO", "doc_count": 40}, {"key": "WARN", "doc_count": 8},
+               {"key": "ERROR", "doc_count": 3}, {"key": "FATAL", "doc_count": 1}]
+    EARLIER_TOTAL = 60
+
+    def msearch(self, searches=None, **kw):
+        payload = list(searches or [])
+        answer = super().msearch(searches=searches, **kw)
+        bodies = [payload[i + 1] for i in range(0, len(payload), 2)]
+        starts = [_window_of(body)[0] for body in bodies]
+        if len(starts) < 2:
+            return answer
+        for index, start in enumerate(starts):
+            if start != min(starts):
+                continue
+            response = answer["responses"][index]
+            response["hits"]["total"]["value"] = self.EARLIER_TOTAL
+            response["aggregations"] = {
+                name: {"buckets": list(self.EARLIER)}
+                for name in response["aggregations"]}
+        return answer
+
+
+class PreviousPeriodTest(DashboardContractTest):
+    """What the three comparison cards say the window before this one held.
+
+    `_compare` asked for an aggregation called `log_levels` while the batch
+    built `_levels`, so `before.get(...)` returned the empty list and
+    error_count, warn_count and info_count were 0 for every dashboard ever
+    opened — printed by the page as the literal words "none in previous
+    period" under Errors, Warnings and Info. Measured on the demo at 24h,
+    where the baseline window really held 19,732 records: ERROR 1,750 +
+    FATAL 220, WARN 2,372, INFO 13,737, all three reported as none.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.es = WindowedES()
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource, ElasticsearchTraceSource
+        hub = Hub()
+        hub.add_logs(ElasticsearchLogSource(self.es))
+        hub.add_traces(ElasticsearchTraceSource(self.es))
+        self.app.hub = hub
+
+    def test_the_previous_period_counts_the_levels_the_baseline_held(self):
+        previous = self.get("data", time_range="24h").get_json()["previous_period"]
+        self.assertEqual(previous["total_hits"], 60)
+        self.assertEqual(previous["error_count"], 4, "ERROR 3 + FATAL 1")
+        self.assertEqual(previous["warn_count"], 8)
+        self.assertEqual(previous["info_count"], 40)
+        self.assertAlmostEqual(previous["error_rate"], 4 / 60)
+
+    def test_the_change_is_measured_against_this_window_not_against_zero(self):
+        """The other half of the same defect, and the more alarming one.
+
+        `_compare` read the same wrong name for the CURRENT window too, so a
+        baseline repaired on its own would have divided a current count of
+        zero by a real one and printed "-100%" — every card claiming traffic
+        had stopped — under the three numbers people read first.
+        """
+        payload = self.get("data", time_range="24h").get_json()
+        change = payload["previous_period"]["change"]
+        self.assertAlmostEqual(change["error_count"], (8 - 4) / 4)
+        self.assertAlmostEqual(change["warn_count"], (12 - 8) / 8)
+        self.assertAlmostEqual(change["info_count"], (80 - 40) / 40)
+        self.assertAlmostEqual(change["total_hits"], (100 - 60) / 60)
+        self.assertEqual(payload["error_count"], 8,
+                         "the card and the comparison count the same records")
+
+    def test_no_number_is_read_from_an_aggregation_nobody_asked_for(self):
+        """The shape of the defect, rather than one instance of it.
+
+        An aggregation result answers an unknown name with the empty list,
+        and every number derived from one reads as zero — which is the
+        project's forbidden failure, emptiness standing in for an answer.
+        Any name this route reads must be a name it asked the backend for.
+        """
+        from wdash.hub.aggregation import AggregationResult
+
+        asked = []
+        original = AggregationResult.get
+
+        def recording(result, name):
+            asked.append(name)
+            return original(result, name)
+
+        AggregationResult.get = recording
+        try:
+            self.get("data", time_range="24h")
+        finally:
+            AggregationResult.get = original
+
+        built = {name for search in self.es.searches
+                 for name in (search["body"].get("aggs") or {})}
+        self.assertTrue(asked, "the route read no aggregation at all")
+        self.assertEqual(set(asked) - built, set(),
+                         f"read {sorted(set(asked) - built)}, asked for "
+                         f"{sorted(built)}")
 
 
 class SharedViewTest(DashboardContractTest):

@@ -150,6 +150,14 @@ document.getElementById('testQuery').addEventListener('click', function() {
         q: query, size: 5,
         start_time: start.toISOString(), end_time: end.toISOString()
     });
+    // The source this form has selected, which /api/search honours and this
+    // never sent: the test always ran against the DEFAULT source, so an
+    // author building a VictoriaLogs dashboard was told their query matched
+    // 30,647 records — from Elasticsearch, where VictoriaLogs holds 1,742.
+    // The select is absent when only one source is configured, and then the
+    // default is the only answer there is.
+    const source = document.getElementById('source');
+    if (source && source.value) params.set('source', source.value);
 
     fetch('/api/search?' + params.toString())
         .then(response => response.json())
@@ -164,11 +172,17 @@ document.getElementById('testQuery').addEventListener('click', function() {
             }
             const records = data.records || [];
             const total = Number(data.total);
+            // Which store answered, and whether its number is a count. Loki
+            // cannot count: it reports the page it returned, so "5 matching
+            // records" would be a floor presented as a total.
+            const answered = (data.sources || [])[0] || {};
+            const counted = answered.exact !== false;
             testResults.innerHTML = `
                 <div class="alert alert-success">
                     <strong>Query test successful!</strong><br>
-                    ${Number.isFinite(total) ? total.toLocaleString() : 0} matching
-                    records in the last 24 hours, across the indices your role
+                    ${counted ? '' : 'at least '}${Number.isFinite(total) ? total.toLocaleString() : 0} matching
+                    records in the last 24 hours${answered.name ? ', from ' + escapeHtml(answered.name) : ''},
+                    across the indices your role
                     can read. The dashboard's index patterns narrow this further.
                 </div>
                 <div class="mt-2">

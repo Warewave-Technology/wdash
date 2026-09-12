@@ -331,6 +331,40 @@ class LogSourceConformance(_SourceConformanceBase):
         self.assertTrue(result.failed or result.warnings,
                         "a failed aggregation is indistinguishable from zero")
 
+    def test_a_terms_result_never_reports_every_value_as_zero(self):
+        """A list of values with a zero beside each is not a ranking.
+
+        The same distinction one level down. This suite checked that a
+        declared capability is CALLABLE and that a failure is MARKED, never
+        that a count is right — so VictoriaLogs answering the Top Services
+        panel with ten values all at zero passed every check there was, and
+        the panel rendered as "No data in this window" beside a volume panel
+        counting 2,103 of the same records.
+
+        `size` is deliberately smaller than the number of values the harness
+        holds: that is the shape a backend gets wrong, because truncating
+        before counting is cheaper than counting and is what an endpoint
+        built for listing values does.
+
+        No buckets at all is a different answer and a legitimate one — a
+        field this backend cannot group by — as long as it is said out loud
+        rather than returned as an empty ranking.
+        """
+        self.skip_unless(Capability.AGGREGATION)
+        result = self.source.aggregate(
+            self._query(), [Terms(name="x", field="service", size=2)],
+            Scope.unrestricted())
+
+        buckets = result.get("x")
+        if not buckets:
+            self.assertTrue(result.failed or result.warnings,
+                            "no buckets and no reason: emptiness standing in "
+                            "for an answer the backend could not give")
+            return
+        self.assertTrue(
+            any(bucket.count for bucket in buckets),
+            f"every count is zero: {[(b.key, b.count) for b in buckets]}")
+
     # ---------- batching ----------
 
     def test_multi_aggregate_answers_one_result_per_request(self):
