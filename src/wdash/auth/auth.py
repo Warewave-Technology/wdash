@@ -11,7 +11,7 @@ from ..models import User
 from ..store.signin import (
     FAILURE, LOCKED, REFUSED, SUCCESS, UNAVAILABLE, client_address)
 from .ldap_auth import DirectoryUnavailable
-from .providers import ldap_settings, oidc_settings
+from .providers import ldap_settings, oidc_settings, shadow_notice
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/auth')
 
@@ -57,11 +57,19 @@ def _resolver():
     return store.rbac if store else None
 
 
-def _start_session(user, local_role=None):
+def _start_session(user, local_role=None, provider=None):
     """Store IDENTITY in the session and sign the user in.
 
-    Only identity: who this is and which groups the provider asserted. What
-    they may do is resolved from the store on every request instead.
+    Only identity: who this is, which groups the provider asserted, and which
+    door they came through. What they may do is resolved from the store on
+    every request instead.
+
+    `provider` is identity too, and it is what stops the one-directory rule
+    telling somebody something untrue: a session survives a change of
+    directory, so "you are not local, therefore you arrived through the
+    directory you are turning off" is a guess. An administrator who arrived
+    through the OTHER directory is the person who should be allowed to turn
+    this one off, and she is exactly who that guess blocks.
 
     Permissions used to be written here. That froze them for the lifetime of
     the cookie, so revoking access in the config page would save successfully
@@ -82,6 +90,10 @@ def _start_session(user, local_role=None):
         # Set for local accounts, whose role is stored with the account rather
         # than derived from provider groups.
         'local_role': local_role,
+        # 'local account', 'directory', 'oidc' — the same words the audit
+        # trail records. Absent in a session written before this existed,
+        # which reads as "unknown" and is never claimed to be either door.
+        'provider': provider,
     }
     login_user(user)
 
@@ -104,15 +116,22 @@ def login():
     is the one that gets left open.
     """
     store = _store()
+    # At most one of these is ever a directory: both read the same resolution
+    # in providers.py, so the page cannot offer two doors even if two are
+    # configured. The third is the sentence for whoever used the other one —
+    # without it their sign-in fails as "Invalid username or password", which
+    # is a failure that looks like their own mistake.
     oidc_available = oidc_settings(current_app) is not None
     directory = ldap_settings(current_app)
+    notice = shadow_notice(current_app)
 
     if request.method == 'GET':
         if store is not None and store.needs_setup:
             return redirect(url_for('setup.first_run'))
         return render_template('login.html', oidc_available=oidc_available,
                                ldap_available=directory is not None,
-                               local_available=store is not None)
+                               local_available=store is not None,
+                               directory_notice=notice)
 
     if store is None:
         flash('Local sign-in is unavailable: no metadata store is configured.',
@@ -141,6 +160,7 @@ def login():
         return render_template('login.html', oidc_available=oidc_available,
                                ldap_available=directory is not None,
                                local_available=True,
+                               directory_notice=notice,
                                username=username), 429
 
     # Local accounts first. The break-glass administrator has to work when the
@@ -172,6 +192,7 @@ def login():
                   'account.', 'error')
             return render_template('login.html', oidc_available=oidc_available,
                                    ldap_available=True, local_available=True,
+                                   directory_notice=notice,
                                    username=username), 503
 
     if not account:
@@ -184,6 +205,7 @@ def login():
         return render_template('login.html', oidc_available=oidc_available,
                                ldap_available=directory is not None,
                                local_available=True,
+                               directory_notice=notice,
                                username=username), 401
 
     # Recorded, not cleared. The success itself is what resets this pair's
@@ -196,9 +218,9 @@ def login():
                 username=account['username'], groups=account.get('groups') or [])
     # A directory account has no stored role: its role is resolved from the
     # groups the directory asserted, exactly like an OIDC principal.
-    _start_session(user, local_role=account.get('role') if account.get('local')
-                   else None)
     method = 'local account' if account.get('local') else 'directory'
+    _start_session(user, local_role=account.get('role') if account.get('local')
+                   else None, provider=method)
     store.audit.record(account['username'], "sign-in",
                        subject=f"user:{account['username']}", address=address,
                        state={"method": method})
@@ -265,12 +287,23 @@ def _authenticate_directory(settings, username, password):
             "local": False}
 
 
+def _no_provider():
+    """Refuse a single sign-on route, saying which of the two things is true.
+
+    "No identity provider is configured" is not true on an installation where
+    one IS configured and is not the directory in force, and a person sent
+    away with an untrue sentence goes looking for the wrong thing.
+    """
+    flash(shadow_notice(current_app) or 'No identity provider is configured.',
+          'error')
+    return redirect(url_for('auth.login'))
+
+
 @auth_bp.route('/oidc')
 def oidc_login():
     settings = oidc_settings(current_app)
     if settings is None:
-        flash('No identity provider is configured.', 'error')
-        return redirect(url_for('auth.login'))
+        return _no_provider()
 
     oauth, oidc = init_oauth(current_app, settings)
 
@@ -288,8 +321,7 @@ def oidc_login():
 def callback():
     settings = oidc_settings(current_app)
     if settings is None:
-        flash('No identity provider is configured.', 'error')
-        return redirect(url_for('auth.login'))
+        return _no_provider()
 
     oauth, oidc = init_oauth(current_app, settings)
 
@@ -341,7 +373,7 @@ def callback():
         
         # Role and boundaries come from the store, resolved on every request
         # from here on; nothing is frozen into the session.
-        _start_session(user)
+        _start_session(user, provider='oidc')
         if store is not None:
             # What the provider said, not whether an address was used: with
             # unverified addresses trusted, `bool(email)` recorded one the

@@ -150,13 +150,20 @@ class LocalSignInTest(IdentityTestCase):
         self.assertEqual(self.client.get("/auth/dev-login").status_code, 404)
 
     def test_the_session_carries_identity_only(self):
-        """Anything else in there is authorization frozen at sign-in."""
+        """Anything else in there is authorization frozen at sign-in.
+
+        `provider` is identity — which door this person came through — and it
+        is read by the rule about turning a directory off, which otherwise
+        has to guess and tells an administrator something untrue.
+        """
         self.client.post("/auth/login", data={
             "username": "owner", "password": PASSWORD})
         with self.client.session_transaction() as session:
             stored = session["user_data"]
         self.assertEqual(sorted(stored),
-                         ["email", "groups", "id", "local_role", "username"])
+                         ["email", "groups", "id", "local_role", "provider",
+                          "username"])
+        self.assertEqual(stored["provider"], "local account")
         for leaked in ("permissions", "allowed_indices", "role"):
             self.assertNotIn(leaked, stored, f"'{leaked}' is frozen in the cookie")
 

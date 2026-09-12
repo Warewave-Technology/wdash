@@ -19,6 +19,37 @@ Read on the request that needs them rather than cached at startup: sign-in is
 rare, a database round trip is nothing next to an OIDC redirect, and it means
 an administrator can fix a broken provider without a restart — which is exactly
 the situation in which nobody wants to be told to restart.
+
+And at most ONE DIRECTORY signs people in: either LDAP or OIDC, never both.
+Local accounts are not a directory and none of this touches them.
+
+The reason is ownership. A dashboard belongs to `created_by == username` and a
+role mapping is written against a name, so the username is one namespace with
+no provider attached to it. With two directories open, a principal at one of
+them who can choose `preferred_username` takes a name that belongs to somebody
+at the other, with their dashboards and their role — measured end to end
+(C147): an OIDC principal signed in as the directory user `alice`, got her
+admin mapping and opened her private dashboard, and the audit trail showed two
+ordinary sign-in rows.
+
+Which one is in force is decided here, once, from CONFIGURATION — a settings
+row that exists and is enabled, or, for OIDC only, the environment pair when
+no row exists at all. Deliberately not from usability: deciding it from
+"usable" while refusing the second one from "configured" means an LDAP whose
+bind password can no longer be decrypted stops shadowing an environment OIDC,
+and the installation silently changes directory with no banner and no audit
+row. Usability is reported separately, and a directory in force that cannot be
+used takes the sign-in door with it rather than handing it to the other one.
+
+    1. Configured in the store beats configured only in the environment.
+    2. Both stored and enabled: the row saved most recently is in force, ties
+       broken in favour of LDAP, so the answer never depends on row order.
+    3. Neither: no directory. Local accounts are unaffected.
+
+`directory(app)` answers in NAMES and a sentence and never returns the
+settings themselves, because that answer goes to templates, to the log and to
+audit rows, while the settings dicts hold a decrypted client secret and bind
+password.
 """
 
 import logging
@@ -28,9 +59,189 @@ logger = logging.getLogger(__name__)
 OIDC_KEY = "auth.oidc"
 LDAP_KEY = "auth.ldap"
 
+#: How each directory is named in a sentence somebody reads.
+LABELS = {"ldap": "LDAP", "oidc": "OpenID Connect"}
+
+#: The other one.
+OTHER = {"ldap": "oidc", "oidc": "ldap"}
+
+#: How to choose a directory without the configuration page. Named in the
+#: refusals, the banner and the startup warning, because a rule whose recovery
+#: is "write SQL" is a lockout with better wording.
+RECOVERY = "python -m wdash.store.recover --use-directory <ldap|oidc|none>"
+
 
 def _store(app):
     return getattr(app, "store", None)
+
+
+def _later(one, other):
+    """True when `one` was saved strictly after `other`."""
+    if one is None:
+        return False
+    if other is None:
+        return True
+    try:
+        return one > other
+    except TypeError:
+        # One dialect hands back naive datetimes and another aware ones. Never
+        # within one store, but a comparison that raises here would take the
+        # sign-in page down, and the tie-break has a defined answer.
+        return False
+
+
+def resolve(rows, environment_oidc=False):
+    """Which directory is in force, from configuration alone.
+
+    `rows` is `store.settings.all(prefix="auth.")`, `environment_oidc` says
+    whether OIDC_CLIENT_ID and OIDC_DISCOVERY_URL are both set. Pure, so the
+    page, the sign-in form, the startup check and the recovery tool all get
+    the same answer from the same rule.
+
+    Returns {"in_force", "shadowed", "sources"}, where `sources` is
+    {"ldap": "configuration"|None, "oidc": "configuration"|"environment"|None}.
+    """
+    def stored(key):
+        row = rows.get(key) or {}
+        return row.get("value"), row.get("updated_at")
+
+    ldap_value, ldap_at = stored(LDAP_KEY)
+    oidc_value, oidc_at = stored(OIDC_KEY)
+
+    sources = {"ldap": None, "oidc": None}
+    if ldap_value and ldap_value.get("enabled"):
+        sources["ldap"] = "configuration"
+    if oidc_value is not None:
+        # A stored row answers for OIDC whether it is on or off. That is what
+        # makes "save the card with Enabled unchecked" turn an environment
+        # provider off, which is the only in-page way to do it.
+        if oidc_value and oidc_value.get("enabled"):
+            sources["oidc"] = "configuration"
+    elif environment_oidc:
+        sources["oidc"] = "environment"
+
+    both = bool(sources["ldap"] and sources["oidc"])
+    if both:
+        in_force = ("ldap" if sources["oidc"] == "environment"
+                    else ("oidc" if _later(oidc_at, ldap_at) else "ldap"))
+    elif sources["ldap"]:
+        in_force = "ldap"
+    elif sources["oidc"]:
+        in_force = "oidc"
+    else:
+        in_force = None
+
+    return {"in_force": in_force,
+            "shadowed": OTHER[in_force] if both else None,
+            "sources": sources}
+
+
+def _state(app):
+    store = _store(app)
+    rows = store.settings.all(prefix="auth.") if store is not None else {}
+    return resolve(rows, bool(app.config.get("OIDC_CLIENT_ID")
+                              and app.config.get("OIDC_DISCOVERY_URL")))
+
+
+def _where(source):
+    return ("on this page" if source == "configuration"
+            else "in the environment")
+
+
+def _reason(state, unusable):
+    """The whole sentence for an administrator: log, banner, audit row.
+
+    Names and instructions only — never a setting, never a secret.
+    """
+    in_force, shadowed = state["in_force"], state["shadowed"]
+    said = []
+    if shadowed:
+        how = (f"turn {LABELS[in_force]} off on this page and save, then "
+               f"enable {LABELS[shadowed]}"
+               if state["sources"][shadowed] == "configuration"
+               else f"turn {LABELS[in_force]} off on this page and save")
+        said.append(
+            f"Two directories are configured here and WDash signs people in "
+            f"through one at a time. {LABELS[in_force]} is in force "
+            f"(configured {_where(state['sources'][in_force])}); "
+            f"{LABELS[shadowed]} is configured "
+            f"{_where(state['sources'][shadowed])} and is not in use. To use "
+            f"{LABELS[shadowed]} instead, {how}. From the command line: "
+            f"{RECOVERY}.")
+    if in_force is not None and unusable:
+        said.append(
+            f"{LABELS[in_force]} is the directory in force here and its saved "
+            f"settings cannot be used: {unusable}. No directory sign-in is "
+            f"offered until that is fixed — local accounts are unaffected. To "
+            f"hand the installation to the other directory instead: "
+            f"{RECOVERY}.")
+    return " ".join(said) or None
+
+
+def directory(app):
+    """Which directory signs people in here, in names and a sentence.
+
+    {"in_force", "shadowed", "sources", "unusable", "reason"} — never the
+    settings, so a template or an audit row physically cannot receive a
+    decrypted secret through this path.
+    """
+    state = _state(app)
+    unusable = None
+    if state["in_force"] is not None:
+        _, unusable = (_ldap_effective(app) if state["in_force"] == "ldap"
+                       else _oidc_effective(app))
+    return {**state, "unusable": unusable, "reason": _reason(state, unusable)}
+
+
+def shadow_notice(app):
+    """One neutral sentence for the sign-in page, or None.
+
+    It names nothing and offers nothing, but it exists: without it a directory
+    user whose directory has just been shadowed — or whose directory cannot be
+    read — is told "Invalid username or password", which is a failure that
+    looks like their own mistake.
+    """
+    state = directory(app)
+    said = []
+    if state["unusable"]:
+        # First: this is the one that explains why the person's own sign-in
+        # has just failed.
+        said.append("Directory sign-in is unavailable here: the directory's "
+                    "saved settings cannot be used. Local accounts still "
+                    "work — ask an administrator.")
+    if state["shadowed"]:
+        said.append("Another sign-in method is configured here but is not in "
+                    "use. If that is the one you normally use, ask an "
+                    "administrator.")
+    return " ".join(said) or None
+
+
+def refuses_second_directory(app, which, enabling):
+    """Why enabling this directory must be refused, or None.
+
+    Decided from `directory()`, so the rule that refuses and the rule that
+    resolves cannot drift apart. A save of the directory ALREADY in force is
+    never "the second directory": that is how an administrator edits the one
+    they are using, and re-saving it cannot change which is in force.
+    """
+    if not enabling:
+        return None
+    in_force = _state(app)["in_force"]
+    if in_force is None or in_force == which:
+        return None
+
+    source = _state(app)["sources"][in_force]
+    how = ("turn it off on this page and save"
+           if source == "configuration" else
+           "save the OpenID Connect card with Enabled unchecked, which stores "
+           "a disabled row and turns the environment's provider off")
+    return (f"{LABELS[in_force]} is the directory in use here"
+            f"{'' if source == 'configuration' else ' (configured in the environment)'}"
+            f", and WDash signs people in through one directory at a time — "
+            f"otherwise a name at one directory belongs to somebody at the "
+            f"other. {LABELS[which]} was not enabled and nothing was saved. To "
+            f"switch: {how}, then enable {LABELS[which]}. From the command "
+            f"line: {RECOVERY}.")
 
 
 #: Which claims name a person, unless something more specific says otherwise.
@@ -60,12 +271,12 @@ def _claims(app, configured):
     return claims
 
 
-def oidc_settings(app):
-    """Effective OIDC settings, or None when no provider is usable.
+def _oidc_effective(app):
+    """(settings, why they cannot be used) for OIDC as configured here.
 
-    Returns a dict with client_id / client_secret / discovery_url /
-    redirect_uri. The secret is decrypted here and must not be logged or put
-    into a template.
+    The settings dict holds the decrypted client secret and must not be
+    logged or put into a template. The second half is a clause for a person,
+    and holds no setting at all.
     """
     store = _store(app)
     if store is not None:
@@ -79,7 +290,7 @@ def oidc_settings(app):
                 # against a provider the administrator thought they had
                 # replaced.
                 logger.error(f"OIDC client secret could not be read: {exc}")
-                return None
+                return None, "the client secret could not be decrypted"
             if stored.get("client_id") and stored.get("discovery_url"):
                 return {
                     "client_id": stored["client_id"],
@@ -89,16 +300,17 @@ def oidc_settings(app):
                     or app.config.get("OIDC_REDIRECT_URI"),
                     "source": "configuration",
                     **_claims(app, stored),
-                }
+                }, None
             logger.warning(
                 "OIDC is enabled but incomplete (client id and discovery URL "
                 "are both required); it will not be offered")
-            return None
+            return None, ("a client id and a discovery URL are both required "
+                          "and one of them is blank")
         if stored is not None and not stored.get("enabled"):
             # Explicitly turned off. Do NOT fall back to the environment —
             # that would make the switch do nothing on a deployment that has
             # both, which is every deployment that has just migrated.
-            return None
+            return None, None
 
     if app.config.get("OIDC_CLIENT_ID") and app.config.get("OIDC_DISCOVERY_URL"):
         return {
@@ -114,30 +326,56 @@ def oidc_settings(app):
                 "trust_unverified_email":
                     app.config.get("OIDC_TRUST_UNVERIFIED_EMAIL"),
             }),
-        }
-    return None
+        }, None
+    return None, None
+
+
+def oidc_settings(app):
+    """Effective OIDC settings, or None when OIDC is not the directory in
+    force here, or is and cannot be used.
+
+    Returns a dict with client_id / client_secret / discovery_url /
+    redirect_uri. The secret is decrypted here and must not be logged or put
+    into a template.
+
+    Every caller obeys the one-directory rule by calling this: the sign-in
+    page, /auth/oidc and /auth/callback each ask the same question and cannot
+    answer it differently.
+    """
+    if _state(app)["in_force"] != "oidc":
+        return None
+    return _oidc_effective(app)[0]
 
 
 def ldap_settings(app):
-    """Effective LDAP settings, or None when no directory is usable."""
+    """Effective LDAP settings, or None when LDAP is not the directory in
+    force here, or is and cannot be used."""
+    if _state(app)["in_force"] != "ldap":
+        return None
+    return _ldap_effective(app)[0]
+
+
+def _ldap_effective(app):
+    """(settings, why they cannot be used) for LDAP as configured here."""
     store = _store(app)
     if store is None:
-        return None
+        return None, None
 
     stored = store.settings.get(LDAP_KEY)
     if not stored or not stored.get("enabled"):
-        return None
+        return None, None
     if not stored.get("server") or not stored.get("base_dn"):
         logger.warning(
             "LDAP is enabled but incomplete (server and base DN are both "
             "required); it will not be offered")
-        return None
+        return None, ("a server and a base DN are both required and one of "
+                      "them is blank")
 
     try:
         password = store.settings.secret(LDAP_KEY)
     except Exception as exc:
         logger.error(f"LDAP bind password could not be read: {exc}")
-        return None
+        return None, "the bind password could not be decrypted"
 
     return {
         "server": stored["server"],
@@ -150,4 +388,4 @@ def ldap_settings(app):
         # existed have no key, and they get the check.
         "verify_certs": stored.get("verify_certs", True) is not False,
         "ca_certs": stored.get("ca_certs") or None,
-    }
+    }, None

@@ -233,6 +233,20 @@ identity truth and two paths to it: alice through LDAP and alice through OIDC
 should reach the same role, and if they do not, one of the two paths is
 wrong.
 
+**WDash itself uses one of those paths at a time.** Both can be configured
+here — that is what makes the lab useful for testing the rule — but only one
+signs people in: with LDAP stored on the configuration page and OIDC in the
+environment above, the stored LDAP is in force and the environment provider is
+shadowed, reported in the log, in an audit row and on `/admin/config`. To try
+the other path instead, turn LDAP off on the page and save, or run
+`python -m wdash.store.recover --use-directory oidc`.
+
+And measured here: this Dex sends no `preferred_username`, so alice arrives as
+`alice` through LDAP and as `alice@lab.local` through Dex — two different
+names in one namespace. Switching the lab's directory therefore does NOT carry
+her dashboards, which makes it a good place to see the inheritance sentence
+tell the truth about a site where the names do not line up.
+
 ### Three things this lab found
 
 Worth reading before adding to it, because each cost an hour:

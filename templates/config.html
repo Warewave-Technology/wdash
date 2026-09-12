@@ -18,6 +18,18 @@
 </div>
 {% endfor %}
 
+{% if directory_conflict %}
+{# One directory at a time. Shown here because the people it affects cannot
+   see the sign-in page's notice from inside an authenticated session, and
+   because the sentence has to reach whoever can act on it. The same function
+   answers the startup log, the audit row and the sign-in notice, so they
+   cannot disagree. #}
+<div class="alert alert-warning py-2" style="font-size:.85rem">
+  <i class="fas fa-triangle-exclamation"></i>
+  <strong>One directory at a time.</strong> {{ directory_conflict }}
+</div>
+{% endif %}
+
 {% if not secrets_available %}
 <div class="alert alert-warning">
   <i class="fas fa-triangle-exclamation"></i>
@@ -315,7 +327,19 @@
     <br>
     A provider switched off is off, even with its settings still filled in.
     WDash does not fall back to the environment in that case &mdash; otherwise
-    the switch would do nothing on a deployment that has both.
+    the switch would do nothing on a deployment that has both. That is also
+    how an OIDC provider configured in the environment is turned off from
+    here: save the card with <strong>Enabled</strong> unchecked.
+    <br>
+    <strong>At most one directory signs people in.</strong> Either LDAP or
+    OpenID Connect, never both: a dashboard belongs to a username and a role
+    mapping is written against one, so with two directories open a name at one
+    of them belongs to somebody at the other. Enabling the second is refused
+    here; to switch, turn the first one off and save, then enable the other
+    &mdash; the second save says what those names already own.
+    <code>python -m wdash.store.recover --use-directory &lt;ldap|oidc|none&gt;</code>
+    does the same from the command line. Local accounts are not a directory
+    and none of this touches them.
   </div>
 </div>
 

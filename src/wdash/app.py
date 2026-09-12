@@ -349,6 +349,28 @@ def create_app(config_class=Config):
     for warning in app.duplicate_sources():
         app.logger.warning(warning)
 
+    # Which directory signs people in, and what is being shadowed to make that
+    # true. An installation that has had both live loses one door the moment
+    # it upgrades — nobody presses anything — so it is made loud rather than
+    # quiet: here, on the configuration page, in the audit trail, and in one
+    # neutral line on the sign-in page for the people whose usual door has
+    # gone. Recomputed on demand for the same reason the duplicate warning is.
+    from .auth.providers import directory as _directory
+    app.directory_conflict = lambda: _directory(app)["reason"]
+    _resolution = _directory(app)
+    if _resolution["reason"]:
+        app.logger.warning(_resolution["reason"])
+    if store is not None and _resolution["shadowed"]:
+        try:
+            store.audit.record(
+                "system", "two directories configured", subject="auth",
+                state={"in_force": _resolution["in_force"],
+                       "shadowed": _resolution["shadowed"],
+                       "sources": _resolution["sources"],
+                       "reason": _resolution["reason"]})
+        except Exception as exc:
+            app.logger.error(f"Directory conflict could not be audited: {exc}")
+
     app.hub = hub
 
 

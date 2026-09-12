@@ -15,6 +15,16 @@ writing SQL under pressure.
     PYTHONPATH=src python -m wdash.store.recover --grant-admin alice
     PYTHONPATH=src python -m wdash.store.recover --set-role alice admin
     PYTHONPATH=src python -m wdash.store.recover --reset-password alice
+    PYTHONPATH=src python -m wdash.store.recover --enable alice
+    PYTHONPATH=src python -m wdash.store.recover --use-directory ldap
+
+The last two exist because the one-directory rule can be lost from the other
+side. WDash signs people in through at most one directory; on an installation
+that had both enabled, the one saved most recently wins, and every
+administrator at the other one is out. The configuration page cannot help —
+nobody can reach it — and a rule whose only way back is SQL is a lockout with
+better wording. `--use-directory` writes the enabled flags from here, and
+`--enable` undoes a disabled local account, which `--grant-admin` never did.
 """
 
 import argparse
@@ -28,6 +38,111 @@ from ..dashboard.invariants import ADMIN_PERMISSION
 RECOVERY_ROLE = "recovery-admin"
 
 
+def _rule():
+    """The one-directory rule, imported where it is used.
+
+    Not at module scope: the recovery tool has to run when the application
+    does not, and `wdash.auth` pulls in Flask and authlib on the way past.
+    """
+    from ..auth.providers import LABELS, LDAP_KEY, OIDC_KEY, resolve
+    return LABELS, LDAP_KEY, OIDC_KEY, resolve
+
+
+def _directory_line(store):
+    """Which directory would sign people in, as one line for --status."""
+    labels, ldap_key, oidc_key, resolve = _rule()
+    environment = bool(os.environ.get("OIDC_CLIENT_ID")
+                       and os.environ.get("OIDC_DISCOVERY_URL"))
+    state = resolve(store.settings.all(prefix="auth."), environment)
+    if state["in_force"] is None:
+        return "Directory: (none — local accounts only)"
+    where = ("on the page"
+             if state["sources"][state["in_force"]] == "configuration"
+             else "in the environment")
+    line = f"Directory: {labels[state['in_force']]} (configured {where})"
+    if state["shadowed"]:
+        line += f"; {labels[state['shadowed']]} is configured and NOT in use"
+    return line
+
+
+def use_directory(store, which):
+    """Make one directory — or neither — the one in force.
+
+    Writes only the `enabled` flags, so nothing an administrator typed is
+    lost. Turning OIDC off means STORING a row that says so: an absent row
+    lets the environment configure it, which is the whole reason an
+    installation can end up with two directories without anybody enabling a
+    second one.
+    """
+    labels, ldap_key, oidc_key, resolve = _rule()
+    if which not in ("ldap", "oidc", "none"):
+        print(f"--use-directory takes ldap, oidc or none, not '{which}'.",
+              file=sys.stderr)
+        return 1
+
+    environment = bool(os.environ.get("OIDC_CLIENT_ID")
+                       and os.environ.get("OIDC_DISCOVERY_URL"))
+    stored = {key: store.settings.get(key) for key in (ldap_key, oidc_key)}
+
+    if which == "ldap" and not stored[ldap_key]:
+        print("No LDAP settings are stored, so LDAP cannot be put in force. "
+              "Configure it on the page first.", file=sys.stderr)
+        return 1
+    if which == "oidc" and not stored[oidc_key] and not environment:
+        print("No OIDC settings are stored and the environment does not "
+              "configure one, so OIDC cannot be put in force.", file=sys.stderr)
+        return 1
+
+    for key, name in ((ldap_key, "ldap"), (oidc_key, "oidc")):
+        value = dict(stored[key] or {})
+        if name == which and not value and name == "oidc":
+            # In force through the environment: a stored row would suppress
+            # it, and an empty one would suppress it AND be incomplete.
+            store.settings.delete(key)
+            continue
+        value["enabled"] = (name == which)
+        store.settings.set(key, value, updated_by="recover")
+
+    state = resolve(store.settings.all(prefix="auth."), environment)
+    if state["in_force"] is None:
+        print("No directory is in force. Local accounts still sign in.")
+    else:
+        print(f"{labels[state['in_force']]} is now the directory in force.")
+    if state["shadowed"]:
+        print(f"WARNING: {labels[state['shadowed']]} is still configured and "
+              f"not in use.")
+    print("Ownership here is the username: whoever signs in as a name that "
+          "already owns dashboards or holds a role mapping gets them.")
+    return 0
+
+
+def enable(store, username, disabled=False):
+    """Re-enable (or disable) a local account.
+
+    `--grant-admin` moves an account to an administering role and stops there,
+    so a disabled account with the recovery role still cannot sign in —
+    `verify()` refuses it before the password is checked. A refusal whose way
+    out cannot be taken is a lockout with better wording.
+    """
+    account = store.users.by_username(username)
+    if account is None:
+        print(f"No local account called '{username}'.", file=sys.stderr)
+        print("Existing accounts: "
+              + ", ".join(a["username"] for a in store.users.all()),
+              file=sys.stderr)
+        return 1
+    store.users.set_disabled(username, disabled)
+    print(f"'{account['username']}' is now "
+          f"{'disabled' if disabled else 'enabled'}.")
+    if not disabled and account["role"] not in [
+            role["name"] for role in store.roles.all()
+            if ADMIN_PERMISSION in (role.get("permissions") or [])]:
+        print(f"It holds '{account['role']}', which does NOT grant "
+              f"{ADMIN_PERMISSION}. Run --grant-admin {account['username']} "
+              f"to make it a way back in to the configuration page.")
+    return 0
+
+
 def status(store):
     roles = store.roles.all()
     carriers = [role["name"] for role in roles
@@ -35,6 +150,7 @@ def status(store):
     accounts = store.users.all()
 
     print(f"Store:    {store.describe()}")
+    print(_directory_line(store))
     print(f"Roles:    {', '.join(role['name'] for role in roles) or '(none)'}")
     print(f"Can administer: {', '.join(carriers) or '(NOBODY)'}")
     print(f"Local accounts:")
@@ -155,10 +271,23 @@ def main(argv=None):
                         help="move a local account to an existing role")
     parser.add_argument("--reset-password", metavar="USERNAME")
     parser.add_argument("--password", help="for scripted use; prompts otherwise")
+    parser.add_argument("--enable", metavar="USERNAME",
+                        help="undo a disabled local account")
+    parser.add_argument("--disable", metavar="USERNAME")
+    parser.add_argument("--use-directory", metavar="WHICH",
+                        choices=("ldap", "oidc", "none"),
+                        help="ldap, oidc or none: which directory signs "
+                             "people in. WDash uses one at a time")
     arguments = parser.parse_args(argv)
 
     store = Store.open(arguments.database_url)
 
+    if arguments.use_directory:
+        return use_directory(store, arguments.use_directory)
+    if arguments.enable:
+        return enable(store, arguments.enable)
+    if arguments.disable:
+        return enable(store, arguments.disable, disabled=True)
     if arguments.grant_admin:
         return grant_admin(store, arguments.grant_admin)
     if arguments.set_role:

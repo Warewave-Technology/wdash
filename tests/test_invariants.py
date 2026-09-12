@@ -19,7 +19,8 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wdash.dashboard.invariants import (  # noqa: E402
-    refuses_mapping_save, refuses_role_delete, refuses_role_save,
+    refuses_directory_off, refuses_mapping_save, refuses_role_delete,
+    refuses_role_save,
 )
 
 
@@ -259,6 +260,67 @@ class TheRulesAskTheResolverTest(unittest.TestCase):
                 self.assertEqual(resolver.role_for(**case), expected)
 
 
+def account(username="owner", role_name="admin", disabled=False):
+    return {"username": username, "role": role_name, "disabled": disabled}
+
+
+class DirectoryOffTest(unittest.TestCase):
+    """The fourth way to lose administration, and the one the one-directory
+    rule creates: with at most one directory signing people in, turning it off
+    takes every non-local administrator with it."""
+
+    ROLES = [ADMIN, VIEWER]
+
+    def arrived(self, provider, **extra):
+        return {**person("alice", groups=["wdash-admins"]),
+                "provider": provider, **extra}
+
+    def test_a_local_administrator_may_always_turn_it_off(self):
+        self.assertIsNone(refuses_directory_off(
+            "ldap", {**local("admin"), "provider": "local account"},
+            self.ROLES, [account()]))
+
+    def test_an_enabled_local_administrator_is_enough(self):
+        self.assertIsNone(refuses_directory_off(
+            "ldap", self.arrived("directory"), self.ROLES, [account()]))
+
+    def test_with_the_only_local_administrator_disabled_it_is_refused(self):
+        refusal = refuses_directory_off(
+            "ldap", self.arrived("directory"), self.ROLES,
+            [account(disabled=True)])
+        self.assertIsNotNone(refusal)
+        self.assertIn("nobody able to open this page", refusal)
+        self.assertIn("--enable owner", refusal,
+                      "a refusal whose way out cannot be taken is a lockout")
+
+    def test_a_local_account_that_cannot_administer_is_not_a_way_back(self):
+        refusal = refuses_directory_off(
+            "ldap", self.arrived("directory"), self.ROLES,
+            [account(role_name="viewer")])
+        self.assertIsNotNone(refusal)
+        self.assertIn("--grant-admin", refusal)
+
+    def test_arriving_through_the_other_directory_is_allowed(self):
+        """She is the person who should be able to resolve the conflict in
+        her own favour, and the session says which door she used rather than
+        the rule guessing from "not local"."""
+        self.assertIsNone(refuses_directory_off(
+            "ldap", self.arrived("oidc"), self.ROLES,
+            [account(disabled=True)]))
+        self.assertIsNotNone(refuses_directory_off(
+            "oidc", self.arrived("oidc"), self.ROLES,
+            [account(disabled=True)]))
+
+    def test_a_session_that_does_not_say_is_refused_without_claiming(self):
+        """Written before the provider was recorded. Refuse conservatively,
+        but do not tell her she used a door she may not have used."""
+        refusal = refuses_directory_off("ldap", self.arrived(None), self.ROLES,
+                                        [account(disabled=True)])
+        self.assertIsNotNone(refusal)
+        self.assertNotIn("you signed in through", refusal.lower())
+        self.assertIn("did not sign in with a local account", refusal)
+
+
 class RecoveryToolTest(unittest.TestCase):
     """"Impossible" is a claim about code that has been reasoned about."""
 
@@ -370,6 +432,62 @@ class RecoveryToolTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIsNotNone(
             self.store.users.verify("owner", "another-long-password"))
+
+    def test_a_disabled_account_can_be_re_enabled(self):
+        """`--grant-admin` moves the role and stops there, so a disabled
+        account with the recovery role still cannot sign in: verify() refuses
+        it before the password is checked. The one-directory refusal names
+        this command, so it has to exist."""
+        self.store.users.set_disabled("owner", True)
+        self.assertIsNone(self.store.users.verify("owner",
+                                                  "a-long-enough-password"))
+        code, output = self.run_tool("--enable", "owner")
+        self.assertEqual(code, 0, output)
+        self.assertIsNotNone(self.store.users.verify("owner",
+                                                     "a-long-enough-password"))
+
+    def test_enabling_an_unknown_account_fails_with_the_options(self):
+        code, output = self.run_tool("--enable", "nobody")
+        self.assertEqual(code, 1)
+        self.assertIn("owner", output)
+
+    def test_a_directory_can_be_chosen_from_the_command_line(self):
+        """The way back when both were enabled and the losing directory held
+        every administrator: nobody can reach the page that would fix it."""
+        for key in ("auth.ldap", "auth.oidc"):
+            self.store.settings.set(key, {"enabled": True, "server": "ldap://x",
+                                          "base_dn": "dc=x", "client_id": "w",
+                                          "discovery_url": "https://idp/x"})
+        code, output = self.run_tool("--use-directory", "ldap")
+        self.assertEqual(code, 0, output)
+        self.assertTrue(self.store.settings.get("auth.ldap")["enabled"])
+        self.assertFalse(self.store.settings.get("auth.oidc")["enabled"])
+        self.assertIn("LDAP is now the directory in force", output)
+        # The settings themselves survive: only the flags are written.
+        self.assertEqual(self.store.settings.get("auth.oidc")["client_id"], "w")
+
+    def test_none_turns_every_directory_off(self):
+        self.store.settings.set("auth.ldap", {"enabled": True,
+                                              "server": "ldap://x",
+                                              "base_dn": "dc=x"})
+        code, output = self.run_tool("--use-directory", "none")
+        self.assertEqual(code, 0, output)
+        self.assertFalse(self.store.settings.get("auth.ldap")["enabled"])
+        self.assertIn("No directory is in force", output)
+
+    def test_choosing_a_directory_that_is_not_configured_is_refused(self):
+        code, output = self.run_tool("--use-directory", "ldap")
+        self.assertEqual(code, 1)
+        self.assertIn("No LDAP settings are stored", output)
+        self.assertIsNone(self.store.settings.get("auth.oidc"),
+                          "a refusal must not have written the other flag")
+
+    def test_status_says_which_directory_would_sign_people_in(self):
+        self.store.settings.set("auth.ldap", {"enabled": True,
+                                              "server": "ldap://x",
+                                              "base_dn": "dc=x"})
+        _, output = self.run_tool("--status")
+        self.assertIn("Directory: LDAP", output)
 
 
 if __name__ == "__main__":

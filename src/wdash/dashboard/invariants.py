@@ -160,6 +160,56 @@ def refuses_role_delete(roles, name, actor, default_role=None,
     return None
 
 
+#: What the session records about the door somebody came through, as the
+#: directory it names. Anything else — including a session written before the
+#: field existed — is unknown, and is never claimed to be either one.
+_ARRIVED = {"directory": "ldap", "oidc": "oidc"}
+
+
+def refuses_directory_off(which, actor, roles, local_accounts=()):
+    """Why this directory must not be turned off, or None.
+
+    The fourth way to lose administration, and the one the one-directory rule
+    creates: with at most one directory signing people in, turning it off
+    takes every non-local administrator with it. A local account is unaffected
+    — that is what it is for — so the rule is only about the case where there
+    is no usable local account left.
+
+    Who is asking matters, and it is READ rather than guessed: a session
+    survives a change of directory, so "not a local account" does not mean
+    "arrived through this one". An administrator who arrived through the other
+    directory is allowed, because turning this one off is exactly how she
+    resolves a conflict in her own favour.
+    """
+    actor = actor or {}
+    if actor.get("local_role") or actor.get("provider") == "local account":
+        return None
+
+    arrived = _ARRIVED.get(actor.get("provider"))
+    if arrived is not None and arrived != which:
+        return None
+
+    carriers = {role["name"] for role in _carriers(roles)}
+    accounts = list(local_accounts or ())
+    if any(account.get("role") in carriers and not account.get("disabled")
+           for account in accounts):
+        return None
+
+    label = {"ldap": "LDAP", "oidc": "OpenID Connect"}.get(which, which)
+    disabled = [account.get("username") for account in accounts
+                if account.get("role") in carriers and account.get("disabled")]
+    way_back = (
+        f"Re-enable one: python -m wdash.store.recover --enable "
+        f"{disabled[0]}." if disabled else
+        "Give a local account an administering role first: python -m "
+        "wdash.store.recover --grant-admin <username>.")
+    return (f"You did not sign in with a local account, and no local account "
+            f"here can administer WDash"
+            + (f" ({_few(disabled)} could, but is disabled)" if disabled else "")
+            + f". Turning {label} off would leave nobody able to open this "
+              f"page, so nothing was saved. {way_back}")
+
+
 def refuses_mapping_save(roles, default_role, mappings, actor):
     """Why these role mappings must not be saved, or None.
 

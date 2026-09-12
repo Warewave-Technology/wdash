@@ -133,6 +133,17 @@ So that a report can say what it got past:
   configurable; no provider allowed to sign anybody in under a local
   account's name, nor under an opaque id when the address it sent was not
   verified;
+* at most ONE directory signing people in — LDAP or OIDC, never both.
+  Ownership here is the username, with no provider attached to it, so with two
+  directories open a principal at one who can choose `preferred_username`
+  takes a name that belongs to somebody at the other, with its dashboards and
+  its role mapping. Enabling the second is refused and audited, an
+  installation that already has both is logged, audited (`two directories
+  configured`) and banners the configuration page, a resolution that changes
+  is audited where it changes, and the sign-in page says in one neutral line
+  that another method is configured and not in use. A directory in force whose
+  settings cannot be read closes the door rather than handing it to the other
+  one. Local accounts are not a directory and none of this touches them;
 * `ldaps://` certificates checked, against the system's CAs or a named CA
   file, with turning the check off an explicit and logged choice;
 * an append-only audit trail, not deletable from the UI, recording refused

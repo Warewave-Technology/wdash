@@ -153,7 +153,7 @@ def first_run():
 
     user = User(user_id=account['id'], email=account['email'] or '',
                 username=account['username'], groups=[])
-    _start_session(user, local_role=account['role'])
+    _start_session(user, local_role=account['role'], provider='local account')
     current_app.logger.warning(
         f"First-run setup completed by '{account['username']}'")
     flash(f"Welcome. You are signed in as {account['username']}.", 'success')

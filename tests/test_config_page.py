@@ -468,6 +468,285 @@ class IdentityProviderSettingsTest(AuthSettingsTest):
                       self.client.get("/admin/config").data)
 
 
+LDAP_FORM = {"provider": "ldap", "server": "ldaps://ldap:636",
+             "base_dn": "dc=example,dc=com", "verify_certs": "on"}
+OIDC_FORM = {"provider": "oidc", "client_id": "wdash",
+             "discovery_url": "https://idp/.well-known/openid-configuration"}
+
+
+class OneDirectoryOnThePageTest(ConfigTestCase):
+    """WDash signs people in through one directory at a time.
+
+    Measured before the rule: posting the OIDC card with Enabled ticked while
+    LDAP was enabled returned 302, stored the row, left both usable, and wrote
+    one ordinary "OIDC settings updated" row.
+    """
+
+    def save(self, form, **overrides):
+        return self.client.post("/admin/auth", data={**form, **overrides},
+                                follow_redirects=True)
+
+    def actions(self):
+        return [row["action"] for row in self.app.store.audit.recent()]
+
+    def test_enabling_the_second_directory_is_refused_either_way_round(self):
+        for first, second in ((LDAP_FORM, OIDC_FORM), (OIDC_FORM, LDAP_FORM)):
+            with self.subTest(enabling=second["provider"]):
+                self.setUp()
+                self.save(first, enabled="on")
+                page = self.save(second, enabled="on").get_data(as_text=True)
+                label = {"ldap": "LDAP",
+                         "oidc": "OpenID Connect"}[first["provider"]]
+                self.assertIn(f"{label} is the directory in use here", page)
+                self.assertIn("one directory at a time", page)
+                self.assertIsNone(
+                    self.app.store.settings.get(f"auth.{second['provider']}"),
+                    "nothing was supposed to be saved")
+                self.assertIn(
+                    f"{'LDAP' if second['provider'] == 'ldap' else 'OIDC'}"
+                    f" settings refused", self.actions())
+                self.tearDown()
+
+    def test_an_environment_provider_counts_as_the_other_one(self):
+        """It can be turned off from this page — saving the card with Enabled
+        unchecked stores a disabled row — so exempting it would leave the
+        commonest shape with no refusal and no guidance."""
+        self.app.config["OIDC_CLIENT_ID"] = "env-client"
+        self.app.config["OIDC_DISCOVERY_URL"] = "https://env/.well-known/x"
+        page = self.save(LDAP_FORM, enabled="on").get_data(as_text=True)
+        self.assertIn("OpenID Connect is the directory in use here", page)
+        self.assertIn("Enabled unchecked", page)
+        self.assertIsNone(self.app.store.settings.get("auth.ldap"))
+
+    def test_the_directory_in_force_can_still_be_edited(self):
+        """Otherwise an administrator on that installation can never touch
+        the settings of the directory they are actually using."""
+        self.app.config["OIDC_CLIENT_ID"] = "env-client"
+        self.app.config["OIDC_DISCOVERY_URL"] = "https://env/.well-known/x"
+        self.save(OIDC_FORM, enabled="on")
+        page = self.save(OIDC_FORM, client_id="renamed",
+                         enabled="on").get_data(as_text=True)
+        self.assertNotIn("directory in use here", page)
+        self.assertEqual(self.app.store.settings.get("auth.oidc")["client_id"],
+                         "renamed")
+
+    def test_turning_the_second_one_off_is_never_refused(self):
+        self.save(LDAP_FORM, enabled="on")
+        self.save(OIDC_FORM)          # no `enabled`, so off
+        self.assertFalse(self.app.store.settings.get("auth.oidc")["enabled"])
+        self.assertNotIn("OIDC settings refused", self.actions())
+
+
+class DirectorySwitchTest(ConfigTestCase):
+    """What a deliberate switch hands over, said at the moment it happens.
+
+    Ownership is the username with no provider attached to it, so whoever
+    signs in as a name at the new directory gets that name's dashboards and
+    role mapping. Nothing is migrated — a name keeping what it owns is what
+    makes a switch work — but the site is told rather than finding out.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.app.store.settings.set("rbac.user_roles", {"alice": "admin"})
+        self.app.dashboard_manager.create_dashboard(
+            name="Alice private", description="", query="",
+            created_by="alice", visibility="private")
+        self.app.dashboard_manager.create_dashboard(
+            name="Owner's own", description="", query="",
+            created_by="owner", visibility="private")
+
+    def save(self, form, **overrides):
+        return self.client.post("/admin/auth", data={**form, **overrides},
+                                follow_redirects=True)
+
+    def audited(self, action):
+        return [row for row in self.app.store.audit.recent()
+                if row["action"] == action]
+
+    def test_the_sentence_lands_on_the_save_that_turns_the_old_one_off(self):
+        """The handover happens there whenever the incoming directory is
+        already configured — the environment shape, and the shape the demo is
+        in. Keyed to the checkbox that switches a directory ON, the sentence
+        would never appear on this path at all."""
+        self.app.config["OIDC_CLIENT_ID"] = "env-client"
+        self.app.config["OIDC_DISCOVERY_URL"] = "https://env/.well-known/x"
+        self.app.store.settings.set("auth.ldap", {
+            "server": "ldaps://ldap:636", "base_dn": "dc=x", "enabled": True})
+
+        page = self.save(LDAP_FORM).get_data(as_text=True)  # enabled off
+        self.assertIn("OpenID Connect is now the directory", page)
+        self.assertIn("alice", page)
+        self.assertIn("1 dashboard and 1 role mapping", page)
+        self.assertNotIn("2 dashboards", page,
+                         "the owner's own dashboard is not inherited")
+
+        row = self.audited("LDAP settings updated")[0]
+        self.assertEqual(row["state"]["directory_in_force"], "oidc")
+        self.assertEqual(row["state"]["directory_was"], "ldap")
+        self.assertEqual(row["state"]["inherited"]["dashboards"], 1)
+        self.assertEqual(row["state"]["inherited"]["names"], ["alice"])
+
+    def test_the_resolution_change_is_audited_where_it_changes(self):
+        """Not only at startup: a change made while the process is running
+        would otherwise never reach the trail, and the banner would say one
+        thing while the audit said another."""
+        self.save(LDAP_FORM, enabled="on")
+        row = self.audited("directory in force changed")[0]
+        self.assertEqual((row["state"]["was"], row["state"]["now"]),
+                         (None, "ldap"))
+        self.assertEqual(row["subject"], "auth")
+
+    def test_dashboards_that_cannot_be_read_are_not_reported_as_none(self):
+        """"0 dashboards belong to names that are not local accounts" is a
+        sentence somebody acts on, and it is the one thing the page cannot
+        know when the read failed."""
+        def raise_instead():
+            raise RuntimeError("the dashboard file is not readable")
+
+        self.app.dashboard_manager.get_all_dashboards = raise_instead
+        page = self.save(LDAP_FORM, enabled="on").get_data(as_text=True)
+        self.assertIn("an unknown number of dashboards", page)
+        self.assertNotIn("0 dashboards", page)
+
+    def test_an_ordinary_re_save_says_nothing_about_inheritance(self):
+        self.save(LDAP_FORM, enabled="on")
+        page = self.save(LDAP_FORM, base_dn="dc=corp",
+                         enabled="on").get_data(as_text=True)
+        self.assertNotIn("is now the directory", page)
+        self.assertEqual(len(self.audited("directory in force changed")), 1)
+        self.assertNotIn("inherited",
+                         self.audited("LDAP settings updated")[0]["state"])
+
+
+class TurningTheDirectoryOffTest(ConfigTestCase):
+    """Turning off the directory in force, by somebody who arrived through it.
+
+    Measured before the rule: the same post was accepted unconditionally, and
+    an installation whose only local administrator was disabled ended with
+    nobody able to open the page.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.app.store.settings.set("auth.ldap", {
+            "server": "ldaps://ldap:636", "base_dn": "dc=x", "enabled": True})
+        self.arrive("directory")
+
+    def arrive(self, provider):
+        with self.client.session_transaction() as session:
+            session["user_data"] = {
+                "id": "directory-1", "email": "alice@example.com",
+                "username": "alice", "groups": ["wdash-admins"],
+                "local_role": None, "provider": provider}
+            session["_user_id"] = "directory-1"
+        self.app.store.rbac.invalidate()
+
+    def turn_off(self):
+        return self.client.post("/admin/auth", data=LDAP_FORM,
+                                follow_redirects=True).get_data(as_text=True)
+
+    def test_with_an_enabled_local_administrator_it_is_allowed(self):
+        self.turn_off()
+        self.assertFalse(self.app.store.settings.get("auth.ldap")["enabled"])
+
+    def test_with_the_only_local_administrator_disabled_it_is_refused(self):
+        self.app.store.users.set_disabled("owner", True)
+        page = self.turn_off()
+        self.assertIn("nobody able to open this page", page)
+        self.assertIn("--enable owner", page)
+        self.assertTrue(self.app.store.settings.get("auth.ldap")["enabled"])
+        self.assertIn("LDAP settings refused",
+                      [row["action"] for row in self.app.store.audit.recent()])
+
+    def test_somebody_who_arrived_through_the_other_one_may(self):
+        self.app.store.users.set_disabled("owner", True)
+        self.arrive("oidc")
+        self.turn_off()
+        self.assertFalse(self.app.store.settings.get("auth.ldap")["enabled"])
+
+    def test_the_directory_that_is_not_in_force_is_never_guarded(self):
+        """Only the directory actually signing people in can take anybody's
+        access away with it. A session that does not say which door it used is
+        refused conservatively for THAT one, and must not be for the other."""
+        self.app.store.users.set_disabled("owner", True)
+        self.arrive(None)
+        self.client.post("/admin/auth", data=OIDC_FORM, follow_redirects=True)
+        self.assertIs(self.app.store.settings.get("auth.oidc")["enabled"],
+                      False)
+        self.assertTrue(self.app.store.settings.get("auth.ldap")["enabled"])
+
+
+class TwoDirectoriesAreReportedTest(unittest.TestCase):
+    """An installation that already has both loses one door at the moment it
+    upgrades, without anybody pressing anything. Made loud rather than quiet:
+    the log, one audit row, and a banner on this page."""
+
+    def setUp(self):
+        handle, self.database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        self.key = SecretBox.generate_key()
+
+    def tearDown(self):
+        if os.path.exists(self.database):
+            os.unlink(self.database)
+
+    def build(self, oidc_client_id=None):
+        database, key = self.database, self.key
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "two-directories"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = key
+            OIDC_CLIENT_ID = oidc_client_id
+            OIDC_DISCOVERY_URL = ("https://env/.well-known/openid-configuration"
+                                  if oidc_client_id else None)
+
+        return create_app(TestConfig)
+
+    def test_the_conflict_is_logged_audited_and_shown(self):
+        first = self.build()
+        client = first.test_client()
+        client.post("/setup", data={"username": "owner", "password": PASSWORD,
+                                    "confirm": PASSWORD})
+        first.store.settings.set("auth.ldap", {
+            "server": "ldaps://ldap:636", "base_dn": "dc=x", "enabled": True})
+
+        # A restart with the environment provider also configured: nobody
+        # pressed anything, and the installation now has two.
+        second = self.build(oidc_client_id="env-client")
+        rows = [row for row in second.store.audit.recent()
+                if row["action"] == "two directories configured"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"]["in_force"], "ldap")
+        self.assertEqual(rows[0]["state"]["shadowed"], "oidc")
+        self.assertEqual(rows[0]["actor"], "system")
+
+        client = second.test_client()
+        client.post("/auth/login", data={"username": "owner",
+                                         "password": PASSWORD})
+        page = client.get("/admin/config").get_data(as_text=True)
+        self.assertIn("One directory at a time", page)
+        self.assertIn("LDAP is in force", page)
+        self.assertIn("--use-directory", page)
+
+    def test_one_directory_alone_says_nothing(self):
+        app = self.build()
+        client = app.test_client()
+        client.post("/setup", data={"username": "owner", "password": PASSWORD,
+                                    "confirm": PASSWORD})
+        app.store.settings.set("auth.ldap", {
+            "server": "ldaps://ldap:636", "base_dn": "dc=x", "enabled": True})
+        again = self.build()
+        self.assertEqual(
+            [row for row in again.store.audit.recent()
+             if row["action"] == "two directories configured"], [])
+        page = again.test_client().get("/auth/login").get_data(as_text=True)
+        self.assertNotIn("Another sign-in method", page)
+
+
 class RoleEditingTest(ConfigTestCase):
     def setUp(self):
         super().setUp()

@@ -83,7 +83,8 @@ issues carries an explicit authorization scope.
   well as what was. Evaluation runs as its own process, because an agent going
   completely silent produces no requests to piggyback on and that is exactly
   when somebody needs telling.
-- **Sign-in** — OIDC, LDAP, and a local break-glass account created at first
+- **Sign-in** — OIDC *or* LDAP — one directory at a time, never both — and a
+  local break-glass account created at first
   run that keeps working when the identity provider does not. Repeated failures
   are throttled per account, per address and per pair. The account-wide limit
   counts only guesses, so an address knocking on a locked door cannot lock the
@@ -188,7 +189,46 @@ broken provider and try again without a restart.
 Where two places configure the same provider, the stored settings win over the
 environment: otherwise the config page would save successfully and change
 nothing. A provider switched off is off, with no fall back to the environment —
-or the switch would do nothing on a deployment that has both.
+or the switch would do nothing on a deployment that has both. Saving the OIDC
+card with **Enabled** unchecked is therefore also how a provider configured in
+the environment is turned off from the page, with no restart.
+
+**At most one directory.** Either LDAP or OIDC signs people in, never both.
+Ownership here is the username — a dashboard belongs to `created_by`, a role
+mapping is written against a name — with no provider attached to it, so with
+two directories open a principal at one who can choose `preferred_username`
+signs in as somebody at the other and gets their dashboards and their role.
+Which one is in force is decided in one place, from configuration and not from
+usability:
+
+1. a directory configured in the store beats one configured only in the
+   environment;
+2. both stored and enabled: the row saved most recently wins, ties to LDAP, so
+   the answer never depends on row order;
+3. neither: no directory, and local accounts are unaffected.
+
+Enabling the second one is refused on the page, in words that say how to
+switch: turn the first one off and save, then enable the other. That second
+save is the confirmation, and it says what those names already own — how many
+dashboards and role mappings belong to names that are not local accounts, a
+few of them by name, and that whoever signs in as one of them through the new
+directory inherits them. Nothing is migrated and nothing is scoped by
+provider: a name keeping what it owns is exactly what makes a deliberate
+switch work.
+
+A directory that is configured and not in use is said rather than hidden — one
+neutral line on the sign-in page, so somebody whose usual door has gone is not
+told "Invalid username or password" for a reason that is not theirs — and a
+directory in force whose settings cannot be read (a rotated encryption key, a
+half-filled row) closes the door rather than handing the installation to the
+other one. An installation that already has both gets a warning in the log at
+startup, a `two directories configured` audit row, and a banner on
+`/admin/config`; a resolution that changes while WDash is running is audited
+as `directory in force changed`. Turning off the directory you arrived through
+is refused when no enabled local account can administer, and
+`python -m wdash.store.recover --use-directory <ldap|oidc|none>`,
+`--enable <username>` and `--grant-admin <username>` are the way back from
+outside the application.
 
 LDAP authentication binds **as the user** with the password they typed. Finding
 their entry with the service account proves the account exists, not that the
@@ -364,7 +404,13 @@ administer and `--grant-admin <username>` puts one account back. The recovery
 role grants no data access; it exists to reach the configuration page.
 `--set-role <username> <role>` moves a local account to a role that exists —
 which is how a role a local account holds is freed to be deleted, since the
-page has no control for a local account's role.
+page has no control for a local account's role. `--enable <username>` undoes a
+disabled account, which `--grant-admin` never did: a disabled account is
+refused before its password is checked, so granting it a role was a way back
+that could not be taken. `--use-directory <ldap|oidc|none>` writes the
+directories' enabled flags, for the one case the page cannot reach — an
+installation that had two directories enabled at once, where the losing one
+held every administrator.
 
 ### Authorization is resolved per request
 

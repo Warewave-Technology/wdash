@@ -27,8 +27,10 @@ from flask import (
 )
 from flask_login import current_user, login_required
 
+from ..auth.providers import LABELS, directory, refuses_second_directory
 from ..dashboard.invariants import (
-    refuses_mapping_save, refuses_role_delete, refuses_role_save,
+    _few, refuses_directory_off, refuses_mapping_save, refuses_role_delete,
+    refuses_role_save,
 )
 from .access import source_names
 from ..hub import Scope, TimeWindow
@@ -144,6 +146,23 @@ def _duplicate_sources():
     return list(warnings or [])
 
 
+def _directory_conflict():
+    """Two directories configured here, or one that cannot be read, in words.
+
+    Read from the app the way the duplicate-sources warning is, and tolerant
+    of an app object that has not caught up. It is the same sentence the
+    startup log and the audit row carry, because they read the same function
+    — a banner that can disagree with the log is worse than no banner.
+    """
+    conflict = getattr(current_app, "directory_conflict", None)
+    if callable(conflict):
+        try:
+            return conflict()
+        except Exception:
+            current_app.logger.exception("Could not resolve the directory")
+    return None
+
+
 def _shadowed_sources(rows):
     """{source id: the signals another source of the same name also serves}.
 
@@ -236,7 +255,11 @@ def _actor():
     return {"email": getattr(current_user, "email", None),
             "username": getattr(current_user, "username", None),
             "groups": list(getattr(current_user, "groups", None) or ()),
-            "local_role": data.get("local_role")}
+            "local_role": data.get("local_role"),
+            # Which door this session came through, for the rule about turning
+            # a directory off. Absent in a session written before it was
+            # recorded, and then nothing is claimed about it.
+            "provider": data.get("provider")}
 
 
 def _audit(action, subject=None, state=None, **details):
@@ -296,6 +319,11 @@ def config_page():
         # symptom — a merged total that is quietly too big — never points at
         # its cause.
         duplicate_sources=_duplicate_sources(),
+        # Two directories configured, or the one in force unreadable. Computed
+        # on demand, not at startup: a conflict can be made on this page while
+        # the process runs, and a warning that waits for a restart is a
+        # warning about something somebody has already walked away from.
+        directory_conflict=_directory_conflict(),
         # {kind: [signals]} for the form. Derived here rather than written
         # out in JavaScript, so adding a backend cannot leave the two
         # disagreeing about what it serves.
@@ -768,6 +796,21 @@ def save_auth():
         flash("Unknown provider.", "error")
         return redirect(url_for("config.config_page"))
 
+    # Which directory this installation signs people in through, before and
+    # after. Both refusals below and the sentence at the end are computed from
+    # the SAME resolution, so "which is in force" and "which counts as the
+    # other one" can never be decided on different footings.
+    before = directory(current_app)
+    refusal = refuses_second_directory(current_app, which, value["enabled"])
+    if refusal is None and not value["enabled"] and before["in_force"] == which:
+        refusal = refuses_directory_off(which, _actor(), store.roles.all(),
+                                        store.users.all())
+    if refusal:
+        flash(refusal, "error")
+        _audit(f"{label} settings refused", subject=f"auth:{which}",
+               state={**value, "reason": refusal})
+        return redirect(url_for("config.config_page"))
+
     held = store.settings.all(prefix=key).get(key) or {}
     url_key, verify_key, what = (
         ("discovery_url", None, "client secret") if key == OIDC
@@ -789,13 +832,94 @@ def save_auth():
         flash(str(exc).split("\n")[0], "error")
         return redirect(url_for("config.config_page"))
 
+    after = directory(current_app)
+    # A switch is the save where the RESOLUTION changes, not the save where a
+    # checkbox does. On the shape this installation is most likely to be in —
+    # a directory on this page and another in the environment — the handover
+    # happens on the save that turns the first one OFF, and no second save
+    # follows; keyed to the checkbox, the sentence would never appear.
+    switched = (after["in_force"] is not None
+                and after["in_force"] != before["in_force"])
+    inherited = _inherited(store) if switched else None
+
     # The resulting state, as for roles and mappings: which provider this
     # installation trusted, and from when, is what an investigation asks.
     _audit(f"{label} settings updated", subject=f"auth:{which}",
-           state={**value, "secret_replaced": secret is not None})
-    flash(f"{label} settings saved and in force now — no restart needed.",
-          "success")
+           state={**value, "secret_replaced": secret is not None,
+                  "directory_in_force": after["in_force"],
+                  "directory_was": before["in_force"],
+                  **({"inherited": inherited} if switched else {})})
+    if (before["in_force"], before["shadowed"]) != (after["in_force"],
+                                                    after["shadowed"]):
+        # Audited where it CHANGES, not only where the process starts:
+        # otherwise a conflict created while WDash is running never reaches
+        # the trail, and the banner says one thing while the trail says
+        # another.
+        _audit("directory in force changed", subject="auth",
+               state={"was": before["in_force"], "now": after["in_force"],
+                      "shadowed": after["shadowed"], "reason": after["reason"],
+                      **({"inherited": inherited} if switched else {})})
+
+    flash(f"{label} settings saved and in force now — no restart needed."
+          + (" " + _switch_sentence(before["in_force"], after["in_force"],
+                                    inherited) if switched else ""),
+          "warning" if switched else "success")
     return redirect(url_for("config.config_page"))
+
+
+def _plural(count, noun):
+    """`1 dashboard`, `3 dashboards` — or a count that is not a count.
+
+    A read that failed must not arrive as a zero. "0 dashboards belong to
+    names that are not local accounts" is a sentence somebody acts on, and it
+    would be the one thing the page could not know.
+    """
+    if count is None:
+        return f"an unknown number of {noun}s (the log says why)"
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _inherited(store):
+    """What names that are not local accounts already own here.
+
+    Read at the moment the directory changes, because that is the moment the
+    site can still act on it: ownership is the username, with no provider
+    attached to it, so whoever signs in as one of these names at the new
+    directory gets what the name holds. Nothing is migrated and nothing is
+    scoped — a name keeping its dashboards is what makes a deliberate switch
+    work at all.
+    """
+    local = {account["username"] for account in store.users.all()}
+    try:
+        owners = [dashboard.created_by for dashboard
+                  in current_app.dashboard_manager.get_all_dashboards()
+                  if dashboard.created_by and dashboard.created_by not in local]
+    except Exception:
+        current_app.logger.exception("Could not read the dashboard owners")
+        owners = None
+    mapped = [name for name in (store.settings.get("rbac.user_roles") or {})
+              if name not in local]
+    return {"dashboards": None if owners is None else len(owners),
+            "mappings": len(mapped),
+            "names": sorted(set(owners or ()) | set(mapped))}
+
+
+def _switch_sentence(was, now, inherited):
+    """What this installation just handed to the other directory."""
+    said = (f"{LABELS[now]} is now the directory this installation signs "
+            f"people in through"
+            + (f" (it was {LABELS[was]})." if was else "."))
+    if inherited and (inherited["names"] or inherited["dashboards"] is None):
+        said += (f" Ownership here is the name: "
+                 f"{_plural(inherited['dashboards'], 'dashboard')} and "
+                 f"{_plural(inherited['mappings'], 'role mapping')} belong to "
+                 f"names that are not local accounts "
+                 f"({_few(inherited['names'])}), along with any saved searches "
+                 f"those names own — counted by nobody, because the database "
+                 f"repository has no read-them-all method on purpose. Whoever "
+                 f"signs in as one of those names through {LABELS[now]} gets "
+                 f"them.")
+    return said
 
 
 # --------------------------------------------------------------------------
