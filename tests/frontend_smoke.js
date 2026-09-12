@@ -1013,6 +1013,45 @@ check('Clear takes away the chart, the sources, the warnings and the stats', () 
         assert(!el.querySelector('img'), 'the backend closed the attribute');
     });
 
+    // An empty saved-search list that is really an unmigrated one.
+    //
+    // /api/saved-searches answers `[]` for "you have never saved one" and for
+    // "yours are in a JSON file this installation stopped reading", and the
+    // dropdown printed "No saved searches yet" over both — a failure wearing
+    // the clothes of emptiness. The server puts what it found on the list
+    // element, so the API's shape does not have to change.
+    {
+        const empty = () => Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+
+        const plain = makeWindow(empty);
+        await Object.create(plain.__LogSearch.prototype)._loadSavedSearches();
+        check('an empty list with nothing left behind still says so plainly', () => {
+            const text = plain.document.getElementById('savedSearchList').textContent;
+            assertEqual(text.trim(), 'No saved searches yet', text);
+        });
+
+        const behind = makeWindow(empty);
+        behind.document.getElementById('savedSearchList').dataset.leftBehind =
+            '2 saved searches are in a JSON file that nothing is reading';
+        await Object.create(behind.__LogSearch.prototype)._loadSavedSearches();
+        check('an empty list that is really an unmigrated one says which', () => {
+            const el = behind.document.getElementById('savedSearchList');
+            assert(el.textContent.includes('2 saved searches are in a JSON file'),
+                   `said: ${el.textContent}`);
+            assert(!el.textContent.includes('No saved searches yet'),
+                   'it said both');
+        });
+
+        const hostile = makeWindow(empty);
+        hostile.document.getElementById('savedSearchList').dataset.leftBehind =
+            '<img src=x onerror="window.__planted=1">';
+        await Object.create(hostile.__LogSearch.prototype)._loadSavedSearches();
+        check('the empty state cannot write its own markup', () => {
+            const el = hostile.document.getElementById('savedSearchList');
+            assert(!el.querySelector('img'), el.innerHTML);
+        });
+    }
+
     console.log(failures.length
         ? `\n${failures.length} failure(s)`
         : '\nall front-end smoke checks passed');

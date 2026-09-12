@@ -17,7 +17,7 @@ import os
 import sys
 import unittest
 
-from tests.support import grant
+from tests.support import change_dashboard, grant, install_dashboard
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -136,6 +136,8 @@ class BackwardCompatibilityTest(unittest.TestCase):
 class TracePanelTest(unittest.TestCase):
     """Trace panels come from a different source, with an honest extra cost."""
 
+    STORAGE = "database"
+
     def setUp(self):
         from wdash.app import create_app
         from wdash.config import Config
@@ -146,12 +148,7 @@ class TracePanelTest(unittest.TestCase):
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "trace-panels"
-            # The fixture dashboard is edited in place and then
-            # fetched through a route, which is a property of the
-            # file manager's cache: it hands out the object it
-            # stores. Said here rather than inherited from the
-            # default, which is now the database.
-            DASHBOARD_STORAGE = "file"
+            DASHBOARD_STORAGE = self.STORAGE
 
         self.es = FakeES()
         self.app = create_app(TestConfig)
@@ -160,9 +157,9 @@ class TracePanelTest(unittest.TestCase):
         self.hub.add_traces(ElasticsearchTraceSource(self.es))
         self.app.hub = self.hub
 
-        self.dashboard = Dashboard("t1", "Traces", "", "*", "u",
-                                   index_patterns=["app-*"])
-        self.app.dashboard_manager.dashboards["t1"] = self.dashboard
+        self.dashboard = install_dashboard(
+            self.app, Dashboard("t1", "Traces", "", "*", "u",
+                                index_patterns=["app-*"]))
         self.client = self.app.test_client()
         grant(self.app, "u", permissions=["dashboard:view"], indices=["*"], trace_indices=["*"], services=["*"])
         with self.client.session_transaction() as session:
@@ -176,7 +173,8 @@ class TracePanelTest(unittest.TestCase):
     def panel(self, **overrides):
         definition = {"type": "trace_services", "sort": "spans", "size": 5}
         definition.update(overrides)
-        self.dashboard.panels = normalise_all([definition])
+        change_dashboard(self.app, self.dashboard,
+                         panels=normalise_all([definition]))
         payload = self.client.get("/api/dashboard/t1/data").get_json()
         return payload["panels"][0]
 
@@ -194,8 +192,8 @@ class TracePanelTest(unittest.TestCase):
         """The trace cost must be paid only by dashboards that ask for it."""
         from wdash.dashboard.panels import signals
 
-        self.dashboard.panels = normalise_all(
-            [{"type": "terms", "field": "service"}])
+        change_dashboard(self.app, self.dashboard, panels=normalise_all(
+            [{"type": "terms", "field": "service"}]))
         self.assertEqual(signals(self.dashboard.get_panels()), {"logs"})
 
         self.es.round_trips = 0
@@ -206,7 +204,8 @@ class TracePanelTest(unittest.TestCase):
         """Three trace panels must cost what one costs: the sources are asked
         once each, and the panels are cut from the same answer."""
         def cost(panels):
-            self.dashboard.panels = normalise_all(panels)
+            change_dashboard(self.app, self.dashboard,
+                             panels=normalise_all(panels))
             self.es.round_trips = 0
             payload = self.client.get("/api/dashboard/t1/data").get_json()
             return self.es.round_trips, payload
@@ -230,10 +229,10 @@ class TracePanelTest(unittest.TestCase):
             Service(name="busy", span_count=1000, error_count=1),
             Service(name="broken", span_count=10, error_count=9),
         ]
-        self.dashboard.panels = normalise_all([
+        change_dashboard(self.app, self.dashboard, panels=normalise_all([
             {"id": "by-spans", "type": "trace_services", "sort": "spans"},
             {"id": "by-rate", "type": "trace_services", "sort": "error_rate"},
-        ])
+        ]))
         panels = {p["id"]: p for p in
                   self.client.get("/api/dashboard/t1/data").get_json()["panels"]}
 
@@ -248,10 +247,10 @@ class TracePanelTest(unittest.TestCase):
         logs_only.add_logs(ElasticsearchLogSource(self.es))
         self.app.hub = logs_only
 
-        self.dashboard.panels = normalise_all([
+        change_dashboard(self.app, self.dashboard, panels=normalise_all([
             {"type": "terms", "field": "service", "title": "Still here"},
             {"type": "trace_services"},
-        ])
+        ]))
         response = self.client.get("/api/dashboard/t1/data")
         self.assertEqual(response.status_code, 200)
 
@@ -265,10 +264,10 @@ class TracePanelTest(unittest.TestCase):
 
         self.hub.traces().services = explode
 
-        self.dashboard.panels = normalise_all([
+        change_dashboard(self.app, self.dashboard, panels=normalise_all([
             {"type": "terms", "field": "service"},
             {"type": "trace_services"},
-        ])
+        ]))
         response = self.client.get("/api/dashboard/t1/data")
         self.assertEqual(response.status_code, 200)
         self.assertIn("error", response.get_json()["panels"][1])
@@ -307,6 +306,8 @@ class TracePanelTest(unittest.TestCase):
 class WireTest(unittest.TestCase):
     """/data must answer any panel list in a single round trip."""
 
+    STORAGE = "database"
+
     def setUp(self):
         from wdash.app import create_app
         from wdash.config import Config
@@ -317,12 +318,7 @@ class WireTest(unittest.TestCase):
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "panels"
-            # The fixture dashboard is edited in place and then
-            # fetched through a route, which is a property of the
-            # file manager's cache: it hands out the object it
-            # stores. Said here rather than inherited from the
-            # default, which is now the database.
-            DASHBOARD_STORAGE = "file"
+            DASHBOARD_STORAGE = self.STORAGE
 
         self.es = FakeES()
         self.app = create_app(TestConfig)
@@ -330,9 +326,9 @@ class WireTest(unittest.TestCase):
         hub.add_logs(ElasticsearchLogSource(self.es))
         self.app.hub = hub
 
-        self.dashboard = Dashboard("p1", "Panels", "", "*", "u",
-                                   index_patterns=["app-*"])
-        self.app.dashboard_manager.dashboards["p1"] = self.dashboard
+        self.dashboard = install_dashboard(
+            self.app, Dashboard("p1", "Panels", "", "*", "u",
+                                index_patterns=["app-*"]))
 
         self.client = self.app.test_client()
         grant(self.app, "u", permissions=["dashboard:view"], indices=["*"], trace_indices=["*"], services=["*"])
@@ -354,10 +350,10 @@ class WireTest(unittest.TestCase):
 
     def test_ten_panels_still_take_one_round_trip(self):
         """Adding a panel must cost an aggregation, not a request."""
-        self.dashboard.panels = normalise_all(
+        change_dashboard(self.app, self.dashboard, panels=normalise_all(
             [{"type": "timeseries", "split_by": "severity"}]
             + [{"type": "terms", "field": f, "title": f"{f} {i}"}
-               for i, f in enumerate(AGGREGATABLE_FIELDS * 3)])
+               for i, f in enumerate(AGGREGATABLE_FIELDS * 3)]))
 
         self.es.round_trips = 0
         payload = self.data()
@@ -367,10 +363,10 @@ class WireTest(unittest.TestCase):
                          f"{self.es.round_trips} round trips for 13 panels")
 
     def test_each_panel_gets_its_own_aggregation_named_after_it(self):
-        self.dashboard.panels = normalise_all([
+        change_dashboard(self.app, self.dashboard, panels=normalise_all([
             {"id": "a", "type": "terms", "field": "service"},
             {"id": "b", "type": "terms", "field": "host"},
-        ])
+        ]))
         self.data()
         aggregations = self.es.searches[0]["body"]["aggs"]
         self.assertIn("a", aggregations)
@@ -378,15 +374,16 @@ class WireTest(unittest.TestCase):
 
     def test_the_summary_counts_survive_an_arbitrary_panel_list(self):
         """The stat cards are not a panel and must not depend on one."""
-        self.dashboard.panels = normalise_all(
-            [{"type": "terms", "field": "host", "title": "Only hosts"}])
+        change_dashboard(self.app, self.dashboard, panels=normalise_all(
+            [{"type": "terms", "field": "host", "title": "Only hosts"}]))
         payload = self.data()
         self.assertEqual(payload["total_hits"], 100)
         self.assertEqual(payload["error_count"], 8)
         self.assertEqual(payload["warn_count"], 12)
 
     def test_a_corrupt_stored_panel_list_reports_rather_than_500s(self):
-        self.dashboard.panels = [{"type": "nonsense"}]
+        change_dashboard(self.app, self.dashboard,
+                         panels=[{"type": "nonsense"}])
         response = self.client.get("/api/dashboard/p1/data")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["error_type"], "invalid_panels")
@@ -399,6 +396,8 @@ if __name__ == "__main__":
 class SourceBindingTest(unittest.TestCase):
     """A dashboard may name the source it reads from."""
 
+    STORAGE = "database"
+
     def setUp(self):
         from wdash.app import create_app
         from wdash.config import Config
@@ -410,12 +409,7 @@ class SourceBindingTest(unittest.TestCase):
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "source-binding"
-            # The fixture dashboard is edited in place and then
-            # fetched through a route, which is a property of the
-            # file manager's cache: it hands out the object it
-            # stores. Said here rather than inherited from the
-            # default, which is now the database.
-            DASHBOARD_STORAGE = "file"
+            DASHBOARD_STORAGE = self.STORAGE
 
         self.primary = FakeES()
         self.secondary = FakeES()
@@ -426,9 +420,9 @@ class SourceBindingTest(unittest.TestCase):
         hub.add_logs(ElasticsearchLogSource(self.secondary, name="secondary"))
         self.app.hub = hub
 
-        self.dashboard = Dashboard("s1", "Bound", "", "*", "u",
-                                   index_patterns=["app-*"])
-        self.app.dashboard_manager.dashboards["s1"] = self.dashboard
+        self.dashboard = install_dashboard(
+            self.app, Dashboard("s1", "Bound", "", "*", "u",
+                                index_patterns=["app-*"]))
 
         self.client = self.app.test_client()
         grant(self.app, "u", ["dashboard:view"])
@@ -446,7 +440,7 @@ class SourceBindingTest(unittest.TestCase):
         self.assertEqual(self.secondary.round_trips, 0)
 
     def test_a_named_source_is_the_one_queried(self):
-        self.dashboard.source = "secondary"
+        change_dashboard(self.app, self.dashboard, source="secondary")
         self.data()
         self.assertEqual(self.primary.round_trips, 0)
         self.assertGreater(self.secondary.round_trips, 0)
@@ -454,7 +448,7 @@ class SourceBindingTest(unittest.TestCase):
     def test_naming_a_source_that_is_gone_says_so(self):
         """Quietly answering from the default is how somebody concludes their
         data has disappeared."""
-        self.dashboard.source = "retired"
+        change_dashboard(self.app, self.dashboard, source="retired")
         response = self.data()
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["error_type"], "source_missing")
@@ -639,3 +633,27 @@ class DatabaseSourceFormTest(SourceFormTest):
     """The same, on the store a deployment with two sources will be using."""
 
     STORAGE = "database"
+
+
+# --- the same questions, on the store that is still supported -------------
+#
+# These three classes were pinned to DASHBOARD_STORAGE=file when the default
+# moved, because their fixture edited the dashboard object in place and only
+# the JSON manager hands out the object it stores. That left every panel
+# behaviour in this module — what a panel draws, what it costs, which source
+# it reads from — measured on the one store nobody gets by default.
+#
+# `change_dashboard` writes through whichever store the app has, so the
+# question is now asked of both. `DatabaseSourceFormTest` above is the same
+# move in the other direction.
+
+class TracePanelOnTheFileStoreTest(TracePanelTest):
+    STORAGE = "file"
+
+
+class WireOnTheFileStoreTest(WireTest):
+    STORAGE = "file"
+
+
+class SourceBindingOnTheFileStoreTest(SourceBindingTest):
+    STORAGE = "file"

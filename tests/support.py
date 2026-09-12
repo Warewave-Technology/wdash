@@ -119,6 +119,36 @@ def install_dashboard(app, dashboard):
     return manager.get_dashboard(dashboard.id)
 
 
+def change_dashboard(app, dashboard, **changes):
+    """Change a fixture dashboard so the next request through a route sees it.
+
+    Tests assigned to the object — `self.dashboard.panels = [...]` — and then
+    fetched it back through a route. That is a write on the JSON file manager
+    and ONLY there: it hands out the object it stores, so the assignment and
+    the store are the same thing. The database hands out a fresh object per
+    read, so the same line changed a copy nothing would look at again and the
+    request answered the fixture's original panels — a test that passes while
+    measuring nothing.
+
+    Which is why twenty-four methods covering panel rendering, thresholds and
+    unreachable sources were pinned to DASHBOARD_STORAGE=file when the default
+    moved: it was the fixture shape that did not survive, not the behaviour.
+    This is the shape that survives both.
+
+    Keyword arguments are `Dashboard` attributes — panels, query, thresholds,
+    source, name, description, index_patterns, visibility. The object in hand
+    is updated too, so a test can go on reading it.
+    """
+    manager = app.dashboard_manager
+    for attribute, value in changes.items():
+        setattr(dashboard, attribute, value)
+    if hasattr(manager, "dashboards"):          # the JSON file manager
+        manager.dashboards[dashboard.id] = dashboard
+        return dashboard
+    manager.update_dashboard(dashboard.id, **changes)
+    return dashboard
+
+
 def session_for(username="u", user_id="1", email="u@x", groups=()):
     """The identity half of a session. Authorization comes from the store."""
     return {"id": user_id, "email": email, "username": username,

@@ -39,6 +39,43 @@
 </div>
 {% endif %}
 
+{# Dashboards in a JSON file the database installation is not reading.
+
+   The start-up log said this, and a log line four gunicorn workers each wrote
+   once, hours before anybody looked, is not where this question gets asked.
+   Without this block the page answered "Create your first dashboard to get
+   started" over a file holding three of theirs — emptiness standing in for a
+   move that has not happened, which is the exact confusion this whole package
+   exists to remove.
+
+   Asked here rather than handed in by the route: `json_stores_left_behind` is
+   a context processor supplying the FUNCTION, so only the two templates that
+   ask pay for it, and the answer is read when the question is asked — so the
+   block goes away the moment the migration finishes, with no restart.
+
+   The count is for everybody who can see this page; the path and the command
+   are for somebody who can act on them. #}
+{% set left_behind = json_stores_left_behind() %}
+{% if left_behind and left_behind.dashboards_notice %}
+<div class="alert alert-warning py-2" style="font-size:.85rem">
+  <i class="fas fa-file-arrow-up"></i>
+  {{ left_behind.dashboards_notice }}. This installation keeps its dashboards
+  in the metadata database. Nothing has been deleted.
+  {% if current_user.has_permission('system:admin') %}
+  <div class="mt-2">
+    <div class="text-muted">{{ left_behind.dashboards_file }}</div>
+    <code class="d-block mt-1" style="white-space:pre-wrap; word-break:break-all">{{ left_behind.command }}</code>
+    <div class="text-muted mt-1">
+      Or set <code>DASHBOARD_STORAGE=file</code> to go on reading the files,
+      which is still supported.
+    </div>
+  </div>
+  {% else %}
+  <div class="mt-1 text-muted">Ask an administrator to move them in.</div>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if dashboards %}
     {% if pages > 1 %}
     <div class="d-flex justify-content-between align-items-center mb-2">
@@ -144,7 +181,15 @@
     <div class="text-center py-5">
         <i class="fas fa-chart-bar fa-4x text-muted mb-3"></i>
         <h4 class="text-muted">No Dashboards Found</h4>
+        {# "Create your first" is a lie when we have just said, above, that
+           there are some in a file. The list really is empty; what is not
+           true is that nobody ever made one. #}
+        {% if left_behind and left_behind.dashboards_notice %}
+        <p class="text-muted">Nothing has been moved into this installation's
+          database yet &mdash; see above.</p>
+        {% else %}
         <p class="text-muted">Create your first dashboard to get started.</p>
+        {% endif %}
         {% if can_create %}
             <a href="{{ url_for('dashboards.create_dashboard') }}" class="btn btn-primary">
                 <i class="fas fa-plus"></i> Create Dashboard

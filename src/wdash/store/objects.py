@@ -27,6 +27,25 @@ class ObjectConflict(DashboardStorageError):
     """The stored object changed while it was being edited."""
 
 
+#: The keys every dashboard store answers from `get_stats()`, and the whole of
+#: what the two /api/debug endpoints promise.
+#:
+#: The two stores answer different shapes and always have: the JSON manager
+#: adds storage_path, file_exists, loaded_signature, disk_signature and
+#: should_reload, which describe a file and mean nothing where there is no
+#: file. Both endpoints jsonify the dict straight through, so moving the
+#: default from 'file' to 'database' silently changed what an installation
+#: that set nothing gets back from them.
+#:
+#: Inventing the file keys for the database — storage_path: null, file_exists:
+#: false — would answer the question with a lie, so the agreement is the
+#: honest intersection plus `backend`, which is the key that says WHICH shape
+#: is being looked at. The file manager kept its extra keys, so nothing
+#: scripted against a file installation lost anything; `backend` is how such a
+#: script now tells the two apart instead of inferring it from a missing key.
+DASHBOARD_STATS = ("backend", "total_dashboards")
+
+
 def _now():
     return datetime.now(timezone.utc)
 
@@ -208,6 +227,12 @@ class DashboardRepository:
         """Nothing is cached; every read already goes to the database."""
 
     def get_stats(self):
+        """What /api/debug/dashboard-manager answers about this store.
+
+        `backend` and `total_dashboards` are the two keys BOTH stores answer,
+        and they are the agreement: see `DASHBOARD_STATS` for why the rest of
+        the file manager's keys are not invented here.
+        """
         with self._engine.connect() as connection:
             total = connection.execute(
                 select(func.count()).select_from(dashboards)).scalar() or 0

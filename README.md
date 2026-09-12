@@ -182,7 +182,7 @@ rather than two owners.
 | `DASHBOARD_STORAGE_FILE` | The JSON dashboard file: where `DASHBOARD_STORAGE=file` keeps dashboards, where the saved searches sit beside them, and the path the start-up check reads to tell an unmigrated installation what it still has | `data/dashboards.json` |
 | `DATABASE_URL` | Metadata store: `postgresql://…` or `sqlite:///…` | `sqlite:///data/wdash.db` |
 | `WDASH_ENCRYPTION_KEY` | Encrypts secrets held in the metadata store. Without it, secrets cannot be saved at all | — |
-| `DASHBOARD_STORAGE` | Where dashboards **and saved searches** live: `database` (default) or `file`. An installation with JSON files it has not migrated is told at start-up, naming both files and the command &mdash; rather than being shown an empty list as though nothing had ever been saved | `database` |
+| `DASHBOARD_STORAGE` | Where dashboards **and saved searches** live: `database` (default) or `file`. An installation with JSON files it has not migrated is told at start-up and on the pages themselves, naming both files and the command &mdash; rather than being shown an empty list as though nothing had ever been saved | `database` |
 | `DASHBOARD_INDEX` | Kept out of log search. The Elasticsearch dashboard store has been removed, but an installation that used it still has the index sitting in the cluster, and without this a search over `*` returns dashboards as bodyless records | `wdash-dashboards` |
 | `MAX_SEARCH_RESULTS` | Upper bound on page size | `1000` |
 
@@ -944,7 +944,14 @@ Stated plainly, because they affect whether this fits your deployment:
   but nothing is reading those files any more. WDash says so at start-up,
   naming both files, how many records in each the database does not have,
   and the command below; it says nothing when there is no file, when the
-  file is empty, or once the records are in. Migrate with:
+  file is empty, or once the records are in.
+
+  The pages say it too, which is where somebody is actually looking: the
+  dashboards page carries the count instead of "Create your first dashboard
+  to get started", and the saved-search list says how many are in the file
+  instead of "No saved searches yet". Both give the path and the command to
+  an administrator only, and both go quiet the moment the migration
+  finishes, without a restart. Migrate with:
 
   ```bash
   PYTHONPATH=src python -m wdash.store.migrate_cli --dry-run

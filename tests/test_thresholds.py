@@ -14,7 +14,7 @@ import os
 import sys
 import unittest
 
-from tests.support import grant
+from tests.support import change_dashboard, grant, install_dashboard
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -117,6 +117,8 @@ class EvaluateTest(unittest.TestCase):
 class PayloadTest(unittest.TestCase):
     """The dashboard response carries the status the badge renders."""
 
+    STORAGE = "database"
+
     def setUp(self):
         from wdash.app import create_app
         from wdash.config import Config
@@ -128,12 +130,7 @@ class PayloadTest(unittest.TestCase):
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "thresholds"
-            # The fixture dashboard is edited in place and then
-            # fetched through a route, which is a property of the
-            # file manager's cache: it hands out the object it
-            # stores. Said here rather than inherited from the
-            # default, which is now the database.
-            DASHBOARD_STORAGE = "file"
+            DASHBOARD_STORAGE = self.STORAGE
 
         self.app = create_app(TestConfig)
         hub = Hub()
@@ -141,8 +138,9 @@ class PayloadTest(unittest.TestCase):
         self.app.hub = hub
 
         # The fixture is 8 errors in 100 records: an 8% error rate.
-        self.dashboard = Dashboard("t1", "T", "", "*", "u", index_patterns=["app-*"])
-        self.app.dashboard_manager.dashboards["t1"] = self.dashboard
+        self.dashboard = install_dashboard(
+            self.app,
+            Dashboard("t1", "T", "", "*", "u", index_patterns=["app-*"]))
 
         self.client = self.app.test_client()
         grant(self.app, "u", permissions=["dashboard:view"], indices=["*"], trace_indices=["*"], services=["*"])
@@ -155,7 +153,7 @@ class PayloadTest(unittest.TestCase):
             session["_user_id"] = "1"
 
     def status(self, thresholds):
-        self.dashboard.thresholds = thresholds
+        change_dashboard(self.app, self.dashboard, thresholds=thresholds)
         return self.client.get("/api/dashboard/t1/data").get_json()["status"]
 
     def test_no_thresholds_means_no_status(self):
@@ -169,6 +167,19 @@ class PayloadTest(unittest.TestCase):
     def test_a_count_threshold_uses_the_error_count(self):
         self.assertEqual(self.status({"error_count": {"critical": 5}})["level"],
                          "critical")
+
+
+
+class PayloadOnTheFileStoreTest(PayloadTest):
+    """The same thresholds against the JSON store, which is still supported.
+
+    Pinned to the file store when the default moved — its fixture set
+    `self.dashboard.thresholds` in place, which is a write only on the manager
+    that hands out the object it stores — so the badge nobody had to configure
+    was measured on the one store nobody gets.
+    """
+
+    STORAGE = "file"
 
 
 if __name__ == "__main__":

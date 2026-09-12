@@ -233,8 +233,10 @@ class VictoriaLogsDashboardTest(unittest.TestCase):
     express. The aggregation raised, so the whole data endpoint answered
     Flask's HTML 500, and the page could only say it failed to parse it."""
 
+    STORAGE = "database"
+
     def setUp(self):
-        from tests.support import grant
+        from tests.support import change_dashboard, grant, install_dashboard
         from tests.test_conformance_victorialogs import FakeVictoriaLogs
         from wdash.hub import Hub
         from wdash.models import Dashboard
@@ -242,12 +244,7 @@ class VictoriaLogsDashboardTest(unittest.TestCase):
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "vl-dashboard"
-            # The fixture dashboard is edited in place and then
-            # fetched through a route, which is a property of the
-            # file manager's cache: it hands out the object it
-            # stores. Said here rather than inherited from the
-            # default, which is now the database.
-            DASHBOARD_STORAGE = "file"
+            DASHBOARD_STORAGE = self.STORAGE
 
         self.harness = FakeVictoriaLogs()
         self.app = create_app(TestConfig)
@@ -255,10 +252,9 @@ class VictoriaLogsDashboardTest(unittest.TestCase):
         hub.add_logs(VictoriaLogsSource("http://vl:9428", name="victorialogs",
                                         session=self.harness))
         self.app.hub = hub
-        self.dashboard = Dashboard(
+        self.dashboard = install_dashboard(self.app, Dashboard(
             dashboard_id="d1", name="VL", description="", query="*",
-            created_by="u", index_patterns=["*"])
-        self.app.dashboard_manager.dashboards["d1"] = self.dashboard
+            created_by="u", index_patterns=["*"]))
         self.client = self.app.test_client()
         grant(self.app, "u", ["dashboard:view"], ("*",))
         with self.client.session_transaction() as session:
@@ -280,7 +276,9 @@ class VictoriaLogsDashboardTest(unittest.TestCase):
         self.assertIn("VictoriaLogs cannot express", " ".join(payload["warnings"]))
 
     def test_so_is_a_stored_query_it_cannot_express(self):
-        self.dashboard.query = "host:w?b"
+        from tests.support import change_dashboard
+
+        change_dashboard(self.app, self.dashboard, query="host:w?b")
         for endpoint in ("data", "stats"):
             with self.subTest(endpoint=endpoint):
                 response = self.client.get(f"/api/dashboard/d1/{endpoint}")
@@ -310,3 +308,15 @@ class VictoriaLogsDashboardTest(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["error_count"], 5)
         self.assertEqual(payload["warnings"], ["p1 failed: backend timed out"])
+
+
+class VictoriaLogsDashboardOnTheFileStoreTest(VictoriaLogsDashboardTest):
+    """The same, on the JSON store, which is still supported.
+
+    Pinned there when the default moved, because its fixture replaced the
+    stored query in place — a write only on the manager that hands out the
+    object it stores. A source that cannot express a stored query is a
+    failure that must not look like a quiet hour on either store.
+    """
+
+    STORAGE = "file"

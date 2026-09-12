@@ -114,8 +114,54 @@ def _stored_ids(store):
                  connection.execute(select(searches_table.c.id))})
 
 
-def files_left_behind(store, dashboards_file):
-    """What to say at start-up about JSON files nothing is reading, or None.
+class LeftBehind:
+    """Records a JSON file holds that the metadata database has no copy of.
+
+    One set of facts, two readers. The start-up log line is one of them; the
+    other is the page somebody is actually looking at, which used to say
+    "Create your first dashboard to get started" over a file holding three of
+    theirs. A log line four gunicorn workers each wrote once, hours ago, is
+    not a substitute for the one place the question gets asked.
+
+    `dashboards` and `searches` are a count, or None for a file that could
+    not be read — the same three answers `_json_rows` gives, carried this far
+    rather than flattened into "nothing", because a failure must not arrive
+    looking like emptiness on the screen either.
+    """
+
+    def __init__(self, dashboards, searches, dashboards_file, searches_file,
+                 command):
+        self.dashboards = dashboards
+        self.searches = searches
+        self.dashboards_file = dashboards_file
+        self.searches_file = searches_file
+        #: What to run, exactly as the operator should type it.
+        self.command = command
+
+    @staticmethod
+    def _notice(count, one, many):
+        if count is None:
+            return (f"A JSON file that may hold {many} cannot be read, so "
+                    f"whether it holds any nobody can see is unknown")
+        if not count:
+            return None
+        return (f"{count} {one if count == 1 else many} "
+                f"{'is' if count == 1 else 'are'} in a JSON file that "
+                f"nothing is reading")
+
+    @property
+    def dashboards_notice(self):
+        """One line for the dashboards page, or None with nothing to say."""
+        return self._notice(self.dashboards, "dashboard", "dashboards")
+
+    @property
+    def searches_notice(self):
+        """One line for the saved-search list, or None."""
+        return self._notice(self.searches, "saved search", "saved searches")
+
+
+def left_behind_report(store, dashboards_file):
+    """What JSON files nothing is reading still hold, or None.
 
     DASHBOARD_STORAGE decides where dashboards AND saved searches live —
     one setting, two files — so an installation that upgrades into the
@@ -124,9 +170,9 @@ def files_left_behind(store, dashboards_file):
     dashboards page, so nobody goes looking for them until a shift when the
     query they always run is gone.
 
-    Silent about a deployment that has no file, an empty file, or one whose
+    None for a deployment that has no file, an empty file, or one whose
     records are all in the database already. A file that cannot be read is
-    named as unreadable rather than skipped, because "nothing to migrate"
+    reported as unreadable rather than skipped, because "nothing to migrate"
     and "could not tell" are different sentences.
     """
     searches_file = saved_searches_beside(dashboards_file)
@@ -144,21 +190,13 @@ def files_left_behind(store, dashboards_file):
 
     dashboard_ids, search_ids = _stored_ids(store)
 
-    lines = []
-    for path, present, one, many in (
-            (dashboards_file, dashboard_ids, "dashboard", "dashboards"),
-            (searches_file, search_ids, "saved search", "saved searches")):
+    counted = []
+    for path, present in ((dashboards_file, dashboard_ids),
+                          (searches_file, search_ids)):
         outstanding = _left_behind(rows[path], present)
-        if outstanding is None:
-            lines.append(f"{os.path.abspath(path)} cannot be read, so "
-                         f"whether it holds {many} nobody can see is unknown")
-        elif outstanding:
-            count = len(outstanding)
-            lines.append(f"{os.path.abspath(path)} holds {count} "
-                         f"{one if count == 1 else many} that the metadata "
-                         f"database does not")
+        counted.append(None if outstanding is None else len(outstanding))
 
-    if not lines:
+    if not any(count is None or count for count in counted):
         return None
 
     # Only the files that are there are named on the command line: the
@@ -166,20 +204,66 @@ def files_left_behind(store, dashboards_file):
     # command that names an absent file is a command that exits 1. An
     # unnamed searches file is derived from the dashboards one, which is
     # this same path, and its absence is the ordinary "nobody has saved one".
+    #
+    # Absolute, because the sentence beside it is. The two halves named
+    # different files: the sentence said
+    # /srv/wdash/data/dashboards.json and the command said
+    # `--dashboards data/dashboards.json`, which is that file only if the
+    # operator happens to run it from the application's working directory.
+    # It failed safe when they did not — the migration refuses a path it
+    # cannot find — but "one message, one path" costs nothing.
+    dashboards_file = os.path.abspath(dashboards_file)
+    searches_file = os.path.abspath(searches_file)
     arguments = ["--dashboards", dashboards_file]
     if not os.path.exists(dashboards_file):
         arguments.append("--allow-missing-dashboards")
     if os.path.exists(searches_file):
         arguments += ["--saved-searches", searches_file]
 
+    return LeftBehind(
+        dashboards=counted[0], searches=counted[1],
+        dashboards_file=dashboards_file, searches_file=searches_file,
+        command="PYTHONPATH=src python -m wdash.store.migrate_cli "
+                + " ".join(arguments))
+
+
+def left_behind_sentence(report):
+    """The start-up log line for a `LeftBehind`, or None for None.
+
+    The log's reader is an operator with a shell, so this one names the files
+    in full and carries the command. The page's reader may be neither, which
+    is why the page renders the same report differently rather than printing
+    this string into HTML.
+    """
+    if report is None:
+        return None
+
+    lines = []
+    for path, count, one, many in (
+            (report.dashboards_file, report.dashboards,
+             "dashboard", "dashboards"),
+            (report.searches_file, report.searches,
+             "saved search", "saved searches")):
+        if count is None:
+            lines.append(f"{path} cannot be read, so "
+                         f"whether it holds {many} nobody can see is unknown")
+        elif count:
+            lines.append(f"{path} holds {count} "
+                         f"{one if count == 1 else many} that the metadata "
+                         f"database does not")
+
     return (
         "DASHBOARD_STORAGE is 'database', and " + "; ".join(lines) + ". "
         "Nothing has been deleted and nothing is being read from these "
         "files. Move them in with:\n"
-        "  PYTHONPATH=src python -m wdash.store.migrate_cli "
-        + " ".join(arguments) + "\n"
+        "  " + report.command + "\n"
         "or set DASHBOARD_STORAGE=file to go on reading them, which is "
         "still supported.")
+
+
+def files_left_behind(store, dashboards_file):
+    """What to say at start-up about JSON files nothing is reading, or None."""
+    return left_behind_sentence(left_behind_report(store, dashboards_file))
 
 
 def create_app(config_class=Config):
@@ -378,14 +462,37 @@ def create_app(config_class=Config):
     # was a different store from 'database'.
     storage = str(app.config.get('DASHBOARD_STORAGE') or 'database')
     storage = storage.strip().lower()
-    if storage == 'database':
-        dashboard_manager = store.dashboards
+
+    def json_stores_left_behind():
+        """The `LeftBehind` report, or None — and never an exception.
+
+        Two callers with the same requirement and different consequences:
+        `create_app` must not fail to start over a check, and a page must not
+        answer 500 over one. Both are told at ERROR and carry on, and a file
+        store is told nothing at all because its files ARE being read.
+        """
+        if storage != 'database':
+            return None
         try:
-            left_behind = files_left_behind(store, storage_file)
+            return left_behind_report(store, storage_file)
         except Exception as exc:        # never at the cost of starting
             app.logger.error(f"Could not check for JSON stores left "
                              f"behind: {exc}")
-            left_behind = None
+            return None
+
+    # The function, not its result. A context processor runs for every
+    # template this application renders and only two of them ask, so a value
+    # here would put two `os.path.exists` calls — and, for an installation
+    # that really does have files left behind, two id columns — on the render
+    # of every page in the product. It is also the reason the page goes quiet
+    # the moment the migration finishes rather than at the next restart: the
+    # answer is read when the question is asked.
+    app.context_processor(
+        lambda: {"json_stores_left_behind": json_stores_left_behind})
+
+    if storage == 'database':
+        dashboard_manager = store.dashboards
+        left_behind = left_behind_sentence(json_stores_left_behind())
         if left_behind:
             app.logger.warning(left_behind)
     elif storage == 'elasticsearch':

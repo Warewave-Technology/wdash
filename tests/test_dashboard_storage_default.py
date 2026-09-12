@@ -821,7 +821,7 @@ class ATestAppLeavesNoDirectoryBehindTest(_Installation):
         root = os.path.join(self.directory, "tmp")
         os.makedirs(root)
         seen = []
-        real = app_module.files_left_behind
+        real = app_module.left_behind_report
 
         def watched(store, dashboards_file):
             seen.append(dashboards_file)
@@ -830,7 +830,7 @@ class ATestAppLeavesNoDirectoryBehindTest(_Installation):
         previous = tempfile.tempdir
         tempfile.tempdir = root
         try:
-            with mock.patch.object(app_module, "files_left_behind", watched):
+            with mock.patch.object(app_module, "left_behind_report", watched):
                 create_app(self.config(
                     DASHBOARD_STORAGE_FILE=DEFAULT_DASHBOARD_FILE))
         finally:
@@ -1034,6 +1034,329 @@ class RunShellScriptTest(unittest.TestCase):
         self.assertLess(self.script.index("source .env"),
                         self.script.index("DASHBOARD_STORAGE"),
                         "run.sh decides before it has read .env")
+
+
+class ThePageSaysWhatTheLogSaysTest(_Installation):
+    """The half of D1 the start-up warning does not reach.
+
+    D1's stated outcome was that an installation with a dashboards.json
+    beside a database store is TOLD "instead of showing an empty list that
+    says Create your first". Only the log half was built. Measured on a
+    non-migrated installation: the start-up line named both files, and
+    /dashboards rendered "Create your first dashboard to get started" with no
+    mention of dashboards.json anywhere in the response, while
+    /api/saved-searches answered a bare [] — indistinguishable from "you have
+    never saved one", which is the project's own "a failure must never look
+    like emptiness" applied to the screen rather than to the log.
+
+    Four gunicorn workers each logging a line once, hours before anybody
+    looked, is not a substitute for the one place the question gets asked.
+    """
+
+    def signed_in(self, app, permissions=("dashboard:view",)):
+        from tests.support import grant
+
+        grant(app, "u", permissions=list(permissions))
+        client = app.test_client()
+        with client.session_transaction() as session:
+            session["user_data"] = {"id": "1", "email": "u@x",
+                                    "username": "u", "groups": []}
+            session["_user_id"] = "1"
+        return client
+
+    def page(self, app=None, **extra):
+        app = app or create_app(self.config(**extra))
+        return self.signed_in(app).get("/dashboards").get_data(as_text=True)
+
+    def test_the_page_names_what_is_in_the_file_rather_than_saying_create_your_first(self):
+        self.write_dashboards([self.a_dashboard(), self.a_dashboard("l2", "B")])
+        shown = self.page()
+        self.assertIn("2 dashboards are in a JSON file that nothing is "
+                      "reading", shown)
+        self.assertIn("Nothing has been deleted", shown)
+        self.assertNotIn("Create your first", shown,
+                         "the list is empty, but somebody did create these")
+
+    def test_one_dashboard_is_not_told_about_in_the_plural(self):
+        self.write_dashboards([self.a_dashboard()])
+        self.assertIn("1 dashboard is in a JSON file that nothing is reading",
+                      self.page())
+
+    def test_an_administrator_is_given_the_file_and_the_command(self):
+        """The count is for everybody who can see the page; the path and the
+        command are for somebody who can act on them."""
+        self.write_dashboards([self.a_dashboard()])
+        app = create_app(self.config(SECRET_KEY="admin-sees"))
+        admin = self.signed_in(app, ("dashboard:view", "system:admin"))
+        seen = admin.get("/dashboards").get_data(as_text=True)
+        self.assertIn(os.path.abspath(self.dashboards), seen)
+        self.assertIn("wdash.store.migrate_cli", seen)
+
+    def test_somebody_who_cannot_run_it_is_not_shown_a_command(self):
+        self.write_dashboards([self.a_dashboard()])
+        shown = self.page()
+        self.assertIn("1 dashboard is in a JSON file", shown)
+        self.assertNotIn("wdash.store.migrate_cli", shown)
+        self.assertNotIn(os.path.abspath(self.dashboards), shown)
+
+    def test_a_file_that_cannot_be_read_is_not_shown_as_nothing(self):
+        with open(self.dashboards, "w") as handle:
+            handle.write("{not json")
+        self.assertIn("cannot be read", self.page())
+
+    def test_an_installation_with_no_file_is_told_nothing(self):
+        shown = self.page()
+        self.assertNotIn("nothing is reading", shown)
+        self.assertIn("Create your first", shown)
+
+    def test_a_file_installation_is_told_nothing_because_it_is_reading_them(self):
+        """DASHBOARD_STORAGE=file behaves exactly as it does today."""
+        self.write_dashboards([self.a_dashboard()])
+        shown = self.page(storage="file")
+        self.assertNotIn("nothing is reading", shown)
+
+    def test_the_page_goes_quiet_the_moment_the_migration_runs(self):
+        """Without a restart: the question is asked when the page is
+        rendered, and the migration leaves the JSON files where they are."""
+        from tests.support import StubLogSource
+        from wdash.hub import Hub
+
+        record = self.a_dashboard(name="On the wall")
+        record["index_patterns"] = ["*"]
+        self.write_dashboards([record])
+        app = create_app(self.config())
+        hub = Hub()
+        hub.add_logs(StubLogSource())
+        app.hub = hub
+        client = self.signed_in(app)
+        self.assertIn("nothing is reading",
+                      client.get("/dashboards").get_data(as_text=True))
+
+        from wdash.store.migrate_cli import main
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = main(["--database-url", f"sqlite:///{self.database}",
+                         "--dashboards", self.dashboards])
+        self.assertEqual(code, 0, out.getvalue())
+
+        after = client.get("/dashboards").get_data(as_text=True)
+        self.assertNotIn("nothing is reading", after)
+        self.assertIn("On the wall", after)
+        self.assertTrue(os.path.exists(self.dashboards),
+                        "the migration is reversible; the file stays")
+
+    def test_a_check_that_throws_costs_the_block_and_not_the_page(self):
+        self.write_dashboards([self.a_dashboard()])
+        app = create_app(self.config())
+        client = self.signed_in(app)
+        with mock.patch("wdash.app._stored_ids",
+                        side_effect=RuntimeError("no database")):
+            answered = client.get("/dashboards")
+        self.assertEqual(answered.status_code, 200)
+        self.assertNotIn("nothing is reading", answered.get_data(as_text=True))
+
+    def test_the_saved_search_list_is_handed_what_the_api_cannot_say(self):
+        """/api/saved-searches answers `[]` for "you have none" and for "they
+        are in a file nothing is reading", and the dropdown printed "No saved
+        searches yet" over both. The server hands the list its empty state so
+        the API's shape does not have to change."""
+        from tests.support import StubLogSource
+        from wdash.hub import Hub
+
+        self.write_searches([self.a_search(), self.a_search("s2", "Other")])
+        app = create_app(self.config())
+        hub = Hub()
+        hub.add_logs(StubLogSource())
+        app.hub = hub
+        client = self.signed_in(app, ("logs:read",))
+
+        shown = client.get("/logs").get_data(as_text=True)
+        self.assertIn('data-left-behind="2 saved searches are in a JSON file '
+                      'that nothing is reading"', shown)
+        self.assertEqual(client.get("/api/saved-searches").get_json(), [],
+                         "the API's shape is unchanged")
+        self.assertNotIn("0 dashboards", shown)
+
+    def test_a_logs_page_with_nothing_left_behind_carries_no_attribute(self):
+        self.assertNotIn("data-left-behind", self.logs_page())
+
+    def test_one_file_left_behind_does_not_make_the_other_page_lie(self):
+        """The report exists as soon as EITHER file has something in it, and
+        each page asks it about its own half. A dashboards file nobody
+        migrated must not put "0 saved searches are in a JSON file" on the
+        log page, and a searches file must not put a block on the dashboards
+        page."""
+        self.write_dashboards([self.a_dashboard()])
+        self.assertNotIn("data-left-behind", self.logs_page(),
+                         "the saved-search list was told about dashboards")
+
+        self.tearDown()
+        self.setUp()
+        self.write_searches([self.a_search()])
+        shown = self.page()
+        self.assertNotIn("nothing is reading", shown,
+                         "the dashboards page was told about saved searches")
+        self.assertIn("Create your first", shown)
+
+    def logs_page(self, **extra):
+        from tests.support import StubLogSource
+        from wdash.hub import Hub
+
+        app = create_app(self.config(**extra))
+        hub = Hub()
+        hub.add_logs(StubLogSource())
+        app.hub = hub
+        client = self.signed_in(app, ("logs:read",))
+        return client.get("/logs").get_data(as_text=True)
+
+
+class OneMessageNamesOnePathTest(_Installation):
+    """The sentence and the command named different files.
+
+    The sentence used `os.path.abspath`; the command handed back the raw
+    DASHBOARD_STORAGE_FILE, which is `data/dashboards.json` in the packaged
+    default. So the message told the operator about /srv/wdash/data/…  and
+    then gave them a command that resolves to that file only if they happen
+    to run it from the application's working directory. It failed safe when
+    they did not — the migration refuses a path it cannot find — but a
+    message that names one file should name it once.
+    """
+
+    def relative(self):
+        """The warning, asked about a relative path from inside the data
+        directory, which is the packaged shape."""
+        app = create_app(self.config())
+        here = os.getcwd()
+        os.chdir(self.directory)
+        try:
+            return files_left_behind(app.store, "dashboards.json")
+        finally:
+            os.chdir(here)
+
+    def test_the_command_names_the_same_file_the_sentence_does(self):
+        self.write_dashboards([self.a_dashboard()])
+        said = self.relative()
+        command = said.split("migrate_cli", 1)[1].splitlines()[0].split()
+        named = command[command.index("--dashboards") + 1]
+        self.assertTrue(os.path.isabs(named), said)
+        self.assertIn(named, said.split("holds")[0],
+                      "the sentence and the command name different files")
+
+    def test_the_searches_file_is_absolute_too(self):
+        self.write_dashboards([self.a_dashboard()])
+        self.write_searches([self.a_search()])
+        said = self.relative()
+        command = said.split("migrate_cli", 1)[1].splitlines()[0].split()
+        named = command[command.index("--saved-searches") + 1]
+        self.assertTrue(os.path.isabs(named), said)
+        self.assertIn(named, said)
+
+    def test_it_still_runs_from_somewhere_else_entirely(self):
+        """Which is the point: the same command, run from a directory that
+        has no data/ in it at all."""
+        from wdash.store.migrate_cli import main
+
+        self.write_dashboards([self.a_dashboard(name="On the wall")])
+        elsewhere = tempfile.mkdtemp(prefix="wdash-a2-elsewhere-")
+        self.addCleanup(shutil.rmtree, elsewhere, True)
+        said = self.relative()
+        arguments = said.split("migrate_cli", 1)[1].splitlines()[0].split()
+
+        here = os.getcwd()
+        os.chdir(elsewhere)
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = main(["--database-url", f"sqlite:///{self.database}"]
+                            + arguments)
+        finally:
+            os.chdir(here)
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("1 moved", out.getvalue())
+
+
+class TheMigrationCarriesASavedSearchSourceTest(_Installation):
+    """`migrate_saved_searches` dropped `source` while `migrate_dashboards`
+    carried it, with the comment two functions above explaining exactly why
+    it must. The column, the parameter and the reason were all there and
+    nothing was passed.
+
+    Nothing is lost today, because no writer sets a source on a saved search
+    — which makes it a trap rather than a live defect, and "every field
+    arrives" true only because the field is unreachable. It is in the one
+    command every upgrading installation is now sent through.
+    """
+
+    def test_a_saved_search_that_names_a_source_keeps_it(self):
+        from wdash.store.migrate_cli import main
+
+        record = self.a_search()
+        record["source"] = "secondary"
+        self.write_searches([record, self.a_search("s2", "No source")])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = main(["--database-url", f"sqlite:///{self.database}",
+                         "--dashboards", self.dashboards,
+                         "--allow-missing-dashboards",
+                         "--saved-searches", self.searches])
+        self.assertEqual(code, 0, out.getvalue())
+
+        store = Store.open(f"sqlite:///{self.database}")
+        self.assertEqual(store.saved_searches.get("search-1").source,
+                         "secondary")
+        self.assertIsNone(store.saved_searches.get("s2").source,
+                          "a record that named none must not invent one")
+
+
+class BothStoresSayWhichOneAnsweredTest(_Installation):
+    """`get_stats()` answers a different shape from each store, and both
+    /api/debug endpoints hand the dict straight to `jsonify`.
+
+    So moving the default silently took four keys off an installation that
+    set nothing — storage_path, file_exists, loaded_signature,
+    disk_signature, should_reload — with nothing left in the response to say
+    which store had answered. The file keys cannot be invented for a database
+    without lying, so the agreement is the honest intersection plus
+    `backend`; the file store keeps everything it had.
+    """
+
+    AGREED = ("backend", "total_dashboards")
+
+    def stats(self, storage):
+        from tests.support import grant
+
+        app = create_app(self.config(storage=storage,
+                                     SECRET_KEY=f"stats-{storage}"))
+        grant(app, "u", permissions=["system:admin"])
+        client = app.test_client()
+        with client.session_transaction() as session:
+            session["user_data"] = {"id": "1", "email": "u@x",
+                                    "username": "u", "groups": []}
+            session["_user_id"] = "1"
+        return (client.get("/api/debug/dashboard-manager").get_json(),
+                client.post("/api/debug/refresh-dashboards").get_json())
+
+    def test_every_store_answers_the_agreed_keys_from_both_endpoints(self):
+        from wdash.store.objects import DASHBOARD_STATS
+
+        self.assertEqual(tuple(DASHBOARD_STATS), self.AGREED)
+        for storage, expected in (("database", "database"), ("file", "file")):
+            with self.subTest(storage=storage):
+                debug, refreshed = self.stats(storage)
+                for answer in (debug["manager_stats"], refreshed["stats"]):
+                    for key in DASHBOARD_STATS:
+                        self.assertIn(key, answer, f"{storage}: {key}")
+                    self.assertEqual(answer["backend"], expected)
+                    self.assertEqual(answer["total_dashboards"], 0)
+
+    def test_a_file_installation_keeps_every_key_it_had(self):
+        """Taking them away to make the shapes match would break the
+        installations that are scripted against them."""
+        debug, refreshed = self.stats("file")
+        for answer in (debug["manager_stats"], refreshed["stats"]):
+            for key in ("storage_path", "file_exists", "loaded_signature",
+                        "disk_signature", "should_reload"):
+                self.assertIn(key, answer, key)
 
 
 if __name__ == "__main__":      # pragma: no cover - the suite runs this

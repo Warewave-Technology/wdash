@@ -918,7 +918,15 @@ class LogSearch {
             var response = await fetch('/api/saved-searches');
             var searches = await response.json();
             if (!searches.length) {
-                listEl.innerHTML = '<span class="dropdown-item-text text-muted"><small>No saved searches yet</small></span>';
+                // "No saved searches yet" and "they are in a file this
+                // installation stopped reading" are different answers, and
+                // the API cannot tell them apart: it returns [] for both.
+                // The page carries what the server found, so an empty list
+                // that is really an unmigrated one says so.
+                var leftBehind = listEl.dataset.leftBehind;
+                listEl.innerHTML = '<span class="dropdown-item-text text-muted"><small>' +
+                    (leftBehind ? WDash.escapeHtml(leftBehind) + '. Nothing has been deleted.'
+                                : 'No saved searches yet') + '</small></span>';
                 return;
             }
             var self = this;

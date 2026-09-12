@@ -53,7 +53,18 @@
                         </button>
                         <ul class="dropdown-menu dropdown-menu-end" id="savedSearchMenu" style="min-width:280px;">
                             <li><h6 class="dropdown-header">Saved Searches</h6></li>
-                            <li id="savedSearchList"><span class="dropdown-item-text text-muted"><small>Loading...</small></span></li>
+                            {# "No saved searches yet" is the one answer nobody
+                               can act on when the searches are sitting in a
+                               JSON file this installation stopped reading.
+                               /api/saved-searches answers `[]` there, and `[]`
+                               is indistinguishable from "you have never saved
+                               one" — a failure wearing the clothes of
+                               emptiness. The server hands the list its empty
+                               state so the API's shape does not have to
+                               change. #}
+                            {% set left_behind = json_stores_left_behind() %}
+                            <li id="savedSearchList"
+                                {% if left_behind and left_behind.searches_notice %}data-left-behind="{{ left_behind.searches_notice }}"{% endif %}><span class="dropdown-item-text text-muted"><small>Loading...</small></span></li>
                             <li><hr class="dropdown-divider"></li>
                             <li>
                                 <div class="px-3 py-2">

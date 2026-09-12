@@ -175,7 +175,16 @@ def migrate_saved_searches(store, path, dry_run=False):
             name=record.get("name", "Untitled"),
             query=record.get("query", "*"),
             time_range=record.get("time_range", "1h"),
-            created_by=record.get("created_by", "unknown"))
+            created_by=record.get("created_by", "unknown"),
+            # The same reason `migrate_dashboards` carries it, two functions
+            # above: a record that named its source must come out of the move
+            # reading from the same store and not from the default one. This
+            # half had the column, the parameter and the comment, and passed
+            # nothing — so "every field arrives" was true only because no
+            # writer sets a source on a saved search TODAY. That makes it a
+            # trap rather than a live defect, and it sits in the one command
+            # every upgrading installation is now sent through.
+            source=record.get("source"))
         moved += 1
     return moved, skipped
 

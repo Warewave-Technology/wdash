@@ -252,9 +252,22 @@ class DashboardManager:
             self.load_dashboards(force=True)
     
     def get_stats(self):
-        """Get dashboard manager statistics for debugging"""
+        """Get dashboard manager statistics for debugging.
+
+        `backend` and `total_dashboards` are the two keys the database store
+        answers too — see `store.objects.DASHBOARD_STATS`. Both /api/debug
+        endpoints hand this dict straight to `jsonify`, so before `backend`
+        existed an installation that upgraded into the 'database' default had
+        five keys silently vanish from a response it may be scripted against,
+        with nothing left in it to say which store had answered.
+
+        The five that describe a file stay. They are true here and cannot be
+        made true there, and taking them away to make the two shapes match
+        would break the file installations that still have them.
+        """
         with self._lock:
             return {
+                'backend': 'file',
                 'total_dashboards': len(self.dashboards),
                 'storage_path': self.storage_path,
                 'file_exists': os.path.exists(self.storage_path),
