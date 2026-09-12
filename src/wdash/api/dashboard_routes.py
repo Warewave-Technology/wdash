@@ -349,6 +349,66 @@ _TRACE_LIST_QUERIES = {
 }
 
 
+def _empty_trace_list_reason(traces, scope, service, window, listed):
+    """Why a trace list came back empty, when "empty" is not the answer.
+
+    Asked ONLY after an empty answer — the same bargain
+    `trace_routes._reaches_no_store` strikes — so a source whose service list
+    costs a round trip pays for it when there is something to explain and not
+    on every load of a board that works. `listed` caches that list across the
+    panels of one dashboard load.
+
+    Two reasons, in the order of what the reader can do about them.
+
+    The STORE boundary first. `traces:read` says whether a role may read
+    traces at all and the service rule says which services; this says which
+    stores, and it is the one this panel never asked. Measured on the lab
+    through the route, Jaeger, service=billing-api, 24h: a role whose stores
+    match nothing got rows=0 and error=None, and the card drew "No trace
+    through billing-api in this window" — a role boundary rendered as a quiet
+    service. The traces page has answered the same role with a sentence about
+    its role all along.
+
+    Then the gap in what the source can list. A trace list is built from the
+    span where a request ENTERED a service, so a service that is only ever
+    called by another one has none. Measured on the lab's Elasticsearch trace
+    indices at 24h: `postgres` (2,579 spans, all Client), `redis` (1,794),
+    `elasticsearch` (1,177) and `stripe-api` (873) each answer a trace list
+    with nothing at all — four of the nine services the trace_services panel
+    on the SAME board ranks by traffic. "No trace through postgres in this
+    window" printed beside a bar saying postgres did 1,048 spans is the
+    loudest kind of wrong, and an author picking a service from that bar
+    chart has no way to know which half of it this panel can answer for.
+
+    Silence stays silence when the source does not list the service: a window
+    in which nothing ran is a real answer and must not be dressed as a fault.
+    """
+    if trace_routes._reaches_no_store(traces, scope):
+        return trace_routes.NO_STORE_SUGGESTION.format(source=traces.name)
+
+    if not traces.supports(Capability.SERVICE_LIST):
+        return None
+    if "names" not in listed:
+        try:
+            listed["names"] = {getattr(found, "name", None)
+                               for found in traces.services(window, scope)}
+        except Exception as exc:
+            # A service list that could not be read is not evidence of
+            # anything, least of all of a gap. Same reasoning as the except
+            # branch in `_reaches_no_store`: an outage must not be reported
+            # as a property of the data.
+            current_app.logger.warning(f"Trace service list failed: {exc}")
+            listed["names"] = set()
+    if service not in listed["names"]:
+        return None
+
+    return (f"This source lists '{service}' but returned no trace that "
+            f"entered through it in this window. A service only ever called "
+            f"by another one — a database, a cache — has no entry span to "
+            f"list, so this may be a gap in what can be read here rather "
+            f"than a quiet window.")
+
+
 def _trace_list_panels(panels, window, scope):
     """Fill in the trace-LIST panels: individual traces, one service each.
 
@@ -389,7 +449,14 @@ def _trace_list_panels(panels, window, scope):
     if traces is None or not traces.supports(Capability.TRACE_SEARCH):
         return refuse("No trace backend that can list traces is configured.")
 
-    out, groups = {}, {}
+    if scope.trace_is_empty:
+        # The third boundary, and the one this panel shipped without. A role
+        # with no trace store assigned is not a role looking at a quiet
+        # service — and an empty table is what it got. Refused before the
+        # search rather than after it: there is nothing to ask.
+        return refuse(trace_routes.NO_STORES_ASSIGNED)
+
+    out, groups, listed = {}, {}, {}
     for panel in wanted:
         service = panel["service"]
         if not trace_routes._may_see_service(scope, traces, service):
@@ -418,6 +485,13 @@ def _trace_list_panels(panels, window, scope):
             out.update(refuse(f"Traces could not be read: {exc}", members))
             continue
 
+        if not found:
+            reason = _empty_trace_list_reason(traces, scope, service, window,
+                                              listed)
+            if reason:
+                out.update(refuse(reason, members))
+                continue
+
         rows = []
         for summary in found:
             # The fan-out stamps this; a single source does not know it is
@@ -442,7 +516,50 @@ def _trace_list_panels(panels, window, scope):
     return out
 
 
-def _records_panels(panels, query, dashboard, scope):
+def _count_disagreement(page, headline):
+    """The sentence a records footer owes its reader when the two counts differ.
+
+    "Showing 5 of 15,402 matching records" and the total hits on the stat card
+    above it answer the SAME question — how many records this board's query
+    matches — by two different routes: this panel's SEARCH reports its hit
+    count, the aggregation batch that drew every chart reports its total. On a
+    healthy backend they agree to the record, and the panel was written so the
+    table and the bars could not disagree.
+
+    They can still disagree above the panel's head. Elasticsearch answers 200
+    with what the shards that worked found, so an index whose mapping a terms
+    aggregation cannot read drops OUT of the aggregation's total while the
+    search keeps it. Measured on the lab over `*-logs-*` at 24h:
+    total_hits 13,898 against a records total of 14,998, the 1,100 records of
+    `bad-logs-000001`, whose `level` is mapped as text; with `q=level:ERROR`
+    on, 1,222 against 1,316. Both numbers looked exact and nothing on either
+    card said why they were not the same number.
+
+    So the card says it. NOT by marking itself `partial`: this panel's own
+    answer is the complete one — it is the board's count that came back short
+    — and claiming otherwise would trade one wrong number for another. The
+    reason the aggregation gave travels with the sentence, because "5 of 9
+    shards failed: Fielddata is disabled on [level] in [bad-logs-000001]" is
+    the thing an administrator can actually act on.
+
+    Only when this panel's total is a COUNT. Loki returns up to a limit and
+    stops, so its total is a floor, the footer never claims "of N" for it, and
+    comparing a floor against a count would fire on every Loki board.
+    """
+    if headline is None or not page.counted:
+        return None
+    total = getattr(headline, "total", None)
+    if total is None or total == page.total:
+        return None
+    sentence = (f"This search found {page.total:,} matching records and the "
+                f"board's own count says {total:,}: the two were measured "
+                f"different ways and one of them is short.")
+    reasons = [str(note) for note in (getattr(headline, "warnings", ()) or ())
+               if note]
+    return " ".join([sentence] + reasons)
+
+
+def _records_panels(panels, query, dashboard, scope, headline=None):
     """Fill in the records panels: the newest records the board matches.
 
     ONE search for however many records panels the board holds. They all ask
@@ -466,6 +583,10 @@ def _records_panels(panels, query, dashboard, scope):
     counted=True, VictoriaLogs 10 of 681 counted=True, and Loki 10 records
     with total=10 and counted=False — Loki returns up to a limit and stops,
     so "10 of 10" would be a total nobody measured.
+
+    `headline` is the aggregation the board's stat cards were drawn from, and
+    it is here for one reason: two exact-looking answers to one question have
+    to agree or say why not. `_count_disagreement` is where that is decided.
     """
     wanted = [p for p in panels if p["type"] == "records"]
     if not wanted:
@@ -482,12 +603,23 @@ def _records_panels(panels, query, dashboard, scope):
         # A search that failed is not a window with nothing in it, and this
         # one runs after the aggregation batch has already answered — so the
         # rest of the board is on screen and only this card is empty.
+        #
+        # The backend's own words travel, the way the trace filler beside
+        # this one already sends Tempo's 168-hour refusal through. A logged
+        # reason is a reason the reader never sees: Loki answers a wide range
+        # HTTP 400 with "the query time range exceeds the limit (query
+        # length: 2161h0m0s, limit: 30d1h)", which names the fix, and "The
+        # records could not be read." names nothing anybody can act on.
         current_app.logger.warning(f"Records panel failed: {exc}")
-        return {p["id"]: {"error": "The records could not be read."}
+        return {p["id"]: {"error": f"The records could not be read: {exc}"}
                 for p in wanted}
 
     rows = [record.to_dict() for record in page.records]
     notes = [str(note) for note in (page.warnings or ()) if note]
+    disagreement = _count_disagreement(page, headline)
+    if disagreement:
+        # First: it is a statement about the footer directly under it.
+        notes.insert(0, disagreement)
 
     out = {}
     for panel in wanted:
@@ -1622,7 +1754,11 @@ def api_dashboard_data(dashboard_id):
              # above. It is still a log panel — it needs the containers, and
              # it dies with the log source rather than drawing an empty table
              # through an outage.
-             **_records_panels(panels, query, dashboard, scope)}),
+             # `result` rides along so the footer's "of N" and the total hits
+             # on the stat card cannot present two different numbers for one
+             # question as though both were exact.
+             **_records_panels(panels, query, dashboard, scope,
+                               headline=result)}),
         "dashboard_patterns": dashboard.index_patterns,
         "resolved_containers": _shown(resolved, allowed),
         "total_resolved": len(resolved),

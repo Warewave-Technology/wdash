@@ -1223,6 +1223,12 @@ class AsyncDashboard {
      * the window. `counted` comes from the source and decides which sentence
      * is printed — never the numbers, because len(rows) === total is also
      * what a quiet hour on Elasticsearch looks like.
+     *
+     * A reason reaches the screen whether or not the table has rows in it.
+     * It used to reach the screen only when the table was EMPTY, so a page
+     * the source answered short, and a footer that disagrees with the stat
+     * card above it, both drew a complete-looking table with the sentence
+     * that explains them dropped on the floor.
      */
     drawRecordTable(panel, slot) {
         const rows = panel.rows || [];
@@ -1247,6 +1253,10 @@ class AsyncDashboard {
         container.innerHTML =
             `<div class="text-muted mb-1" style="font-size:.7rem">${
                 escape(caption)}</div>` +
+            (notes.length
+                ? `<div class="text-warning mb-1" style="font-size:.7rem">${
+                    escape(notes.join(' '))}</div>`
+                : '') +
             '<table class="table table-sm mb-0" style="font-size:.75rem">' +
             '<thead><tr><th>Time</th><th>Severity</th><th>Service</th>' +
             '<th>Message</th></tr></thead><tbody>' +
@@ -1258,15 +1268,21 @@ class AsyncDashboard {
                 const when = row.timestamp
                     ? new Date(row.timestamp).toLocaleString()
                     : '';
-                // severity_text is what the source called it; severity is the
-                // normalised form the board counted by. The raw one is shown
-                // because "WARNING" becoming "WARN" on screen is a change
-                // nobody asked for, and the title carries both.
-                const shownLevel = row.severity_text || row.severity || '';
+                // The severity the BOARD counted by, not the source's own
+                // casing. Every bar and every stat card on this board is
+                // labelled with the normalised form, and this table is read
+                // as the records behind those numbers: measured against the
+                // lab at 24h, Loki and VictoriaLogs return severity_text
+                // 'error'/'info' for records the charts beside them label
+                // ERROR and INFO, so the table read in a different language
+                // from the panel above it. The raw word the source wrote is
+                // kept in the title, where it answers "what does the
+                // document actually say" without contradicting the chart.
+                const raw = row.severity_text || '';
                 return `<tr>
                     <td class="text-nowrap">${escape(when)}</td>
-                    <td class="${tone}" title="${escape(row.severity || '')}">${
-                        escape(shownLevel)}</td>
+                    <td class="${tone}" title="${escape(raw)}">${
+                        escape(level)}</td>
                     <td>${escape(row.service || '')}</td>
                     <td class="text-truncate" style="max-width:22rem" title="${
                         escape(row.body || '')}">${escape(row.body || '')}</td>
@@ -1306,16 +1322,27 @@ class AsyncDashboard {
 
         container.innerHTML =
             '<table class="table table-sm mb-0" style="font-size:.75rem">' +
-            '<thead><tr><th>Trace</th><th>Operation</th>' +
+            '<thead><tr><th>Trace</th><th>Service</th><th>Operation</th>' +
             '<th class="text-end">Duration</th></tr></thead><tbody>' +
             rows.map(row => {
                 const tone = row.has_error ? 'text-danger' : '';
+                // The service is a COLUMN because a row need not belong to
+                // the service the card is titled for: Tempo and Jaeger
+                // describe a trace by its root span, so a panel asking for
+                // cache-tier lists rows labelled mobile-bff (measured on the
+                // lab: 6 of 8 Tempo services and 5 of 7 Jaeger ones answer
+                // with another service's name). That is adapter behaviour
+                // the Traces page shares and documents — but with the name
+                // only in a title= tooltip, a card headed for one service
+                // silently listed another's work.
                 return `<tr data-trace="${escape(row.trace_id)}" data-source="${
                         escape(row.source || '')}" role="button" class="${tone}">
                     <td><code>${escape(String(row.trace_id).slice(0, 12))}</code>${
                         row.has_error
                             ? ' <span title="This trace has an error">!</span>'
                             : ''}</td>
+                    <td class="text-truncate" style="max-width:9rem">${
+                        escape(row.service || '')}</td>
                     <td class="text-truncate" style="max-width:14rem" title="${
                         escape(`${row.service || ''} ${row.name || ''}`)}">${
                         escape(row.name || '')}</td>

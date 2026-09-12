@@ -100,24 +100,51 @@ class _Traces:
     name = "test-traces"
     backend = "test"
 
-    def __init__(self, summaries=(), fail=None, partial=()):
+    def __init__(self, summaries=(), fail=None, partial=(), lists=(),
+                 stores=("traces-000001",)):
         self.capabilities = frozenset({Capability.TRACE_SEARCH,
                                        Capability.SERVICE_LIST})
         self._summaries = list(summaries)
         self.fail = fail
         self.partial = tuple(partial)
         self.queries = []
+        #: The services this source says it HOLDS, which is a different
+        #: question from which of them it can list traces for: on the lab's
+        #: Elasticsearch trace indices four of the nine services it ranks by
+        #: traffic answer a trace list with nothing at all, because every
+        #: span they emit is a Client span.
+        self._lists = tuple(lists)
+        self._stores = tuple(stores)
+        self.service_calls = []
 
     def supports(self, capability):
         return capability in self.capabilities
 
+    def containers(self, scope):
+        """The trace stores this role reaches.
+
+        Filtered through the scope the way an adapter does it, because
+        `trace_routes._reaches_no_store` asks TWICE — once through the role,
+        once unrestricted — and a double that answered the same list both
+        times could not tell a role boundary from a source with no stores.
+        """
+        return list(scope.resolve_traces(self._stores, source=self.name))
+
     def services(self, window, scope):
-        return []
+        self.service_calls.append(window)
+        from wdash.hub.models import Service
+        return [Service(name=name, span_count=100) for name in self._lists]
 
     def search(self, query, scope):
         self.queries.append(query)
         if self.fail:
             raise self.fail
+        if not self.containers(scope):
+            # A source that reaches no store finds nothing IN it. Answering
+            # rows here would hide the role boundary behind data the role
+            # cannot see, which is the thing being tested.
+            return PartialList([], partial=bool(self.partial),
+                               warnings=self.partial)
         rows = [s for s in self._summaries
                 if not query.service or s.service == query.service]
         if query.only_errors:
@@ -148,6 +175,9 @@ class _Board(unittest.TestCase):
                _record(3, service="search", level="INFO", message="ok")]
     PERMISSIONS = ["dashboard:view", "traces:read"]
     SERVICES = ["*"]
+    #: What a role may reach is decided per source, container AND service.
+    #: The trace-store half is the one a trace list never asked about.
+    TRACE_STORES = ["*"]
 
     def setUp(self):
         from wdash.app import create_app
@@ -174,7 +204,7 @@ class _Board(unittest.TestCase):
                                 index_patterns=["app-*"]))
         self.client = self.app.test_client()
         grant(self.app, "u", permissions=self.PERMISSIONS, indices=["*"],
-              trace_indices=["*"], services=self.SERVICES)
+              trace_indices=self.TRACE_STORES, services=self.SERVICES)
         with self.client.session_transaction() as session:
             session["user_data"] = {"id": "1", "email": "u@x", "username": "u",
                                     "groups": []}
@@ -297,6 +327,12 @@ class RecordsPanelTest(_Board):
 
         self.assertEqual(response.status_code, 200, payload)
         self.assertIn("could not be read", panels["recs"].get("error", ""))
+        # And it says what the BACKEND said. Asserting only the wrapper
+        # phrase passed while the reason was logged and dropped: the trace
+        # filler beside this one repeats Tempo's own refusal, and a reader
+        # told "the records could not be read" has nothing to act on where
+        # Loki would have told them their range exceeds its 30-day limit.
+        self.assertIn("cluster unreachable", panels["recs"].get("error", ""))
         self.assertEqual(len(panels["chart"]["buckets"]), 2)
 
     def test_the_panel_says_why_in_a_log_outage(self):
@@ -377,6 +413,148 @@ class UncountedRecordsTest(_Board):
         panel = self.panels_by_id(payload)["recs"]
 
         self.assertIs(panel["counted"], True)
+        self.assertNotIn("warnings", panel)
+
+
+class _FieldDataDisabled(ModelledES):
+    """A cluster holding one index a terms aggregation cannot read.
+
+    The lab reproduces this on purpose: `bad-logs-000001` maps `level` as
+    text, so `terms` on it cannot run. Elasticsearch does not fail such a
+    search — it answers 200 from the shards that worked, says so in `_shards`,
+    and its `hits.total` counts only those shards, while the SAME query
+    without an aggregation reads every index and counts them all.
+
+    Modelled rather than stubbed, because the disagreement being tested is
+    between two REQUESTS: the aggregation request really does lose the index
+    here and the records search really does keep it, so a fix that passed the
+    wrong one of the two numbers around would be caught.
+    """
+
+    BROKEN = "bad-logs-000001"
+
+    def search(self, index=None, **kwargs):
+        from tests.support import search_body
+        names = [name for name in str(index or "").split(",") if name]
+        if search_body(kwargs).get("aggs") and self.BROKEN in names:
+            healthy = ",".join(n for n in names if n != self.BROKEN)
+            response = super().search(index=healthy, **kwargs)
+            response["_shards"] = {
+                "total": 9, "failed": 5,
+                "failures": [{"reason": {
+                    "type": "illegal_argument_exception",
+                    "reason": (f"Fielddata is disabled on [level] in "
+                               f"[{self.BROKEN}]")}}]}
+            return response
+        return super().search(index=index, **kwargs)
+
+
+class BoardCountDisagreementTest(unittest.TestCase):
+    """Two exact-looking answers to one question, on one board.
+
+    The footer's "of N" comes from this panel's search; the total hits on the
+    stat card above it come from the aggregation batch. They are the same
+    query over the same window, so on a healthy backend they agree — and the
+    panel exists so that the table and the bars cannot disagree. When an index
+    drops out of the aggregation and not out of the search they do disagree,
+    and neither card said a word about it: measured on the lab over
+    `*-logs-*` at 24h, total_hits 13,898 against a records footer reading
+    14,998, with `counted: True` and no warning on the panel at all.
+    """
+
+    def setUp(self):
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.hub import Hub
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "dashboard-tables"
+            DASHBOARD_STORAGE = "database"
+
+        healthy = [_record(i, service="payments") for i in range(4)]
+        broken = [_record(100 + i, service="search") for i in range(3)]
+        self.es = _FieldDataDisabled({
+            "app-logs-000001": (KEYWORD_MAPPING, healthy),
+            "bad-logs-000001": (KEYWORD_MAPPING, broken)})
+        self.app = create_app(TestConfig)
+        self.hub = Hub()
+        self.logs = _CountingLogs(self.es)
+        self.hub.add_logs(self.logs)
+        self.app.hub = self.hub
+
+        self.dashboard = install_dashboard(
+            self.app, Dashboard("b1", "Board", "", "*", "u",
+                                index_patterns=["*-logs-*"]))
+        self.client = self.app.test_client()
+        grant(self.app, "u", permissions=["dashboard:view"], indices=["*"])
+        with self.client.session_transaction() as session:
+            session["user_data"] = {"id": "1", "email": "u@x", "username": "u",
+                                    "groups": []}
+            session["_user_id"] = "1"
+
+    def board(self, patterns=("*-logs-*",)):
+        change_dashboard(self.app, self.dashboard,
+                         index_patterns=list(patterns),
+                         panels=normalise_all([
+                             {"id": "recs", "type": "records", "size": 10}]))
+        payload = self.client.get("/api/dashboard/b1/data").get_json()
+        return payload, {p["id"]: p for p in payload["panels"]}["recs"]
+
+    def test_the_two_counts_really_do_differ(self):
+        """The ground first: without it the rest of this class could pass
+        over a cluster that never disagreed with itself."""
+        payload, panel = self.board()
+
+        self.assertEqual(payload["total_hits"], 4,
+                         "the aggregation kept the index it cannot read")
+        self.assertEqual(panel["total"], 7,
+                         "the search lost the index the aggregation lost")
+
+    def test_a_footer_that_disagrees_with_the_board_says_so(self):
+        _, panel = self.board()
+        said = " ".join(panel.get("warnings") or [])
+
+        self.assertIn("7", said, f"the card said {said!r}")
+        self.assertIn("4", said, f"the card said {said!r}")
+        self.assertIn("Fielddata is disabled", said,
+                      "the reason the aggregation gave was dropped")
+
+    def test_the_panel_does_not_claim_its_own_answer_is_short(self):
+        """It is the BOARD's count that came back short. Marking this panel
+        partial would trade one wrong number for another, and `partial` is
+        read elsewhere as "some containers did not answer"."""
+        _, panel = self.board()
+
+        self.assertNotIn("partial", panel)
+        self.assertIs(panel["counted"], True)
+        self.assertEqual(len(panel["rows"]), 7)
+
+    def test_a_board_whose_counts_agree_carries_no_caveat(self):
+        """Otherwise every board wears the sentence and nobody reads any."""
+        payload, panel = self.board(patterns=["app-logs-*"])
+
+        self.assertEqual(payload["total_hits"], panel["total"])
+        self.assertNotIn("warnings", panel)
+
+    def test_a_total_that_is_a_floor_is_not_compared(self):
+        """Loki returns up to a limit and stops, so its total is "at least
+        this many" and the footer never claims "of N" for it. Comparing a
+        floor against a count would print the caveat on every Loki board."""
+        from wdash.hub.models import LogPage
+        real = self.logs.search
+
+        def stopping(query, scope):
+            page = real(query, scope)
+            return LogPage(records=page.records, total=len(page.records),
+                           counted=False, containers=page.containers)
+        self.logs.search = stopping
+
+        payload, panel = self.board()
+
+        self.assertIs(panel["counted"], False)
+        self.assertNotEqual(payload["total_hits"], panel["total"],
+                            "the two numbers agreed, so nothing was proved")
         self.assertNotIn("warnings", panel)
 
 
@@ -588,6 +766,134 @@ class TraceListServiceRuleTest(_Board):
         panel = self.panels_by_id(payload)["traces"]
 
         self.assertNotIn("error", panel)
+
+
+class TraceListStoreScopeTest(_Board):
+    """The third boundary: which trace STORES a role reaches.
+
+    `traces:read` says whether a role may read traces at all; the service rule
+    says which services; this says which stores, and it is the one the panel
+    shipped without. A role with no trace store assigned got rows=0 and no
+    error, so the card drew "No trace through payments in this window" — a
+    role boundary rendered as a quiet service, which is the failure the whole
+    of this file exists to prevent. The traces page has answered the same role
+    with a sentence about its role all along.
+    """
+
+    PANEL = {"id": "traces", "type": "trace_list", "service": "payments",
+             "view": "recent", "size": 5}
+    TRACE_STORES = []
+
+    def setUp(self):
+        super().setUp()
+        self.traces = self.with_traces(_Traces([_summary("aaa", "payments")]))
+
+    def test_a_role_with_no_trace_store_is_told_so(self):
+        _, payload = self.board([
+            {"id": "chart", "type": "terms", "field": "service"}, self.PANEL])
+        panels = self.panels_by_id(payload)
+
+        self.assertIn("no trace stores assigned",
+                      panels["traces"].get("error", "").lower())
+        self.assertNotIn("rows", panels["traces"])
+        self.assertEqual(self.traces.queries, [],
+                         "a search was issued for a role with nowhere to "
+                         "search")
+        self.assertEqual(len(panels["chart"]["buckets"]), 2,
+                         "the rest of the board was taken down with it")
+
+
+class TraceListUnreachableStoreTest(_Board):
+    """A role WITH stores assigned that match nothing in this source.
+
+    Not the same sentence and not the same fix: the role has a rule, it simply
+    reaches none of the stores this source holds. `api_search_traces` says
+    exactly this after an empty answer, and it is asked only then — a source
+    whose store list costs a round trip pays for it when there is something to
+    explain.
+    """
+
+    PANEL = {"id": "traces", "type": "trace_list", "service": "payments",
+             "view": "recent", "size": 5}
+    TRACE_STORES = ["nothing-*"]
+
+    def setUp(self):
+        super().setUp()
+        self.traces = self.with_traces(_Traces([_summary("aaa", "payments")]))
+
+    def test_an_answer_no_store_could_have_filled_is_not_a_quiet_window(self):
+        _, payload = self.board([self.PANEL])
+        panel = self.panels_by_id(payload)["traces"]
+
+        self.assertIn("reaches no trace store", panel.get("error", ""))
+        self.assertIn("test-traces", panel.get("error", ""))
+        self.assertNotIn("rows", panel)
+
+
+class TraceListGapTest(_Board):
+    """An empty list for a service the source itself says it holds.
+
+    Requiring a service is the right call on cost — Jaeger fans out one
+    request per service without one — but it turns an adapter limitation into
+    an authored, saved panel. A trace list is built from the span where a
+    request ENTERED a service, so a service only ever called by another one
+    has none. Measured on the lab's Elasticsearch trace indices at 24h:
+    postgres 2,579 spans, redis 1,794, elasticsearch 1,177 and stripe-api 873
+    — every one of them a Client span, every one of them answering a trace
+    list with nothing, while the trace_services panel on the SAME board ranks
+    postgres first with 1,048. Four of nine services could not be listed at
+    all and the card said "No trace through postgres in this window".
+    """
+
+    PANEL = {"id": "traces", "type": "trace_list", "service": "postgres",
+             "view": "recent", "size": 5}
+
+    def setUp(self):
+        super().setUp()
+        self.traces = self.with_traces(_Traces(
+            [_summary("aaa", "api-gateway")],
+            lists=("api-gateway", "postgres")))
+
+    def test_a_service_the_source_lists_but_cannot_list_traces_for(self):
+        _, payload = self.board([self.PANEL])
+        panel = self.panels_by_id(payload)["traces"]
+
+        self.assertIn("postgres", panel.get("error", ""))
+        self.assertIn("gap", panel.get("error", ""))
+        self.assertNotIn("rows", panel)
+
+    def test_a_service_the_source_does_not_list_is_left_as_a_quiet_window(self):
+        """Silence stays silence. A window in which nothing ran is a real
+        answer, and dressing it as a fault is the same lie in the other
+        direction."""
+        _, payload = self.board([{**self.PANEL, "service": "ghost"}])
+        panel = self.panels_by_id(payload)["traces"]
+
+        self.assertNotIn("error", panel)
+        self.assertEqual(panel["rows"], [])
+
+    def test_the_service_list_is_only_asked_for_when_there_is_nothing(self):
+        """The cost bargain `_reaches_no_store` already strikes: a board that
+        works must not pay a round trip to be told it works."""
+        _, payload = self.board([{**self.PANEL, "service": "api-gateway"}])
+        panel = self.panels_by_id(payload)["traces"]
+
+        self.assertEqual(self.traces.service_calls, [],
+                         "the service list was fetched for a panel that had "
+                         "its answer")
+        self.assertEqual(len(panel.get("rows") or []), 1, panel)
+
+    def test_two_empty_panels_share_one_service_list(self):
+        """However many came back empty, the question is asked once."""
+        self.board([self.PANEL,
+                    {**self.PANEL, "id": "traces2", "service": "postgres",
+                     "view": "slowest"}])
+
+        self.assertEqual(len(self.traces.queries), 2,
+                         "two different questions should be two searches")
+        self.assertEqual(len(self.traces.service_calls), 1,
+                         f"{len(self.traces.service_calls)} service lists "
+                         f"for one dashboard load")
 
 
 # ---------------------------------------------------------------------------

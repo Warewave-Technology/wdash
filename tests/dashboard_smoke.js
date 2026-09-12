@@ -1187,6 +1187,49 @@ async function main() {
         assert(/did not answer/.test(text), `it said "${text}"`);
     });
 
+    // A reason has to reach the screen whether or not the table has rows.
+    // It used to reach it only when the table was EMPTY, so the sentence
+    // explaining a footer that disagrees with the stat card above it — the
+    // very disagreement this panel exists to remove — was dropped under a
+    // table that looked complete. Measured on the lab over `*-logs-*` at
+    // 24h: total_hits 13,898 against a records footer reading 14,998.
+    const disputed = await loadWith({
+        panels: [{ id: 'r1', type: 'records', title: 'Recent', width: 6,
+                   rows: [RECORD], total: 14998, counted: true,
+                   warnings: ['This search found 14,998 matching records and '
+                              + "the board's own count says 13,898.",
+                              'Fielddata is disabled on [level] in '
+                              + '[bad-logs-000001]'] }],
+    });
+    check('a records footer that disagrees with the board says so on the card', () => {
+        const body = disputed.document.querySelector(
+            '[data-panel-id="r1"] .chart-container');
+        assert(body.querySelectorAll('tbody tr').length === 1,
+               'the table was thrown away instead of annotated');
+        assert(/13,898/.test(body.textContent), body.textContent);
+        assert(/Fielddata is disabled/.test(body.textContent), body.textContent);
+    });
+
+    // The board counts by the normalised severity and labels every bar with
+    // it. Measured against the lab at 24h, Loki and VictoriaLogs return
+    // severity_text 'error'/'info' for records the charts beside them label
+    // ERROR and INFO, so the table read in a different language from the
+    // panel above it.
+    const rawCase = await loadWith({
+        panels: [{ id: 'r1', type: 'records', title: 'Recent', width: 6,
+                   rows: [{ ...RECORD, severity: 'ERROR',
+                            severity_text: 'error' }],
+                   total: 1, counted: true }],
+    });
+    check('the severity a record shows is the one the board counts by', () => {
+        const cell = rawCase.document.querySelectorAll(
+            '[data-panel-id="r1"] tbody tr td')[1];
+        assert(cell.textContent.trim() === 'ERROR',
+               `the cell read "${cell.textContent.trim()}"`);
+        assert(cell.getAttribute('title') === 'error',
+               `the raw word was lost: title="${cell.getAttribute('title')}"`);
+    });
+
     // ------------------------------------------------------- trace list
     //
     // The click carries the window being looked at and the store that
@@ -1222,6 +1265,31 @@ async function main() {
     });
     check('a trace list stops spinning', () =>
         assert(spinning(traceBoard) === 0, `${spinning(traceBoard)} spinner(s) left`));
+
+    // D9 asked for service, duration and a link into the waterfall. The
+    // service matters most where it is least expected: Tempo and Jaeger
+    // describe a trace by its ROOT span, so a card titled for one service
+    // lists rows belonging to another (measured on the lab: 6 of 8 Tempo
+    // services and 5 of 7 Jaeger ones). With the name only in a title=
+    // tooltip that mismatch was invisible.
+    const rooted = await loadWith({
+        time_range: '24h',
+        panels: [{ id: 't1', type: 'trace_list', title: 'cache-tier', width: 6,
+                   service: 'cache-tier', view: 'slowest',
+                   rows: [{ trace_id: 'abc123def456789', service: 'mobile-bff',
+                            name: 'GET /feed', start: '2026-09-11T10:00:00.000Z',
+                            duration_us: 9000, has_error: false,
+                            source: 'lab-tempo' }] }],
+    });
+    check('a trace row names the service it actually belongs to', () => {
+        const head = [...rooted.document.querySelectorAll(
+            '[data-panel-id="t1"] thead th')].map(th => th.textContent.trim());
+        assert(head.includes('Service'), `columns were ${head.join(', ')}`);
+        const cells = [...rooted.document.querySelectorAll(
+            '[data-panel-id="t1"] tbody td')].map(td => td.textContent.trim());
+        assert(cells.includes('mobile-bff'),
+               `the row showed ${cells.join(' | ')}`);
+    });
 
     const noTraces = await loadWith({
         panels: [{ id: 't1', type: 'trace_list', title: 'Slowest', width: 6,
