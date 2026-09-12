@@ -1000,6 +1000,77 @@ class LokiSpecificTest(unittest.TestCase):
                          ("some streams carry no 'host' label; those lines "
                           "are counted in the total and not in the split",))
 
+    def test_a_window_with_nothing_in_it_claims_nothing_about_the_label(self):
+        """An empty answer is a quiet window, not a missing label.
+
+        The adapter cannot ask Loki whether a name is a label; it INFERS it
+        from an answer of one unlabelled series carrying every line. No
+        series at all is not that answer, and reading it as one put "'level'
+        is not a Loki label on these streams; this is the total" on a panel
+        over streams that carry `level`, beside a total of nothing — a
+        sentence that sends an author to fix a panel that is right.
+        `_terms_buckets` has always required the same evidence.
+        """
+        from wdash.hub.aggregation import DateHistogram, Terms
+        self.harness.metric_streams = ()
+
+        for field in ("severity", "service"):
+            result = self._aggregate("*", DateHistogram(
+                name="timeline", sub=(Terms(name="split", field=field),)))
+            self.assertEqual(result.get("timeline"), [], field)
+            self.assertEqual(result.reasons("timeline"), (), field)
+            self.assertEqual(result.warnings, (), field)
+            self.assertFalse(result.failed, field)
+
+        # And the other shape of nothing: a series that IS unlabelled, which
+        # is the evidence this sentence rests on, carrying no points. There
+        # is no breakdown to explain and no total to call it.
+        self.harness.metric_streams = (({"service_name": "api-gateway"}, {}),)
+        result = self._aggregate("*", DateHistogram(
+            name="timeline", sub=(Terms(name="split", field="host"),)))
+        self.assertEqual(result.get("timeline"), [])
+        self.assertEqual(result.reasons("timeline"), ())
+
+    def test_a_split_cut_to_fit_the_legend_says_how_many_it_dropped(self):
+        """The same visible gap as the half-labelled split, from truncation.
+
+        The series kept are the largest `size` of them, so the stack is
+        shorter than the line above it and the docstring's own argument
+        applies: nothing said why. Measured on the lab, a 24h split by
+        `service` at size 10 drew 473 of 488 lines with an empty note.
+        """
+        from wdash.hub.aggregation import DateHistogram, Terms
+        self.harness.metric_streams = (
+            ({"service_name": "a", "host": "node-1"}, {1754305800: 4}),
+            ({"service_name": "b", "host": "node-2"}, {1754305800: 3}),
+            ({"service_name": "c", "host": "node-3"}, {1754305800: 2}),
+            ({"service_name": "d", "host": "node-4"}, {1754305800: 1}),
+        )
+
+        result = self._aggregate("*", DateHistogram(
+            name="timeline", sub=(Terms(name="split", field="host", size=2),)))
+        row = result.get("timeline")[0]
+        self.assertEqual(row.count, 10)
+        self.assertEqual(sorted((b.key, b.count) for b in row.sub["split"]),
+                         [("node-1", 4), ("node-2", 3)])
+        self.assertEqual(result.reasons("timeline"),
+                         ("2 smaller 'host' values did not fit the legend; "
+                          "those lines are counted in the total and not in "
+                          "the split",))
+
+        # One of them reads as one of them.
+        result = self._aggregate("*", DateHistogram(
+            name="timeline", sub=(Terms(name="split", field="host", size=3),)))
+        self.assertEqual(result.reasons("timeline"),
+                         ("1 smaller 'host' value did not fit the legend; "
+                          "those lines are counted in the total and not in "
+                          "the split",))
+
+        # And a split that fits says nothing at all.
+        result = self._aggregate("*", DateHistogram(
+            name="timeline", sub=(Terms(name="split", field="host", size=4),)))
+        self.assertEqual(result.reasons("timeline"), ())
+
     def test_a_split_by_a_name_logql_cannot_hold_is_refused_not_sent(self):
         """A dotted field is a PARSE error, not a narrower answer.
 

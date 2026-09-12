@@ -84,6 +84,23 @@ class StaticVocabularyTest(unittest.TestCase):
         with self.assertRaises(PanelError):
             normalise({"type": "timeseries", "split_by": "body"})
 
+    def test_a_split_is_refused_in_the_words_of_a_split(self):
+        """A timeseries has no "group by" control to go and look at.
+
+        The refusal is read beside the form that caused it, and the form
+        calls this one Split by; "cannot group by 'body'" sends the author to
+        a control that is not on that row. Nothing pinned the verb, so a
+        refusal reading `group by` passed the whole suite.
+        """
+        for panel, verb in (({"type": "terms", "field": "body"}, "group by"),
+                            ({"type": "timeseries", "split_by": "body"},
+                             "split by"),
+                            ({"type": "timeseries", "split_by": "k8s-pod"},
+                             "split by")):
+            with self.assertRaises(PanelError, msg=str(panel)) as caught:
+                normalise(panel)
+            self.assertIn(f"cannot {verb} ", str(caught.exception))
+
     def test_a_name_that_is_not_a_field_name_is_refused(self):
         """And this is a security boundary, not tidiness.
 
@@ -327,6 +344,128 @@ class EditorOfferRouteTest(unittest.TestCase):
         return self.client.get(
             f"/api/dashboard/group-by-fields?source={source}")
 
+    def offer(self, mapping, indices=None):
+        """What the editor is handed for a cluster with this mapping."""
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource
+
+        hub = Hub()
+        hub.add_logs(ElasticsearchLogSource(
+            ModelledES(indices or {"app-logs-000001": (mapping, [])}),
+            name="es-lab"))
+        self.app.hub = hub
+        payload = self.ask().get_json()
+        return payload["fields"], payload["reason"]
+
+    def test_a_name_a_panel_cannot_hold_is_not_offered(self):
+        """A mapping is a wider vocabulary than a panel field name.
+
+        `@version` is on every Logstash-fed index, and a hyphen is legal in
+        both an Elasticsearch mapping and a VictoriaLogs field; `normalise`
+        refuses all of them. An offer the save refuses is not a warning: the
+        editor re-renders from the STORED list when a save is refused, so one
+        unusable option costs the author every panel they built in that
+        sitting. Measured on the lab's own cluster: the Heartbeat index maps
+        eleven keyword fields whose names carry a hyphen, `Content-Type` and
+        `Set-Cookie` among them.
+        """
+        mapping = dict(LAB_MAPPING)
+        mapping["@version"] = {"type": "keyword"}
+        mapping["k8s-pod"] = {"type": "keyword"}
+        mapping["http"] = {"properties": {
+            "status-code": {"type": "short"},
+            "response": {"properties": {"headers": {"properties": {
+                "Content-Type": {"type": "keyword"}}}}}}}
+
+        offered, reason = self.offer(mapping)
+        self.assertIn("http_status", offered)
+        for refused in ("@version", "k8s-pod", "http.status-code",
+                        "http.response.headers.Content-Type"):
+            self.assertNotIn(refused, offered)
+        self.assertIsNone(reason)
+        # The invariant, not a list of the names known today: every name on
+        # offer survives the save.
+        for field in offered:
+            normalise({"type": "terms", "field": field})
+            normalise({"type": "timeseries", "split_by": field})
+
+    def test_the_filter_is_the_join_and_not_one_backend_s_manners(self):
+        """VictoriaLogs takes any field name a record was written with, and a
+        Kubernetes-shaped deployment writes `k8s-pod` and
+        `app.kubernetes.io/name`. The offer is filtered where the two facts
+        meet — what a source can count by, and what a panel may name — so no
+        adapter has to carry its own copy of the panel model's rules.
+        """
+        from tests.test_conformance_victorialogs import FakeVictoriaLogs
+        from wdash.hub import Hub
+        from wdash.hub.adapters.victorialogs import VictoriaLogsSource
+
+        harness = FakeVictoriaLogs()
+        harness.field_names = ["_msg", "level", "service", "k8s-pod",
+                               "app.kubernetes.io/name", "ok_name"]
+        hub = Hub()
+        hub.add_logs(VictoriaLogsSource("http://vl:9428", name="vl",
+                                        session=harness))
+        self.app.hub = hub
+
+        payload = self.ask("vl").get_json()
+        self.assertEqual(payload["fields"], ["ok_name", "service", "severity"])
+        for field in payload["fields"]:
+            normalise({"type": "terms", "field": field})
+
+    def test_a_source_whose_every_name_is_unusable_says_so(self):
+        """Not "reported no fields": it reported plenty, and none of them can
+        name a panel. Only one of those two is worth waiting out."""
+        offered, reason = self.offer({
+            "@timestamp": {"type": "date"},
+            "k8s-pod": {"type": "keyword"},
+            "app.kubernetes.io/name": {"type": "keyword"}})
+        self.assertEqual(offered, list(AGGREGATABLE_FIELDS))
+        self.assertIsNotNone(reason, "the offer fell back with no reason")
+        self.assertIn("can name a panel", reason)
+        self.assertIn("2 field names", reason)
+
+    def test_an_offer_cut_to_fit_the_select_says_that_it_was(self):
+        """The default case, not an edge.
+
+        A log source is given `patterns=("*",)` unless somebody narrowed it,
+        and the lab's eleven-index cluster then discovers 1465 aggregatable
+        fields: the fifty offered are `agent.*`, `as.*` and `attr_0` through
+        `attr_148`, and `http_status` — the field this whole offer exists to
+        unlock — is not among them. Cut in silence, the select reads as the
+        whole answer.
+        """
+        mapping = {"@timestamp": {"type": "date"}, "level": {"type": "keyword"}}
+        for number in range(60):
+            mapping[f"attr_{number:03d}"] = {"type": "keyword"}
+
+        offered, reason = self.offer(mapping)
+        self.assertEqual(len(offered), 50)
+        self.assertIsNotNone(reason, "the list was cut in silence")
+        self.assertIn("first 50", reason)
+        self.assertIn("index patterns", reason)
+
+    def test_the_offer_is_read_with_the_callers_own_scope(self):
+        """The route hands the request's scope to the source, or the select
+        names fields out of indices this role may not read.
+
+        Each adapter is tested for honouring a scope; this is the line that
+        gives it one. Replacing `_scope()` with an unrestricted scope left
+        the whole suite green, which is what this closes.
+        """
+        indices = {"app-logs-000001": (LAB_MAPPING, []),
+                   "secret-logs-000001": (
+                       {"@timestamp": {"type": "date"},
+                        "clearance": {"type": "keyword"}}, [])}
+        self.login(["dashboard:view", "dashboard:edit"], indices=("app-*",))
+        offered, _ = self.offer(None, indices=indices)
+        self.assertIn("http_status", offered)
+        self.assertNotIn("clearance", offered)
+
+        self.login(["dashboard:view", "dashboard:edit"], indices=("*",))
+        offered, _ = self.offer(None, indices=indices)
+        self.assertIn("clearance", offered)
+
     def test_the_default_source_answers_with_its_own_fields(self):
         payload = self.ask().get_json()
         self.assertIn("http_status", payload["fields"])
@@ -354,16 +493,13 @@ class EditorOfferRouteTest(unittest.TestCase):
         payload = self.ask("loki-lab").get_json()
         self.assertEqual(payload["fields"], ["service", "severity"])
         self.assertIsNone(payload["reason"])
-        # And the four names are still on the wire, because the editor needs
-        # something to fall back to when the next source cannot answer.
-        self.assertEqual(payload["standard"], list(AGGREGATABLE_FIELDS))
+        # ONE list on the wire. This asserted a second key, `standard`, that
+        # no client read: the editor builds its select from `fields`, and the
+        # route has already fallen back to the standard names when it had to,
+        # so a second copy of them was an answer to a question nobody asked.
+        self.assertEqual(sorted(payload), ["fields", "reason", "source"])
 
-    def test_a_source_that_cannot_be_read_answers_with_a_reason(self):
-        """The failure that must never look like emptiness.
-
-        A blank select and a source with nothing to group by look identical,
-        and only one of them is worth waiting out.
-        """
+    def _down_hub(self, message):
         from wdash.hub import Hub
         from wdash.hub.adapters import ElasticsearchLogSource
 
@@ -372,7 +508,7 @@ class EditorOfferRouteTest(unittest.TestCase):
             def indices(self):
                 class Indices:
                     def get_mapping(self, index=None, **kw):
-                        raise RuntimeError("connection refused")
+                        raise RuntimeError(message)
                 return Indices()
 
         hub = Hub()
@@ -380,10 +516,36 @@ class EditorOfferRouteTest(unittest.TestCase):
             Down({"app-logs-000001": (LAB_MAPPING, [])}), name="es-lab"))
         self.app.hub = hub
 
+    def test_a_source_that_cannot_be_read_answers_with_a_reason(self):
+        """The failure that must never look like emptiness.
+
+        A blank select and a source with nothing to group by look identical,
+        and only one of them is worth waiting out.
+        """
+        self._down_hub("connection refused")
+
         payload = self.ask().get_json()
         self.assertEqual(payload["fields"], list(AGGREGATABLE_FIELDS))
-        self.assertIn("connection refused", payload["reason"])
+        self.assertIn("RuntimeError", payload["reason"])
         self.assertIn("es-lab", payload["reason"])
+
+    def test_the_reason_does_not_carry_the_backend_address(self):
+        """The sentence says WHAT failed, not where the cluster lives.
+
+        This asserted the exception's text, which is where an Elasticsearch
+        or a Loki client puts the host and port it could not reach — and this
+        sentence is rendered into a page every holder of dashboard:edit can
+        open, which is a wider audience than the people who run the cluster.
+        The class of the failure separates "down" from "empty" just as well;
+        the text is in the log, for the person fixing it.
+        """
+        self._down_hub("Connection refused by http://es.internal.example:9200")
+
+        reason = self.ask().get_json()["reason"]
+        self.assertIsNotNone(reason, "the failure was not reported at all")
+        self.assertIn("RuntimeError", reason)
+        self.assertNotIn("es.internal.example", reason)
+        self.assertNotIn("9200", reason)
 
     def test_a_source_that_does_not_list_its_fields_says_that(self):
         from tests.support import StubLogSource
@@ -412,6 +574,133 @@ class EditorOfferRouteTest(unittest.TestCase):
         response = self.client.get("/dashboard/create")
         self.assertEqual(response.status_code, 200)
         self.assertIn("http_status", response.get_data(as_text=True))
+
+
+class NumberedGroupByTest(unittest.TestCase):
+    """A panel grouped by a NUMBER, which the offer now includes.
+
+    `_panel_aggregations` asks for absent documents to be counted under
+    "unknown" on every terms panel but severity, and Elasticsearch parses
+    `missing` as the field's own type: measured against the lab cluster,
+    `{"terms": {"field": "http_status", "missing": "unknown"}}` on a `short`
+    answers `BadRequestError(400, ... 'For input string: "unknown"')`, and a
+    400 fails the whole `_search` — so one panel grouped by the field this
+    offer exists to unlock took every other panel on its board down with it,
+    with no reason attributed to any of them.
+    """
+
+    def setUp(self):
+        import datetime as dt
+
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource
+
+        self.recent = (dt.datetime.now(dt.timezone.utc)
+                       - dt.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.client_es = ModelledES({"app-logs-000001": (LAB_MAPPING, [
+            {"_id": "1", "@timestamp": self.recent, "level": "ERROR",
+             "service": "pay", "http_status": 500, "user_id": "u-1"},
+            {"_id": "2", "@timestamp": self.recent, "level": "INFO",
+             "service": "pay", "http_status": 200},
+        ])})
+        self.source = ElasticsearchLogSource(self.client_es, name="es-lab")
+        self.hub = Hub()
+        self.hub.add_logs(self.source)
+
+    def aggregate(self, *aggregations):
+        import datetime as dt
+
+        from wdash.hub import LogQuery, Scope, TimeWindow
+        now = dt.datetime.now(dt.timezone.utc)
+        query = LogQuery(window=TimeWindow.exact(now - dt.timedelta(hours=1),
+                                                 now),
+                         text="*", limit=10)
+        return self.source.aggregate(query, list(aggregations),
+                                     Scope.unrestricted())
+
+    def terms_body(self, name):
+        for request in reversed(self.client_es.requests):
+            aggs = (request["body"].get("aggs") or {})
+            if name in aggs:
+                return aggs[name]["terms"]
+        raise AssertionError(f"no aggregation named {name} was sent")
+
+    def test_a_word_is_not_offered_to_a_number_as_its_missing_value(self):
+        from wdash.hub.aggregation import Terms
+        result = self.aggregate(
+            Terms(name="status", field="http_status", size=5,
+                  missing="unknown"))
+
+        self.assertFalse(result.failed, result.warnings)
+        self.assertEqual(sorted((b.key, b.count) for b in result.get("status")),
+                         [(200, 1), (500, 1)])
+        self.assertNotIn("missing", self.terms_body("status"))
+
+    def test_a_keyword_field_still_counts_the_documents_without_it(self):
+        """The parameter is not dropped everywhere — only where the mapping
+        says the value would not parse. `user_id` is a keyword, and the
+        document that has none is what "unknown" is for."""
+        from wdash.hub.aggregation import Terms
+        result = self.aggregate(
+            Terms(name="users", field="user_id", size=5, missing="unknown"))
+
+        self.assertEqual(self.terms_body("users").get("missing"),
+                         "unknown", "the keyword field lost its "
+                         "count of documents that have none")
+        self.assertEqual(sorted((b.key, b.count) for b in result.get("users")),
+                         [("u-1", 1), ("unknown", 1)])
+
+    def test_one_numeric_panel_does_not_take_the_rest_of_the_board_with_it(self):
+        """The batch is ONE request: a 400 is every panel, not one panel.
+
+        Terms only, because ModelledES does not model `date_histogram`; the
+        same batch WITH the timeline is measured against the real cluster in
+        tests/test_group_by_fields_lab.py.
+        """
+        from wdash.hub.aggregation import Terms
+        result = self.aggregate(
+            Terms(name="levels", field="severity", size=10),
+            Terms(name="users", field="user_id", size=10, missing="unknown"),
+            Terms(name="status", field="http_status", size=10,
+                  missing="unknown"))
+
+        self.assertFalse(result.failed, result.warnings)
+        self.assertEqual(result.warnings, ())
+        self.assertTrue(result.get("levels"))
+        self.assertTrue(result.get("status"))
+
+    def test_the_board_draws_every_panel(self):
+        """End to end, through the panel translation that sends `missing`."""
+        app = create_app(TestConfig)
+        app.hub = self.hub
+        install_dashboard(app, Dashboard(
+            dashboard_id="board", name="Board", description="", query="*",
+            created_by="u", index_patterns=["app-*"],
+            panels=[
+                {"id": "levels", "type": "terms", "field": "severity",
+                 "size": 5, "width": 4, "height": 300},
+                {"id": "status", "type": "terms", "field": "http_status",
+                 "size": 5, "width": 4, "height": 300},
+                {"id": "users", "type": "terms", "field": "user_id",
+                 "size": 5, "width": 4, "height": 300},
+            ]))
+        client = app.test_client()
+        grant(app, "u", ["dashboard:view"], ("*",))
+        with client.session_transaction() as session:
+            session["user_data"] = {
+                "id": "1", "email": "u@x", "username": "u", "groups": [],
+                "role": "admin", "permissions": ["dashboard:view"],
+                "allowed_indices": ["*"], "allowed_trace_indices": ["*"],
+                "allowed_services": ["*"]}
+            session["_user_id"] = "1"
+
+        response = client.get("/api/dashboard/board/data?time_range=24h")
+        self.assertEqual(response.status_code, 200,
+                         "one numeric panel failed the whole board")
+        panels = {panel["id"]: panel for panel in response.get_json()["panels"]}
+        for panel_id in ("levels", "status", "users"):
+            self.assertTrue(panels[panel_id]["buckets"],
+                            f"{panel_id} drew nothing")
 
 
 class OnePanelRefusedNotTheBoardTest(unittest.TestCase):

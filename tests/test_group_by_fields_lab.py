@@ -127,6 +127,46 @@ class LokiSplitLabTest(unittest.TestCase):
             self.assertNotIn("__error__", query)
             self.assertIn("sum by (", query)
 
+    def test_a_window_with_no_lines_says_nothing_about_the_label(self):
+        """The inference needs evidence, and an empty answer is not evidence.
+
+        `sum by (level)` over a filter nothing matches returns no series at
+        all, which was read as the one unlabelled series that means "not a
+        label" — so a panel over a quiet window reported that `severity` is
+        not a Loki label on streams that carry it, beside a total of nothing.
+        The terms path has always required an unlabelled series carrying
+        lines before it says this.
+        """
+        for field in ("severity", "service"):
+            result = self.source.aggregate(
+                LogQuery(window=_window(24), text="zzz_no_such_line_F1",
+                         limit=10),
+                [DateHistogram(name="panel", interval="1h", min_count=0,
+                               sub=(Terms(name="split", field=field, size=10),))],
+                Scope.unrestricted())
+            self.assertFalse(result.failed, result.warnings)
+            self.assertEqual(sum(row.count for row in result.get("panel") or ()),
+                             0, "the lab answered lines for a nonsense filter")
+            self.assertEqual(result.reasons("panel"), (), field)
+            self.assertEqual(result.warnings, (), field)
+
+    def test_a_split_cut_to_fit_the_legend_says_how_many_it_dropped(self):
+        """Measured: 24h by `service` at size 10 drew 473 of 488 lines with
+        nothing said. The stack is shorter than the line above it, which is
+        exactly the state the half-labelled note exists for."""
+        result = self.source.aggregate(
+            _query(_window(24)),
+            [DateHistogram(name="panel", interval="1h", min_count=0,
+                           sub=(Terms(name="split", field="service", size=2),))],
+            Scope.unrestricted())
+        rows = result.get("panel")
+        total = sum(row.count for row in rows)
+        stack = sum(b.count for row in rows for b in row.sub.get("split", ()))
+        self.assertGreater(total, stack, "nothing was dropped to measure")
+        reason = " ".join(result.reasons("panel"))
+        self.assertIn("did not fit the legend", reason)
+        self.assertIn("'service'", reason)
+
     def test_a_field_that_is_not_a_label_draws_the_total_and_says_so(self):
         """`host` is one of the four names the editor offered every source."""
         result = self.split("host")
@@ -184,6 +224,39 @@ class GroupByOfferLabTest(unittest.TestCase):
         self.assertIn("env", offered)
         self.assertNotIn("environment", offered)
         self.assertNotIn("_msg", offered)
+
+    def test_a_numbered_field_answers_the_aggregation_a_panel_really_sends(self):
+        """The offer is only worth having if the panel built from it answers.
+
+        `_panel_aggregations` asks for absent documents under "unknown" on
+        every terms panel but severity, and Elasticsearch parses `missing` as
+        the field's own type: `{"terms": {"field": "http_status", "missing":
+        "unknown"}}` answered `BadRequestError(400, ... 'For input string:
+        "unknown"')` on this cluster, and a 400 is the whole `_search` — the
+        timeline and the severity panel of the same board went dark too, with
+        no reason on any of the three. Measured with a bare `Terms`, which is
+        not what a board sends, this looked fine.
+        """
+        es = self.elasticsearch()
+        offered = es.group_by_fields(Scope.unrestricted())
+        self.assertIn("http_status", offered)
+
+        batch = [
+            DateHistogram(name="timeline", interval="1h", min_count=0,
+                          sub=(Terms(name="split", field="severity", size=10),)),
+            Terms(name="levels", field="severity", size=10),
+            Terms(name="status", field="http_status", size=10,
+                  missing="unknown"),
+            Terms(name="slow", field="duration_ms", size=10,
+                  missing="unknown"),
+            Terms(name="users", field="user_id", size=10, missing="unknown"),
+        ]
+        result = es.aggregate(_query(), batch, Scope.unrestricted())
+
+        self.assertFalse(result.failed, result.warnings)
+        self.assertEqual(result.warnings, ())
+        for name in ("timeline", "levels", "status", "slow", "users"):
+            self.assertTrue(result.get(name), f"{name} answered nothing")
 
     def test_a_field_one_source_has_and_another_does_not(self):
         """`http_status` is the case the whole option is about.

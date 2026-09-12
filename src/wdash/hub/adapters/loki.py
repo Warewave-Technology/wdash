@@ -777,9 +777,6 @@ class LokiLogSource(LogSource):
                     counts = split_counts.setdefault(at, {})
                     counts[key] = counts.get(key, 0) + count
 
-        if labels and note is None:
-            note = self._split_note(split, split_counts, unlabelled)
-
         # The series kept are chosen over the WINDOW, not per bucket: picking
         # the top few inside each bucket makes a legend whose entries appear
         # and vanish as the eye moves along the axis.
@@ -789,6 +786,12 @@ class LokiLogSource(LogSource):
                 ranked[key] = ranked.get(key, 0) + count
         biggest = sorted(ranked.items(), key=lambda item: -item[1])
         keep = {key for key, _ in biggest[:(getattr(split, "size", 10) or 10)]}
+
+        # AFTER the ranking, because how many values were dropped is one of
+        # the things the note has to say.
+        if labels and note is None:
+            note = self._split_note(split, split_counts, unlabelled, totals,
+                                    len(ranked) - len(keep))
 
         rows = []
         for at in sorted(totals):
@@ -806,20 +809,45 @@ class LokiLogSource(LogSource):
         return rows, note
 
     @staticmethod
-    def _split_note(split, split_counts, unlabelled):
-        """Why a split is missing or short, or None when it is whole."""
+    def _split_note(split, split_counts, unlabelled, totals, dropped=0):
+        """Why a split is missing or short, or None when it is whole.
+
+        Every sentence here needs EVIDENCE, which is what `totals` and
+        `unlabelled` are for. Loki does not report "that is not a label"; the
+        adapter infers it from an answer of one unlabelled series carrying
+        every line, and an empty answer is not that — it is a window in which
+        nothing matched. Said anyway, it told an author that `severity` is
+        not a Loki label on streams where it is, about a total that does not
+        exist, and sent them to fix a panel that was right. `_terms_buckets`
+        has always required the same evidence (`if unlabelled and not
+        counts`); this is that rule, on the path that draws the picture.
+        """
         if not split_counts:
+            if not (unlabelled and totals):
+                # Nothing was counted at all: no series, or series with no
+                # points. There is nothing to explain and no total to claim.
+                return None
             # Measured: `sum by (host)` over streams with no `host` label
             # answers with ONE series, no labels, carrying every line — so the
             # totals above are right and only the breakdown is missing.
             return (f"'{split.field}' is not a Loki label on these streams; "
                     f"this is the total")
+        parts = []
         if unlabelled:
             # Half a breakdown is the worse state, because the stack is
             # shorter than the line above it and nothing says why.
-            return (f"some streams carry no '{split.field}' label; those "
-                    f"lines are counted in the total and not in the split")
-        return None
+            parts.append(f"some streams carry no '{split.field}' label; those "
+                         f"lines are counted in the total and not in the split")
+        if dropped > 0:
+            # The same visible gap from the other cause: measured on the lab,
+            # a 24h split by `service` at size 10 drew 473 of the 488 lines
+            # on the line above it, the rest belonging to services that fell
+            # off the end of the ranking.
+            parts.append(f"{dropped} smaller '{split.field}' value"
+                         f"{'' if dropped == 1 else 's'} did not fit the "
+                         f"legend; those lines are counted in the total and "
+                         f"not in the split")
+        return "; ".join(parts) or None
 
     def histogram(self, query, scope):
         result = self.aggregate(

@@ -61,6 +61,20 @@ _NEUTRAL_FOR_PATH = {
 #: and a refused save re-renders from the stored panel list.
 _NOT_GROUPABLE = frozenset({"body", "message", "timestamp"})
 
+#: Mapped types that can hold the string a terms aggregation counts absent
+#: documents under.
+#:
+#: `missing` is a VALUE, and Elasticsearch parses it as the field's own type:
+#: measured on the lab, `{"terms": {"field": "http_status", "missing":
+#: "unknown"}}` on a `short` answers HTTP 400 `For input string: "unknown"`,
+#: and a 400 fails the whole `_search` — so ONE panel grouped by a number
+#: took the other panels of its board down with it, which is the fault the
+#: field offer exists to avoid. A number cannot be counted under "unknown"
+#: anywhere, so the option is to invent a sentinel (a bucket labelled -1 that
+#: no document holds) or to leave documents without the field out of a
+#: question about the values of that field. The second is the true one.
+_MISSING_CAN_BE_A_STRING = frozenset({"keyword"})
+
 
 class MalformedResponse(ValueError):
     """The cluster answered with something Elasticsearch does not send."""
@@ -628,7 +642,20 @@ class ElasticsearchLogSource(LogSource):
                 continue
             seen.add(name)
             out.append(name)
-        return out[:self.GROUP_BY_LIMIT]
+        if len(out) <= self.GROUP_BY_LIMIT:
+            return out
+        # Cutting silently is the default case, not an edge: a log source
+        # says `patterns=("*",)` unless somebody narrowed it, and the lab's
+        # eleven-index cluster then discovers 1465 aggregatable fields, of
+        # which the first fifty by name are `agent.*`, `as.*` and `attr_0`
+        # to `attr_148` — `http_status` is not among them. An author who was
+        # not told reads the select as the whole answer.
+        return PartialList(
+            out[:self.GROUP_BY_LIMIT], partial=True,
+            warnings=(f"More fields can be grouped by here than one select "
+                      f"can hold: these are the first {self.GROUP_BY_LIMIT} "
+                      f"by name. Narrow this source's index patterns to "
+                      f"reach the rest.",))
 
     def field_stats(self, query, scope, fields=None, top=10):
         targets = self._targets(query, scope)
@@ -811,13 +838,17 @@ class ElasticsearchLogSource(LogSource):
             # RESOLVE the field path from the mapping rather than guessing. The
             # old code tried "service.keyword" first and retried with "service"
             # on failure — two round trips and a guess.
-            path = self._resolve_agg_field(targets, agg.field)
+            path, mapped = self._resolve_agg(targets, agg.field)
             if path is None:
                 refuse(f"'{agg.field}' cannot be aggregated on these indices "
                        "(it may not be mapped as keyword)")
                 return None
             terms = {"field": path, "size": agg.size, "order": {"_count": "desc"}}
-            if agg.missing is not None:
+            # Only where the mapping says the value will parse. The editor now
+            # offers every field the mapping can count by, numbers included,
+            # and a word sent as a number's `missing` is a 400 that takes the
+            # whole batch — every other panel on the board — down with it.
+            if agg.missing is not None and mapped in _MISSING_CAN_BE_A_STRING:
                 terms["missing"] = agg.missing
             node = {"terms": terms}
         else:
@@ -850,7 +881,16 @@ class ElasticsearchLogSource(LogSource):
         return out
 
     def _resolve_agg_field(self, targets, neutral_name):
-        """Find the real aggregatable field path, or None.
+        """The real aggregatable field path, or None. See `_resolve_agg`."""
+        return self._resolve_agg(targets, neutral_name)[0]
+
+    def _resolve_agg(self, targets, neutral_name):
+        """Find the real aggregatable field path and its mapped type.
+
+        The type is None when the mapping did not say — an unreadable mapping,
+        or the dotted-path guess below — and a caller that needs to know what
+        a value will be parsed as must treat that as "not known to be a
+        string" rather than as a keyword.
 
         A neutral name can live under more than one backend field: `severity`
         is `level` in a flat index and `severity_text` in one written by the
@@ -862,17 +902,17 @@ class ElasticsearchLogSource(LogSource):
         did; it is only no longer remembered as an empty one.
         """
         try:
-            discovered = self._aggregatable_fields(targets, max_fields=1000)
+            discovered, types = self._discovered(targets, max_fields=1000)
         except Exception:
-            discovered = {}
+            discovered, types = {}, {}
         for candidate in field_candidates(neutral_name):
             if candidate in discovered:
-                return discovered[candidate]
+                return discovered[candidate], types.get(candidate)
         # Not discovered — a dotted path may still be valid; a bare name is not.
         for candidate in field_candidates(neutral_name):
             if "." in candidate:
-                return candidate
-        return None
+                return candidate, None
+        return None, None
 
     def histogram(self, query, scope):
         targets = self._targets(query, scope)
@@ -1078,6 +1118,16 @@ class ElasticsearchLogSource(LogSource):
     _FIELD_CACHE_TTL = 60.0
 
     def _aggregatable_fields(self, targets, max_fields=10):
+        """The discovered field name -> the path to aggregate it on.
+
+        The types the same walk found are beside it in `_discovered`, cached
+        together: what a field IS decides whether `missing` can be a string,
+        and asking separately would be a second get_mapping for a fact the
+        first one already carried.
+        """
+        return self._discovered(targets, max_fields)[0]
+
+    def _discovered(self, targets, max_fields=10):
         """Cached in front of the real discovery: mappings change rarely, but
         this was issuing a get_mapping on every field-stats request."""
         key = (",".join(targets), max_fields)
@@ -1094,6 +1144,11 @@ class ElasticsearchLogSource(LogSource):
     def _discover_aggregatable_fields(self, targets, max_fields=10):
         """Discover aggregatable fields across the target indices.
 
+        Answers a PAIR: the name -> path map everything reads, and the name ->
+        mapped type map beside it. The type is not decoration: `missing` is
+        parsed as the field's own type, so sending a word for a `short` is a
+        400 for the whole search.
+
         EVERY target's mapping is scanned, not just the first. Looking at one
         index causes a silent failure: because indices are ordered newest first,
         an index whose top-level fields are all objects (an APM trace store, for
@@ -1106,12 +1161,12 @@ class ElasticsearchLogSource(LogSource):
         request.
         """
         if not targets:
-            return {}
+            return {}, {}
         mapping = self._es.indices.get_mapping(index=",".join(targets))
 
         skip = {"@timestamp", "message"}
         aggregatable = {"keyword", "boolean", "integer", "short", "byte", "long", "ip"}
-        found = {}
+        found, types = {}, {}
 
         def walk(properties, prefix=""):
             """Descend into object fields.
@@ -1133,8 +1188,13 @@ class ElasticsearchLogSource(LogSource):
                 field_type = definition.get("type")
                 if field_type in aggregatable:
                     found[path] = path
+                    types[path] = field_type
                 elif field_type == "text" and "keyword" in (definition.get("fields") or {}):
                     found[path] = f"{path}.keyword"
+                    # The type of what is AGGREGATED, which is the sub-field:
+                    # `service` is text, `service.keyword` is the keyword the
+                    # bucket keys come from and the one `missing` is read as.
+                    types[path] = "keyword"
                 elif definition.get("properties"):
                     # An object. Bounded depth: telemetry nests two or three
                     # levels, and an unbounded walk over a mapping with
@@ -1153,7 +1213,7 @@ class ElasticsearchLogSource(LogSource):
             if len(ordered) >= max_fields:
                 break
             ordered[name] = found[name]
-        return ordered
+        return ordered, {name: types[name] for name in ordered if name in types}
 
     def _to_record(self, hit):
         """Turn a hit into a record using whatever schema wrote it.

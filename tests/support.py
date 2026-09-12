@@ -638,10 +638,40 @@ class ModelledES:
                     "hits": {"total": {"value": len(hits)},
                              "hits": returned}}
         if body.get("aggs"):
+            # The indices being searched, for `_aggregate` to read the
+            # mapping out of. Not a parameter: three test files subclass this
+            # and override `_aggregate(self, spec, hits)`, and a fourth
+            # argument would break them all for a fact only one branch wants.
+            self._searching = index
             response["aggregations"] = {
                 name: self._aggregate(spec, hits)
                 for name, spec in body["aggs"].items()}
         return response
+
+    #: Mapped types that read a terms `missing` as a number, and so reject a
+    #: word. Elasticsearch parses `missing` as the field's own type before it
+    #: looks at any document, and the whole `_search` answers 400 — every
+    #: aggregation in the batch, not the one that asked. Modelled here because
+    #: a fixture that accepts what the real cluster refuses is how a panel
+    #: that kills its board passes its tests: measured on the lab,
+    #: `{"terms": {"field": "http_status", "missing": "unknown"}}` on a
+    #: `short` answers `For input string: "unknown"`.
+    _NUMERIC_TYPES = frozenset({"integer", "short", "byte", "long", "float",
+                                "double", "half_float", "scaled_float"})
+
+    def _mapped_type(self, index, field):
+        field = field[:-len(".keyword")] if field.endswith(".keyword") else field
+        for name in str(index or "").split(","):
+            properties = (self._indices.get(name) or (None,))[0] or {}
+            node = properties
+            for part in field.split("."):
+                node = (node or {}).get(part) or (node or {}).get(
+                    "properties", {}).get(part)
+                if node is None:
+                    break
+            if isinstance(node, dict) and node.get("type"):
+                return node["type"]
+        return None
 
     def _aggregate(self, spec, hits):
         if "filter" in spec:
@@ -650,9 +680,22 @@ class ModelledES:
                                                          hit["_id"],
                                                          self._mapping_of(hit)))}
         terms = spec["terms"]
+        missing = terms.get("missing")
+        if isinstance(missing, str) and not missing.lstrip("-").isdigit():
+            index = getattr(self, "_searching", None)
+            if self._mapped_type(index, terms["field"]) in self._NUMERIC_TYPES:
+                raise RuntimeError(
+                    f'BadRequestError(400, \'search_phase_execution_exception\', '
+                    f'\'For input string: "{missing}"\')')
         buckets = {}
         for hit in hits:
-            for value in _values(hit["_source"], terms["field"]):
+            values = _values(hit["_source"], terms["field"])
+            # What `missing` is FOR: a document without the field is counted
+            # under that key rather than left out. Modelled so that dropping
+            # the parameter is visible as the bucket it removes.
+            if not values and missing is not None:
+                values = [missing]
+            for value in values:
                 buckets.setdefault(value, []).append(hit)
         out = []
         for key, members in sorted(buckets.items(), key=lambda kv: -len(kv[1])):

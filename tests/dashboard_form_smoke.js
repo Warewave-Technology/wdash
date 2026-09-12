@@ -224,11 +224,13 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
 
     /** The editor script with its Jinja values filled in.
      *
-     * `fields` is the standard list the server falls back to; `offered` is
-     * what the DASHBOARD'S SOURCE said it can group by, which is what the
-     * selects are actually built from. They are two values because they are
-     * two facts: one is a constant, the other is a backend's answer, and
-     * `reason` says why the select is showing the first.
+     * `fields` is the standard list the server falls back to, and the
+     * default for `offered` — what the DASHBOARD'S SOURCE said it can group
+     * by, which is what the selects are actually built from. They are two
+     * values because they are two facts: one is a constant, the other is a
+     * backend's answer, and `reason` says why the select is showing the
+     * first. Only `offered` reaches the page: the server sends ONE list,
+     * already fallen back to the standard names when it had to.
      */
     function editor({ panels, fields = ['severity', 'service', 'host', 'environment'],
                       offered = null, reason = null,
@@ -239,7 +241,6 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
         const found = text.match(/<script nonce="\{\{ csp_nonce \}\}">([\s\S]*?)<\/script>/);
         if (!found) throw new Error('no script in the editor include');
         return found[1]
-            .replace('{{ aggregatable_fields | tojson }}', JSON.stringify(fields))
             .replace('{{ group_by_fields | tojson }}',
                      JSON.stringify(offered === null ? fields : offered))
             .replace('{{ group_by_reason | tojson }}', JSON.stringify(reason))
@@ -735,8 +736,8 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
                        size: 10, width: 6, height: 300 }],
             fields: ['severity', 'service', 'host', 'environment'],
             offered: ['severity', 'service', 'host', 'environment'],
-            reason: "The fields of 'es' could not be read (connection "
-                    + 'refused); these are the standard ones.' });
+            reason: "The fields of 'es' could not be read "
+                    + '(ConnectionError); these are the standard ones.' });
         check('a discovery that failed still offers the standard fields',
               groupBy(down.d).join() === 'severity,service,host,environment',
               groupBy(down.d).join());

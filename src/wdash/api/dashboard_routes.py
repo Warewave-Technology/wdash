@@ -37,7 +37,7 @@ from ..dashboard.thresholds import (
 from ..dashboard.visibility import PRIVATE, VISIBILITIES, can_view, explain
 from ..dashboard.panels import (
     AGGREGATABLE_FIELDS, MONITOR_VIEWS, PANEL_HEIGHTS, PanelError,
-    default_panels, needs_logs, normalise_all, signal_of,
+    check_group_by, default_panels, needs_logs, normalise_all, signal_of,
 )
 from ..hub.aggregation import AggregationResult
 # The certificate bands and the scope monitors are read under come from the
@@ -1603,6 +1603,16 @@ def _group_by_fields(name):
     every READ of a dashboard and a refusal there is a 400 for the whole
     board, so a field this list does not hold is refused by the source that
     cannot answer it, as one panel carrying the reason.
+
+    Advisory in ONE direction, though. A name the SAVE refuses must never be
+    offered: the editor re-renders from the stored list when a save is
+    refused, so one unusable option costs the author every panel they built
+    in that sitting. So the offer is filtered by `check_group_by` itself —
+    the function the save calls — rather than by a second copy of its rules
+    that would drift from it. Measured on the lab's own cluster: the
+    Heartbeat index maps eleven keyword fields whose names carry a hyphen
+    (`http.response.headers.Content-Type` and its neighbours), which
+    discovery finds and `normalise` refuses.
     """
     standard = list(AGGREGATABLE_FIELDS)
     try:
@@ -1620,7 +1630,7 @@ def _group_by_fields(name):
         return standard, (f"'{source.name}' does not list the fields it can "
                           f"group by; these are the standard ones.")
     try:
-        found = list(ask(_scope()))
+        answer = ask(_scope())
     except NotImplementedError:
         return standard, (f"'{source.name}' does not list the fields it can "
                           f"group by; these are the standard ones.")
@@ -1630,12 +1640,38 @@ def _group_by_fields(name):
         # The reason, not a shrug: a cluster that is down and a cluster with
         # nothing to group by look identical in an empty select, and only one
         # of them is worth waiting out.
+        #
+        # The class of the failure and not its text: an Elasticsearch or Loki
+        # client puts the backend's host and port in the message, and this
+        # sentence is rendered into a page anyone with dashboard:edit can
+        # open. The full exception is in the log above, where the person
+        # fixing it looks.
         return standard, (f"The fields of '{source.name}' could not be read "
-                          f"({exc}); these are the standard ones.")
+                          f"({type(exc).__name__}); these are the standard "
+                          f"ones.")
+
+    # A source that answered with a PartialList says what its list is not:
+    # the Elasticsearch offer is cut to fifty names, and a select showing the
+    # first fifty of fifteen hundred reads exactly like the whole answer.
+    cut = tuple(getattr(answer, "warnings", ()) or ())
+
+    found, unnameable = [], 0
+    for field in answer:
+        try:
+            check_group_by("", field)
+        except PanelError:
+            unnameable += 1
+            continue
+        found.append(field)
+
     if not found:
+        if unnameable:
+            return standard, (f"None of the {unnameable} field names "
+                              f"'{source.name}' reports can name a panel; "
+                              f"these are the standard ones.")
         return standard, (f"'{source.name}' reported no fields your role can "
                           f"group by; these are the standard ones.")
-    return found, None
+    return found, (" ".join(cut) or None)
 
 
 class _NamedSource:
@@ -1663,8 +1699,11 @@ def api_group_by_fields():
 
     name = (request.args.get("source") or "").strip()
     fields, reason = _group_by_fields(name)
-    return jsonify({"source": name, "fields": fields,
-                    "standard": list(AGGREGATABLE_FIELDS), "reason": reason})
+    # ONE list, and the reason it is that one. A `standard` beside it was a
+    # second answer to the same question that no client read: the editor
+    # fills its select from `fields`, and `_group_by_fields` has already
+    # fallen back to the standard names when it had to.
+    return jsonify({"source": name, "fields": fields, "reason": reason})
 
 
 def _editor_context(panels, thresholds, defaulted, source=""):
@@ -1687,7 +1726,6 @@ def _editor_context(panels, thresholds, defaulted, source=""):
     fields, reason = _group_by_fields(source)
     return {"panels": panels,
             "panels_are_default": defaulted,
-            "aggregatable_fields": list(AGGREGATABLE_FIELDS),
             # Rendered with the page rather than fetched by it, so the select
             # is never briefly wrong: the form comes back with the source's
             # own fields already in it, and the endpoint above is for the
