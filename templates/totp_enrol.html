@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Set up your authenticator - WDash{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-8 col-lg-7">
+    <div class="card mt-5">
+      <div class="card-body p-4">
+        <h3 class="mb-1">
+          <i class="fas fa-mobile-screen text-primary"></i>
+          Set up your authenticator
+        </h3>
+        <p class="text-muted">
+          Signing in as <strong>{{ username }}</strong>. Local accounts need a
+          code as well as a password, so this is the last step of your first
+          sign-in.
+        </p>
+
+        {% if not secrets_available %}
+        {# No key, no secret. Storing the shared secret as text would mean a
+           database dump carries a working second factor for every local
+           account, which is worse than carrying none: the deployment
+           believes it has one. So enrolment stops here and says what to
+           set, rather than enrolling into plaintext. #}
+        <div class="alert alert-danger mb-0">
+          <h5 class="alert-heading" style="font-size:1rem">
+            <i class="fas fa-triangle-exclamation"></i>
+            <code>WDASH_ENCRYPTION_KEY</code> is not set
+          </h5>
+          <p class="mb-2" style="font-size:.9rem">
+            A second factor has to be stored encrypted, and WDash refuses to
+            write a secret as plain text rather than pretend it is protected.
+            Until a key is configured, no local account can finish signing in.
+          </p>
+          <p class="mb-2" style="font-size:.9rem">Generate one with:</p>
+<pre class="mb-2" style="font-size:.8rem">python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"</pre>
+          <p class="mb-0" style="font-size:.9rem">
+            Set it as <code>WDASH_ENCRYPTION_KEY</code> in the environment and
+            restart. Keep it: everything sealed with it &mdash; source
+            passwords, the OIDC client secret, these authenticators &mdash;
+            needs the same key to be read back.
+          </p>
+        </div>
+        {% else %}
+
+        <div class="row g-4 align-items-start">
+          <div class="col-md-5 text-center">
+            {# Drawn dark-on-light whatever the page's theme is, in its own
+               white quiet zone: a camera reading a screen wants the contrast
+               the specification assumes. Inline SVG because the
+               Content-Security-Policy admits no external image and no CDN. #}
+            <div class="d-inline-block p-2 rounded qr-quiet-zone"
+                 aria-hidden="true">
+              {{ qr }}
+            </div>
+            <div class="form-text mt-1">Scan this.</div>
+          </div>
+
+          <div class="col-md-7">
+            <label class="form-label small mb-1">
+              Or type the key in by hand
+            </label>
+            {# An authenticator on the same device cannot scan the screen it
+               is on, and somebody on a desktop with a phone in a drawer is
+               the ordinary case, not the exception. #}
+            <code class="d-block p-2 rounded mb-1"
+                  style="background:var(--surface-sunken);
+                         font-size:.95rem;letter-spacing:.06em;
+                         word-break:break-all"
+                  id="totpSecret">{{ secret_groups }}</code>
+            <div class="form-text mb-3">
+              Time-based, SHA-1, {{ digits }} digits, every
+              {{ step_seconds }} seconds &mdash; the defaults every
+              authenticator uses.
+            </div>
+
+            <label class="form-label small mb-1">
+              Or paste the whole setup link
+            </label>
+            <code class="d-block p-2 rounded"
+                  style="background:var(--surface-sunken);font-size:.7rem;
+                         word-break:break-all"
+                  id="totpUri">{{ uri }}</code>
+          </div>
+        </div>
+
+        <hr>
+
+        <form method="POST" class="row g-2 align-items-end">
+          <div class="col-sm-6">
+            <label for="code" class="form-label">
+              Enter the code it shows
+            </label>
+            <input type="text" class="form-control" id="code" name="code"
+                   inputmode="numeric" autocomplete="one-time-code"
+                   pattern="[0-9]*" maxlength="{{ digits }}"
+                   autofocus required>
+          </div>
+          <div class="col-sm-6">
+            <button type="submit" class="btn btn-primary w-100">
+              <i class="fas fa-check"></i> Confirm and sign in
+            </button>
+          </div>
+          <div class="col-12">
+            <div class="form-text">
+              Nothing is saved until this code proves you have the key. If you
+              close this page, the next sign-in starts again with a new one.
+            </div>
+          </div>
+        </form>
+        {% endif %}
+
+        <div class="alert alert-secondary mt-3 mb-0" style="font-size:.85rem">
+          <i class="fas fa-circle-info"></i>
+          This is for <strong>local accounts</strong> only. LDAP and OpenID
+          Connect sign-ins are untouched: WDash never sees those passwords,
+          and a second factor for them belongs at the provider that checks
+          them. If you lose the authenticator, an administrator can reset it
+          from Authentication &rarr; Local accounts, or from the command line
+          with <code>python -m wdash.store.recover --reset-totp
+          &lt;username&gt;</code>.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

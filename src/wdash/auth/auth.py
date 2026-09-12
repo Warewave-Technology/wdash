@@ -1,19 +1,33 @@
 import secrets
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from flask import (
     Blueprint, current_app, flash, redirect, render_template, request, session, url_for,
 )
 from flask_login import current_user, login_user, logout_user, login_required
 from authlib.integrations.flask_client import OAuth
+from markupsafe import Markup
 
 from ..models import User
 from ..store.signin import (
     FAILURE, LOCKED, REFUSED, SUCCESS, UNAVAILABLE, client_address)
+from . import totp
 from .ldap_auth import DirectoryUnavailable
 from .providers import ldap_settings, oidc_settings, shadow_notice
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/auth')
+
+#: Where a half-finished sign-in lives. Its own key, never `user_data`: the
+#: principal is rebuilt from `user_data` and nothing else, so a session holding
+#: only this is not signed in to anything. `tests/test_totp.py` proves that by
+#: asking every route in the url map, rather than by reading the code.
+PENDING = 'pending_totp'
+
+#: How long the hold is good for. Long enough to unlock a phone and read a
+#: code; short enough that a browser left open on a shared machine between the
+#: password and the code is not a way in.
+PENDING_MINUTES = 5
 
 def init_oauth(app, settings=None):
     """Build the OIDC client from whatever settings are currently in force.
@@ -100,6 +114,268 @@ def _start_session(user, local_role=None, provider=None):
 
 def _store():
     return getattr(current_app, 'store', None)
+
+
+# ---------------------------------------------------------------------------
+# The second factor
+#
+# A correct password for a local account does not start a session. It puts the
+# sign-in ON HOLD: the account it is for, when it was issued, when it expires,
+# and — while enrolling — the candidate secret that is not in the database yet.
+# The hold grants nothing. `load_user_from_session` reads `user_data`, which a
+# held sign-in does not have, so every `@login_required` route turns it away
+# exactly as it turns away a browser that has never signed in.
+#
+# Directory accounts are untouched. LDAP and OIDC principals go straight to a
+# session, because a second factor belongs at the provider that authenticates
+# them: WDash never sees their password and has nowhere to put a secret for
+# them — `wdash_users` holds local accounts and deliberately nothing else.
+# ---------------------------------------------------------------------------
+
+def _hold(username, secret=None):
+    """Put a sign-in on hold between the password and the code.
+
+    `session.clear()` first, for the same reason `_start_session` does it:
+    whatever the pre-authentication session held must not survive into the
+    next stage, and a hold is the thing an attacker would most like to plant.
+
+    `secret` is the candidate for an enrolment. It lives in the signed cookie
+    rather than in the database, because a secret stored before a code proves
+    it is a half-enrolled account: one that cannot sign in, and that whoever
+    else saw the QR can. The cookie is signed and not encrypted, so the
+    candidate is readable by the browser holding it — which is the browser
+    being shown the same secret on screen, so nothing is disclosed that the
+    page is not already disclosing to the same person.
+    """
+    session.clear()
+    now = datetime.now(timezone.utc)
+    session[PENDING] = {
+        'username': username,
+        'issued_at': now.isoformat(),
+        'expires_at': (now + timedelta(minutes=PENDING_MINUTES)).isoformat(),
+        'secret': secret,
+    }
+
+
+def _pending():
+    """The held sign-in, or None when there is none or it has expired.
+
+    An expired hold is dropped rather than left to be read again: a cookie
+    that says "this password was right" is worth exactly as much as the window
+    it names, and one nobody clears keeps saying it.
+    """
+    held = session.get(PENDING)
+    if not isinstance(held, dict):
+        return None
+    try:
+        expires = datetime.fromisoformat(held['expires_at'])
+    except (KeyError, TypeError, ValueError):
+        session.pop(PENDING, None)
+        return None
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires <= datetime.now(timezone.utc) or not held.get('username'):
+        session.pop(PENDING, None)
+        return None
+    return held
+
+
+def _held_account(store):
+    """(held, account) for a hold that is still good, or (None, None).
+
+    The account is read NOW rather than trusted from the hold: it can be
+    disabled, deleted, or have its second factor reset by an administrator
+    between the password and the code, and each of those has to take effect
+    before the code is accepted rather than after.
+    """
+    held = _pending()
+    if store is None or held is None:
+        return None, None
+    account = store.users.by_username(held['username'])
+    if account is None or account['disabled']:
+        session.pop(PENDING, None)
+        return None, None
+    return held, account
+
+
+def _start_again(message='Your sign-in timed out. Please start again.'):
+    session.pop(PENDING, None)
+    flash(message, 'error')
+    return redirect(url_for('auth.login'))
+
+
+def _completed(store, account, address, method='local account',
+               second_factor='totp'):
+    """Finish a sign-in that has passed both halves.
+
+    SUCCESS is recorded HERE and nowhere earlier. The pair limit counts from
+    the last success, so recording one when the password was accepted would
+    reset the counter before the code was ever checked — handing anybody who
+    had the password an unlimited number of guesses at the second factor,
+    which is the one thing the second factor exists to stop.
+    """
+    store.signin.record(account['username'], address, SUCCESS)
+    store.users.record_sign_in(account['username'])
+    user = User(user_id=account['id'], email=account['email'] or '',
+                username=account['username'], groups=[])
+    # Clears the session, the hold included.
+    _start_session(user, local_role=account['role'], provider=method)
+    store.audit.record(account['username'], "sign-in",
+                       subject=f"user:{account['username']}", address=address,
+                       state={"method": method, "second_factor": second_factor})
+    current_app.logger.info(
+        f"Sign-in: {account['username']} via {method} with {second_factor}")
+    return redirect(url_for('index'))
+
+
+def _wrong_code(store, address, template, page):
+    """A wrong code is a FAILURE, through the guard that already exists.
+
+    Not a counter of its own: the lockout, the backoff and the audit trail
+    that cover password guessing cover code guessing for free, and a second
+    counter would be a second set of thresholds to keep in agreement.
+
+    `page` is passed as a dict rather than keywords because it carries a
+    `username` of its own, and a template context that collides with a
+    parameter name is a TypeError raised on the sign-in path.
+    """
+    who = page['username']
+    store.signin.record(who, address, FAILURE)
+    current_app.logger.warning(
+        f"Failed second factor for {who!r} from {address}")
+    flash('That code was not accepted. Check your authenticator and try '
+          'the current code.', 'error')
+    return render_template(template, **page), 401
+
+
+def _locked(store, address, lockout, template, page):
+    who = page['username']
+    store.signin.record(who, address, LOCKED)
+    store.audit.record(who, "sign-in blocked", subject=f"user:{who}",
+                       address=address,
+                       state={"limit": lockout.limit,
+                              "failures": lockout.failures,
+                              "stage": "second factor"})
+    flash(f'Too many sign-in attempts. Try again in '
+          f'{_describe_wait(lockout.seconds_remaining)}.', 'error')
+    return render_template(template, **page), 429
+
+
+@auth_bp.route('/totp/enrol', methods=['GET', 'POST'])
+def totp_enrol():
+    """Set up an authenticator, and finish signing in with it.
+
+    Reachable only with a held sign-in, which means only after a correct
+    password. The secret shown here is NOT in the database: it is written, in
+    one statement with its confirmation time, when a code proves the person
+    holds it.
+    """
+    store = _store()
+    held, account = _held_account(store)
+    if held is None:
+        return _start_again()
+    if account['totp_enrolled']:
+        # Finished in another tab, or set up elsewhere while this form was
+        # open. The code page is where they belong.
+        return redirect(url_for('auth.totp_code'))
+
+    # A secret that cannot be sealed must not be enrolled: storing it as text
+    # would mean a database dump carries a working second factor, which is
+    # the one thing store/secrets.py exists to refuse.
+    if not store.secrets.available:
+        return render_template('totp_enrol.html', username=account['username'],
+                               secrets_available=False), 503
+
+    secret = held.get('secret')
+    if not secret:
+        secret = totp.generate_secret()
+        session[PENDING] = {**held, 'secret': secret}
+
+    address = client_address(
+        request, current_app.config.get('TRUSTED_PROXY_COUNT', 0))
+    uri = totp.provisioning_uri(secret, account['username'])
+    # Marked safe HERE rather than with `|safe` in the template. A template
+    # that switches autoescape off is a template somebody later puts a
+    # username in, so the whole project refuses the filter
+    # (tests/test_security_headers.py) — and the decision belongs beside the
+    # code that generated the markup anyway. This is segno's own output for a
+    # URI this function built; nothing from a request reaches it unencoded.
+    page = {'username': account['username'], 'secrets_available': True,
+            'qr': Markup(totp.qr_svg(uri)), 'uri': uri,
+            'secret_groups': totp.readable(secret),
+            'digits': totp.DIGITS, 'step_seconds': totp.STEP}
+
+    if request.method == 'GET':
+        return render_template('totp_enrol.html', **page)
+
+    lockout = store.signin.check(account['username'], address)
+    if lockout is not None:
+        return _locked(store, address, lockout, 'totp_enrol.html', page)
+
+    step = totp.verify(secret, request.form.get('code', ''))
+    if step is None:
+        return _wrong_code(store, address, 'totp_enrol.html', page)
+
+    store.users.confirm_totp(account['username'], secret, step)
+    store.audit.record(account['username'], "totp enrolled",
+                       subject=f"user:{account['username']}", address=address,
+                       state={"username": account['username']})
+    current_app.logger.warning(
+        f"Second factor enrolled for local account '{account['username']}'")
+    flash('Your authenticator is set up. It will ask for a code every time '
+          'you sign in.', 'success')
+    return _completed(store, account, address)
+
+
+@auth_bp.route('/totp', methods=['GET', 'POST'])
+def totp_code():
+    """Ask for the code, for an account that has already enrolled."""
+    store = _store()
+    held, account = _held_account(store)
+    if held is None:
+        return _start_again()
+    if not account['totp_enrolled']:
+        # An administrator reset it while this form was open, or the account
+        # never had one. Either way the answer is to enrol.
+        return redirect(url_for('auth.totp_enrol'))
+
+    page = {'username': account['username'], 'digits': totp.DIGITS}
+    if request.method == 'GET':
+        return render_template('totp.html', **page)
+
+    address = client_address(
+        request, current_app.config.get('TRUSTED_PROXY_COUNT', 0))
+    lockout = store.signin.check(account['username'], address)
+    if lockout is not None:
+        return _locked(store, address, lockout, 'totp.html', page)
+
+    try:
+        secret = store.users.totp_secret(account['username'])
+    except Exception as exc:
+        # The key has changed since the secret was sealed, or there is none.
+        # Said plainly: this is not a wrong code, and telling somebody their
+        # code is wrong when the server cannot read the secret sends them to
+        # re-install an application that was never the problem.
+        current_app.logger.error(
+            f"Could not open the stored second factor for "
+            f"{account['username']!r}: {exc}")
+        flash('Your second factor could not be read on this server, so the '
+              'code could not be checked. An administrator has to reset it: '
+              'python -m wdash.store.recover --reset-totp '
+              f"{account['username']}", 'error')
+        return render_template('totp.html', **page), 503
+
+    # `after` is what refuses a replay: a code that was already accepted is a
+    # code somebody may have read over a shoulder or off a screen share.
+    # Submitting the same one twice — a double click included — is a FAILURE,
+    # which is the right answer to "this code has been used".
+    step = totp.verify(secret, request.form.get('code', ''),
+                       after=account['totp_last_step'])
+    if step is None:
+        return _wrong_code(store, address, 'totp.html', page)
+
+    store.users.record_totp_step(account['username'], step)
+    return _completed(store, account, address)
 
 
 @auth_bp.route('/login', methods=['GET', 'POST'])
@@ -208,6 +484,16 @@ def login():
                                directory_notice=notice,
                                username=username), 401
 
+    if account.get('local'):
+        # Half a sign-in. No session, no SUCCESS recorded — see `_completed`
+        # for why the success has to wait for the second half — and nothing
+        # in the hold that any route will accept.
+        _hold(account['username'],
+              secret=None if account['totp_enrolled']
+              else totp.generate_secret())
+        return redirect(url_for('auth.totp_code' if account['totp_enrolled']
+                                else 'auth.totp_enrol'))
+
     # Recorded, not cleared. The success itself is what resets this pair's
     # counter — see SignInGuard._evaluate. Deleting the failures would let
     # somebody who eventually guessed the password erase the attempts that
@@ -217,14 +503,14 @@ def login():
     user = User(user_id=account['id'], email=account['email'] or '',
                 username=account['username'], groups=account.get('groups') or [])
     # A directory account has no stored role: its role is resolved from the
-    # groups the directory asserted, exactly like an OIDC principal.
-    method = 'local account' if account.get('local') else 'directory'
-    _start_session(user, local_role=account.get('role') if account.get('local')
-                   else None, provider=method)
+    # groups the directory asserted, exactly like an OIDC principal. Its
+    # second factor belongs at the directory too — WDash never sees its
+    # password and has nowhere to keep a secret for it.
+    _start_session(user, local_role=None, provider='directory')
     store.audit.record(account['username'], "sign-in",
                        subject=f"user:{account['username']}", address=address,
-                       state={"method": method})
-    current_app.logger.info(f"Sign-in: {account['username']} via {method}")
+                       state={"method": 'directory'})
+    current_app.logger.info(f"Sign-in: {account['username']} via directory")
     return redirect(url_for('index'))
 
 

@@ -14,8 +14,11 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from wdash.app import create_app  # noqa: E402
 from wdash.config import Config  # noqa: E402
+from wdash.store import SecretBox  # noqa: E402
 from wdash.hub import Scope  # noqa: E402
 from wdash.hub.patterns import (  # noqa: E402
     matches, matches_any, matches_for_source)
@@ -276,6 +279,9 @@ class GateTestCase(unittest.TestCase):
             SECRET_KEY = "authz"
             DATABASE_URL = f"sqlite:///{database}"
             OIDC_CLIENT_ID = None
+            # A local account cannot finish signing in without one: its
+            # authenticator's secret is sealed with this key.
+            ENCRYPTION_KEY = SecretBox.generate_key()
 
         self.app = create_app(TestConfig)
         # Declared, not inherited. These tests are about AUTHORIZATION and use
@@ -285,9 +291,7 @@ class GateTestCase(unittest.TestCase):
         from tests.support import with_stub_logs
         self.logs = with_stub_logs(self.app)
         self.client = self.app.test_client()
-        self.client.post("/setup", data={
-            "username": "owner", "password": PASSWORD, "confirm": PASSWORD})
-
+        support.set_up(self.client, username="owner", password=PASSWORD)
     def tearDown(self):
         if os.path.exists(self.database):
             os.unlink(self.database)

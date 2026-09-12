@@ -1258,7 +1258,11 @@ class MonitorTlsUpgradeTest(unittest.TestCase):
     def test_the_columns_are_added_and_every_check_still_verifies(self):
         from wdash.store import migrations
         engine = self._at_sixteen()
-        self.assertEqual(migrations.migrate(engine), 17)
+        # The latest, rather than 17 written out: this test is about the two
+        # columns below, and a number that has to be edited every time a
+        # migration is added is a test that fails for the wrong reason.
+        self.assertEqual(migrations.migrate(engine),
+                         max(step[0] for step in migrations.MIGRATIONS))
 
         store = Store(engine)
         monitor = store.monitors.get("m1")
@@ -1278,4 +1282,94 @@ class MonitorTlsUpgradeTest(unittest.TestCase):
     def test_the_upgrade_is_safe_to_run_again(self):
         from wdash.store import migrations
         engine = self._at_sixteen()
+        self.assertEqual(migrations.migrate(engine), migrations.migrate(engine))
+
+
+class LocalTotpUpgradeTest(unittest.TestCase):
+    """Version 18 on a store that already has local accounts in it.
+
+    Three columns, all NULL, and nothing else touched. What the upgrade must
+    not do is lock anybody out of an installation that was working: the
+    accounts keep their passwords and their roles, and NULL on all three
+    reads as "has not enrolled", which means the next sign-in enrols. It
+    must not read as "enrolled, with no secret" — an account that can never
+    produce a code that matches, whose only way out is the recovery tool.
+
+    Runs on both dialects: with WDASH_TEST_POSTGRES set, `build_engine` puts
+    this store in a Postgres schema instead, and the ALTERs are the part most
+    likely to differ between the two.
+    """
+
+    def _at_seventeen(self):
+        from datetime import datetime, timezone
+
+        from sqlalchemy import text
+
+        from wdash.store import migrations
+
+        engine = build_engine("sqlite:///:memory:")
+        every = migrations.MIGRATIONS
+        migrations.MIGRATIONS = [step for step in every if step[0] <= 17]
+        try:
+            migrations.migrate(engine)
+        finally:
+            migrations.MIGRATIONS = every
+
+        now = datetime.now(timezone.utc).isoformat()
+        with engine.begin() as connection:
+            # Migration 1 builds the tables from schema.py, which already
+            # declares this version's columns, so a store "at 17" made by
+            # running the steps has them anyway. Dropped here so this really
+            # is a store the new columns are missing from, which is what an
+            # installation being upgraded actually is.
+            for column in ("totp_secret", "totp_confirmed_at",
+                           "totp_last_step"):
+                connection.execute(text(
+                    f"ALTER TABLE wdash_users DROP COLUMN {column}"))
+            connection.execute(text(
+                "INSERT INTO wdash_users (id, username, email, password_hash, "
+                "role, disabled, created_at) VALUES ('u1', 'owner', NULL, "
+                f"'not-a-real-hash', 'admin', false, '{now}')"))
+        return engine
+
+    def test_the_columns_are_added_and_the_account_has_not_enrolled(self):
+        from wdash.store import migrations
+        engine = self._at_seventeen()
+        self.assertEqual(migrations.migrate(engine),
+                         max(step[0] for step in migrations.MIGRATIONS))
+
+        account = Store(engine).users.by_username("owner")
+        self.assertFalse(account["totp_enrolled"])
+        self.assertIsNone(account["totp_confirmed_at"])
+        self.assertIsNone(account["totp_last_step"])
+        self.assertEqual(account["role"], "admin")
+        self.assertFalse(account["disabled"])
+
+    def test_the_sealed_secret_never_travels_with_the_account(self):
+        """It is a credential. Everything but the sign-in path reads these
+        rows to put them on a page, in an audit row or through an invariant,
+        and a secret that travels with them is one waiting to be rendered."""
+        from wdash.store import migrations
+        engine = self._at_seventeen()
+        migrations.migrate(engine)
+        store = Store(engine, SecretBox(SecretBox.generate_key()))
+        store.users.confirm_totp("owner", "GEZDGNBVGY3TQOJQ", 1)
+
+        self.assertNotIn("totp_secret", store.users.by_username("owner"))
+        self.assertNotIn("totp_secret", store.users.all()[0])
+        self.assertTrue(store.users.by_username("owner")["totp_enrolled"])
+        self.assertEqual(store.users.totp_secret("owner"), "GEZDGNBVGY3TQOJQ")
+
+    def test_a_secret_cannot_be_stored_with_no_key(self):
+        """Rule one of store/secrets.py, on the newest thing it seals."""
+        from wdash.store import migrations
+        engine = self._at_seventeen()
+        migrations.migrate(engine)
+        store = Store(engine, SecretBox(None))
+        with self.assertRaises(SecretsUnavailable):
+            store.users.confirm_totp("owner", "GEZDGNBVGY3TQOJQ", 1)
+
+    def test_the_upgrade_is_safe_to_run_again(self):
+        from wdash.store import migrations
+        engine = self._at_seventeen()
         self.assertEqual(migrations.migrate(engine), migrations.migrate(engine))

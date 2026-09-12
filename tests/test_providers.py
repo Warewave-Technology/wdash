@@ -32,6 +32,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from wdash.app import create_app  # noqa: E402
 from wdash.auth.ldap_auth import escape_filter  # noqa: E402
 from wdash.auth.providers import (  # noqa: E402
@@ -126,8 +128,7 @@ class LoginPageTest(unittest.TestCase):
     def setUp(self):
         self.app, self.database = make_app()
         self.client = self.app.test_client()
-        self.client.post("/setup", data={
-            "username": "owner", "password": PASSWORD, "confirm": PASSWORD})
+        support.set_up(self.client, username="owner", password=PASSWORD)
         self.client = self.app.test_client()
 
     def tearDown(self):
@@ -169,8 +170,7 @@ class OneDoorOnTheSignInPageTest(unittest.TestCase):
     def setUp(self):
         self.app, self.database = make_app(**ENVIRONMENT)
         client = self.app.test_client()
-        client.post("/setup", data={"username": "owner", "password": PASSWORD,
-                                    "confirm": PASSWORD})
+        support.set_up(client, username="owner", password=PASSWORD)
         self.app.store.settings.set("auth.ldap", LDAP_VALUE, secret="bind")
         self.client = self.app.test_client()
 

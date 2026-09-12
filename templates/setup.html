@@ -34,11 +34,14 @@
         </div>
 
         {% if not secrets_available %}
-        <div class="alert alert-warning py-2" style="font-size:.85rem">
+        <div class="alert alert-danger py-2" style="font-size:.85rem">
           <i class="fas fa-triangle-exclamation"></i>
-          <code>WDASH_ENCRYPTION_KEY</code> is not set. Setup will work, but
-          OIDC and LDAP credentials cannot be saved until it is &mdash; WDash
-          refuses to store secrets as plain text.
+          <code>WDASH_ENCRYPTION_KEY</code> is not set. The account will be
+          created, and you will <strong>not be able to finish signing in</strong>:
+          a local account needs an authenticator, its shared secret is stored
+          encrypted, and WDash refuses to write a secret as plain text rather
+          than pretend it is protected. OIDC and LDAP credentials cannot be
+          saved either. Set a key first.
         </div>
         {% endif %}
 

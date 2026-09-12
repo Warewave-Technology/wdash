@@ -15,8 +15,14 @@ writing SQL under pressure.
     PYTHONPATH=src python -m wdash.store.recover --grant-admin alice
     PYTHONPATH=src python -m wdash.store.recover --set-role alice admin
     PYTHONPATH=src python -m wdash.store.recover --reset-password alice
+    PYTHONPATH=src python -m wdash.store.recover --reset-totp alice
     PYTHONPATH=src python -m wdash.store.recover --enable alice
     PYTHONPATH=src python -m wdash.store.recover --use-directory ldap
+
+`--reset-totp` is the one a mandatory second factor makes necessary. A local
+account cannot sign in without a code, so the operator who is the only
+administrator and has lost their phone has no way in at all — the accounts
+page that would reset it is behind the sign-in that needs it.
 
 The last two exist because the one-directory rule can be lost from the other
 side. WDash signs people in through at most one directory; on an installation
@@ -227,6 +233,10 @@ def status(store):
     print(f"Local accounts:")
     for account in accounts:
         marker = " [disabled]" if account["disabled"] else ""
+        # Whether it has an authenticator, because the answer changes what
+        # the next sign-in will ask for — and "not yet" is not a fault: the
+        # account enrols at its next sign-in.
+        marker += "" if account.get("totp_enrolled") else " [no authenticator]"
         reachable = account["role"] in carriers
         print(f"  {account['username']} -> {account['role']}"
               f"{marker}{'' if reachable else '   (cannot administer)'}")
@@ -332,6 +342,37 @@ def reset_password(store, username, password=None):
     return 0
 
 
+def reset_totp(store, username):
+    """Forget an account's authenticator, so its next sign-in enrols again.
+
+    For the operator who is the only administrator and has lost their phone:
+    the accounts page can do this too, and it is behind the sign-in that needs
+    the code.
+
+    Says what it costs. Until that account enrols again its password alone
+    signs it in, and somebody running this to help a colleague should know
+    that before they walk away from the terminal.
+    """
+    account = store.users.by_username(username)
+    if account is None:
+        print(f"No local account called '{username}'.", file=sys.stderr)
+        print("Existing accounts: "
+              + ", ".join(a["username"] for a in store.users.all()),
+              file=sys.stderr)
+        return 1
+
+    if not account["totp_enrolled"]:
+        print(f"'{account['username']}' has no authenticator set up. Its next "
+              f"sign-in will set one up.")
+        return 0
+
+    store.users.clear_totp(account["username"])
+    print(f"The authenticator for '{account['username']}' has been reset.")
+    print("Its next sign-in sets up a new one. Until then, the password "
+          "alone signs that account in.")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
@@ -341,6 +382,9 @@ def main(argv=None):
     parser.add_argument("--set-role", nargs=2, metavar=("USERNAME", "ROLE"),
                         help="move a local account to an existing role")
     parser.add_argument("--reset-password", metavar="USERNAME")
+    parser.add_argument("--reset-totp", metavar="USERNAME",
+                        help="forget an account's authenticator, so its next "
+                             "sign-in sets up a new one")
     parser.add_argument("--password", help="for scripted use; prompts otherwise")
     parser.add_argument("--enable", metavar="USERNAME",
                         help="undo a disabled local account")
@@ -366,6 +410,8 @@ def main(argv=None):
     if arguments.reset_password:
         return reset_password(store, arguments.reset_password,
                               arguments.password)
+    if arguments.reset_totp:
+        return reset_totp(store, arguments.reset_totp)
     return status(store)
 
 

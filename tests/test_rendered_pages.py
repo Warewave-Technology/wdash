@@ -30,6 +30,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 PASSWORD = "rendered-pages-only-password"
 
 #: Bootstrap 5.3's own palette. None of it is in `wdash.css`, so an element
@@ -170,9 +172,11 @@ class EveryScreenTest(unittest.TestCase):
             DASHBOARD_STORAGE = "database"
 
         cls.app = create_app(RenderConfig)
-        cls.app.test_client().post("/setup", data={"username": "admin",
-                                                   "password": PASSWORD,
-                                                   "confirm": PASSWORD})
+        # Enrolled once here, through a test client: a local account needs an
+        # authenticator, and every browser sign-in below uses the secret this
+        # returns rather than enrolling again.
+        cls.secret = support.set_up(cls.app.test_client(), username="admin",
+                                    password=PASSWORD)
         # Through the store, like everything else here: the local account's
         # role decides what the navbar shows, and a page nobody may open
         # renders nothing to measure.
@@ -211,11 +215,10 @@ class EveryScreenTest(unittest.TestCase):
             context = browser.new_context(viewport={"width": 1500,
                                                     "height": 1000})
             page = context.new_page()
-            page.goto(f"{base}/auth/login", wait_until="networkidle")
-            page.fill("input[name=username]", "admin")
-            page.fill("input[name=password]", PASSWORD)
-            page.click("button[type=submit]")
-            page.wait_for_load_state("networkidle")
+            # Both halves: a local account needs an authenticator, and the
+            # first sign-in is where it is set up.
+            support.sign_in_in_browser(page, base, "admin", PASSWORD,
+                                       self.secret, app=self.app)
 
             # Registered once. Inside the loop they accumulate, and the
             # fourth page reports the first page's failures four times.
@@ -253,11 +256,10 @@ class EveryScreenTest(unittest.TestCase):
             page = browser.new_context().new_page()
             page.on("console", lambda m: refused.append(m.text)
                     if "Content Security Policy" in m.text else None)
-            page.goto(f"{base}/auth/login", wait_until="networkidle")
-            page.fill("input[name=username]", "admin")
-            page.fill("input[name=password]", PASSWORD)
-            page.click("button[type=submit]")
-            page.wait_for_load_state("networkidle")
+            # Both halves: a local account needs an authenticator, and the
+            # first sign-in is where it is set up.
+            support.sign_in_in_browser(page, base, "admin", PASSWORD,
+                                       self.secret, app=self.app)
             for url in ("/logs", "/dashboards"):
                 page.goto(base + url, wait_until="networkidle")
                 loaded[url] = page.evaluate(
@@ -312,9 +314,11 @@ class TheAgentRowIsOneRowHighTest(unittest.TestCase):
             DASHBOARD_STORAGE = "database"
 
         cls.app = create_app(RowConfig)
-        cls.app.test_client().post("/setup", data={"username": "admin",
-                                                   "password": PASSWORD,
-                                                   "confirm": PASSWORD})
+        # Enrolled once here, through a test client: a local account needs an
+        # authenticator, and every browser sign-in below uses the secret this
+        # returns rather than enrolling again.
+        cls.secret = support.set_up(cls.app.test_client(), username="admin",
+                                    password=PASSWORD)
         grant(cls.app, "admin", ["system:admin", "monitors:read"])
         cls.app.store.settings.set("rbac.user_roles", {"admin": "test-role"})
         cls.app.store.rbac.invalidate()
@@ -339,11 +343,9 @@ class TheAgentRowIsOneRowHighTest(unittest.TestCase):
             for width in self.WIDTHS:
                 page = browser.new_context(
                     viewport={"width": width, "height": 900}).new_page()
-                page.goto(f"{self.base}/auth/login", wait_until="networkidle")
-                page.fill("input[name=username]", "admin")
-                page.fill("input[name=password]", PASSWORD)
-                page.click("button[type=submit]")
-                page.wait_for_load_state("networkidle")
+                support.sign_in_in_browser(
+                    page, self.base, "admin", PASSWORD, self.secret,
+                    app=self.app)
                 page.goto(f"{self.base}/admin/config#tab-monitors",
                           wait_until="networkidle")
                 page.wait_for_selector(

@@ -24,6 +24,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from wdash.app import create_app  # noqa: E402
 from wdash.config import Config  # noqa: E402
 from wdash.store import SecretBox  # noqa: E402
@@ -49,9 +51,7 @@ class AccountPageTestCase(unittest.TestCase):
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
-        self.client.post("/setup", data={
-            "username": "owner", "password": PASSWORD, "confirm": PASSWORD})
-
+        support.set_up(self.client, username="owner", password=PASSWORD)
     def tearDown(self):
         if os.path.exists(self.database):
             os.unlink(self.database)
@@ -345,8 +345,8 @@ class OpenSessionTest(AccountPageTestCase):
     def bob(self, role="admin"):
         self.create(username="bob", role=role)
         client = self.app.test_client()
-        client.post("/auth/login", data={"username": "bob",
-                                         "password": OTHER})
+        # Its first sign-in, so it enrols an authenticator on the way past.
+        support.sign_in(client, "bob", OTHER)
         return client
 
     def test_a_demotion_reaches_a_session_that_is_already_open(self):

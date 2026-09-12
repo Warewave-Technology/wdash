@@ -336,8 +336,8 @@
     <div class="card-body p-0">
       <table class="table table-sm mb-0 align-middle">
         <thead><tr>
-          <th>Username</th><th>Email</th><th>Role</th><th>Created</th>
-          <th>Last sign-in</th><th></th>
+          <th>Username</th><th>Email</th><th>Role</th><th>Authenticator</th>
+          <th>Created</th><th>Last sign-in</th><th></th>
         </tr></thead>
         <tbody>
         {% for account in local_accounts %}
@@ -390,6 +390,23 @@
               </div>
               {% endif %}
             </td>
+            <td style="font-size:.8rem">
+              {# What the column can say, and no more. WDash cannot read the
+                 secret back to a screen — it is sealed, and sealed secrets
+                 are replaced, never shown. #}
+              {% if account.totp_enrolled %}
+                <span class="badge bg-success-subtle text-success">set up</span>
+                <div class="text-muted" style="font-size:.72rem">
+                  {{ account.totp_confirmed_at.strftime('%Y-%m-%d')
+                     if account.totp_confirmed_at else '' }}
+                </div>
+              {% else %}
+                <span class="badge bg-warning-subtle text-warning">not yet</span>
+                <div class="text-muted" style="font-size:.72rem">
+                  set up at next sign-in
+                </div>
+              {% endif %}
+            </td>
             <td class="text-muted" style="font-size:.8rem">
               {{ account.created_at.strftime('%Y-%m-%d %H:%M') if account.created_at else '—' }}</td>
             <td class="text-muted" style="font-size:.8rem">
@@ -402,6 +419,18 @@
                       data-bs-toggle="modal" data-bs-target="#passwordModal">
                 Reset password
               </button>
+              {% if account.totp_enrolled %}
+              {# Recoverable for the person — they enrol again at their next
+                 sign-in — and a real weakening in the meantime: whoever knows
+                 the password gets in with no second factor until they do. So
+                 it asks first, like the other controls that change what a
+                 credential is worth. #}
+              <form method="POST" class="d-inline"
+                    action="{{ url_for('config.reset_account_totp', username=account.username) }}"
+                    data-confirm="Reset the authenticator for {{ account.username }}? Until they set up a new one at their next sign-in, their password alone gets in.">
+                <button class="btn btn-sm btn-outline-danger">Reset TOTP</button>
+              </form>
+              {% endif %}
               {# Deleting an account is not something a person can undo, so it
                  takes the same confirmation every other destructive button on
                  this page takes. #}
@@ -423,6 +452,14 @@
       installation refuses to be left without one that is enabled and can
       administer. <code>python -m wdash.store.recover --status</code> says who
       that is from the command line, without signing in.
+      <br>
+      Every local account needs an authenticator as well as a password, set up
+      at its first sign-in and never optional. LDAP and OpenID Connect
+      accounts are not listed here and get no second factor from WDash: it
+      never sees their passwords, and a second factor for them belongs at the
+      provider that checks them. If somebody loses their phone, reset it here,
+      or run <code>python -m wdash.store.recover --reset-totp
+      &lt;username&gt;</code> when nobody can open this page.
     </div>
   </div>
 

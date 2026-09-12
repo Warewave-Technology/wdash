@@ -53,6 +53,14 @@
     --border-strong: #665c54;
     --accent: #fe8019;
 
+    /* The quiet zone a QR code is drawn in, on the authenticator enrolment
+       page. Deliberately NOT themed and deliberately not Gruvbox's off-white:
+       a camera reading a screen wants the black-on-white contrast the QR
+       specification assumes, and inverting or tinting it to match a dark page
+       is a decoration some scanners refuse. Here rather than in the template
+       because the palette is the only place this project writes a colour. */
+    --qr-ground: #ffffff;
+
     /* What a shadow is made of, and what a hover overlay is made of. Both
        have to flip: a shadow on a light page is far weaker than black at
        40%, and an overlay that lightens a dark row has to darken a light
@@ -2144,3 +2152,10 @@ span.flatpickr-weekday {
 .numInputWrapper span:hover { background: var(--surface-hover); }
 .numInputWrapper span.arrowUp::after { border-bottom-color: var(--text-muted); }
 .numInputWrapper span.arrowDown::after { border-top-color: var(--text-muted); }
+
+/* The QR code's quiet zone on the authenticator enrolment page. One rule so
+   the value lives in the palette; see --qr-ground for why it does not
+   follow the theme. */
+.qr-quiet-zone {
+    background: var(--qr-ground);
+}

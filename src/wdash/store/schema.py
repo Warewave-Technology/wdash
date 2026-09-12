@@ -22,8 +22,8 @@ joins nobody performs.
 """
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Index, Integer, LargeBinary, MetaData, String,
-    Table, Text, UniqueConstraint,
+    BigInteger, Boolean, Column, DateTime, Index, Integer, LargeBinary,
+    MetaData, String, Table, Text, UniqueConstraint,
 )
 from sqlalchemy.types import JSON
 
@@ -51,6 +51,24 @@ users = Table(
     Column("disabled", Boolean, nullable=False, default=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("last_login_at", DateTime(timezone=True)),
+    #: The TOTP shared secret, SEALED with the store's SecretBox — the same
+    #: treatment as a source password or a channel's token, and for the same
+    #: reason: a database dump otherwise carries a working second factor for
+    #: every local account, which is worse than carrying none at all because
+    #: the deployment believes it has one.
+    #:
+    #: NULL means "has not enrolled", which is what every account written
+    #: before this column says, and what an administrator's reset puts back.
+    Column("totp_secret", Text),
+    #: When a code proved the person holds the secret. An unconfirmed secret
+    #: is never stored, so this is NOT NULL exactly when `totp_secret` is —
+    #: the pair is written in one statement.
+    Column("totp_confirmed_at", DateTime(timezone=True)),
+    #: The last time step this account accepted, so the same code cannot be
+    #: used twice. A replayed code is one somebody read over a shoulder, off
+    #: a screen share, or out of a phishing page thirty seconds ago; without
+    #: this the window to reuse it is the whole drift allowance.
+    Column("totp_last_step", BigInteger),
     # Case-insensitive uniqueness is enforced by storing the username folded;
     # see users repository. The constraint is what makes the first-run race
     # safe rather than merely unlikely.

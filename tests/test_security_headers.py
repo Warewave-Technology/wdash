@@ -16,6 +16,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from wdash.app import create_app  # noqa: E402
 from wdash.config import Config  # noqa: E402
 from wdash.store.secrets import SecretBox  # noqa: E402
@@ -219,9 +221,7 @@ class SessionTest(HeaderTestCase):
         with self.client.session_transaction() as session:
             session["planted"] = "from before sign-in"
 
-        self.client.post("/setup", data={"username": "owner",
-                                         "password": PASSWORD,
-                                         "confirm": PASSWORD})
+        support.set_up(self.client, username="owner", password=PASSWORD)
         with self.client.session_transaction() as session:
             self.assertIn("user_data", session, "setup did not sign anybody in")
             self.assertNotIn("planted", session)
@@ -242,9 +242,7 @@ class OidcCallbackTest(HeaderTestCase):
         super().setUp()
         # Otherwise every route redirects to first-run setup and the callback
         # is never reached.
-        self.client.post("/setup", data={"username": "owner",
-                                         "password": PASSWORD,
-                                         "confirm": PASSWORD})
+        support.set_up(self.client, username="owner", password=PASSWORD)
         self.client.get("/auth/logout")
         self.app.store.settings.set("auth.oidc", {
             "enabled": True, "client_id": "wdash",

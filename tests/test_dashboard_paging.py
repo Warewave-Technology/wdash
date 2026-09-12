@@ -19,6 +19,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from wdash.api.dashboard_routes import DASHBOARDS_PER_PAGE  # noqa: E402
 from wdash.app import create_app  # noqa: E402
 from wdash.config import Config  # noqa: E402
@@ -53,10 +55,7 @@ class PagingTestCase(unittest.TestCase):
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
-        self.client.post("/setup", data={"username": "owner",
-                                         "password": PASSWORD,
-                                         "confirm": PASSWORD})
-
+        support.set_up(self.client, username="owner", password=PASSWORD)
     def tearDown(self):
         for path in (self.database, self.storage):
             if os.path.exists(path):

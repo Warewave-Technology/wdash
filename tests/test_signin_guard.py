@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from sqlalchemy import create_engine  # noqa: E402
 
 from wdash.store.schema import metadata, signin_attempts  # noqa: E402
@@ -337,10 +339,7 @@ class TheSignInPageOffersNoLinkToItselfTest(unittest.TestCase):
 
     def _claim(self):
         password = "first-run-only-password"
-        self.client.post("/setup", data={"username": "owner",
-                                         "password": password,
-                                         "confirm": password})
-
+        support.set_up(self.client, username="owner", password=password)
     @staticmethod
     def _navbar(page):
         """The bar, not the page.

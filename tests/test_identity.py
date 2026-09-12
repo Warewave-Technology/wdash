@@ -20,8 +20,11 @@ import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from wdash.app import create_app  # noqa: E402
 from wdash.config import Config  # noqa: E402
+from wdash.store import SecretBox  # noqa: E402
 
 PASSWORD = "a-sufficiently-long-password"
 
@@ -39,9 +42,11 @@ class IdentityTestCase(unittest.TestCase):
             SECRET_KEY = "identity"
             DATABASE_URL = f"sqlite:///{database}"
             OIDC_CLIENT_ID = None
-            # Stated, not inherited: one test here asserts the setup page warns
-            # that secrets cannot be stored, which is only true without a key.
-            ENCRYPTION_KEY = None
+            # Stated, not inherited. A local account cannot finish signing in
+            # without a key: its authenticator's secret is sealed with this
+            # one, and WDash refuses to write a secret as plain text. The
+            # test about a keyless installation builds its own app.
+            ENCRYPTION_KEY = SecretBox.generate_key()
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
@@ -50,9 +55,23 @@ class IdentityTestCase(unittest.TestCase):
         if os.path.exists(self.database):
             os.unlink(self.database)
 
-    def complete_setup(self, username="owner", password=PASSWORD):
+    def submit_setup(self, username="owner", password=PASSWORD):
+        """The form alone. A correct submission no longer starts a session:
+        it leaves the browser holding a half-finished sign-in."""
         return self.client.post("/setup", data={
             "username": username, "password": password, "confirm": password})
+
+    def complete_setup(self, username="owner", password=PASSWORD):
+        """The form AND the authenticator enrolment it now requires, which
+        together are what one POST used to do. The secret is kept on `self`
+        so a later sign-in can produce a code for it."""
+        response = self.submit_setup(username, password)
+        self.secret = support.enrol(self.client)
+        return response
+
+    def sign_in(self, username="owner", password=PASSWORD):
+        return support.sign_in(self.client, username, password, self.secret,
+                               app=self.app)
 
 
 class SetupGateTest(IdentityTestCase):
@@ -108,15 +127,58 @@ class SetupFormTest(IdentityTestCase):
             "username": "   ", "password": PASSWORD, "confirm": PASSWORD})
         self.assertEqual(response.status_code, 400)
 
-    def test_setup_signs_the_administrator_in(self):
-        response = self.complete_setup()
+    def test_setup_does_not_sign_the_administrator_in(self):
+        """It used to, which with a mandatory second factor would have made
+        the account that matters most the one account that never enrolled."""
+        response = self.submit_setup()
         self.assertEqual(response.status_code, 302)
+        self.assertIn("/auth/totp/enrol", response.headers["Location"])
         with self.client.session_transaction() as session:
-            self.assertEqual(session["user_data"]["username"], "owner")
+            self.assertNotIn("user_data", session)
+        self.assertEqual(self.client.get("/admin/config").status_code, 302)
+
+    def test_enrolling_is_what_signs_them_in(self):
+        self.complete_setup()
+        self.assertEqual(self.client.get("/admin/config").status_code, 200)
 
     def test_the_page_warns_when_secrets_cannot_be_stored(self):
-        """Otherwise the first OIDC save fails for a reason nobody expects."""
-        self.assertIn(b"WDASH_ENCRYPTION_KEY", self.client.get("/setup").data)
+        """Otherwise the first OIDC save fails for a reason nobody expects —
+        and now so does the first sign-in, which is worse."""
+        database = os.path.join(tempfile.mkdtemp(), "keyless.db")
+
+        class Keyless(Config):
+            TESTING = True
+            SECRET_KEY = "keyless"
+            DATABASE_URL = f"sqlite:///{database}"
+            OIDC_CLIENT_ID = None
+            ENCRYPTION_KEY = None
+
+        client = create_app(Keyless).test_client()
+        self.assertIn(b"WDASH_ENCRYPTION_KEY", client.get("/setup").data)
+
+    def test_without_a_key_the_administrator_cannot_finish_signing_in(self):
+        """No key, no secret — and an authenticator IS a secret. Refused with
+        the sentence that says what to set, rather than enrolled into
+        plaintext."""
+        database = os.path.join(tempfile.mkdtemp(), "keyless.db")
+
+        class Keyless(Config):
+            TESTING = True
+            SECRET_KEY = "keyless"
+            DATABASE_URL = f"sqlite:///{database}"
+            OIDC_CLIENT_ID = None
+            ENCRYPTION_KEY = None
+
+        app = create_app(Keyless)
+        client = app.test_client()
+        client.post("/setup", data={"username": "owner", "password": PASSWORD,
+                                    "confirm": PASSWORD})
+        page = client.get("/auth/totp/enrol")
+        self.assertEqual(page.status_code, 503)
+        self.assertIn(b"WDASH_ENCRYPTION_KEY", page.data)
+        self.assertEqual(client.get("/admin/config").status_code, 302)
+        self.assertIsNone(app.store.users.by_username("owner")["totp_enrolled"]
+                          or None)
 
 
 class LocalSignInTest(IdentityTestCase):
@@ -125,10 +187,20 @@ class LocalSignInTest(IdentityTestCase):
         self.complete_setup()
         self.client = self.app.test_client()      # a fresh, signed-out client
 
-    def test_the_right_password_signs_in(self):
+    def test_the_right_password_asks_for_a_code_rather_than_signing_in(self):
+        """Half a sign-in. The hold grants nothing until the code."""
         response = self.client.post("/auth/login", data={
             "username": "owner", "password": PASSWORD})
         self.assertEqual(response.status_code, 302)
+        self.assertIn("/auth/totp", response.headers["Location"])
+        with self.client.session_transaction() as session:
+            self.assertNotIn("user_data", session)
+
+    def test_the_code_is_what_signs_them_in(self):
+        support.sign_in(self.client, "owner", PASSWORD, self.secret,
+                        app=self.app)
+        with self.client.session_transaction() as session:
+            self.assertEqual(session["user_data"]["username"], "owner")
 
     def test_the_wrong_password_does_not(self):
         response = self.client.post("/auth/login", data={
@@ -156,8 +228,8 @@ class LocalSignInTest(IdentityTestCase):
         is read by the rule about turning a directory off, which otherwise
         has to guess and tells an administrator something untrue.
         """
-        self.client.post("/auth/login", data={
-            "username": "owner", "password": PASSWORD})
+        support.sign_in(self.client, "owner", PASSWORD, self.secret,
+                        app=self.app)
         with self.client.session_transaction() as session:
             stored = session["user_data"]
         self.assertEqual(sorted(stored),
@@ -321,9 +393,7 @@ class SignInThrottleTest(IdentityTestCase):
         self.assertIn("locked", outcomes)
 
     def test_signing_in_reaches_the_audit_trail(self):
-        self.client.post("/auth/login",
-                         data={"username": "owner", "password": PASSWORD},
-                         environ_base={"REMOTE_ADDR": "10.0.0.1"})
+        self.sign_in()
         actions = [row["action"] for row in self.app.store.audit.recent()]
         self.assertIn("sign-in", actions)
 
@@ -350,8 +420,7 @@ class BreakGlassTest(IdentityTestCase):
     def test_the_local_administrator_survives_signing_out(self):
         self.complete_setup()
         self.client.get("/auth/logout")
-        self.client.post("/auth/login",
-                         data={"username": "owner", "password": PASSWORD})
+        self.sign_in()
         self.assertEqual(self.client.get("/admin/config").status_code, 200)
 
     def test_a_local_account_is_marked_as_local(self):
@@ -364,8 +433,7 @@ class BreakGlassTest(IdentityTestCase):
     def test_the_sign_in_is_recorded_as_local_rather_than_directory(self):
         self.complete_setup()
         self.client.get("/auth/logout")
-        self.client.post("/auth/login",
-                         data={"username": "owner", "password": PASSWORD})
+        self.sign_in()
         row = next(entry for entry in self.app.store.audit.recent()
                    if entry["action"] == "sign-in")
         self.assertEqual(row["state"]["method"], "local account")
@@ -499,9 +567,12 @@ class DirectoryTest(IdentityTestCase):
                 self.assertEqual(response.status_code, 401)
                 self.assertIn(b"Invalid username or password", response.data)
         self.assertEqual(self.client.get("/admin/config").status_code, 302)
+        # The two attempts made here, newest first. The success under them is
+        # the enrolment that finished setUp's sign-in; what matters is that
+        # neither of these was recorded as an outage, which no limit counts.
         self.assertEqual(
             [row["outcome"] for row in self.app.store.signin.recent()
-             if row["username"] == "owner"], ["failure", "failure"])
+             if row["username"] == "owner"][:2], ["failure", "failure"])
 
     def test_guesses_at_a_local_account_lock_it_while_the_directory_is_down(self):
         """The measurement, as a test: 60 wrong guesses at `owner` with the
@@ -590,8 +661,11 @@ class ProviderIdentityTest(IdentityTestCase):
         for _ in range(12):
             self.sign_in({"sub": "1", "preferred_username": "owner",
                           "email": "o@x", "email_verified": True})
+        # Everything the twelve attempts wrote. The success below them is
+        # setUp's own sign-in finishing; none of these is a failure, which is
+        # what would have counted towards a lockout.
         outcomes = {row["outcome"] for row in self.app.store.signin.recent()
-                    if row["username"] == "owner"}
+                    if row["username"] == "owner"} - {"success"}
         self.assertEqual(outcomes, {"refused"})
         response = self.client.post("/auth/login", data={
             "username": "owner", "password": PASSWORD})
@@ -789,11 +863,11 @@ class SetupRoleTest(unittest.TestCase):
             DATABASE_URL = f"sqlite:///{database}"
             RBAC_CONFIG_FILE = path
             OIDC_CLIENT_ID = None
+            ENCRYPTION_KEY = SecretBox.generate_key()
 
         app = create_app(TestConfig)
         client = app.test_client()
-        client.post("/setup", data={"username": "owner", "password": PASSWORD,
-                                    "confirm": PASSWORD})
+        support.set_up(client, username="owner", password=PASSWORD)
         return app, client
 
     def test_an_administering_role_by_another_name_is_used(self):
@@ -840,6 +914,7 @@ class SetupRoleTest(unittest.TestCase):
             DATABASE_URL = f"sqlite:///{database}"
             RBAC_CONFIG_FILE = path
             OIDC_CLIENT_ID = None
+            ENCRYPTION_KEY = SecretBox.generate_key()
 
         app = create_app(TestConfig)
         response = app.test_client().post("/setup", data={

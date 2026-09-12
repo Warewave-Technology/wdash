@@ -34,6 +34,8 @@ from unittest import mock
 SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, SRC)
 
+from tests import support  # noqa: E402
+
 import wdash.app as app_module  # noqa: E402
 from wdash.app import create_app, files_left_behind  # noqa: E402
 from wdash.config import Config, DEFAULT_DASHBOARD_FILE  # noqa: E402
@@ -93,9 +95,7 @@ class _Installation(unittest.TestCase):
     def build(self, **extra):
         app = create_app(self.config(**extra))
         client = app.test_client()
-        client.post("/setup", data={"username": "owner",
-                                    "password": PASSWORD,
-                                    "confirm": PASSWORD})
+        support.set_up(client, username="owner", password=PASSWORD)
         return app, client
 
     def write_dashboards(self, records):
@@ -174,8 +174,7 @@ class TheDefaultIsTheDatabaseTest(_Installation):
 
         app = create_app(Bare)
         client = app.test_client()
-        client.post("/setup", data={"username": "owner", "password": PASSWORD,
-                                    "confirm": PASSWORD})
+        support.set_up(client, username="owner", password=PASSWORD)
         app.dashboard_manager.create_dashboard("Board", "", "*", "owner", ["*"])
         client.post("/api/saved-searches",
                     json={"name": "Mine", "query": "*", "time_range": "1h"})
@@ -379,9 +378,7 @@ class TheStartUpWarningTest(_Installation):
                                          SECRET_KEY="packaged-searches",
                                          DASHBOARD_STORAGE_FILE=packaged))
             client = app.test_client()
-            client.post("/setup", data={"username": "owner",
-                                        "password": PASSWORD,
-                                        "confirm": PASSWORD})
+            support.set_up(client, username="owner", password=PASSWORD)
             reply = client.post("/api/saved-searches",
                                 json={"name": "Mine", "query": "*",
                                       "time_range": "1h"})

@@ -37,6 +37,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from wdash.app import create_app  # noqa: E402
 from wdash.config import Config  # noqa: E402
 from wdash.hub import Hub  # noqa: E402
@@ -55,9 +57,8 @@ class LiveSourceTestCase(unittest.TestCase):
         self.key = SecretBox.generate_key()
         self.app = self.worker()
         self.client = self.app.test_client()
-        self.client.post("/setup", data={"username": "owner",
-                                         "password": PASSWORD,
-                                         "confirm": PASSWORD})
+        self.secret = support.set_up(
+            self.client, username="owner", password=PASSWORD)
         self.sign_in(self.client)
 
     def tearDown(self):
@@ -80,13 +81,11 @@ class LiveSourceTestCase(unittest.TestCase):
 
         return create_app(TestConfig)
 
-    @staticmethod
-    def sign_in(client):
-        """Through the form. Permissions are resolved from the store on every
-        request, so a session written by hand is a cookie nothing reads."""
-        client.post("/auth/login", data={"username": "owner",
-                                         "password": PASSWORD},
-                    follow_redirects=True)
+    def sign_in(self, client):
+        """Through the form, both halves. Permissions are resolved from the
+        store on every request, so a session written by hand is a cookie
+        nothing reads."""
+        support.sign_in(client, "owner", PASSWORD, self.secret, app=self.app)
 
     # ---------- acting through the page, not the store ----------
 

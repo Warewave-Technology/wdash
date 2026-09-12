@@ -48,7 +48,7 @@ class Store:
     def __init__(self, engine, secret_box=None):
         self.engine = engine
         self.secrets = secret_box or SecretBox.from_environment()
-        self.users = UserRepository(engine)
+        self.users = UserRepository(engine, self.secrets)
         self.roles = RoleRepository(engine)
         self.settings = SettingsRepository(engine, self.secrets)
         self.sources = SourceRepository(engine, self.secrets)

@@ -43,11 +43,19 @@
           <button type="submit" class="btn btn-outline-primary w-100">
             {% if ldap_available %}Sign in{% else %}Sign in with a local account{% endif %}
           </button>
-          {% if ldap_available %}
+          {# Said before the code is asked for, not after: somebody who does
+             not know a second factor is coming reads the next page as a
+             failure. It names no account and reveals nothing — a local
+             account always needs a code, so the sentence is the same whoever
+             is reading it. #}
           <div class="form-text text-center mt-2">
+            {% if ldap_available %}
             Local accounts and directory accounts both use this form.
+            {% endif %}
+            A local account also asks for a code from your authenticator, and
+            sets one up at your first sign-in. Directory accounts do not:
+            their second factor belongs at the directory.
           </div>
-          {% endif %}
         </form>
         {% elif not oidc_available %}
         <div class="alert alert-warning mb-0">

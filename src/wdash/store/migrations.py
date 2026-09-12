@@ -367,6 +367,32 @@ def _add_monitor_tls(connection):
                 text(f"ALTER TABLE {table} ADD COLUMN {column} {kind}"))
 
 
+def _add_local_totp(connection):
+    """Version 18: a local account's second factor.
+
+    Three columns, added NULL, on the guarded ALTER shape migrations 14 and
+    17 use. NULL on all three reads as "this account has not enrolled", which
+    is true of every account that exists at the moment of the upgrade — and
+    what it means is that its next sign-in enrols. It must not read as
+    "enrolled, with no secret": that is an account which can never produce a
+    code that matches, and the way out of it is the recovery tool.
+
+    Nothing is backfilled and nobody is locked out by the upgrade itself. The
+    accounts that existed keep their passwords, keep their roles, and are
+    asked to enrol the next time they sign in.
+    """
+    from sqlalchemy import inspect, text
+
+    existing = {column["name"] for column
+                in inspect(connection).get_columns("wdash_users")}
+    for column, kind in (("totp_secret", "TEXT"),
+                         ("totp_confirmed_at", "TIMESTAMP"),
+                         ("totp_last_step", "BIGINT")):
+        if column not in existing:
+            connection.execute(text(
+                f"ALTER TABLE wdash_users ADD COLUMN {column} {kind}"))
+
+
 def _signals_of(row):
     """What a source row serves, as a set.
 
@@ -408,6 +434,7 @@ MIGRATIONS = [
      _report_source_name_collisions),
     (17, "a check's own TLS decision, and whether its handshake was verified",
      _add_monitor_tls),
+    (18, "a local account's second factor, sealed at rest", _add_local_totp),
 ]
 
 

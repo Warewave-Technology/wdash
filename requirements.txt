@@ -16,6 +16,14 @@ psycopg[binary]==3.3.4
 # Secrets at rest and password hashing for the local break-glass account.
 cryptography==50.0.0
 argon2-cffi==23.1.0
+# The QR code on the authenticator enrolment page, and nothing else. BSD
+# 3-clause, pure Python, and no dependencies of its own on the versions we
+# run — so it adds one file of drawing code to the image and no transitive
+# tree. The TOTP itself is ours, in src/wdash/auth/totp.py: RFC 6238 is two
+# pages of hmac and hashlib, checked against the RFC's own vectors, and a
+# third party in the authentication path would be a worse trade than a
+# third party in the picture beside it.
+segno==1.6.6
 # Directory authentication. LGPL v3, like psycopg above — kept behind
 # src/wdash/auth/ldap_auth.py so it can be swapped in one file. Both are used
 # as libraries over their published interfaces, which is what the LGPL is for;

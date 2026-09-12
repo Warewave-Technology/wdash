@@ -22,6 +22,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from wdash.app import create_app  # noqa: E402
 from wdash.config import Config  # noqa: E402
 from wdash.store import SecretBox  # noqa: E402
@@ -47,9 +49,7 @@ class ConfigTestCase(unittest.TestCase):
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
-        self.client.post("/setup", data={
-            "username": "owner", "password": PASSWORD, "confirm": PASSWORD})
-
+        support.set_up(self.client, username="owner", password=PASSWORD)
     def tearDown(self):
         if os.path.exists(self.database):
             os.unlink(self.database)
@@ -775,8 +775,7 @@ class TwoDirectoriesAreReportedTest(unittest.TestCase):
     def test_the_conflict_is_logged_audited_and_shown(self):
         first = self.build()
         client = first.test_client()
-        client.post("/setup", data={"username": "owner", "password": PASSWORD,
-                                    "confirm": PASSWORD})
+        secret = support.set_up(client, username="owner", password=PASSWORD)
         first.store.settings.set("auth.ldap", {
             "server": "ldaps://ldap:636", "base_dn": "dc=x", "enabled": True})
 
@@ -791,8 +790,7 @@ class TwoDirectoriesAreReportedTest(unittest.TestCase):
         self.assertEqual(rows[0]["actor"], "system")
 
         client = second.test_client()
-        client.post("/auth/login", data={"username": "owner",
-                                         "password": PASSWORD})
+        support.sign_in(client, "owner", PASSWORD, secret)
         page = client.get("/admin/config").get_data(as_text=True)
         self.assertIn("One directory at a time", page)
         self.assertIn("LDAP is in force", page)
@@ -801,8 +799,7 @@ class TwoDirectoriesAreReportedTest(unittest.TestCase):
     def test_one_directory_alone_says_nothing(self):
         app = self.build()
         client = app.test_client()
-        client.post("/setup", data={"username": "owner", "password": PASSWORD,
-                                    "confirm": PASSWORD})
+        support.set_up(client, username="owner", password=PASSWORD)
         app.store.settings.set("auth.ldap", {
             "server": "ldaps://ldap:636", "base_dn": "dc=x", "enabled": True})
         again = self.build()
@@ -1219,26 +1216,35 @@ class DirectoryAdministratorTest(ConfigTestCase):
 
 
 class SecretsUnavailableTest(unittest.TestCase):
-    """With no encryption key, the page works but refuses to store secrets."""
+    """With no encryption key, the page works but refuses to store secrets.
+
+    Reached by taking the key away AFTER the administrator signed in, which
+    is the shape a real installation gets into: a key that was set is lost,
+    or was never carried into a new deployment. It cannot be reached by
+    starting with none — a local account's authenticator has to be sealed,
+    so an installation with no key has no local sign-in at all. One box is
+    shared by every repository in the store, so emptying it empties all of
+    them at once, exactly as a missing key would.
+    """
 
     def setUp(self):
         handle, self.database = tempfile.mkstemp(suffix=".db")
         os.close(handle)
         os.unlink(self.database)
-        database = self.database
+        database, key = self.database, SecretBox.generate_key()
 
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "no-key"
             DATABASE_URL = f"sqlite:///{database}"
-            ENCRYPTION_KEY = None
+            ENCRYPTION_KEY = key
             OIDC_CLIENT_ID = None
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
-        self.client.post("/setup", data={
-            "username": "owner", "password": PASSWORD, "confirm": PASSWORD})
-
+        support.set_up(self.client, username="owner", password=PASSWORD)
+        self.app.store.secrets._fernet = None
+        assert not self.app.store.secrets.available
     def tearDown(self):
         if os.path.exists(self.database):
             os.unlink(self.database)

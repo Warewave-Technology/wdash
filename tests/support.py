@@ -71,6 +71,156 @@ def claim(app):
             created_at=now, last_login_at=None))
 
 
+#: What `set_up` uses when a test does not care. Long enough to pass the
+#: length rule, which is the only rule there is.
+SETUP_PASSWORD = "a-sufficiently-long-password"
+
+
+def _secret_on(page):
+    """The shared secret the enrolment page is showing, without its spaces.
+
+    Read off the page rather than out of the database, because that is what a
+    person does: the page shows it in groups of four precisely so it can be
+    typed into an authenticator by hand.
+    """
+    import re
+    found = re.search(r'id="totpSecret">([^<]+)<', page)
+    if not found:
+        raise AssertionError(
+            "the enrolment page showed no secret; it may not be the enrolment "
+            "page at all:\n" + page[:400])
+    return "".join(found.group(1).split())
+
+
+def enrol(client):
+    """Finish the authenticator enrolment a held sign-in is waiting on.
+
+    Returns the secret, so a later sign-in by the same client can produce a
+    code for it. Drives the real pages — a test that forges the session
+    instead would pass with the whole second factor removed.
+    """
+    from wdash.auth import totp
+
+    page = client.get("/auth/totp/enrol", follow_redirects=True).data.decode()
+    secret = _secret_on(page)
+    response = client.post("/auth/totp/enrol", data={"code": totp.code(secret)},
+                           follow_redirects=False)
+    assert response.status_code == 302, (
+        f"enrolment was refused: {response.status_code}")
+    return secret
+
+
+def set_up(client, username="owner", password=SETUP_PASSWORD, email=None):
+    """Complete first-run setup AND the enrolment it now requires.
+
+    `POST /setup` no longer starts a session: a local account needs an
+    authenticator, and the first administrator enrols like everybody else, so
+    setup leaves the browser holding a half-finished sign-in. Returns the TOTP
+    secret.
+    """
+    form = {"username": username, "password": password, "confirm": password}
+    if email is not None:
+        form["email"] = email
+    client.post("/setup", data=form)
+    return enrol(client)
+
+
+def sign_in(client, username, password, secret=None, app=None):
+    """Sign a client in through both halves, as a person does.
+
+    With no `secret` the account has not enrolled yet, and this enrols it —
+    which is exactly what its first sign-in does. Returns the final response.
+
+    A code can be used ONCE. Enrolling uses the current step, so the next step
+    is tried first: a test that enrols and then signs in would otherwise
+    replay the step it just used, which is refused — correctly — and recorded
+    as a failure counting towards the lockout the next test is about.
+
+    Three steps is all the drift allowance holds, so a test that signs the
+    same account in three times inside thirty seconds runs out. `app` is the
+    way out of that and the only thing here that reaches past the pages: it
+    forgets the last step used, because a test does in a millisecond what a
+    person does over minutes. The replay refusal itself is measured against
+    the real pages in tests/test_totp.py, not here.
+    """
+    import time
+
+    from wdash.auth import totp
+
+    if app is not None and secret is not None:
+        app.store.users.record_totp_step(username, None)
+
+    client.post("/auth/login",
+                data={"username": username, "password": password})
+    if secret is None:
+        page = client.get("/auth/totp/enrol",
+                          follow_redirects=True).data.decode()
+        fresh = _secret_on(page)
+        return client.post("/auth/totp/enrol",
+                           data={"code": totp.code(fresh)})
+
+    response = None
+    for ahead in (totp.STEP, 0, -totp.STEP):
+        response = client.post(
+            "/auth/totp",
+            data={"code": totp.code(secret, at=time.time() + ahead)})
+        if response.status_code == 302:
+            return response
+    return response
+
+
+def sign_in_in_browser(page, base, username, password, secret=None, app=None):
+    """Drive a real browser through both halves of a local sign-in.
+
+    The pages are driven rather than the session forged, because this IS the
+    flow now: a cookie written by hand would pass with the second factor
+    removed entirely. Enrols when the account has not yet, and returns the
+    secret either way.
+
+    `app` forgets the last step used first, for the same reason `sign_in`
+    takes one: a suite signs the same account in several times inside one
+    thirty-second step, and a person does not.
+    """
+    from wdash.auth import totp
+
+    if app is not None:
+        app.store.users.record_totp_step(username, None)
+
+    page.goto(f"{base}/auth/login", wait_until="networkidle")
+    page.fill("input[name=username]", username)
+    page.fill("input[name=password]", password)
+    page.click("button[type=submit]")
+    page.wait_for_load_state("networkidle")
+
+    if "/auth/totp/enrol" in page.url:
+        secret = "".join(page.inner_text("#totpSecret").split())
+    elif secret is None:
+        # Said rather than left to fail as a wrong code: this account has
+        # already enrolled, so the caller has to hand back the secret the
+        # first sign-in returned.
+        raise AssertionError(
+            f"{username} has already enrolled and no secret was given; the "
+            f"page is {page.url}")
+    page.fill("input[name=code]", totp.code(secret))
+    page.click("button[type=submit]")
+    page.wait_for_load_state("networkidle")
+    return secret
+
+
+def sign_in_after_key_change(client, username, password, app):
+    """Sign in on a worker whose encryption key is not the one that sealed
+    this account's authenticator.
+
+    A rotated `WDASH_ENCRYPTION_KEY` makes every local account's second factor
+    unreadable, exactly as it does a source password, and the way back is
+    `python -m wdash.store.recover --reset-totp` followed by a fresh
+    enrolment against the new key. That is what this does: the recovery, not a
+    shortcut past it.
+    """
+    app.store.users.clear_totp(username)
+    return sign_in(client, username, password)
+
+
 def grant(app, username="u", permissions=(), indices=("*",),
           trace_indices=("*",), services=None):
     """Give the test principal exactly these permissions and boundaries."""

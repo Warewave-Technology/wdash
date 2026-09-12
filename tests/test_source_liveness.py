@@ -33,6 +33,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from wdash.api.config_routes import _not_live  # noqa: E402
 from wdash.app import create_app  # noqa: E402
 from wdash.config import Config  # noqa: E402
@@ -64,9 +66,8 @@ class _Store(unittest.TestCase):
         self.key = SecretBox.generate_key()
         self.app = self.worker()
         self.client = self.app.test_client()
-        self.client.post("/setup", data={"username": "owner",
-                                         "password": PASSWORD,
-                                         "confirm": PASSWORD})
+        self.secret = support.set_up(
+            self.client, username="owner", password=PASSWORD)
         self.sign_in(self.client)
 
     def tearDown(self):
@@ -90,11 +91,8 @@ class _Store(unittest.TestCase):
 
         return create_app(TestConfig)
 
-    @staticmethod
-    def sign_in(client):
-        client.post("/auth/login", data={"username": "owner",
-                                         "password": PASSWORD},
-                    follow_redirects=True)
+    def sign_in(self, client):
+        support.sign_in(client, "owner", PASSWORD, self.secret, app=self.app)
 
     def save(self, client=None, **fields):
         form = {"name": "loki-a", "kind": "loki", "url": "http://localhost:3100",
@@ -116,7 +114,10 @@ class SavedButNotInUseTest(_Store):
         # Another worker, another deployment key, the same store.
         self.other = self.worker(key=SecretBox.generate_key())
         self.client2 = self.other.test_client()
-        self.sign_in(self.client2)
+        # A worker with another key cannot read this account's authenticator
+        # either, so it enrols again there — the documented recovery.
+        support.sign_in_after_key_change(self.client2, "owner", PASSWORD,
+                                         self.other)
         self.row = next(s for s in self.other.store.sources.all()
                         if s["name"] == "loki-a")
 
@@ -304,7 +305,7 @@ class ThePageLooksBeforeItReportsTest(_Store):
         built before the row existed, so nothing is wrong with it yet."""
         other = self.worker(key=SecretBox.generate_key())
         client = other.test_client()
-        self.sign_in(client)
+        support.sign_in_after_key_change(client, "owner", PASSWORD, other)
         return other, client
 
     def test_the_page_of_a_worker_that_has_served_nothing_says_so(self):

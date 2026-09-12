@@ -32,6 +32,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from wdash.hub.adapters.es_monitors import (  # noqa: E402
     ElasticsearchMonitorSource, _dig,
 )
@@ -361,9 +363,10 @@ class TheTilesDrawTest(unittest.TestCase):
             DASHBOARD_STORAGE = "database"
 
         cls.app = create_app(LabConfig)
-        cls.app.test_client().post("/setup", data={"username": "admin",
-                                                   "password": cls.password,
-                                                   "confirm": cls.password})
+        # Enrolled once, through a test client: a local account needs an
+        # authenticator, and the browser sign-in below uses this secret.
+        cls.secret = support.set_up(cls.app.test_client(), username="admin",
+                                    password=cls.password)
         grant(cls.app, "admin", ["system:admin", "monitors:read"],
               indices=["*"])
         # The local account's role, not the test principal's: this signs in
@@ -406,11 +409,8 @@ class TheTilesDrawTest(unittest.TestCase):
                     lambda m: errors.append(m.text) if m.type == "error"
                     else None)
             base = f"http://127.0.0.1:{self.port}"
-            page.goto(f"{base}/auth/login", wait_until="networkidle")
-            page.fill("input[name=username]", "admin")
-            page.fill("input[name=password]", self.password)
-            page.click("button[type=submit]")
-            page.wait_for_load_state("networkidle")
+            support.sign_in_in_browser(page, base, "admin", self.password,
+                                       self.secret, app=self.app)
             page.goto(f"{base}/monitors/{monitor_id}?window=24h",
                       wait_until="networkidle")
             page.locator("button[data-bs-target^='#steps-']").last.click()

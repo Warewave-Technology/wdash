@@ -1583,6 +1583,44 @@ def reset_account_password(username):
     return _back()
 
 
+@config_bp.route("/accounts/<username>/totp/reset", methods=["POST"])
+@login_required
+def reset_account_totp(username):
+    """Forget an account's authenticator, so it enrols again.
+
+    The recovery path a mandatory second factor needs: a lost or wiped phone
+    otherwise locks somebody out of an account whose password they still know,
+    and the only way back would be the database.
+
+    What it costs is worth saying: until that person enrols again, their
+    password alone gets in. That is why it is audited, and why the button asks
+    first.
+    """
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    account = store.users.by_username(username)
+    if account is None:
+        flash(f"There is no local account called '{username}'.", "warning")
+        return _back()
+    if not account["totp_enrolled"]:
+        flash(f"'{account['username']}' has no authenticator set up; it will "
+              f"set one up at its next sign-in.", "info")
+        return _back()
+
+    store.users.clear_totp(account["username"])
+    _audit("account totp reset", subject=f"user:{account['username']}",
+           state={"username": account["username"],
+                  "consequence": "until this account enrols again, its "
+                                 "password alone signs it in"})
+    flash(f"The authenticator for '{account['username']}' was reset. They set "
+          f"up a new one at their next sign-in; until then their password "
+          f"alone signs them in.", "warning")
+    return _back()
+
+
 @config_bp.route("/accounts/<username>/delete", methods=["POST"])
 @login_required
 def delete_account(username):

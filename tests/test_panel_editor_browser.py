@@ -23,6 +23,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 PASSWORD = "panel-editor-browser-password"
 
 #: A service name nobody would type, chosen because every character in it is
@@ -95,9 +97,11 @@ class PanelsAuthoredInABrowserTest(unittest.TestCase):
             DASHBOARD_STORAGE = "database"
 
         cls.app = create_app(EditorConfig)
-        cls.app.test_client().post("/setup", data={"username": "admin",
-                                                   "password": PASSWORD,
-                                                   "confirm": PASSWORD})
+        # Enrolled once here, through a test client: a local account needs an
+        # authenticator, and every browser sign-in below uses the secret this
+        # returns rather than enrolling again.
+        cls.secret = support.set_up(cls.app.test_client(), username="admin",
+                                    password=PASSWORD)
         grant(cls.app, "admin", ["system:admin", "logs:read", "traces:read",
                                  "dashboard:view", "dashboard:create",
                                  "dashboard:edit"], indices=["*"])
@@ -117,11 +121,8 @@ class PanelsAuthoredInABrowserTest(unittest.TestCase):
         cls.server.shutdown()
 
     def _sign_in(self, page):
-        page.goto(f"{self.base}/auth/login", wait_until="networkidle")
-        page.fill("input[name=username]", "admin")
-        page.fill("input[name=password]", PASSWORD)
-        page.click("button[type=submit]")
-        page.wait_for_load_state("networkidle")
+        support.sign_in_in_browser(page, self.base, "admin", PASSWORD,
+                                   self.secret, app=self.app)
 
     def test_both_new_panel_types_survive_the_create_form_and_the_edit_form(self):
         from playwright.sync_api import sync_playwright

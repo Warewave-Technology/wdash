@@ -89,12 +89,14 @@ issues carries an explicit authorization scope.
   well as what was. Evaluation runs as its own process, because an agent going
   completely silent produces no requests to piggyback on and that is exactly
   when somebody needs telling.
-- **Sign-in** — OIDC *or* LDAP — one directory at a time, never both — and a
-  local break-glass account created at first
-  run that keeps working when the identity provider does not. Repeated failures
-  are throttled per account, per address and per pair. The account-wide limit
-  counts only guesses, so an address knocking on a locked door cannot lock the
-  owner out from everywhere else.
+- **Sign-in** — OIDC *or* LDAP — one directory at a time, never both — and
+  local break-glass accounts that keep working when the identity provider does
+  not. Every local account needs an authenticator code as well as a password,
+  set up at its first sign-in and not optional; directory accounts get their
+  second factor at the provider. Repeated failures are throttled per account,
+  per address and per pair, and a wrong code is a failure like a wrong
+  password. The account-wide limit counts only guesses, so an address knocking
+  on a locked door cannot lock the owner out from everywhere else.
 - **Audit trail** — every configuration change with its resulting state, every
   sign-in, sign-out and lockout, each with the address it came from. Read-only
   from the application, filterable, exportable as JSON lines, and forwardable
@@ -146,6 +148,52 @@ route leads to `/setup`, where you create the administrator.
 >
 > Minimum password length is 12 characters. There are no composition rules —
 > length is what actually costs an attacker time.
+>
+> **You will be asked to set up an authenticator before you are signed in.**
+> Every local account needs one: scan the QR with any TOTP application, or
+> type the key it shows beside it, and enter the code. Nothing is stored until
+> that code proves you have the key. Set `WDASH_ENCRYPTION_KEY` BEFORE you do
+> this — the shared secret is sealed with it, WDash refuses to write a secret
+> as plain text, and without a key no local account can finish signing in.
+
+### Two factors, for local accounts only
+
+A password alone is a shared secret that travels: it is typed on other
+people's machines, reused, and phished. The local account is also the one that
+keeps working when the identity provider does not, which is precisely what
+makes it worth stealing — so it takes a code as well.
+
+- **At the first sign-in** the enrolment page shows a QR code, the same secret
+  in groups you can type, and the whole `otpauth://` link. An authenticator on
+  the same device cannot scan the screen it is on, which is why all three are
+  there. The secret does NOT reach the database until a code proves you hold
+  it: an unconfirmed secret on an account is a half-enrolled account somebody
+  who saw the QR may be able to sign in as.
+- **At every sign-in after**, the code page. A step either side of now is
+  accepted for clock drift, and a step that has already been used is refused —
+  a replayed code is one somebody read over a shoulder or off a screen share.
+- **A correct password starts nothing.** It puts the sign-in on hold for a few
+  minutes, and the hold opens those two pages and nothing else.
+- **A wrong code is a failure** through the same guard that throttles password
+  guessing, so the lockout, the backoff and the audit trail cover it too.
+- **RFC 6238**, SHA-1, six digits, a thirty-second step: what authenticator
+  applications implement. It is implemented in `src/wdash/auth/totp.py` out of
+  the standard library — about sixty lines — and checked against the RFC's own
+  published vectors in `tests/test_totp.py`.
+- **Lost your phone?** An administrator resets it from Authentication → Local
+  accounts, and you enrol again at your next sign-in. When nobody can open
+  that page, `python -m wdash.store.recover --reset-totp <username>` does the
+  same from the command line. Both are audited, and both say what it costs:
+  until that account enrols again, its password alone signs it in.
+- **Directory accounts are untouched.** WDash never sees an LDAP or OIDC
+  password and keeps no row for those principals, so a second factor for them
+  belongs at the provider that authenticates them.
+
+`WDASH_ENCRYPTION_KEY` is now required for local sign-in, not just for stored
+credentials. The authenticator's shared secret is sealed with it like every
+other secret at rest, and with no key the enrolment page refuses and says so
+rather than storing it as text. Rotating or losing that key makes every local
+account's authenticator unreadable — the way back is `--reset-totp`.
 
 ### How setup closes
 
@@ -154,6 +202,13 @@ startup, so a second worker sees the first worker's administrator immediately.
 The account is created under a uniqueness constraint, so two people submitting
 the form at the same moment produce one administrator and one clear error
 rather than two owners.
+
+Setup does not sign the first administrator in. It used to, which with a
+mandatory second factor would have made the account that matters most the one
+account that never enrolled — and the bypass would have been one POST away
+from anybody who reached an unclaimed installation. It leaves the same hold a
+correct password leaves, and the enrolment page is the only thing that hold
+opens.
 
 ## Configuration
 
@@ -181,7 +236,7 @@ rather than two owners.
 | `TRUSTED_PROXY_COUNT` | How many reverse proxies sit in front of WDash. `0` ignores `X-Forwarded-For` entirely — trusting it without knowing the depth lets a client name its own address and step around the per-address rate limit | `0` |
 | `DASHBOARD_STORAGE_FILE` | The JSON dashboard file: where `DASHBOARD_STORAGE=file` keeps dashboards, where the saved searches sit beside them, and the path the start-up check reads to tell an unmigrated installation what it still has | `data/dashboards.json` |
 | `DATABASE_URL` | Metadata store: `postgresql://…` or `sqlite:///…` | `sqlite:///data/wdash.db` |
-| `WDASH_ENCRYPTION_KEY` | Encrypts secrets held in the metadata store. Without it, secrets cannot be saved at all | — |
+| `WDASH_ENCRYPTION_KEY` | Encrypts secrets held in the metadata store, including every local account's authenticator. Without it, secrets cannot be saved at all and no local account can sign in | — |
 | `DASHBOARD_STORAGE` | Where dashboards **and saved searches** live: `database` (default) or `file`. An installation with JSON files it has not migrated is told at start-up and on the pages themselves, naming both files and the command &mdash; rather than being shown an empty list as though nothing had ever been saved | `database` |
 | `DASHBOARD_INDEX` | Kept out of log search. The Elasticsearch dashboard store has been removed, but an installation that used it still has the index sitting in the cluster, and without this a search over `*` returns dashboards as bodyless records | `wdash-dashboards` |
 | `MAX_SEARCH_RESULTS` | Upper bound on page size | `1000` |
@@ -879,10 +934,15 @@ as a break, because `>=3.8` was never installable: `psycopg` has required
 
 ## Production notes
 
-- **Set `WDASH_ENCRYPTION_KEY`.** Without it WDash refuses to store secrets at
-  all, so the configuration page cannot save OIDC or LDAP credentials. It
-  refuses rather than writing them as text, which is the right failure — but it
-  is a failure you want to meet before you need the page.
+- **Set `WDASH_ENCRYPTION_KEY` before anybody signs in.** Without it WDash
+  refuses to store secrets at all, so the configuration page cannot save OIDC
+  or LDAP credentials — and no local account can finish signing in, because
+  the authenticator every one of them needs has nowhere safe to live. It
+  refuses rather than writing a secret as text, which is the right failure,
+  and it is one you want to meet before it is the only door you have. Keep the
+  key: rotating or losing it means re-entering every stored credential and
+  resetting every authenticator with
+  `python -m wdash.store.recover --reset-totp <username>`.
 - **Run the migration before upgrading an installation that has JSON files.**
   `DASHBOARD_STORAGE=database` is the default now, so a deployment that never
   set the variable moves with the upgrade. Nothing is deleted and the start-up

@@ -23,10 +23,9 @@ from flask import (
     Blueprint, current_app, flash, redirect, render_template, request, url_for,
 )
 
-from ..models import User
 from ..store import SetupClosed, WeakPassword
 from ..store.users import check_password_strength
-from .auth import _start_session
+from .auth import _hold
 
 
 def _administering_role(store):
@@ -151,10 +150,14 @@ def first_run():
         current_app.logger.error(f"Setup failed: {exc}")
         return again('The account could not be created. Check the server logs.')
 
-    user = User(user_id=account['id'], email=account['email'] or '',
-                username=account['username'], groups=[])
-    _start_session(user, local_role=account['role'], provider='local account')
+    # NOT a session. Setup used to sign the first administrator straight in,
+    # which with a mandatory second factor would have made the account that
+    # matters most the one account that never enrolled — and the bypass would
+    # be one POST away from anybody who reached an unclaimed installation.
+    # The hold grants nothing; the enrolment page is the only thing it opens.
+    _hold(account['username'])
     current_app.logger.warning(
         f"First-run setup completed by '{account['username']}'")
-    flash(f"Welcome. You are signed in as {account['username']}.", 'success')
-    return redirect(url_for('index'))
+    flash(f"Welcome, {account['username']}. Set up an authenticator to "
+          f"finish signing in.", 'success')
+    return redirect(url_for('auth.totp_enrol'))

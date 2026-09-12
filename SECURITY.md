@@ -93,7 +93,22 @@ deliberately and written down.
   otherwise.
 * **The local administrator is a permanent credential.** It is created at
   first run and keeps working when the identity provider does not, which is
-  the point and also what makes it worth stealing.
+  the point and also what makes it worth stealing. It takes a password AND an
+  authenticator code, which is what that is worth.
+* **A second factor for a directory account is the directory's job.** WDash
+  never sees an LDAP or OIDC password and keeps no row for those principals.
+  A TOTP secret it could not tie to anything it authenticates would be a
+  second factor in name only.
+* **`WDASH_ENCRYPTION_KEY` is required for local sign-in.** The
+  authenticator's shared secret is sealed with it, and with no key enrolment
+  refuses rather than storing the secret as text — so a deployment with no
+  key has directory sign-in and nothing else. Rotating or losing the key
+  makes every local account's authenticator unreadable; the way back is
+  `python -m wdash.store.recover --reset-totp <username>`.
+* **There are no backup codes.** A printed list of one-time codes is a second
+  password, kept in the place people keep passwords. The recovery path is an
+  administrator, or the recovery tool with database access — which is the
+  same bar every other recovery here is held to.
 * **Sessions live in the signed cookie**, carrying identity only.
   Authorization is read from the database per request, so a role change takes
   effect at once — but a stolen cookie is valid until it expires. There is no
@@ -122,6 +137,19 @@ So that a report can say what it got past:
 * Argon2 for local passwords, SHA-256 for agent tokens, Fernet for stored
   secrets — and a refusal to store a secret at all when no encryption key is
   configured, rather than writing it as text;
+* a second factor on every local account, not optional and not a setting:
+  RFC 6238 TOTP, implemented out of the standard library in
+  `src/wdash/auth/totp.py` and checked against the RFC's own published
+  vectors. A correct password starts no session — it holds the sign-in for a
+  few minutes, and the hold opens the enrolment page and the code page and
+  nothing else, which `tests/test_totp.py` proves by asking every route in
+  the url map for it. The shared secret is sealed with the store's SecretBox
+  like a source password, is written only once a code has proved it, and is
+  never rendered back. A used step is recorded and refused, so a code read
+  over a shoulder or off a screen share cannot be replayed. A wrong code is a
+  failure through the guard that already throttles password guessing, so one
+  set of limits covers both. First-run setup enrols like everybody else: it
+  no longer signs the first administrator in;
 * local accounts managed from the product, under Authentication on the
   configuration page: an administrator can see who holds one, when it was last
   used, create one, change its role, disable it, reset its password and delete

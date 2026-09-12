@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Enter your code - WDash{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-5 col-lg-4">
+    <div class="card mt-5">
+      <div class="card-body p-4">
+        <h3 class="mb-3">
+          <i class="fas fa-shield-halved text-primary"></i> Enter your code
+        </h3>
+        <p class="text-muted" style="font-size:.9rem">
+          Signing in as <strong>{{ username }}</strong>. Open your
+          authenticator and enter the {{ digits }}-digit code it shows for
+          WDash.
+        </p>
+
+        <form method="POST">
+          <div class="mb-3">
+            <label for="code" class="form-label">Code</label>
+            <input type="text" class="form-control" id="code" name="code"
+                   inputmode="numeric" autocomplete="one-time-code"
+                   pattern="[0-9]*" maxlength="{{ digits }}"
+                   autofocus required>
+            <div class="form-text">
+              A code can only be used once. If you have just used this one,
+              wait for the next.
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary w-100">
+            <i class="fas fa-right-to-bracket"></i> Sign in
+          </button>
+        </form>
+
+        <div class="form-text mt-3">
+          Lost the authenticator? An administrator can reset it from
+          Authentication &rarr; Local accounts, or from the command line with
+          <code>python -m wdash.store.recover --reset-totp
+          &lt;username&gt;</code>. Then your next sign-in sets up a new one.
+        </div>
+
+        {# No class on the anchor: `a:not([class])` is where the palette
+           paints a link, and Bootstrap's own blue is 3.58:1 on the light
+           theme's page. Measured by the audit in tests/test_totp.py. #}
+        <div class="mt-3 small">
+          <a href="{{ url_for('auth.login') }}">Sign in as somebody else</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

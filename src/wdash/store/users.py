@@ -58,9 +58,28 @@ def hash_password(password):
     return _hasher.hash(password)
 
 
+def _public(row):
+    """One account as anything outside this module may see it.
+
+    The sealed TOTP secret is dropped and replaced by whether there is one.
+    It is a credential, and the only caller that needs the value is the code
+    check — which asks for it by name, through `totp_secret()`. Everything
+    else here feeds a page, an audit row or an invariant, and a secret that
+    travels with them is a secret waiting to be rendered.
+    """
+    account = dict(row)
+    account["totp_enrolled"] = bool(account.get("totp_confirmed_at"))
+    account.pop("totp_secret", None)
+    return account
+
+
 class UserRepository:
-    def __init__(self, engine):
+    def __init__(self, engine, secret_box=None):
         self._engine = engine
+        #: For sealing the TOTP secret. `None` means no key, and nothing else:
+        #: sealing then raises rather than storing the secret as text. See
+        #: store/secrets.py, rule 1.
+        self._secrets = secret_box
 
     # ---------- reading ----------
 
@@ -94,13 +113,37 @@ class UserRepository:
             row = connection.execute(
                 select(users).where(users.c.username == username.strip().lower())
             ).mappings().first()
-        return dict(row, local=True) if row else None
+        return dict(_public(row), local=True) if row else None
 
     def all(self):
         with self._engine.connect() as connection:
             rows = connection.execute(
                 select(users).order_by(users.c.created_at)).mappings().all()
-        return [dict(row) for row in rows]
+        return [_public(row) for row in rows]
+
+    def totp_secret(self, username):
+        """The account's shared secret, opened. None when it has not enrolled.
+
+        The one path that reads it, named so that a reader can find every
+        caller. Raises `SecretsCorrupt` when the key has changed since it was
+        sealed, rather than answering "not enrolled" — an account whose secret
+        cannot be opened must not quietly fall back to enrolling again, which
+        is a second factor that a lost key removes.
+        """
+        with self._engine.connect() as connection:
+            sealed = connection.execute(
+                select(users.c.totp_secret)
+                .where(users.c.username == (username or "").strip().lower())
+            ).scalar()
+        return self._box().open(sealed) if sealed else None
+
+    def _box(self):
+        if self._secrets is None:
+            from .secrets import SecretBox
+            # A repository built without one. Not a fallback to plaintext:
+            # an empty box refuses to seal, which is the whole rule.
+            return SecretBox(None)
+        return self._secrets
 
     # ---------- writing ----------
 
@@ -184,6 +227,11 @@ class UserRepository:
 
         Always performs a hash comparison, even when the user does not exist,
         so that response time does not reveal which usernames are real.
+
+        A password is now half of a sign-in, not all of it: the second factor
+        is checked after this, and `last_login_at` moved to `record_sign_in`
+        so that "last sign-in" on the accounts page is not set by somebody who
+        typed the right password and never produced a code.
         """
         account = self.by_username(username)
         stored = account["password_hash"] if account else _DUMMY_HASH
@@ -205,11 +253,70 @@ class UserRepository:
         if _hasher.check_needs_rehash(account["password_hash"]):
             self.set_password(account["username"], password)
 
-        with self._engine.begin() as connection:
-            connection.execute(users.update()
-                               .where(users.c.id == account["id"])
-                               .values(last_login_at=datetime.now(timezone.utc)))
         return account
+
+    def record_sign_in(self, username):
+        """Mark an account as having signed in, now.
+
+        Called when the WHOLE sign-in has succeeded — the password and the
+        second factor — rather than when the password was accepted. The
+        difference is the column the accounts page labels "Last sign-in", and
+        an attacker who has the password but not the phone should not be able
+        to write to it.
+        """
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                users.update()
+                .where(users.c.username == (username or "").strip().lower())
+                .values(last_login_at=datetime.now(timezone.utc)))
+        return result.rowcount > 0
+
+    # ---------- the second factor ----------
+
+    def confirm_totp(self, username, secret, step):
+        """Store a secret a code has just proved, and the step it used.
+
+        Written in ONE statement with its confirmation time and first used
+        step, because a secret stored before it is proved is a half-enrolled
+        account: the person cannot sign in, and whoever else holds the secret
+        — a shoulder, a screenshot of the QR in a chat — can.
+
+        Sealing happens here rather than in the caller so that there is one
+        place where a TOTP secret meets the database, and it is a place that
+        cannot write plaintext: with no encryption key, `seal` raises.
+        """
+        sealed = self._box().seal(secret)
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                users.update()
+                .where(users.c.username == (username or "").strip().lower())
+                .values(totp_secret=sealed,
+                        totp_confirmed_at=datetime.now(timezone.utc),
+                        totp_last_step=step))
+        return result.rowcount > 0
+
+    def record_totp_step(self, username, step):
+        """Remember the step a code was accepted for, so it cannot be reused."""
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                users.update()
+                .where(users.c.username == (username or "").strip().lower())
+                .values(totp_last_step=step))
+        return result.rowcount > 0
+
+    def clear_totp(self, username):
+        """Forget an account's second factor, so it enrols again.
+
+        All three columns together: a confirmation time or a used step left
+        behind an absent secret describes an account that does not exist.
+        """
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                users.update()
+                .where(users.c.username == (username or "").strip().lower())
+                .values(totp_secret=None, totp_confirmed_at=None,
+                        totp_last_step=None))
+        return result.rowcount > 0
 
     def set_password(self, username, password):
         check_password_strength(password)

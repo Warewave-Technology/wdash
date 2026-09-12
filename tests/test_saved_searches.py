@@ -21,6 +21,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tests import support  # noqa: E402
+
 from wdash.app import create_app  # noqa: E402
 from wdash.config import Config  # noqa: E402
 from wdash.store.secrets import SecretBox  # noqa: E402
@@ -49,10 +51,8 @@ class SavedSearchTestCase(unittest.TestCase):
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
-        self.client.post("/setup", data={"username": "owner",
-                                         "password": PASSWORD,
-                                         "confirm": PASSWORD})
-
+        self.secret = support.set_up(
+            self.client, username="owner", password=PASSWORD)
     def tearDown(self):
         import shutil
         shutil.rmtree(self.directory, ignore_errors=True)
@@ -73,8 +73,9 @@ class SavedSearchTestCase(unittest.TestCase):
         self.app.store.settings.set("rbac.user_roles", mapping)
         self.app.store.rbac.invalidate()
         client = self.app.test_client()
-        client.post("/auth/login",
-                    data={"username": "colleague", "password": PASSWORD})
+        # Its first sign-in, so this enrols an authenticator on the way
+        # through — which is what a local account's first sign-in does.
+        support.sign_in(client, "colleague", PASSWORD)
         return client
 
 
@@ -291,8 +292,7 @@ class UnreadableFileTest(SavedSearchTestCase):
     def signed_in(self):
         """Another client for the same account — another worker's request."""
         client = self.app.test_client()
-        client.post("/auth/login",
-                    data={"username": "owner", "password": PASSWORD})
+        support.sign_in(client, "owner", PASSWORD, self.secret, app=self.app)
         return client
 
     def test_saves_made_at_the_same_moment_all_survive(self):

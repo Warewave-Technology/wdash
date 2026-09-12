@@ -414,6 +414,16 @@ def create_app(config_class=Config):
             "OIDC and LDAP credentials cannot be saved from the config page, "
             "no alert channel can be defined or delivered to, and no check "
             "can carry credentials")
+        # Said as its own line, because it is the one consequence that stops
+        # the installation being usable rather than merely limited: a local
+        # account needs an authenticator, its shared secret is sealed with
+        # this key, and WDash refuses to write a secret as plain text. Only a
+        # directory sign-in works until a key is set.
+        app.logger.error(
+            "WDASH_ENCRYPTION_KEY is not set, so NO LOCAL ACCOUNT CAN SIGN "
+            "IN: the authenticator every local account needs cannot be "
+            "stored. Generate one with: python -c \"from cryptography.fernet "
+            "import Fernet; print(Fernet.generate_key().decode())\"")
 
     # Where dashboards and saved searches live. 'database' is the default:
     # the metadata database is opened and migrated a few lines above whatever
