@@ -346,8 +346,12 @@ class TheJourneyReadsAsUnknownTest(unittest.TestCase):
                 "selector": {}}
         seen = observe(rule, source, self.app.store, TimeWindow.of("1h"),
                        _now())
-        self.assertEqual([o.subject for o in seen if o.bad], [],
+        self.assertEqual([o.subject for o in seen.observations if o.bad], [],
                          "a working checkout paged somebody")
+        # The listing is complete: nothing failed, the journey is simply
+        # unknown. A rule that sees an INCOMPLETE listing holds its state
+        # instead, which would hide this if it were wrong.
+        self.assertTrue(seen.complete, seen.warnings)
 
 
 # ---------------------------------------------------------------------------
