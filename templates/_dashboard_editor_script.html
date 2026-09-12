@@ -30,70 +30,174 @@ function escapeAttr(value) {
         ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 }
 
-function panelRow(panel, index) {
-    const row = document.createElement('div');
-    row.className = 'list-group-item';
+/* The option lists, each mirroring a tuple in wdash/dashboard/panels.py.
+ * tests/test_panel_editor_types.py holds them to it: a value this form
+ * offers that `normalise` refuses is not a warning, it is the author's whole
+ * panel list thrown away — a refused save re-renders from the STORED list
+ * whenever the submitted one does not validate. */
+const TRACE_SORTS = ['spans', 'errors', 'error_rate'];
+const TRACE_LIST_VIEWS = ['slowest', 'recent', 'errors'];
+const MONITOR_VIEWS = ['status', 'availability'];
 
-    const fieldOptions = (selected, allowNone) =>
-        (allowNone ? '<option value="">(total only)</option>' : '') +
-        AGGREGATABLE.map(f =>
-            `<option value="${f}"${f === selected ? ' selected' : ''}>${f}</option>`
-        ).join('');
+/* What each of those reads as. A value missing from here shows as
+ * itself rather than as nothing, because the value IS the stored
+ * answer. */
+const VIEW_LABELS = Object.assign(Object.create(null), {
+    slowest: 'the slowest', recent: 'the newest', errors: 'errors only',
+    status: 'status right now', availability: 'availability over the window',
+});
 
-    const sortOptions = (selected) => ['spans', 'errors', 'error_rate'].map(v =>
-        `<option value="${v}"${v === selected ? ' selected' : ''}>${
-            v.replace('_', ' ')}</option>`).join('');
+const optionsFor = (values, selected) => values.map(v =>
+    `<option value="${v}"${v === selected ? ' selected' : ''}>${
+        VIEW_LABELS[v] || v.replace('_', ' ')}</option>`).join('');
+
+const fieldOptions = (selected, allowNone) =>
+    (allowNone ? '<option value="">(total only)</option>' : '') +
+    AGGREGATABLE.map(f =>
+        `<option value="${f}"${f === selected ? ' selected' : ''}>${f}</option>`
+    ).join('');
+
+/** Said on the row and again if the form is submitted without one. */
+const SERVICE_NEEDED = 'A trace list needs a service to list traces for. '
+    + 'Without one a Jaeger backend has to search every service it knows, on '
+    + 'every refresh — so the save refuses the panel.';
+
+/* ------------------------------------------------------------------
+ * The controls each panel type gets, keyed by type.
+ *
+ * This was a ternary chain ending in the TIMESERIES controls, so every type
+ * the chain did not name fell into it: `records` and `trace_list` — both
+ * accepted by the server, neither in the add menu — were handed a "Split by"
+ * select belonging to another question, and a person who chose a field there
+ * saw it vanish on save because `normalise` does not keep `split_by` on a
+ * records panel.
+ *
+ * A table with no prototype and an empty default, the way PANEL_HINTS in
+ * async-dashboard.js is: a type nobody has written a row for here says
+ * NOTHING rather than somebody else's controls. Every key in `PANEL_TYPES`
+ * must appear, which tests/test_panel_editor_types.py measures — an empty
+ * cell is honest but it is not a panel anybody can configure.
+ *
+ * Each row returns four grid columns, because the rest of the row (title 3,
+ * width 2, height 2, buttons 1) takes the other eight.
+ * ---------------------------------------------------------------- */
+const PANEL_CONTROLS = Object.assign(Object.create(null), {
+    timeseries: (panel) => `
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Split by</label>
+        <select class="form-select form-select-sm" data-key="split_by">
+          ${fieldOptions(panel.split_by || '', true)}
+        </select>
+      </div>
+      <div class="col-md-2"></div>`,
+
+    terms: (panel) => `
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Group by</label>
+        <select class="form-select form-select-sm" data-key="field">
+          ${fieldOptions(panel.field, false)}
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Show top</label>
+        <input type="number" class="form-control form-control-sm"
+               data-key="size" min="1" max="50" value="${panel.size || 10}">
+      </div>`,
+
+    // Rows, and capped at MAX_RECORDS rather than at MAX_SIZE: a record is a
+    // message and two maps where a bucket is two numbers, and the server
+    // clamps to 25 anyway. A box that offers 50 and stores 25 is a lie the
+    // author only finds by counting rows.
+    records: (panel) => `
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Rows</label>
+        <input type="number" class="form-control form-control-sm"
+               data-key="size" min="1" max="25" value="${panel.size || 10}">
+      </div>
+      <div class="col-md-2"></div>`,
+
+    trace_services: (panel) => `
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Sort by</label>
+        <select class="form-select form-select-sm" data-key="sort">
+          ${optionsFor(TRACE_SORTS, panel.sort || 'spans')}
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Show top</label>
+        <input type="number" class="form-control form-control-sm"
+               data-key="size" min="1" max="50" value="${panel.size || 10}">
+      </div>`,
+
+    // The service is REQUIRED and the row says so while it is empty, because
+    // the save does not just refuse the panel: `_resubmitted` cannot
+    // re-render a list that fails to validate, so it falls back to the
+    // stored one and every other edit on the page goes with it.
+    trace_list: (panel) => {
+        const named = (panel.service || '').trim();
+        return `
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Service</label>
+        <input type="text" class="form-control form-control-sm"
+               data-key="service" placeholder="name one"
+               value="${escapeAttr(panel.service || '')}">
+        ${named ? '' : `<div class="form-text text-warning mt-0"
+             data-needs-service>${escapeAttr(SERVICE_NEEDED)}</div>`}
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Show</label>
+        <div class="input-group input-group-sm">
+          <select class="form-select form-select-sm" data-key="view">
+            ${optionsFor(TRACE_LIST_VIEWS, panel.view || 'slowest')}
+          </select>
+          <input type="number" class="form-control form-control-sm"
+                 style="max-width:4.5rem" data-key="size"
+                 min="1" max="50" value="${panel.size || 5}">
+        </div>
+      </div>`;
+    },
 
     // "Is it up now" and "was it up all window" are two questions out of one
     // fetch, so they are one panel type with a view rather than two types
     // costing two round trips.
-    const viewOptions = (selected) =>
-        [['status', 'status right now'],
-         ['availability', 'availability over the window']].map(([v, label]) =>
-            `<option value="${v}"${v === selected ? ' selected' : ''}>${
-                label}</option>`).join('');
+    monitors: (panel) => `
+      <div class="col-md-2">
+        <label class="form-label small mb-0">Show</label>
+        <select class="form-select form-select-sm" data-key="view">
+          ${optionsFor(MONITOR_VIEWS, panel.view || 'status')}
+        </select>
+      </div>
+      <div class="col-md-2"></div>`,
 
-    const specific = panel.type === 'trace_services'
-        ? `<div class="col-md-2">
-             <label class="form-label small mb-0">Sort by</label>
-             <select class="form-select form-select-sm" data-key="sort">
-               ${sortOptions(panel.sort || 'spans')}
-             </select>
-           </div>
-           <div class="col-md-2">
-             <label class="form-label small mb-0">Show top</label>
-             <input type="number" class="form-control form-control-sm"
-                    data-key="size" min="1" max="50" value="${panel.size || 10}">
-           </div>`
-        : panel.type === 'monitors'
-        ? `<div class="col-md-2">
-             <label class="form-label small mb-0">Show</label>
-             <select class="form-select form-select-sm" data-key="view">
-               ${viewOptions(panel.view || 'status')}
-             </select>
-           </div>
-           <div class="col-md-2"></div>`
-        : panel.type === 'monitor_certificates'
-        ? '<div class="col-md-4"></div>'
-        : panel.type === 'terms'
-        ? `<div class="col-md-2">
-             <label class="form-label small mb-0">Group by</label>
-             <select class="form-select form-select-sm" data-key="field">
-               ${fieldOptions(panel.field, false)}
-             </select>
-           </div>
-           <div class="col-md-2">
-             <label class="form-label small mb-0">Show top</label>
-             <input type="number" class="form-control form-control-sm"
-                    data-key="size" min="1" max="50" value="${panel.size || 10}">
-           </div>`
-        : `<div class="col-md-2">
-             <label class="form-label small mb-0">Split by</label>
-             <select class="form-select form-select-sm" data-key="split_by">
-               ${fieldOptions(panel.split_by || '', true)}
-             </select>
-           </div>
-           <div class="col-md-2"></div>`;
+    monitor_certificates: () => '<div class="col-md-4"></div>',
+});
+
+/* What the row says the panel is, and what it costs to ask. Keyed the same
+ * way and defaulting the same way: the lookup used to end in `|| panel.type`,
+ * which printed the raw type name for anything it did not know, and — being
+ * a plain object literal — would have printed a function body for a panel
+ * type called `constructor`. */
+const ROW_CAPTIONS = Object.assign(Object.create(null), {
+    terms: 'Top values',
+    timeseries: 'Volume over time',
+    records: 'Recent records — the board’s own query and window, newest '
+             + 'first; a search rather than an aggregation, so it costs '
+             + 'one more request, shared by every records panel here',
+    trace_services: 'Services by traffic — from traces, so this panel costs a second query',
+    trace_list: 'Traces for one service — from traces, and a '
+                + 'request of its own per service, view and row count; it '
+                + 'needs traces:read and a service named',
+    monitors: 'Monitor status — from the monitor sources, so this panel costs a second query, and it needs monitors:read to read',
+    monitor_certificates: 'TLS certificates — rides the monitor panel’s source, and needs monitors:read to read',
+});
+
+
+function panelRow(panel, index) {
+    const row = document.createElement('div');
+    row.className = 'list-group-item';
+
+    const controls = PANEL_CONTROLS[panel.type];
+    const specific = controls ? controls(panel) : '<div class="col-md-4"></div>';
 
     row.innerHTML = `
       <div class="row g-2 align-items-end">
@@ -130,19 +234,20 @@ function panelRow(panel, index) {
           </div>
         </div>
       </div>
-      <small class="text-muted">${
-          { terms: 'Top values',
-            timeseries: 'Volume over time',
-            trace_services: 'Services by traffic — from traces, so this panel costs a second query',
-            monitors: 'Monitor status — from the monitor sources, so this panel costs a second query, and it needs monitors:read to read',
-            monitor_certificates: 'TLS certificates — rides the monitor panel’s source, and needs monitors:read to read'
-          }[panel.type] || panel.type}</small>`;
+      <small class="text-muted">${escapeAttr(ROW_CAPTIONS[panel.type] || '')}</small>`;
 
     row.querySelectorAll('[data-key]').forEach(input => {
         input.addEventListener('change', () => {
             const key = input.dataset.key;
             panels[index][key] = key === 'size' || key === 'width' || key === 'height'
                 ? parseInt(input.value, 10) : input.value;
+            // The service is the one control whose value changes what the row
+            // SAYS — the warning under it has to go when a service is typed,
+            // and come back if it is cleared again.
+            if (key === 'service') {
+                drawPanels();
+                return;
+            }
             serialise();
         });
     });
@@ -193,28 +298,60 @@ function drawPanels() {
     serialise();
 }
 
+/* What a freshly added panel of each type is, before anybody touches it.
+ *
+ * Keyed and defaulted like the two tables above: a button naming a type that
+ * is not here used to push `{...undefined}` — a panel with no type at all,
+ * which the save refuses for the WHOLE board with "Unknown panel type:
+ * (none)". A button nobody wrote a blank for now adds nothing. */
+const BLANK_PANELS = Object.assign(Object.create(null), {
+    terms: { type: 'terms', title: 'Top values', field: 'service',
+             size: 10, width: 6, height: 300 },
+    timeseries: { type: 'timeseries', title: 'Volume over time',
+                  split_by: 'severity', width: 12, height: 300 },
+    // Full width and taller than the standard card: the columns are a
+    // timestamp, a severity, a service and a MESSAGE, and ten of them in a
+    // half-width 300px box is a table read three words at a time.
+    records: { type: 'records', title: 'Recent records', size: 10,
+               width: 12, height: 450 },
+    trace_services: { type: 'trace_services', title: 'Services by traffic',
+                      sort: 'spans', size: 10, width: 6, height: 300 },
+    // `service` is deliberately empty rather than guessed at: there is no
+    // service name this form could invent that would be the right one, and
+    // the row says what is missing until it is filled in.
+    trace_list: { type: 'trace_list', title: 'Traces for one service',
+                  service: '', view: 'slowest', size: 5, width: 6,
+                  height: 300 },
+    monitors: { type: 'monitors', title: 'Monitor status',
+                view: 'status', width: 6, height: 300 },
+    monitor_certificates: { type: 'monitor_certificates',
+                            title: 'TLS certificates', width: 6,
+                            height: 300 },
+});
+
 document.querySelectorAll('[data-add-panel]').forEach(button => {
     button.addEventListener('click', () => {
-        const type = button.dataset.addPanel;
-        const blank = {
-            terms: { type: 'terms', title: 'Top values', field: 'service',
-                     size: 10, width: 6, height: 300 },
-            timeseries: { type: 'timeseries', title: 'Volume over time',
-                          split_by: 'severity', width: 12, height: 300 },
-            trace_services: { type: 'trace_services', title: 'Services by traffic',
-                              sort: 'spans', size: 10, width: 6, height: 300 },
-            monitors: { type: 'monitors', title: 'Monitor status',
-                        view: 'status', width: 6, height: 300 },
-            monitor_certificates: { type: 'monitor_certificates',
-                                    title: 'TLS certificates', width: 6,
-                                    height: 300 },
-        };
-        panels.push({ ...blank[type] });
+        const blank = BLANK_PANELS[button.dataset.addPanel];
+        if (!blank) return;
+        panels.push({ ...blank });
         drawPanels();
     });
 });
 
-document.querySelector('form').addEventListener('submit', () => serialise());
+document.querySelector('form').addEventListener('submit', (event) => {
+    serialise();
+    // The one control on this form whose value the server REFUSES to store.
+    // Caught here because a refusal is not a refusal of the panel: the form
+    // comes back rendered from the stored list, so the trace panel and every
+    // other edit made beside it are gone with no sign they were ever typed.
+    const nameless = panels.filter(
+        p => p.type === 'trace_list' && !(p.service || '').trim());
+    if (nameless.length) {
+        event.preventDefault();
+        alert(`${SERVICE_NEEDED}\n\nWaiting for a service: `
+              + nameless.map(p => `“${p.title || 'Traces'}”`).join(', '));
+    }
+});
 
 drawPanels();
 </script>

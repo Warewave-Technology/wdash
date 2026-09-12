@@ -135,7 +135,10 @@ class UnreachableLokiTest(_Installation):
         down, so a Loki outage sent whoever was looking to a cluster this
         deployment does not even have."""
         board = self.board()
-        for endpoint in ("data", "recent-logs", "stats"):
+        # `recent-logs` was the third of these until the E1 package removed
+        # it: nothing called it, and the records panel on /data answers the
+        # question it was written for.
+        for endpoint in ("data", "stats"):
             with self.subTest(endpoint=endpoint):
                 reply = self.client.get(f"/api/dashboard/{board}/{endpoint}")
                 self.assertEqual(reply.status_code, 503)

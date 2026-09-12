@@ -275,19 +275,17 @@ class DashboardContractTest(unittest.TestCase):
             self.assertIn(key, payload, suffix)
             self.assertIsInstance(payload[key], list)
 
-    def test_recent_logs_is_time_bounded(self):
-        """The previous version had no time range here and scanned in full."""
-        self.get("recent-logs")
-        clauses = self.es.searches[-1]["body"]["query"]["bool"]["must"]
-        self.assertTrue(any("range" in c for c in clauses),
-                        "recent-logs runs without a time range")
-
     # ---------- permissions and errors ----------
 
     def test_permission_gate_on_every_endpoint(self):
         self.login(["logs:read"])
+        # `recent-logs` was in this list and in a time-bound test of its own
+        # until the E1 package removed the endpoint — nothing called it, and
+        # the records panel on /data answers what it asked. The records
+        # panel's search is held to the charts' own window by
+        # tests/test_dashboard_tables.py.
         for suffix in ("data", "stats", "timeline", "log-levels", "services",
-                       "heatmap", "recent-logs", "patterns"):
+                       "heatmap", "patterns"):
             self.assertEqual(self.get(suffix).status_code, 403, suffix)
 
     def test_unknown_dashboard(self):
@@ -852,13 +850,6 @@ class SharedViewTest(DashboardContractTest):
         for element_id in ("dashboardFilter", "shareBtn", "clearFilterBtn",
                            "timeRange"):
             self.assertIn(f'id="{element_id}"'.encode(), response.data, element_id)
-
-
-class RecentLogsShapeTest(DashboardContractTest):
-    def test_recent_logs_returns_neutral_records(self):
-        payload = self.get("recent-logs").get_json()
-        self.assertIn("records", payload)
-        self.assertNotIn("hits", payload)
 
 
 class DrillDownScopeTest(unittest.TestCase):

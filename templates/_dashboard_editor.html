@@ -20,9 +20,20 @@
                     data-add-panel="terms">
                 <i class="fas fa-chart-bar"></i> Top values
             </button>
+            {# Both of these were panel types the SERVER accepted and this
+               menu could not produce, so the only way to have one was to
+               write the dashboard's JSON by hand. #}
+            <button type="button" class="btn btn-outline-primary"
+                    data-add-panel="records">
+                <i class="fas fa-list-ul"></i> Records
+            </button>
             <button type="button" class="btn btn-outline-info"
                     data-add-panel="trace_services">
                 <i class="fas fa-project-diagram"></i> Services (traces)
+            </button>
+            <button type="button" class="btn btn-outline-info"
+                    data-add-panel="trace_list">
+                <i class="fas fa-stream"></i> Trace list
             </button>
             <button type="button" class="btn btn-outline-info"
                     data-add-panel="monitors">
@@ -40,10 +51,13 @@
        would only mean reassembling it there. #}
     <input type="hidden" name="panels" id="panelsField">
     <div class="form-text">
-        Every log panel is answered by the same request, so adding one costs
-        an aggregation rather than a round trip. Traces and monitors are other
-        sources: the first panel from each costs one more request, and every
-        further panel from it costs nothing.
+        Every log panel that counts something is answered by the same request,
+        so adding one costs an aggregation rather than a round trip. A records
+        panel lists rows rather than counting them, which is a search: the
+        board's records panels share one extra request between them. Traces
+        and monitors are other sources: the first panel from each costs one
+        more request, and every further panel from it costs nothing &mdash;
+        except a trace list, which asks per service, view and row count.
     </div>
 </div>
 

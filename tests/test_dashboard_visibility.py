@@ -147,10 +147,20 @@ class ListingTest(unittest.TestCase):
         return [name for name in ("AppBoard", "SecretBoard", "InfraBoard")
                 if name.encode() in page]
 
-    def test_recent_logs_has_the_gates_every_other_panel_has(self):
-        """Measured: for alice's PRIVATE dashboard, a viewer who was not its
-        author got 404 from data, log-levels, patterns and stats, and 200
-        from recent-logs, with the dashboard's query run for them."""
+    def test_a_private_board_is_not_read_through_a_panel_endpoint(self):
+        """Measured when this was written: for alice's PRIVATE dashboard, a
+        viewer who was not its author got 404 from data, log-levels, patterns
+        and stats, and 200 from `recent-logs`, with the dashboard's query run
+        for them.
+
+        `recent-logs` was removed with the E1 package — nothing called it and
+        the records panel on /data answers the question it was written for —
+        so the four tests that stood on it alone went with it. What they were
+        about did not: the reason the private query must not be run for a
+        stranger is measured here, and the records panel's own gates are
+        `/data`'s, exercised in the loop below and in
+        tests/test_dashboard_tables.py.
+        """
         manager = self.app.dashboard_manager
         manager.create_dashboard("Fraud", "", 'service:"fraud"', "alice",
                                  ["app-*"], visibility=PRIVATE)
@@ -159,57 +169,20 @@ class ListingTest(unittest.TestCase):
         es = self.app.hub.logs()._es
         client = self.client_for("u", ["app-*"])
         before = len(es.searches)
-        for suffix in ("data", "log-levels", "recent-logs"):
+        for suffix in ("data", "log-levels"):
             with self.subTest(suffix=suffix):
                 reply = client.get(f"/api/dashboard/{fraud}/{suffix}")
                 self.assertEqual(reply.status_code, 404)
         self.assertEqual(len(es.searches), before, "the private query was run")
 
-    def test_recent_logs_says_when_there_is_no_such_dashboard(self):
-        """Not an empty list: that is the answer for a dashboard with nothing
-        recent in it, and the two were indistinguishable."""
+    def test_a_dashboard_out_of_reach_and_one_that_does_not_exist_answer_alike(self):
+        """Not an empty payload for either: "nothing recent in it" and "not
+        yours" were indistinguishable on the endpoint this replaced."""
         client = self.client_for("u", ["app-*"])
         for dashboard in ("does-not-exist", self.ids["SecretBoard"]):
             with self.subTest(dashboard=dashboard):
-                reply = client.get(f"/api/dashboard/{dashboard}/recent-logs")
+                reply = client.get(f"/api/dashboard/{dashboard}/data")
                 self.assertEqual(reply.status_code, 404)
-
-    def test_recent_logs_for_its_author_still_works(self):
-        client = self.client_for("alice", ["app-*"])
-        reply = client.get(f"/api/dashboard/{self.ids['AppBoard']}/recent-logs")
-        self.assertEqual(reply.status_code, 200)
-        self.assertIn("records", reply.get_json())
-
-    def test_recent_logs_with_a_query_that_does_not_parse_is_a_400(self):
-        manager = self.app.dashboard_manager
-        manager.create_dashboard("Bad", "", "service:(", "alice", ["app-*"])
-        bad = next(d.id for d in manager.get_all_dashboards() if d.name == "Bad")
-        client = self.client_for("alice", ["app-*"])
-        reply = client.get(f"/api/dashboard/{bad}/recent-logs")
-        self.assertEqual(reply.status_code, 400)
-        self.assertEqual(reply.get_json()["error_type"], "invalid_query")
-
-    def test_recent_logs_when_the_source_cannot_answer_is_a_503(self):
-        client = self.client_for("alice", ["app-*"])
-        from wdash.api import dashboard_routes
-        original = dashboard_routes._targets
-        calls = []
-
-        def failing(dashboard, scope):
-            calls.append(dashboard.id)
-            # The visibility check asks first; it treats a failure as
-            # unreachable, so the endpoint's own call is the second.
-            if len(calls) > 1:
-                raise ConnectionError("cluster down")
-            return original(dashboard, scope)
-        dashboard_routes._targets = failing
-        try:
-            reply = client.get(
-                f"/api/dashboard/{self.ids['AppBoard']}/recent-logs")
-        finally:
-            dashboard_routes._targets = original
-        self.assertEqual(reply.status_code, 503)
-        self.assertNotIn("records", reply.get_json())
 
     def test_a_reader_sees_only_dashboards_over_data_they_can_reach(self):
         client = self.client_for("bob", ["app-*"])
@@ -353,7 +326,7 @@ class ListingTest(unittest.TestCase):
         board = self.ids["AppBoard"]
         client = self.client_for("bob", ["app-*"])
 
-        for suffix in ("data", "stats", "recent-logs", "patterns", "timeline"):
+        for suffix in ("data", "stats", "patterns", "timeline"):
             with self.subTest(endpoint=suffix):
                 reply = client.get(f"/api/dashboard/{board}/{suffix}")
                 self.assertEqual(reply.status_code, 404)

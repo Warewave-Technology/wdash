@@ -242,9 +242,14 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
         const dom = new JSDOM(`<!doctype html><body><form>
           <button type="button" data-add-panel="timeseries"></button>
           <button type="button" data-add-panel="terms"></button>
+          <button type="button" data-add-panel="records"></button>
           <button type="button" data-add-panel="trace_services"></button>
+          <button type="button" data-add-panel="trace_list"></button>
           <button type="button" data-add-panel="monitors"></button>
           <button type="button" data-add-panel="monitor_certificates"></button>
+          <!-- Not in the real menu: a stand-in for the next panel type,
+               put on the page by whoever forgets to write its blank. -->
+          <button type="button" data-add-panel="a_type_from_the_future"></button>
           <div id="panelList"></div><input type="hidden" id="panelsField">
           </form></body>`, { runScripts: 'outside-only' });
         const said = [];
@@ -389,6 +394,176 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
         check('a monitor row says the permission it needs to draw',
               /monitors:read/.test(d.getElementById('panelList').textContent),
               d.getElementById('panelList').textContent);
+    }
+
+    // The two panel types the server accepted and this form could not
+    // produce. Measured before the fix: the add menu offered five types and
+    // named neither, and a STORED records panel opened here was handed the
+    // timeseries controls — a "Split by" select belonging to another
+    // question, whose value `normalise` then dropped on save.
+    {
+        const { d } = editorPage({ panels: [
+            { id: 'p1', type: 'terms', title: 'Top', field: 'service',
+              size: 10, width: 6, height: 300 }] });
+
+        d.querySelector('[data-add-panel="records"]').click();
+        const records = rows(d)[1];
+        check('the editor can add a records panel',
+              stored(d)[1] && stored(d)[1].type === 'records',
+              d.getElementById('panelsField').value);
+        check('and it gets its own control, not the timeseries one',
+              records.querySelector('[data-key="size"]')
+              && !records.querySelector('[data-key="split_by"]'),
+              records.innerHTML);
+        check('a records row says what the panel costs to ask',
+              /one more request/.test(records.textContent)
+              && !/Split by/.test(records.textContent), records.textContent);
+
+        // 25 rows, not 50: the server clamps a records panel to MAX_RECORDS,
+        // and a box offering what the store will silently halve is a lie the
+        // author finds by counting rows.
+        check('and the row count it offers is the one the server keeps',
+              records.querySelector('[data-key="size"]').max === '25',
+              records.querySelector('[data-key="size"]').outerHTML);
+
+        d.querySelector('[data-add-panel="trace_list"]').click();
+        const list = rows(d)[2];
+        check('the editor can add a trace list',
+              stored(d)[2] && stored(d)[2].type === 'trace_list',
+              d.getElementById('panelsField').value);
+        check('with a service box, a view and a row count',
+              ['service', 'view', 'size'].every(
+                  k => list.querySelector(`[data-key="${k}"]`))
+              && !list.querySelector('[data-key="split_by"]'), list.innerHTML);
+        check('the view starts on the slowest and offers only what the save accepts',
+              [...list.querySelector('[data-key="view"]').options]
+                  .map(o => o.value).join(',') === 'slowest,recent,errors'
+              && list.querySelector('[data-key="view"]').value === 'slowest',
+              list.querySelector('[data-key="view"]').innerHTML);
+    }
+
+    // A trace list with no service is a save the server refuses — and a
+    // refusal re-renders the form from the STORED list, so the refused panel
+    // and every edit made beside it disappear. The form has to say so first.
+    {
+        const { d, said } = editorPage({ panels: [
+            { id: 'p1', type: 'terms', title: 'Top', field: 'service',
+              size: 10, width: 6, height: 300 }] });
+        d.querySelector('[data-add-panel="trace_list"]').click();
+
+        check('a trace list with no service says so on the row',
+              rows(d)[1].querySelector('[data-needs-service]')
+              && /needs a service/.test(rows(d)[1].textContent),
+              rows(d)[1].textContent);
+
+        const submit = new d.defaultView.Event('submit', { cancelable: true });
+        d.querySelector('form').dispatchEvent(submit);
+        check('and submitting is stopped, with the reason and the panel named',
+              submit.defaultPrevented && said.length === 1
+              && /needs a service/.test(said[0])
+              && /Traces for one service/.test(said[0]), JSON.stringify(said));
+
+        const service = rows(d)[1].querySelector('[data-key="service"]');
+        service.value = 'payment-service';
+        service.dispatchEvent(new d.defaultView.Event('change'));
+        check('naming a service takes the warning off the row',
+              !rows(d)[1].querySelector('[data-needs-service]'),
+              rows(d)[1].textContent);
+
+        const second = new d.defaultView.Event('submit', { cancelable: true });
+        d.querySelector('form').dispatchEvent(second);
+        check('and then the form submits, with the service in the field',
+              !second.defaultPrevented && stored(d)[1].service === 'payment-service'
+              && said.length === 1, d.getElementById('panelsField').value);
+    }
+
+    // The service is free text, and it goes into a quoted attribute.
+    {
+        const service = 'pay "prod" & <b>bold</b>';
+        const { d } = editorPage({ panels: [
+            { id: 'p1', type: 'trace_list', title: 'T', service,
+              view: 'errors', size: 5, width: 6, height: 300 }] });
+        const box = d.querySelector('[data-key="service"]');
+        check('a stored service comes back into its box as it was written',
+              box && box.value === service, box && box.value);
+        check('and brings no markup with it',
+              !d.querySelector('#panelList b'),
+              d.getElementById('panelList').innerHTML);
+        check('a stored view is the one selected',
+              d.querySelector('[data-key="view"]').value === 'errors',
+              d.querySelector('[data-key="view"]').value);
+    }
+
+    // The fall-through. The chain ended in the timeseries controls, so a type
+    // it did not name was handed a "Split by" select and a caption reading
+    // the raw type name. Nothing rather than somebody else's question.
+    {
+        const { d } = editorPage({ panels: [
+            { id: 'p1', type: 'a_type_from_the_future', title: 'Mystery',
+              width: 6, height: 300 }] });
+        const row = rows(d)[0];
+        check('a panel type the editor does not know is offered no controls',
+              !row.querySelector('[data-key="split_by"]')
+              && !row.querySelector('[data-key="field"]')
+              && !row.querySelector('[data-key="view"]'), row.innerHTML);
+        check('and its caption says nothing rather than the type name',
+              !/a_type_from_the_future/.test(row.textContent), row.textContent);
+        check('while the controls every panel has still work',
+              ['title', 'width', 'height'].every(
+                  k => row.querySelector(`[data-key="${k}"]`)), row.innerHTML);
+    }
+
+    // A button naming a type with no blank pushed `{...undefined}` — a panel
+    // with no type, which the save refuses for the whole board.
+    {
+        const { d } = editorPage({ panels: [
+            { id: 'p1', type: 'terms', title: 'Top', field: 'service',
+              size: 10, width: 6, height: 300 }] });
+        for (const type of ['timeseries', 'terms', 'records', 'trace_services',
+                            'trace_list', 'monitors', 'monitor_certificates']) {
+            d.querySelector(`[data-add-panel="${type}"]`).click();
+        }
+        check('every button in the menu adds a panel of its own type',
+              stored(d).length === 8
+              && stored(d).slice(1).map(p => p.type).join(',') ===
+                 'timeseries,terms,records,trace_services,trace_list,'
+                 + 'monitors,monitor_certificates',
+              d.getElementById('panelsField').value);
+        check('and no panel arrives without a type',
+              stored(d).every(p => p.type), d.getElementById('panelsField').value);
+
+        // The button nobody wrote a blank for. It used to push
+        // `{...undefined}` — a panel with no type, which the save refuses for
+        // the WHOLE board with "Unknown panel type: (none)".
+        const before = d.getElementById('panelsField').value;
+        d.querySelector('[data-add-panel="a_type_from_the_future"]').click();
+        check('a button with no blank behind it adds nothing at all',
+              d.getElementById('panelsField').value === before
+              && stored(d).length === 8, d.getElementById('panelsField').value);
+    }
+
+    // A panel arriving without one of its own keys — a list hand-edited into
+    // the record, or a key a future `normalise` stops writing. The select has
+    // to land on a value the save accepts rather than on nothing.
+    {
+        const { d } = editorPage({ panels: [
+            { id: 'p1', type: 'trace_list', title: 'T', service: 'payments',
+              width: 6, height: 300 }] });
+        const view = d.querySelector('[data-key="view"]');
+        // Marked, not merely displayed: a select whose options carry no
+        // `selected` shows its FIRST option whatever the fallback was, so a
+        // default naming a value the save refuses looks right on screen.
+        check('a trace list with no view stored starts on the slowest',
+              view.value === 'slowest'
+              && (view.querySelector('option[selected]') || {}).value === 'slowest'
+              && [...view.options].map(o => o.value).join(',')
+                 === 'slowest,recent,errors', view.innerHTML);
+        const { d: plain } = editorPage({ panels: [
+            { id: 'p1', type: 'records', title: 'R', width: 12,
+              height: 450 }] });
+        check('and a records panel with no size shows the rows it will get',
+              plain.querySelector('[data-key="size"]').value === '10',
+              plain.querySelector('[data-key="size"]').outerHTML);
     }
 
     // The create form renders the DEFAULT panel set, which it must not then
