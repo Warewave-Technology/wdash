@@ -64,12 +64,37 @@ class Spool:
         with self._lock:
             return self._read_locked()[:count]
 
-    def drop(self, count):
-        """Forget the oldest `count` results. Called after a successful send."""
+    def drop(self, sent):
+        """Forget the results a send delivered. Returns how many are left.
+
+        Given WHAT was sent rather than how many, because the spool moves
+        underneath a send. A check now finishes on its own thread and appends
+        while the POST is in flight; an append that overflows the spool trims
+        the OLDEST, and "the oldest 500" then named a different 500 from the
+        ones the server took. Measured with a spool of 20 at its limit, a POST
+        that took 0.5s and five results added during it: the five new ones
+        were dropped without ever being sent, and the log said it was dropping
+        the oldest while it did it.
+        """
         with self._lock:
-            remaining = self._read_locked()[count:]
+            results = self._read_locked()
+            remaining = results[self._still_here(results, sent):]
             self._write_locked(remaining)
             return len(remaining)
+
+    @staticmethod
+    def _still_here(results, sent):
+        """How many of `sent` are still at the front of the spool.
+
+        A trim only ever takes from the front, so what survives of a batch is
+        a suffix of it and still a prefix of the file: the longest such
+        overlap is what this send is entitled to drop, and anything a trim
+        already took is not counted twice.
+        """
+        for count in range(min(len(results), len(sent)), 0, -1):
+            if results[:count] == sent[len(sent) - count:]:
+                return count
+        return 0
 
     def pending(self):
         with self._lock:

@@ -256,7 +256,7 @@ class Agent:
                          f"{response.status_code}; dropping them"
                          + (f" (monitor {batch[0].get('monitor_id')})"
                             if len(batch) == 1 else ""))
-            self.spool.drop(len(batch))
+            self.spool.drop(batch)
             return 0
 
         # Read BEFORE the spool is dropped. A 200 whose body is not JSON is
@@ -267,7 +267,11 @@ class Agent:
         if payload is None:
             return 0
 
-        self.spool.drop(len(batch))
+        # BY WHAT WAS SENT, not by how many. A check finishing while the POST
+        # was in flight appends, and an append that overflows trims the
+        # oldest — so a count taken before the send named results the server
+        # never saw. See `Spool.drop`.
+        self.spool.drop(batch)
         accepted = payload.get("accepted", len(batch))
         if not isinstance(accepted, int):
             accepted = len(batch)
@@ -483,9 +487,28 @@ class Agent:
         self._stop.set()
 
     def close(self):
-        """Let the checking threads go. Whatever is still running is
-        abandoned, not waited for: a stop signal has a deadline, and a journey
-        may have ten minutes left on its own."""
+        """Stop taking checks and let the pool go. Returns at once.
+
+        What is QUEUED and has not started is dropped. What is already
+        running is not: a pool's worker threads are not daemons and the
+        interpreter joins them on the way out, so a journey with ten minutes
+        of patience left holds the process for ten minutes whatever this
+        does. Measured with one 5s check in flight: `close()` returned in
+        0.00s and the interpreter exited 4.8s later.
+
+        This used to say the running checks were "abandoned, not waited for",
+        which is the sentence an operator reads while looking at a pod that
+        will not stop. They are named instead, so that the wait has a reason
+        somebody can see.
+        """
         pool, self._pool = self._pool, None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+        if pool is None:
+            return
+        pool.shutdown(wait=False, cancel_futures=True)
+        with self._lock:
+            running = sorted(self._monitors.get(i, {}).get("name") or i
+                             for i in self._running)
+        if running:
+            logger.warning(f"{len(running)} check(s) are still running and "
+                           f"cannot be interrupted: {', '.join(running)} — "
+                           f"the process exits when they finish")

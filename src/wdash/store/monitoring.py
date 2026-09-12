@@ -811,15 +811,35 @@ def _steps_of(result):
     return out or None
 
 
-def _whole_number(value):
-    """An integer column's value, or None. Never a string or a dictionary.
+#: What a BIGINT column holds. JSON has no integer limit, so `10**30` is a
+#: legal thing for an agent to send — and it type-checked, reached the INSERT
+#: and raised there: OverflowError on SQLite, DataError on Postgres, neither
+#: of them raised while the row was being built and neither in the per-result
+#: guard. One such number took the whole batch, the endpoint answered 500 and
+#: the agent retried it for ever. The type check alone was not enough; the
+#: range is where a number stops being storable.
+INT64 = 2 ** 63 - 1
 
-    A number sent as text would reach the database as one and be refused
-    there, which fails the whole batch over one field nobody reads.
+#: What an HTTP status can be. RFC 9110: three digits, the first 1-5.
+HTTP_STATUS_RANGE = (100, 599)
+
+
+def _whole_number(value, low=-INT64 - 1, high=INT64):
+    """An integer column's value, or None when it is not one the column takes.
+
+    Not a string, not a dictionary, not a number too big for the column, and
+    not an infinity — `json.loads` accepts `Infinity` and `NaN`, so both reach
+    here from an ingest endpoint. Anything else costs the field rather than
+    the measurement it came with.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return int(value)
+    try:
+        number = int(value)
+    except (OverflowError, ValueError):
+        # float('inf') and float('nan').
+        return None
+    return number if low <= number <= high else None
 
 
 #: Largest certificate an agent may attach to a result. `_describe` builds ten
@@ -862,6 +882,14 @@ class ResultRepository:
         because those were stored before the rows were built. Measured: three
         results, a bad one last, stored 0 results and 2 more orphan images per
         attempt, for ever.
+
+        The same loop, twice over: a `duration_us` of `10**30` is legal JSON
+        and the right TYPE, so it passed the guard and raised at the INSERT
+        instead — OverflowError on SQLite, DataError on Postgres — which is
+        neither in the guard nor inside it. Measured through the endpoint:
+        HTTP 500, 0 results and 3 more orphan images per attempt. Fields are
+        bounded to what the column holds, the guard catches everything, and
+        the images go in after the rows they belong to.
         """
         if not results:
             return 0
@@ -870,22 +898,28 @@ class ResultRepository:
                    .for_agent(agent_id)}
         received = _now()
         with self._engine.begin() as connection:
-            rows = []
+            rows, images = [], []
             for result in results:
                 try:
                     row = self._row(agent_id, result, allowed, received)
-                except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                except Exception as exc:
+                    # Every exception, not a list of the four that were
+                    # measured: this is an ingest endpoint, the next agent to
+                    # be modified will find a fifth, and the whole point of
+                    # the guard is that finding one costs its own result.
                     logger.warning(
                         f"agent {agent_id} sent a result that could not be "
                         f"read ({type(exc).__name__}: {exc}); it was skipped")
                     continue
                 if row is None:
                     continue
-                # After the row is known to be storable, and in the same
-                # transaction as it: an image kept for a row that never
-                # arrives is a megabyte nothing points at.
-                row["screenshot_id"] = self._keep_screenshot(
-                    connection, row["monitor_id"], result)
+                # Read and checked now, stored after the rows are in: an
+                # image kept for a row that never arrives is a megabyte
+                # nothing points at.
+                image = self._screenshot_row(row["monitor_id"], result)
+                row["screenshot_id"] = image["id"] if image else None
+                if image:
+                    images.append(image)
                 rows.append(row)
             if not rows:
                 return 0
@@ -899,13 +933,26 @@ class ResultRepository:
             for start in range(0, len(rows), INSERT_CHUNK):
                 connection.execute(
                     insert(monitor_results).values(rows[start:start + INSERT_CHUNK]))
+            # AFTER the rows, in the same transaction. Before them it was not
+            # in the same transaction at all on SQLite, whatever the savepoint
+            # said: pysqlite emits no BEGIN of its own, so a SAVEPOINT that is
+            # the first statement in the block opens a transaction of its own
+            # and RELEASE commits it — measured, the image survived the
+            # rollback of the block it was written in, and every retry of a
+            # batch that could not store left another copy of it behind.
+            for image in images:
+                self._keep_screenshot(connection, image)
         return len(rows)
 
     def _row(self, agent_id, result, allowed, received):
         """One result as a row, or None when this agent may not report it.
 
-        Raises TypeError, ValueError, KeyError or AttributeError on anything
-        it cannot read, which the caller turns into "this one is skipped".
+        Raises on anything it cannot read — a `started_at` that is not a time
+        raises ValueError, and the next agent somebody modifies will find a
+        kind nobody listed — which the caller turns into "this one is
+        skipped". Every value that reaches a column is bounded HERE rather
+        than at the INSERT, because an INSERT that refuses one row refuses the
+        whole batch with it.
         """
         monitor_id = result.get("monitor_id")
         if not isinstance(monitor_id, str) or monitor_id not in allowed:
@@ -927,21 +974,43 @@ class ResultRepository:
             "started_at": started or received,
             "received_at": received,
             "status": "down" if result.get("status") == "down" else "up",
-            "duration_us": _whole_number(result.get("duration_us")),
+            "duration_us": self._number(agent_id, monitor_id, result,
+                                        "duration_us"),
             # `str` before the slice: an error that arrived as a dictionary
             # raised TypeError on the slice and took the whole batch with it.
             "error": str(result.get("error") or "")[:2000] or None,
-            "http_status": _whole_number(result.get("http_status")),
+            "http_status": self._number(agent_id, monitor_id, result,
+                                        "http_status", *HTTP_STATUS_RANGE),
             "tls": _certificate_of(monitor_id, result),
             "steps": _steps_of(result),
         }
 
-    def _keep_screenshot(self, connection, monitor_id, result):
-        """Store the failure screenshot, if the agent sent one usable.
+    @staticmethod
+    def _number(agent_id, monitor_id, result, field, low=-INT64 - 1,
+                high=INT64):
+        """One numeric field, and a line when it had to be dropped.
 
-        Returns its id, or None. Never raises: a picture that could not be
-        decoded must not cost the result it came with — the fact that the
-        journey failed is the part somebody needs.
+        Said rather than silently blanked: every other discard in `record`
+        logs — an unreadable result, a monitor this agent does not run, an
+        oversized certificate — and a duration that arrives as `"ages"` used
+        to reach the page as an empty cell with nothing anywhere saying why.
+        """
+        raw = result.get(field)
+        number = _whole_number(raw, low, high)
+        if number is None and raw is not None:
+            logger.warning(
+                f"agent {agent_id} sent monitor {monitor_id} a {field} that "
+                f"is not a number this column holds ({raw!r:.80}); the field "
+                f"is blank and the rest of the result was kept")
+        return number
+
+    def _screenshot_row(self, monitor_id, result):
+        """The failure screenshot as a row, if the agent sent one usable.
+
+        Returns the row, with the id the result will point at, or None. Never
+        raises: a picture that could not be decoded must not cost the result
+        it came with — the fact that the journey failed is the part somebody
+        needs.
         """
         shot = result.get("screenshot")
         if not shot:
@@ -967,23 +1036,32 @@ class ResultRepository:
             logger.warning(f"monitor {monitor_id} sent a screenshot that is "
                            f"not a JPEG, PNG or WebP image; it was not kept")
             return None
-        row = {
+        return {
             "id": str(uuid.uuid4()), "monitor_id": monitor_id,
             "captured_at": _now(),
             "content_type": kind[0],
             "bytes": len(image), "image": image,
         }
+
+    @staticmethod
+    def _keep_screenshot(connection, image):
+        """Store one image beside the row that already points at it.
+
+        On a savepoint, which here is inside a transaction that has already
+        written: an image that will not store must not cost the results it
+        came with, and on Postgres a failed statement poisons the transaction
+        it is in unless it is rolled back to one. When it does fail, the
+        result stops pointing at a picture nobody can fetch.
+        """
         try:
-            # A savepoint inside the caller's transaction: an image that will
-            # not store must not cost the results it came with, and on
-            # Postgres a failed statement poisons the transaction it is in
-            # unless it is rolled back to one.
             with connection.begin_nested():
-                connection.execute(insert(journey_screenshots).values(**row))
+                connection.execute(insert(journey_screenshots).values(**image))
         except Exception as exc:
             logger.warning(f"could not store a screenshot: {exc}")
-            return None
-        return row["id"]
+            connection.execute(
+                update(monitor_results)
+                .where(monitor_results.c.screenshot_id == image["id"])
+                .values(screenshot_id=None))
 
     def screenshot(self, screenshot_id):
         with self._engine.connect() as connection:

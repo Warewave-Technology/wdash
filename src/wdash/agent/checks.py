@@ -107,8 +107,19 @@ def _http_with(client, monitor):
         headers["Authorization"] = f"Bearer {auth['token']}"
 
     try:
-        response = _get_following(client, monitor["target"], timeout, headers,
-                                  credentials, request.get("cookies") or None)
+        response = _get_following(client, monitor["target"], headers,
+                                  credentials, request.get("cookies") or None,
+                                  deadline)
+    except _Overran as exc:
+        # The hops themselves ran the budget out. Named separately from a
+        # slow body, because "the response did not finish" about a check that
+        # never got a response sends somebody to look at the wrong thing.
+        hops = exc.args[0] if exc.args else 0
+        return _result(monitor, started, "down",
+                       f"the redirects did not finish within {timeout}s "
+                       f"({hops} hop(s) followed)",
+                       duration_us=int((time.monotonic() - clock) * 1_000_000),
+                       tls=_certificate(monitor["target"], timeout))
     except Exception as exc:
         elapsed = int((time.monotonic() - clock) * 1_000_000)
         # The certificate is read even though the request failed, and
@@ -122,25 +133,29 @@ def _http_with(client, monitor):
                        duration_us=elapsed,
                        tls=_certificate(monitor["target"], timeout))
 
+    # The body is read either way. Kept only when something is asserted about
+    # it, but always consumed: the timing would otherwise measure the headers
+    # alone, and a server that answers instantly and then stalls would look
+    # fast.
+    keeping = bool(assertions.get("body_contains"))
     body = b""
-    overran = False
+    read = 0
+    overran = late = False
     try:
-        if assertions.get("body_contains"):
-            for chunk in response.iter_content(8192):
+        for chunk in response.iter_content(8192):
+            read += len(chunk)
+            if keeping:
                 body += chunk
-                if time.monotonic() > deadline:
-                    overran = True
-                    break
                 if len(body) >= MAX_BODY:
                     break
-        else:
-            # Nothing is asserted about the body, but the response still has
-            # to be consumed or the timing measures the headers alone — and a
-            # server that answers instantly then stalls would look fast.
-            for _ in response.iter_content(8192):
-                if time.monotonic() > deadline:
-                    overran = True
-                    break
+            if time.monotonic() > deadline:
+                # Told apart before either is reported: a body that arrived
+                # complete and late is a different fact from one that stopped
+                # half way, and the second sentence sends somebody looking
+                # for a stall that never happened.
+                overran = not _all_of_it(response, read)
+                late = not overran
+                break
     except Exception as exc:
         elapsed = int((time.monotonic() - clock) * 1_000_000)
         return _result(monitor, started, "down",
@@ -151,14 +166,24 @@ def _http_with(client, monitor):
         response.close()
 
     elapsed = int((time.monotonic() - clock) * 1_000_000)
-    if overran:
-        # Down, and named for what happened: the target answered and then did
-        # not finish. No second connection for the certificate — the budget is
-        # already spent, and a slow body says nothing about the certificate.
+    # A body that ended by itself, past the deadline: the loop never had to
+    # cut it off, and it is still over the budget the monitor was given.
+    late = late or (not overran and time.monotonic() > deadline)
+    if overran or late:
+        # Down, and named for what happened: the target answered and then
+        # either did not finish or finished too late. The certificate is read
+        # here as it is on every other down path — `_to_monitor` takes the
+        # TLS column from the LATEST result, so leaving it out empties the
+        # certificate screen for as long as the target keeps overrunning, and
+        # "down, and we cannot tell you which certificate" says nothing.
         return _result(monitor, started, "down",
-                       f"the response did not finish within {timeout}s",
+                       (f"the response did not finish within {timeout}s"
+                        if overran else
+                        f"the response took {elapsed / 1000:.0f} ms, over the "
+                        f"{timeout}s timeout"),
                        duration_us=elapsed,
-                       http_status=response.status_code)
+                       http_status=response.status_code,
+                       tls=_certificate(monitor["target"], timeout))
     certificate = _certificate(monitor["target"], timeout)
     failure = _assert_http(response, body, elapsed, assertions)
     return _result(monitor, started, "down" if failure else "up", failure,
@@ -169,6 +194,34 @@ def _http_with(client, monitor):
 #: Hops a check follows before it calls the target down.
 MAX_REDIRECTS = 10
 _REDIRECTS = (301, 302, 303, 307, 308)
+
+
+class _Overran(Exception):
+    """The monitor's whole budget went before there was an answer to read.
+
+    Carries the number of hops that were followed, for the message.
+    """
+
+
+def _all_of_it(response, read):
+    """Whether the body that arrived is the whole body.
+
+    Only `Content-Length` can settle it. A chunked answer cannot be settled
+    without pulling again, which is the one thing there is no budget left for,
+    so that one is reported as unfinished — which is what it looks like from
+    here.
+
+    Asked at all because a complete answer whose last byte landed a
+    millisecond after the deadline used to be reported as "the response did
+    not finish within 1s", about a response that finished.
+    """
+    declared = response.headers.get("Content-Length")
+    if declared is None:
+        return False
+    try:
+        return read >= int(declared)
+    except (TypeError, ValueError):
+        return False
 
 
 def _origin(url):
@@ -193,8 +246,15 @@ def _at_home(home, url):
     return (home[0], home[2]) == ("http", 80) and here == ("https", home[1], 443)
 
 
-def _get_following(client, url, timeout, headers, credentials, cookies):
-    """GET `url`, following redirects by hand.
+def _get_following(client, url, headers, credentials, cookies, deadline):
+    """GET `url`, following redirects by hand, inside one deadline.
+
+    Every hop is given what is LEFT of the check's budget rather than the
+    whole of it. Handing each one the full timeout made the timeout a
+    per-hop figure: measured against a server that redirected ten times,
+    sleeping 0.8s before each answer, a check with `timeout_seconds=1`
+    returned after 8.9s — and a target that writes its own Location headers
+    chooses that multiplier itself.
 
     Redirects are followed, because a monitor that reports 301 as a failure
     reports every site that moved to https as down. But `requests` follows
@@ -213,10 +273,15 @@ def _get_following(client, url, timeout, headers, credentials, cookies):
 
     home = _origin(url)
     current = url
-    for _ in range(MAX_REDIRECTS + 1):
+    for hop in range(MAX_REDIRECTS + 1):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise _Overran(hop)
         own = _at_home(home, current)
         response = client.get(
-            current, timeout=timeout, stream=True, allow_redirects=False,
+            # Never zero: a timeout of 0 is "no timeout" to `requests`, which
+            # is the opposite of what a spent budget means.
+            current, timeout=max(0.1, left), stream=True, allow_redirects=False,
             headers=headers if own else {"User-Agent": USER_AGENT},
             auth=credentials if own else None,
             cookies=cookies if own else None)

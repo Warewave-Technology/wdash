@@ -37,10 +37,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sqlalchemy import select  # noqa: E402
 
-from wdash.agent import runner  # noqa: E402
+from wdash.agent import checks, runner  # noqa: E402
 from wdash.agent.browser import run_journey  # noqa: E402
 from wdash.agent.checks import run_check  # noqa: E402
 from wdash.agent.runner import Agent  # noqa: E402
+from wdash.agent.spool import Spool  # noqa: E402
 from wdash.hub.models import UNKNOWN  # noqa: E402
 from wdash.hub.query import TimeWindow  # noqa: E402
 from wdash.hub.scope import Scope  # noqa: E402
@@ -506,6 +507,21 @@ class AResponseThatNeverFinishesTest(unittest.TestCase):
                                 assertions={"body_contains": "hello"})
         self.assertEqual(result["status"], "up", result["error"])
 
+    def test_an_overrun_still_says_which_certificate(self):
+        """The overrun path returned without `tls`, and `_to_monitor` takes
+        the certificate from the LATEST result — so an https monitor that
+        overran lost its certificate from the page for as long as it kept
+        overrunning. The rule the same function states forty lines above is
+        that a monitor which goes down and cannot say which certificate has
+        told you nothing."""
+        certificate = {"common_name": "shop.example", "issuer": "Lab CA"}
+        with _Swapped(checks, "_certificate",
+                      lambda url, timeout: dict(certificate)):
+            result, _ = self._check()
+        self.assertEqual(result["status"], "down")
+        self.assertEqual(result.get("tls"), certificate,
+                         "the TLS column empties while the target overruns")
+
 
 # ---------------------------------------------------------------------------
 # An answer that is not JSON
@@ -912,6 +928,77 @@ class AResultTheStoreCannotReadTest(unittest.TestCase):
         self.assertEqual(rows[0]["duration_us"], 1200)
         self.assertEqual(len(self._screenshots()), 2)
 
+    def test_a_number_too_big_for_its_column_costs_the_field(self):
+        """`10**30` is legal JSON and the right TYPE, so the type check passed
+        it and the INSERT raised — OverflowError on SQLite, DataError on
+        Postgres, neither of them in the guard and neither raised while the
+        row was being built. Measured through the real endpoint: HTTP 500,
+        `results=0 screenshots=3`, then 6, 9, 12, 15 over five retries."""
+        for label, bad in {
+                "a duration of 10**30": {"duration_us": 10 ** 30},
+                "a duration of -10**30": {"duration_us": -10 ** 30},
+                "an http status of 10**30": {"http_status": 10 ** 30},
+                "an http status nobody can answer with": {"http_status": 9999},
+                "a duration that is an infinity": {"duration_us":
+                                                   float("inf")}}.items():
+            with self.subTest(bad=label):
+                before = self.store.results.count()
+                with self.assertLogs("wdash.store.monitoring", "WARNING"):
+                    stored = self.store.results.record(
+                        self.agent["id"],
+                        [self._good(), self._good(), self._good(**bad)])
+                self.assertEqual(stored, 3, "the batch was refused whole")
+                self.assertEqual(self.store.results.count(), before + 3)
+                row = self._results()[-1]
+                for field in bad:
+                    self.assertIsNone(row[field],
+                                      f"{field} reached the column")
+
+        kept = {row["id"] for row in self._screenshots()}
+        referenced = {row["screenshot_id"] for row in self._results()
+                      if row["screenshot_id"]}
+        self.assertEqual(kept - referenced, set(),
+                         "images were kept for results that never arrived")
+
+    def test_a_field_that_cannot_be_read_is_said_so(self):
+        """Every other discard in `record` logs — an unreadable result, a
+        monitor this agent does not run, an oversized certificate. A duration
+        that arrived as "ages" reached the page as an empty cell with nothing
+        anywhere saying why."""
+        with self.assertLogs("wdash.store.monitoring", "WARNING") as log:
+            self.store.results.record(self.agent["id"], [self._good(
+                screenshot=False, duration_us="ages")])
+        said = "\n".join(log.output)
+        self.assertIn("duration_us", said)
+        self.assertIn(self.monitor["id"], said)
+
+    def test_no_screenshot_is_stored_when_the_rows_cannot_be(self):
+        """The other half of the same defect: the images went in FIRST, on a
+        savepoint that does not roll back with the block it is in. Measured
+        on SQLite — the store the default installation runs — a row written
+        inside `connection.begin_nested()` survived the rollback of the
+        enclosing `engine.begin()`, so every retry of a batch that could not
+        store left another copy of its pictures behind.
+        """
+        from wdash.store import monitoring
+
+        real = monitoring.insert
+
+        def refusing(table, *args, **kwargs):
+            if table is monitor_results:
+                raise RuntimeError("the results could not be stored")
+            return real(table, *args, **kwargs)
+
+        with _Swapped(monitoring, "insert", refusing):
+            with self.assertRaises(RuntimeError):
+                self.store.results.record(self.agent["id"],
+                                          [self._good(), self._good()])
+
+        self.assertEqual(self.store.results.count(), 0)
+        self.assertEqual([dict(r) for r in self._screenshots()], [],
+                         "images outlived the transaction their rows never "
+                         "reached")
+
     def test_a_certificate_is_kept_and_a_preposterous_one_is_not(self):
         """`_steps_of` trims the steps; nothing trimmed the certificate, and a
         5,000,000-byte `tls` value was stored whole — its JSON read back at
@@ -928,6 +1015,429 @@ class AResultTheStoreCannotReadTest(unittest.TestCase):
                            tls={"common_name": "x" * 5_000_000})])
         kept = self._results()[1]["tls"]
         self.assertIsNone(kept, f"{len(json.dumps(kept or {}))} bytes stored")
+
+
+# ---------------------------------------------------------------------------
+# A redirect chain, and a body that arrives late
+# ---------------------------------------------------------------------------
+
+class _Slow(BaseHTTPRequestHandler):
+    """Slow hops, and one answer that completes just past the deadline.
+
+    `/hop/N` waits HOP seconds and then redirects to `/hop/N-1`; `/hop/0`
+    answers. `/late` sends its headers after 0.8s and its four bytes 0.5s
+    after that — inside any per-read timeout, and over a 1s budget for the
+    check as a whole. `/toslow` is one quick hop to an answer that takes
+    three seconds, and `/tail` sends its whole body early and the end of the
+    stream late.
+    """
+
+    protocol_version = "HTTP/1.1"
+    HOP = 0.3
+
+    def log_message(self, *args):
+        pass
+
+    def _answer(self, body):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.startswith("/hop/"):
+            time.sleep(self.HOP)
+            left = int(self.path.rsplit("/", 1)[1])
+            if left:
+                self.send_response(302)
+                self.send_header("Location", f"/hop/{left - 1}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self._answer(b"arrived")
+            return
+        if self.path == "/late":
+            time.sleep(0.8)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "4")
+            self.end_headers()
+            time.sleep(0.5)
+            self.wfile.write(b"done")
+            return
+        if self.path == "/toslow":
+            time.sleep(self.HOP)
+            self.send_response(302)
+            self.send_header("Location", "/slow")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path == "/slow":
+            time.sleep(3)
+            self._answer(b"eventually")
+            return
+        if self.path == "/tail":
+            # The body arrives early and the END of the stream arrives late:
+            # the read loop never has to cut anything off, and the exchange
+            # is still over its budget.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            time.sleep(0.5)
+            self.wfile.write(b"4\r\ndone\r\n")
+            self.wfile.flush()
+            time.sleep(0.8)
+            self.wfile.write(b"0\r\n\r\n")
+            return
+        self._answer(b"arrived")
+
+
+class _SlowServerTest(unittest.TestCase):
+    """One server for both, started once."""
+
+    class _Server(ThreadingHTTPServer):
+        daemon_threads = True
+
+        def handle_error(self, request, client_address):
+            pass
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.support import serve_in_background
+        cls.server = serve_in_background(cls._Server(("127.0.0.1", 0), _Slow))
+        cls.address = f"http://127.0.0.1:{cls.server.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def _check(self, path, patience=8, **monitor):
+        options = {"id": "m", "kind": "http", "target": self.address + path,
+                   "timeout_seconds": 1}
+        options.update(monitor)
+        box = {}
+        clock = time.monotonic()
+        thread = threading.Thread(
+            target=lambda: box.setdefault("result", run_check(options)),
+            daemon=True)
+        thread.start()
+        thread.join(patience)
+        self.assertFalse(thread.is_alive(),
+                         f"the check was still running after {patience}s")
+        return box["result"], time.monotonic() - clock
+
+
+class ARedirectChainTest(_SlowServerTest):
+    """The timeout was a deadline for the body and a per-hop figure for
+    everything before it.
+
+    `_get_following` handed every hop the whole `timeout_seconds`, so a check
+    could spend (MAX_REDIRECTS + 1) x timeout before the body read even
+    started — and a target that writes its own Location headers chooses that
+    multiplier itself. Measured at the base commit against ten redirects of
+    0.8s each with `timeout_seconds=1`: the check returned after 8.9s.
+    """
+
+    def test_a_chain_of_redirects_ends_at_the_timeout(self):
+        result, took = self._check("/hop/10")
+        self.assertEqual(result["status"], "down", result["error"])
+        self.assertLess(took, 2.0,
+                        f"ten hops of {_Slow.HOP}s ran {took:.1f}s against a "
+                        f"1s timeout")
+        self.assertRegex(result["error"], "within 1s|timed out")
+
+    def test_a_spent_budget_stops_the_chain_asking(self):
+        """The deciding condition on its own, without the timing: a chain
+        with nothing left of its budget must not make another request."""
+        import requests
+        with requests.Session() as client:
+            with self.assertRaises(checks._Overran):
+                checks._get_following(client, self.address + "/hop/3", {},
+                                      None, None, time.monotonic() - 1)
+
+    def test_one_hop_cannot_spend_more_than_is_left(self):
+        """The budget has to reach the hop itself, not only the loop around
+        it: one redirect to an answer that takes three seconds used to be
+        three seconds of a one-second check."""
+        result, took = self._check("/toslow")
+        self.assertEqual(result["status"], "down", result["error"])
+        self.assertLess(took, 2.0,
+                        f"one hop to a 3s answer took {took:.1f}s against a "
+                        f"1s timeout")
+
+    def test_a_redirect_is_still_followed(self):
+        """The hop budget must not stop a monitor following the one hop
+        nearly every site makes."""
+        result, _ = self._check("/hop/1", timeout_seconds=5,
+                                assertions={"body_contains": "arrived"})
+        self.assertEqual(result["status"], "up", result["error"])
+
+
+class ABodyThatArrivesLateTest(_SlowServerTest):
+    """"The response did not finish within 1s" about a response that
+    finished.
+
+    The deadline is checked after a chunk is read, so an answer whose last
+    chunk landed past it was reported as unfinished when it was merely late.
+    Measured at the base commit: a complete 200 whose four-byte body was fully
+    read came back as `down`, "the response did not finish within 1s".
+    """
+
+    def test_a_late_answer_is_said_to_be_late_rather_than_unfinished(self):
+        result, took = self._check("/late")
+        self.assertEqual(result["status"], "down", "over its budget is down")
+        self.assertRegex(result["error"],
+                         r"^the response took \d+ ms, over the 1s timeout$")
+        self.assertEqual(result["http_status"], 200)
+        self.assertLess(took, 4)
+
+    def test_a_body_that_ended_by_itself_can_still_be_late(self):
+        """The read loop never had to cut this one off — the body was all
+        there early and the end of the stream came late — so the deadline
+        has to be asked about after the loop as well as inside it."""
+        result, took = self._check("/tail")
+        self.assertEqual(result["status"], "down", "over its budget is down")
+        self.assertRegex(result["error"],
+                         r"^the response took \d+ ms, over the 1s timeout$")
+        self.assertLess(took, 3)
+
+    def test_an_answer_inside_the_budget_is_still_up(self):
+        result, _ = self._check("/hop/0", timeout_seconds=5)
+        self.assertEqual(result["status"], "up", result["error"])
+        self.assertEqual(result["error"], "")
+
+
+# ---------------------------------------------------------------------------
+# A check that lands while a delivery is in flight
+# ---------------------------------------------------------------------------
+
+class _SlowDelivery:
+    """A server that takes half a second to accept a batch."""
+
+    class _Answer:
+        def __init__(self, count):
+            self.status_code = 200
+            self._count = count
+
+        def json(self):
+            return {"accepted": self._count}
+
+    def __init__(self):
+        self.delivered = []
+
+    def post(self, url, json=None, **kwargs):
+        self.delivered.extend(r["monitor_id"] for r in json["results"])
+        time.sleep(0.5)
+        return self._Answer(len(json["results"]))
+
+    def get(self, url, **kwargs):
+        raise AssertionError("this test does not poll for configuration")
+
+
+class ASpoolThatMovesDuringADeliveryTest(unittest.TestCase):
+    """`drop` counted from the front, and the front moves.
+
+    A check now spools on its own thread (that is what stopped one slow
+    monitor holding the heartbeat), so an append can land while the POST is in
+    flight — and an append that overflows the spool trims the OLDEST. The
+    `drop(len(batch))` that followed then ate that many from the NEW front:
+    results that had never been sent, while the log said it was dropping the
+    oldest. In production this needs a full spool, which is recovery from
+    exactly the long outage the spool exists for.
+
+    Measured before the fix with a spool of 20 at its limit, a POST that took
+    0.5s and five results added 0.2s in: `NEVER sent and no longer spooled:
+    [new0, new1, new2, new3, new4]`.
+    """
+
+    def test_a_result_added_during_a_delivery_is_not_dropped_unsent(self):
+        path = _spool()
+        agent = Agent("http://wdash", "t", spool_path=path,
+                      session=_SlowDelivery())
+        agent.spool = Spool(path, limit=20)
+        agent.spool.add([{"monitor_id": f"old{n}", "status": "up"}
+                         for n in range(20)])
+
+        accepted = []
+        sender = threading.Thread(
+            target=lambda: accepted.append(agent.flush()), daemon=True)
+        sender.start()
+        time.sleep(0.2)
+        with self.assertLogs("wdash.agent.spool", "WARNING"):
+            agent.spool.add([{"monitor_id": f"new{n}", "status": "up"}
+                             for n in range(5)])
+        sender.join(10)
+        self.assertFalse(sender.is_alive(), "the delivery never returned")
+
+        delivered = set(agent._session.delivered)
+        left = [r["monitor_id"] for r in agent.spool.take(100)]
+        self.assertEqual(accepted, [20])
+        self.assertEqual(
+            [m for m in left if m in delivered], [],
+            "a result the server took is still spooled and will be sent twice")
+        self.assertEqual(
+            left, [f"new{n}" for n in range(5)],
+            "results measured during the delivery were dropped without ever "
+            "being sent")
+
+
+# ---------------------------------------------------------------------------
+# Stopping while a check is still running
+# ---------------------------------------------------------------------------
+
+class AStopWithACheckInFlightTest(unittest.TestCase):
+    """`close()` said the running checks were "abandoned, not waited for".
+
+    They are not: a pool's worker threads are not daemons and the interpreter
+    joins them on the way out, so `shutdown(wait=False)` returns at once and
+    the process then blocks until the slowest check in flight finishes — up
+    to MAX_JOURNEY_TIMEOUT for a journey, well past a container's grace
+    period. Measured with one 5s check in flight: `close()` returned in 0.00s,
+    the interpreter exited 4.8s later. That is the comment an operator reads
+    while looking at a pod that will not stop.
+    """
+
+    def test_the_checks_that_hold_the_process_are_named(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        running = threading.Event()
+
+        def check(monitor, session=None):
+            running.set()
+            release.wait(20)
+            return {"monitor_id": monitor["id"], "status": "up",
+                    "started_at": _now().isoformat()}
+
+        agent = Agent("http://wdash", "t", spool_path=_spool())
+        agent._apply({"j": {"id": "j", "name": "Checkout journey",
+                            "kind": "http", "interval_seconds": 1}})
+        with _Swapped(runner, "run_check", check):
+            agent.run_due(force=True)
+            self.assertTrue(running.wait(5), "the check never started")
+            clock = time.monotonic()
+            with self.assertLogs("wdash.agent.runner", "WARNING") as log:
+                agent.close()
+            took = time.monotonic() - clock
+
+        self.assertLess(took, 1.0, "close() waited for the check")
+        self.assertIn("Checkout journey", "\n".join(log.output),
+                      "nothing said what the process is waiting for")
+
+
+# ---------------------------------------------------------------------------
+# A check that hangs
+# ---------------------------------------------------------------------------
+
+class ACheckThatStoppedComingBackTest(unittest.TestCase):
+    """The agent's heartbeat says the AGENT is alive, not that a check ran.
+
+    Checks now run on threads of their own, which is what keeps one slow
+    monitor from holding the heartbeat — and it means a check that hangs
+    leaves the rest of the agent reporting normally. `agent['stale']` was the
+    only freshness signal in the row, so the monitors page went on showing the
+    last result as the CURRENT status for as long as the check hung.
+
+    Measured at the implementer's commit with real endpoints and a check that
+    answered once and then hung: `check started 2 time(s); the 2nd one is
+    still hanging / agent last_seen_at: 23:43:14 stale=False / page row: API
+    status=up checked_at=23:43:13 error=''`. The only notice was one line in
+    the agent's own log.
+    """
+
+    def setUp(self):
+        handle, self.database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        self.store = Store.open(f"sqlite:///{self.database}")
+        self.agent, _ = self.store.agents.create("probe")
+        self.monitor = self.store.monitors.create(
+            name="API", kind="http", target="https://shop.example/health",
+            interval_seconds=60, timeout_seconds=5)
+
+    def tearDown(self):
+        self.store.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.database + suffix):
+                os.unlink(self.database + suffix)
+
+    def _row(self, ago_seconds, window=None):
+        """The page row for a monitor whose only result is that old, from an
+        agent that is heartbeating normally."""
+        from datetime import timedelta
+
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+
+        started = _now() - timedelta(seconds=ago_seconds)
+        self.store.results.record(self.agent["id"], [
+            {"monitor_id": self.monitor["id"], "status": "up",
+             "started_at": started.isoformat(), "duration_us": 1200}])
+        self.store.agents.seen(self.agent["id"])
+        rows = StoreMonitorSource(self.store).monitors(
+            window or TimeWindow.of("24h"),
+            Scope(containers=("*",))).monitors
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_a_check_that_has_not_come_back_is_not_the_current_status(self):
+        row = self._row(ago_seconds=20 * 60)
+        self.assertEqual(row.status, UNKNOWN,
+                         "a check that hung an agent still calls alive was "
+                         "shown as the current status")
+        self.assertIn("not the current one", row.error)
+        self.assertIn("no result since", row.error)
+
+    def test_a_check_that_answered_on_time_is_untouched(self):
+        """The whole difficulty: this must not turn an ordinary monitor
+        `unknown` between two turns of its own schedule."""
+        row = self._row(ago_seconds=30)
+        self.assertNotEqual(row.status, UNKNOWN, row.error)
+        self.assertEqual(row.error, "")
+
+    def test_one_slow_turn_is_not_called_a_hang(self):
+        """Three intervals, and never sooner than five minutes: a monitor on
+        a fifteen-second schedule must not go `unknown` over one slow
+        minute."""
+        self.store.monitors.update(self.monitor["id"], interval_seconds=15)
+        row = self._row(ago_seconds=90)
+        self.assertNotEqual(row.status, UNKNOWN, row.error)
+
+    def test_a_window_that_ends_in_the_future_does_not_age_a_check(self):
+        """A window's end is aligned FORWARD to a bucket boundary, so it sits
+        in the future for most of every bucket. Measured on a 24-hour window:
+        it ended at 00:10 while the clock said 00:06 — which would have put
+        every monitor on a short schedule into `unknown` four minutes out of
+        every five."""
+        from datetime import timedelta
+
+        now = _now()
+        row = self._row(ago_seconds=30,
+                        window=TimeWindow.exact(now - timedelta(hours=1),
+                                                now + timedelta(hours=1)))
+        self.assertNotEqual(row.status, UNKNOWN, row.error)
+
+    def test_the_agent_being_quiet_is_still_said_of_the_agent(self):
+        """Two different facts, and the agent's name is the more useful one
+        when it applies."""
+        from datetime import timedelta
+
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+        from wdash.store.schema import agents as agents_table
+        from sqlalchemy import update
+
+        started = _now() - timedelta(seconds=20 * 60)
+        self.store.results.record(self.agent["id"], [
+            {"monitor_id": self.monitor["id"], "status": "up",
+             "started_at": started.isoformat(), "duration_us": 1200}])
+        with self.store.engine.begin() as connection:
+            connection.execute(update(agents_table).values(
+                last_seen_at=_now() - timedelta(hours=1)))
+        rows = StoreMonitorSource(self.store).monitors(
+            TimeWindow.of("24h"), Scope(containers=("*",))).monitors
+        self.assertEqual(rows[0].status, UNKNOWN)
+        self.assertIn("agent 'probe' has not reported", rows[0].error)
 
 
 if __name__ == "__main__":

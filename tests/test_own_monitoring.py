@@ -552,7 +552,9 @@ class SpoolTest(unittest.TestCase):
 
     def test_dropping_removes_the_oldest(self):
         self.spool.add([{"n": 1}, {"n": 2}, {"n": 3}])
-        self.spool.drop(2)
+        # What was taken, rather than how many: the spool moves underneath a
+        # send. See `Spool.drop`.
+        self.spool.drop(self.spool.take(2))
         self.assertEqual([r["n"] for r in self.spool.take(10)], [3])
 
     def test_overflow_drops_the_oldest_not_the_newest(self):

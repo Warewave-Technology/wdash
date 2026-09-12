@@ -19,10 +19,19 @@ Showing the last known status would report a target as `up` for as long as
 nobody was watching. "The agent stopped" and "the target is fine" are
 different facts, and the second one is the one nobody should be told without
 evidence.
+
+**A monitor that is OVERDUE is UNKNOWN too, even from a healthy agent.** The
+agent's heartbeat says the agent is alive; it says nothing about this check.
+An agent runs its checks on threads of its own, so one check that hangs — a
+journey with ten minutes of patience, a target that keeps a connection open —
+leaves the rest of the agent reporting normally while that one monitor's last
+result sits on the page as the CURRENT status. Measured: a check that answered
+once and then hung was still shown as `up` twenty-six seconds later, with a
+fresh `last_seen_at` and nothing anywhere saying the check had not come back.
 """
 
 import logging
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 
 from ..models import DOWN, STEP_SKIPPED, UNKNOWN, UP, Certificate, Monitor, \
     MonitorCheck, MonitorPage, MonitorPoint, SourceRef, StepResult
@@ -46,6 +55,18 @@ SQLITE_COMFORTABLE_ROWS = 2_000_000
 #: Buckets in the sparkline. Matches the Elasticsearch adapter, so the two
 #: kinds of source draw the same width of history in a row.
 SPARKLINE_POINTS = 24
+
+#: How many of a monitor's own intervals may pass before its last result stops
+#: being called the current one. Three, like the agent's own staleness rule:
+#: one missed turn is a slow check, three is a check that is not coming back.
+OVERDUE_INTERVALS = 3
+
+#: And never sooner than this, whatever the interval. A monitor on a
+#: fifteen-second schedule would otherwise go `unknown` for a forty-five
+#: second hiccup, which is a way to teach people to ignore the word. Matches
+#: `AGENT_STALE_AFTER`, so a check is never called overdue before the agent
+#: running it would be called silent.
+OVERDUE_FLOOR = timedelta(minutes=5)
 
 
 def _aware(value):
@@ -182,13 +203,15 @@ class StoreMonitorSource(MonitorSource):
                 continue
             reported.add(result["monitor_id"])
             rows.append(self._to_monitor(definition, result,
-                                         agents.get(result["agent_id"])))
+                                         agents.get(result["agent_id"]),
+                                         window.end))
 
         # Configured but silent. This is the row that matters most and the one
         # a "list what reported" query would leave out.
         for definition in definitions:
             if definition["id"] not in reported:
-                rows.append(self._to_monitor(definition, None, None))
+                rows.append(self._to_monitor(definition, None, None,
+                                             window.end))
 
         if series:
             self._attach_series(rows, window)
@@ -196,7 +219,7 @@ class StoreMonitorSource(MonitorSource):
         rows.sort(key=lambda m: (m.status != DOWN, m.name.lower(), m.source))
         return MonitorPage(monitors=rows, sources=(self.name,))
 
-    def _to_monitor(self, definition, result, agent):
+    def _to_monitor(self, definition, result, agent, asked_at=None):
         """One row. `result` is None when nothing has been reported."""
         if result is None:
             status, checked_at, duration, error, certificate, ref = (
@@ -218,6 +241,21 @@ class StoreMonitorSource(MonitorSource):
             since = _aware(agent["last_seen_at"])
             when = f"since {since:%H:%M}" if since else "at all"
             detail = (f"agent '{agent['name']}' has not reported {when} — "
+                      f"this is its last known result, not the current one")
+            error = detail
+        elif self._overdue(definition, result, asked_at):
+            # The agent is reporting; THIS CHECK is not. The agent runs its
+            # checks on threads of its own, so one that hangs stops answering
+            # while its neighbours and the heartbeat carry on — and the row
+            # went on showing the last answer as the current one. Unknown for
+            # the same reason a silent agent is: nobody looked.
+            status = UNKNOWN
+            checked_at = _aware(result["started_at"])
+            duration = (result["duration_us"] or 0) / 1000.0
+            certificate = _certificate(result["tls"])
+            ref = None
+            detail = (f"no result since {checked_at:%H:%M} — this check runs "
+                      f"every {definition.get('interval_seconds') or 60}s, so "
                       f"this is its last known result, not the current one")
             error = detail
         else:
@@ -244,6 +282,31 @@ class StoreMonitorSource(MonitorSource):
             status=status, checked_at=checked_at, duration_ms=duration,
             error=error, tags=tags, certificate=certificate,
             source=self.name, ref=ref)
+
+    @staticmethod
+    def _overdue(definition, result, asked_at=None):
+        """Whether the last result is too old to be called the current one.
+
+        Against the monitor's OWN interval, because that is the only thing
+        that says how often an answer is expected, and against a floor, so a
+        fifteen-second schedule does not go `unknown` over one slow minute.
+        `asked_at` is the end of the window being drawn rather than the clock,
+        so a page about last Tuesday is not told that every check on it is
+        late — but never later than the clock, because a window's end is
+        aligned FORWARD to a bucket boundary and sits in the future for most
+        of every bucket. Measured without that: a 24-hour window ended at
+        00:10 while it was 00:06, and every monitor on a fifteen-second
+        schedule read `unknown` four minutes out of every five.
+        """
+        started = _aware(result["started_at"])
+        if started is None:
+            return False
+        now = datetime.now(timezone.utc)
+        asked_at = min(_aware(asked_at) or now, now)
+        interval = definition.get("interval_seconds") or 60
+        allowed = max(timedelta(seconds=interval * OVERDUE_INTERVALS),
+                      OVERDUE_FLOOR)
+        return (asked_at - started) > allowed
 
     # ---------- history ----------
 
