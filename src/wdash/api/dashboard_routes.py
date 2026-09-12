@@ -113,10 +113,15 @@ LEVEL_GROUPS = {
 #: built `_levels` and the comparison asked for `log_levels`, which no result
 #: carries, so the previous window's error, warning and info counts were the
 #: empty list's — zero — and the page printed "none in previous period" under
-#: all three. Measured on the demo at 24h: previous_period held 19,732
-#: records, of which the cluster really had ERROR 1,750 + FATAL 220, WARN
-#: 2,372 and INFO 13,737. The per-panel endpoints below keep `log_levels`:
-#: that one is a KEY IN THEIR JSON, not an internal name.
+#: all three. Measured on the demo at 24h over the baseline window
+#: 2026-09-10T09:15Z .. 2026-09-11T09:20Z, which held 19,732 records, of
+#: which the cluster really had ERROR 1,750 + FATAL 220, WARN 2,372 and INFO
+#: 13,737. The window is named because it slides: the same measurement a day
+#: later, over 2026-09-10T10:00Z .. 2026-09-11T10:05Z, reads 20,527 records
+#: with 2,031 in the error group, WARN 2,443 and INFO 14,323 — two unnamed
+#: snapshots of a rolling 24 hours read as a contradiction.
+#: The per-panel endpoints below keep `log_levels`: that one is a KEY IN
+#: THEIR JSON, not an internal name.
 LEVELS_AGGREGATION = "_levels"
 
 
@@ -169,6 +174,19 @@ def _compare(current, before, baseline_query):
     real zero would render a backend hiccup as "-100%, traffic has stopped" —
     the most alarming thing this page can say, and untrue. No comparison is
     the honest answer; the rest of the response is unaffected.
+
+    A baseline that PARTLY answered is the case in between, and it decided on
+    `failed` alone: a window whose aggregation warned came back as exact
+    numbers with its warnings thrown away, because the payload carries the
+    current result's warnings only. Measured on the lab, where both windows
+    hit the same shard failure ("Fielddata is disabled on [level] in
+    [bad-logs-000001]"): bad-logs-000001 holds 1,720 records in the baseline
+    window of which 158 match level:ERROR, so error_count 2,031 is short by
+    158 while total_hits 20,527 counts all 1,720 — an error rate of 9.9%
+    where the records say 10.7%. Today the current window fails identically
+    and the page warns; a baseline-only failure would have been silent. The
+    counts still ship — they are the best floor there is — carrying the
+    reason they are a floor.
     """
     if before is None or getattr(before, "failed", False):
         return None
@@ -182,7 +200,7 @@ def _compare(current, before, baseline_query):
             return None
         return (now - then) / then
 
-    return {
+    compared = {
         "total_hits": before.total,
         "error_count": counts["error"],
         "warn_count": counts["warn"],
@@ -197,6 +215,11 @@ def _compare(current, before, baseline_query):
         "window": {"start": baseline_query.window.start.isoformat(),
                    "end": baseline_query.window.end.isoformat()},
     }
+    notes = [note for note in (getattr(before, "warnings", ()) or ()) if note]
+    if notes:
+        compared["partial"] = True
+        compared["warnings"] = notes
+    return compared
 
 
 def _timeline_interval(window):

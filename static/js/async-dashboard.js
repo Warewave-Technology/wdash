@@ -67,12 +67,21 @@ const LEVEL_GROUPS = {
  * hint at all. A new panel type inherits silence and adds its own line when
  * it has a click to describe — which is the opposite of what the ternary
  * did, where every type added inherited the promise.
+ *
+ * With NO PROTOTYPE, so that "not named here" means what it says. A plain
+ * object literal answers `constructor`, `toString` and `valueOf` with an
+ * inherited function, and this lookup is `PANEL_HINTS[panel.type] || ''` —
+ * so a panel of one of those types would have set the hint to a function
+ * and printed `function Object() { [native code] }` into the card header.
+ * Unreachable today, because `PANEL_TYPES` refuses a kind it does not name
+ * and the route answers 400 for the whole board; reachable by whoever adds
+ * the next panel type, which is what this table is for.
  */
-const PANEL_HINTS = {
+const PANEL_HINTS = Object.assign(Object.create(null), {
     timeseries: 'Click a segment to open those records in the Logs page',
     terms: 'Click a value to open those records in the Logs page',
     trace_services: 'Click a service to open it in the Traces page',
-};
+});
 
 
 /**
@@ -740,6 +749,24 @@ class AsyncDashboard {
             note.innerHTML =
                 `<i class="fas fa-info-circle"></i> Compared against the preceding window ` +
                 `(${from.toLocaleString()} &rarr; ${to.toLocaleString()}). Click any card to see the records.`;
+            // A baseline whose aggregation only partly answered gives counts
+            // that are a FLOOR, and every percentage above is measured
+            // against them. It used to arrive as exact numbers with its
+            // reasons dropped, because the payload carries the CURRENT
+            // window's warnings only — so a baseline that failed where this
+            // window did not read as a clean comparison.
+            //
+            // textContent, not innerHTML: the reason is whatever the backend
+            // said.
+            if (previous.partial) {
+                const said = document.createElement('span');
+                said.className = 'text-warning';
+                const reasons = (previous.warnings || []).filter(Boolean);
+                said.textContent = ' The preceding window answered only in '
+                    + 'part, so these percentages are a lower bound'
+                    + (reasons.length ? `: ${reasons.join('; ')}` : '.');
+                note.appendChild(said);
+            }
         }
     }
 

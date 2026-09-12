@@ -176,14 +176,28 @@ document.getElementById('testQuery').addEventListener('click', function() {
             // cannot count: it reports the page it returned, so "5 matching
             // records" would be a floor presented as a total.
             const answered = (data.sources || [])[0] || {};
-            const counted = answered.exact !== false;
+            // And whether it answered the WHOLE query. A store that lost
+            // shards still returns a number, and this rendered it as a clean
+            // success: on the demo the default source answers `failed` with
+            // "5 of 9 shards failed: Fielddata is disabled on [level] in
+            // [bad-logs-000001] ...", and 1,831 was printed as an exact
+            // total with the reason nowhere on the page.
+            const incomplete = answered.failed === true || data.partial === true;
+            const counted = answered.exact !== false && !incomplete;
+            const reasons = (data.warnings || []).filter(Boolean).join('; ');
+            // "At least", capitalised: the line break above ends the
+            // heading, so the floor phrasing begins a sentence rather than
+            // continuing one.
+
             testResults.innerHTML = `
-                <div class="alert alert-success">
-                    <strong>Query test successful!</strong><br>
-                    ${counted ? '' : 'at least '}${Number.isFinite(total) ? total.toLocaleString() : 0} matching
+                <div class="alert alert-${incomplete ? 'warning' : 'success'}">
+                    <strong>${incomplete ? 'The store answered only part of this query.'
+                                         : 'Query test successful!'}</strong><br>
+                    ${counted ? '' : 'At least '}${Number.isFinite(total) ? total.toLocaleString() : 0} matching
                     records in the last 24 hours${answered.name ? ', from ' + escapeHtml(answered.name) : ''},
                     across the indices your role
                     can read. The dashboard's index patterns narrow this further.
+                    ${incomplete && reasons ? '<br>' + escapeHtml(reasons) : ''}
                 </div>
                 <div class="mt-2">
                     ${records.slice(0, 3).map(record => {

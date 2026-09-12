@@ -93,17 +93,51 @@ class StubSource(LogSource):
         except RuntimeError as exc:
             return AggregationResult(warnings=(str(exc),), failed=True)
 
-        buckets = {}
+        buckets, unanswerable = {}, []
         for aggregation in aggregations:
             if isinstance(aggregation, DateHistogram):
                 buckets[aggregation.name] = [
                     Bucket(key=1754305800000, key_text="t0", count=2),
                     Bucket(key=1754305860000, key_text="t1", count=3)]
-            else:
-                buckets[aggregation.name] = [
-                    Bucket(key="INFO", count=self._total),
+                continue
+            grouped = self._terms(getattr(aggregation, "field", None))
+            if grouped is None:
+                unanswerable.append(getattr(aggregation, "field", None))
+                buckets[aggregation.name] = []
+                continue
+            buckets[aggregation.name] = grouped
+        return AggregationResult(
+            total=self._total, buckets=buckets,
+            warnings=tuple(f"{self.name} cannot group by '{field}'"
+                           for field in unanswerable))
+
+    def _terms(self, field):
+        """Values of the field ASKED FOR, or None if this source has none.
+
+        It used to be one list of levels returned for every aggregation, so
+        a request grouped by `service` came back as INFO/ERROR and the merge
+        under test could not tell an adapter that read the field from one
+        that ignored it — the same blindness that let the dashboard read an
+        aggregation nobody built. Severity keeps the shape the merge tests
+        rely on (`total` per source, so two sources add up to something
+        observable); everything else is counted off the records this source
+        actually holds.
+
+        A field it cannot group by answers with no buckets AND a reason,
+        never with an empty ranking.
+        """
+        if field in ("severity", "severity_text", "level"):
+            return [Bucket(key="INFO", count=self._total),
                     Bucket(key="ERROR", count=1)]
-        return AggregationResult(total=self._total, buckets=buckets)
+        counted = {}
+        for record in self._records:
+            value = getattr(record, field, None) if field else None
+            if value:
+                counted[value] = counted.get(value, 0) + 1
+        if not counted:
+            return None
+        return [Bucket(key=key, count=count) for key, count in
+                sorted(counted.items(), key=lambda item: -item[1])]
 
 
 def _record(source_name, backend, container, at, body="line"):
@@ -513,6 +547,22 @@ class AggregationMergeTest(unittest.TestCase):
         by_key = {bucket.key: bucket.count for bucket in buckets.get("levels")}
         self.assertEqual(by_key["INFO"], 30)   # 10 + 20
         self.assertEqual(by_key["ERROR"], 2)   # 1 + 1
+
+    def test_a_field_no_source_can_group_by_comes_back_with_a_reason(self):
+        """The merge has to carry the reason, not just the emptiness.
+
+        A member that cannot group by a field answers with no buckets and
+        says so; if the fan-out drops that, the caller sees an empty ranking
+        and cannot tell it from a field where nothing matched. Loki answers
+        exactly this way for any field that is not one of its labels, so it
+        is the ordinary case rather than a hypothetical one.
+        """
+        result = self.aggregate([Terms(name="levels", field="host")])
+        self.assertEqual(result.get("levels"), [])
+        self.assertTrue(result.warnings,
+                        "an empty ranking with no reason: emptiness standing "
+                        "in for an answer nobody could give")
+        self.assertIn("host", " ".join(result.warnings))
 
     def test_terms_come_back_largest_first(self):
         buckets = self.aggregate([Terms(name="levels", field="severity")])

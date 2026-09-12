@@ -579,6 +579,47 @@ class WindowedES(FakeES):
         return answer
 
 
+class ShortBaselineES(WindowedES):
+    """Only the EARLIER window loses shards.
+
+    Elasticsearch fails a search outright only when every shard fails; when
+    some do it answers 200 with what the others found and says so in
+    `_shards`. The baseline answering in part is the case the comparison had
+    no way to express: `failed` is False, so the counts, the error rate and
+    all four percentages were computed from a floor and returned as exact
+    numbers, while the payload's own `warnings` carry the CURRENT result's.
+    A baseline that lost shards where this window did not was silent.
+
+    Measured on the lab over 2026-09-10T10:35Z..2026-09-11T10:40Z, where
+    `bad-logs-000001` maps `level` as text and refuses to aggregate on it:
+    the baseline came back `failed=False` with "5 of 9 shards failed:
+    Fielddata is disabled on [level] in [bad-logs-000001]", holding 1,773
+    records of which 167 match level:ERROR. So previous_period.error_count
+    2,079 was short by at least 167 and error_rate 9.90% was really at least
+    10.70%, against a total_hits of 20,996 that counted all 1,773.
+    """
+
+    REASON = ("Fielddata is disabled on [level] in [bad-logs-000001]. Text "
+              "fields are not optimised for operations that require "
+              "per-document field data like aggregations and sorting")
+
+    def msearch(self, searches=None, **kw):
+        answer = super().msearch(searches=searches, **kw)
+        payload = list(searches or [])
+        bodies = [payload[i + 1] for i in range(0, len(payload), 2)]
+        starts = [_window_of(body)[0] for body in bodies]
+        if len(starts) < 2:
+            return answer
+        for index, start in enumerate(starts):
+            if start != min(starts):
+                continue
+            answer["responses"][index]["_shards"] = {
+                "total": 9, "successful": 4, "failed": 5,
+                "failures": [{"reason": {"type": "illegal_argument_exception",
+                                         "reason": self.REASON}}]}
+        return answer
+
+
 class PreviousPeriodTest(DashboardContractTest):
     """What the three comparison cards say the window before this one held.
 
@@ -655,6 +696,49 @@ class PreviousPeriodTest(DashboardContractTest):
         self.assertEqual(set(asked) - built, set(),
                          f"read {sorted(set(asked) - built)}, asked for "
                          f"{sorted(built)}")
+
+    def test_a_baseline_that_answered_in_full_claims_nothing_else(self):
+        """The arm that keeps the caveat from becoming decoration."""
+        previous = self.get("data", time_range="24h").get_json()["previous_period"]
+        self.assertFalse(previous.get("partial"))
+        self.assertFalse(previous.get("warnings"))
+
+    def test_a_baseline_that_answered_in_part_says_the_counts_are_a_floor(self):
+        """Making the numbers visible put a new lie where the old one was.
+
+        `before.failed` is False when only SOME shards fail, so a baseline
+        that lost five of nine shipped its counts, its error rate and all
+        four percentages as exact numbers with the reason discarded — the
+        project's forbidden failure moved rather than removed, onto the three
+        numbers people read first. The payload's own `warnings` are the
+        CURRENT window's, so they cannot stand in for it: here this window
+        answers in full and only the baseline does not.
+        """
+        self.app.hub = None
+        self.es = ShortBaselineES()
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource, ElasticsearchTraceSource
+        hub = Hub()
+        hub.add_logs(ElasticsearchLogSource(self.es))
+        hub.add_traces(ElasticsearchTraceSource(self.es))
+        self.app.hub = hub
+
+        payload = self.get("data", time_range="24h").get_json()
+        previous = payload["previous_period"]
+
+        self.assertTrue(previous.get("partial"),
+                        "a baseline short of five shards was presented as "
+                        "exact numbers")
+        said = " ".join(previous.get("warnings") or ())
+        self.assertIn("Fielddata is disabled", said,
+                      "the reason the counts are a floor did not reach the "
+                      "page")
+        self.assertEqual(previous["error_count"], 4,
+                         "the counts still ship: they are the best floor "
+                         "there is")
+        self.assertNotIn("Fielddata", " ".join(payload.get("warnings") or ()),
+                         "this window answered in full; the baseline's "
+                         "reason must not be attributed to it")
 
 
 class SharedViewTest(DashboardContractTest):

@@ -33,6 +33,21 @@ _SEARCH_PARAMETERS = frozenset(
     inspect.signature(RealElasticsearch.search).parameters) - {"self"}
 
 
+def _value_at(source, field):
+    """A document's value for a dotted field name, literal keys included.
+
+    `resource.attributes` is a nested object whose KEY is the dotted string
+    `service.name`, so walking every dot blindly finds nothing where the
+    document plainly has something.
+    """
+    if not isinstance(source, dict) or not field:
+        return None
+    if field in source:
+        return source[field]
+    head, _, rest = field.partition(".")
+    return _value_at(source.get(head), rest) if rest else None
+
+
 class FakeElasticsearch(Harness):
     """Records every request and can be told to fail the next one."""
 
@@ -154,11 +169,6 @@ class FakeElasticsearch(Harness):
                     "hits": {"total": {"value": 0}, "hits": []},
                     "aggregations": {}}
 
-        aggregations = {
-            name: {"buckets": [{"key": "api-gateway", "doc_count": 3,
-                                "failed": {"doc_count": 0}}]}
-            for name in (body.get("aggs") or {})
-        }
         if self.trace_mode:
             hits = [{"_index": self.TRACE_INDICES[0], "_id": "s1",
                      "_source": {"@timestamp": TIMESTAMP,
@@ -174,6 +184,26 @@ class FakeElasticsearch(Harness):
                      "_source": {"@timestamp": TIMESTAMP, "level": "INFO",
                                  "message": "hello", "service": "api-gateway",
                                  "host": "node-1"}}]
+
+        # Grouped by the field each aggregation NAMES, over the document
+        # this fake holds. It used to answer every aggregation with one
+        # hardcoded `api-gateway` bucket, so a terms on `level` came back as
+        # a service and an adapter that sent the wrong field — or no field —
+        # was indistinguishable from one that sent the right one. The comment
+        # above says as much about hits and was true only of them.
+        #
+        # A field the document does not carry gets no buckets, which is what
+        # the backend does: "not there" and "there, and this is it" are
+        # different answers.
+        aggregations = {
+            name: {"buckets": [
+                {"key": value, "doc_count": 3, "failed": {"doc_count": 0}}
+                for value in [_value_at(hit["_source"],
+                                        (node.get("terms") or {}).get("field"))
+                              for hit in hits]
+                if value]}
+            for name, node in (body.get("aggs") or {}).items()
+        }
         return {"took": 3, "timed_out": False,
                 "hits": {"total": {"value": len(hits)}, "hits": hits},
                 "aggregations": aggregations}

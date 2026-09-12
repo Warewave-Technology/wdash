@@ -365,6 +365,52 @@ class LogSourceConformance(_SourceConformanceBase):
             any(bucket.count for bucket in buckets),
             f"every count is zero: {[(b.key, b.count) for b in buckets]}")
 
+    def test_a_terms_result_names_values_of_the_field_it_was_asked_about(self):
+        """A ranking that is the same whatever it was asked is not a ranking.
+
+        The check above says the counts are real. It does not say they count
+        the right thing, and two of the four harnesses that pass it answered
+        every aggregation from one hardcoded list: the Elasticsearch fake
+        returned `api-gateway` for a terms on `level`, and the fan-out stub
+        returned INFO/ERROR for a terms on `service`. An adapter that ignored
+        the field entirely — sent the wrong one, or dropped it — would have
+        passed both of them, which is the blindness that let the dashboard's
+        own defect survive: a fixture that ignores the NAME it is asked for
+        cannot tell a fix from the fault.
+
+        Measured against the records the source itself returns, because they
+        are the only values this suite knows are really there. `size` is
+        generous: the property is that the ranking NAMES this field's values,
+        not which of them come first.
+        """
+        self.skip_unless(Capability.AGGREGATION)
+        page = self.source.search(self._query(), Scope.unrestricted())
+        measured = []
+        for field in ("service", "severity"):
+            carried = {getattr(record, field) for record in page.records
+                       if getattr(record, field, None)}
+            if not carried:
+                continue
+            result = self.source.aggregate(
+                self._query(), [Terms(name="x", field=field, size=10)],
+                Scope.unrestricted())
+            buckets = result.get("x")
+            if not buckets:
+                self.assertTrue(
+                    result.failed or result.warnings,
+                    f"no buckets and no reason for '{field}'")
+                continue
+            measured.append(field)
+            keys = {bucket.key for bucket in buckets}
+            self.assertTrue(
+                keys & carried,
+                f"a ranking of '{field}' named {sorted(keys)}, none of which "
+                f"is a '{field}' these records carry ({sorted(carried)})")
+        self.assertTrue(
+            measured,
+            "neither field could be measured, so this check proved nothing: "
+            "the harness must hold records that carry a service or a severity")
+
     # ---------- batching ----------
 
     def test_multi_aggregate_answers_one_result_per_request(self):

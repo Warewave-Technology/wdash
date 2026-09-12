@@ -43,6 +43,10 @@ function makeDashboard(responder) {
     const dom = new JSDOM(`<!doctype html><body>
         <span id="totalHits"></span><span id="errorCount"></span>
         <span id="warnCount"></span><span id="infoCount"></span>
+        <span id="errorRate"></span>
+        <div id="totalHitsDelta"></div><div id="errorCountDelta"></div>
+        <div id="warnCountDelta"></div><div id="infoCountDelta"></div>
+        <div id="baselineNote"></div>
         <span id="lastUpdated"></span>
         <select id="timeRange"><option value="1h" selected>1h</option></select>
         <input id="dashboardFilter" value="">
@@ -563,6 +567,22 @@ async function main() {
                `the panel said "${hint}"`);
     });
 
+    // The third row of the table, and the only hint the old ternary got
+    // right — which is how it went unpinned: a change making it untrue again
+    // passed every check here. It is the hint on the first panel of the
+    // demo's own board. A timeseries click calls openLogs too.
+    const overTime = await loadWith({
+        total_hits: 12,
+        panels: [{ ...PANEL, type: 'timeseries',
+                   buckets: [{ key: '10:00', count: 12 }] }],
+    });
+    check('a volume panel says its segments open the Logs page', () => {
+        const hint = overTime.document
+            .querySelector('[data-panel-id="p1"] .panel-hint').textContent;
+        assert(/Logs page/.test(hint) && !/filter by it/.test(hint),
+               `the panel said "${hint}"`);
+    });
+
     // The half that decides what the next six panel types inherit: a type
     // the table does not name makes no promise at all, rather than falling
     // through to the promise this whole check exists to remove.
@@ -574,6 +594,22 @@ async function main() {
     check('a panel type with no described click says nothing', () => {
         const hint = novel.document
             .querySelector('[data-panel-id="n1"] .panel-hint').textContent;
+        assert(hint === '', `the panel said "${hint}"`);
+    });
+
+    // "A type the table does not name" has to mean every type it does not
+    // name. A plain object literal inherits Object.prototype, so
+    // PANEL_HINTS['constructor'] is a FUNCTION and the hint would have read
+    // "function Object() { [native code] }" in the card header — the lookup
+    // every panel type written after this one goes through.
+    const inherited = await loadWith({
+        total_hits: 3,
+        panels: [{ id: 'n2', title: 'Built ins', type: 'constructor', width: 6,
+                   buckets: [{ key: 'checkout', count: 3 }] }],
+    });
+    check('a panel type named after a built-in still says nothing', () => {
+        const hint = inherited.document
+            .querySelector('[data-panel-id="n2"] .panel-hint').textContent;
         assert(hint === '', `the panel said "${hint}"`);
     });
 
@@ -589,6 +625,54 @@ async function main() {
             .querySelector('[data-panel-id="n1"] .panel-hint').textContent;
         assert(/one check did not answer/.test(hint), `the panel said "${hint}"`);
     });
+
+    // The comparison cards, against a baseline that only partly answered.
+    // Its counts are a floor and every percentage is measured against them;
+    // the note said "Compared against the preceding window" and nothing else,
+    // because the payload carries the CURRENT window's warnings only.
+    const PREVIOUS = {
+        total_hits: 60, error_count: 4, warn_count: 8, info_count: 40,
+        error_rate: 4 / 60, window: { start: '2026-09-10T09:00:00Z',
+                                      end: '2026-09-11T09:00:00Z' },
+        change: { total_hits: 0.5, error_count: 1, warn_count: 0.5,
+                  info_count: 1 },
+    };
+    const wholeBaseline = await loadWith({
+        total_hits: 90, panels: [], previous_period: { ...PREVIOUS },
+    });
+    check('a baseline that answered in full is compared without a caveat', () => {
+        const note = wholeBaseline.document
+            .getElementById('baselineNote').textContent;
+        assert(/preceding window/.test(note) && !/lower bound/.test(note),
+               `the note said "${note}"`);
+    });
+
+    const shortBaseline = await loadWith({
+        total_hits: 90, panels: [],
+        previous_period: { ...PREVIOUS, partial: true,
+                           warnings: ['5 of 9 shards failed: Fielddata is '
+                                      + 'disabled on [level]'] },
+    });
+    check('a baseline that answered in part says the change is a floor', () => {
+        const note = shortBaseline.document
+            .getElementById('baselineNote').textContent;
+        assert(/lower bound/.test(note) && /shards failed/.test(note),
+               `the note said "${note}"`);
+    });
+    check('and the reason it gives is text', () => {
+        const planted = shortBaseline.document
+            .getElementById('baselineNote').innerHTML;
+        assert(!/<img/.test(planted), planted);
+    });
+
+    const planted = await loadWith({
+        total_hits: 90, panels: [],
+        previous_period: { ...PREVIOUS, partial: true,
+                           warnings: ['<img src=x id=planted6>'] },
+    });
+    check('a baseline warning cannot bring markup with it', () =>
+        assert(!planted.document.getElementById('planted6'),
+               planted.document.getElementById('baselineNote').innerHTML));
 
     check('a severity takes its colour from the palette', () =>
         assert(palette.AsyncDashboard.seriesColour('ERROR', 0) === '#abcdef',

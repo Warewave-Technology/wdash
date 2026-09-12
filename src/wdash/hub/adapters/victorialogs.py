@@ -534,6 +534,15 @@ class VictoriaLogsSource(LogSource):
         The capability Loki does not have. Asking the backend beats
         approximating from a page of results, which describes the page rather
         than the data.
+
+        Counted over the RECORDS, for the reason `_terms` is: this asked
+        `field_values` with `limit=top`, that endpoint applies its limit
+        before it counts, and a field with more distinct values than the
+        limit answers with every `hits` at zero — which the guard below then
+        dropped, silently. Measured on the lab over 2026-09-01..09-13: the
+        sidebar listed level, env, log.level, severity and severity_text and
+        left out `service` (22 values, 2,103 records) and `host` (16), the
+        two fields it exists for, with nothing on screen saying why.
         """
         from ..models import FieldStat, FieldValue
 
@@ -556,8 +565,11 @@ class VictoriaLogsSource(LogSource):
         for field in candidates:
             name = self._field_for(field)
             try:
-                body = self._json("/select/logsql/field_values", {
-                    "query": expression, "field": name, "limit": top,
+                rows = self._lines("/select/logsql/query", {
+                    "query": _ranked(
+                        f"{expression} | stats by ({_field_name(name)}) "
+                        f"count() as hits",
+                        top, field in _NORMALISED_FIELDS),
                     **self._window(query)})
             except Exception as exc:
                 # One field failing must not empty the sidebar.
@@ -568,15 +580,19 @@ class VictoriaLogsSource(LogSource):
             # both are WARN, which put the same label on the sidebar twice
             # with the counts split between them.
             merged = {}
-            for entry in body.get("values") or ():
-                key = self._bucket_key(field, entry.get("value"))
-                merged[key] = merged.get(key, 0) + int(entry.get("hits") or 0)
+            for row in rows:
+                key = self._bucket_key(field, row.get(name) or "")
+                merged[key] = merged.get(key, 0) + int(float(row.get("hits") or 0))
 
-            # A field where every value comes back with zero hits is one this
-            # backend cannot count — high-cardinality fields answer that way.
-            # A list of values with no numbers beside them is not a statistic,
-            # and showing it invites somebody to read the zeros as real.
+            # `count()` never answers zero, so this is now a malformed answer
+            # rather than the ordinary one it used to be. It stays as a last
+            # resort — a list of values with no numbers beside them is not a
+            # statistic — but it says so in the log instead of removing a
+            # field from the sidebar without a word.
             if not any(merged.values()):
+                logger.warning(
+                    f"VictoriaLogs counted no records for field '{name}'; "
+                    f"it is left out of the field list")
                 continue
 
             values = [FieldValue(value=key, count=count)
@@ -681,16 +697,20 @@ class VictoriaLogsSource(LogSource):
         `stats by` counts first, exactly as `_severity_terms` does and for a
         related reason, so the truncation to `size` happens here — after
         `_merge_buckets` has both summed the collisions normalising can
-        create and put the biggest first.
+        create and put the biggest first. The RANKING is cut by VictoriaLogs
+        where that is sound (`_ranked`), because one row per distinct value
+        is not a bound at all on a field like `host`.
         """
         if aggregation.field in ("severity", "severity_text"):
             return self._severity_terms(expression, query, aggregation)
         field = self._field_for(aggregation.field)
-        rows = self._lines("/select/logsql/query", {
-            "query": f"{expression} | stats by ({_field_name(field)}) "
-                     f"count() as hits",
-            **self._window(query)})
         size = getattr(aggregation, "size", 10) or 10
+        rows = self._lines("/select/logsql/query", {
+            "query": _ranked(
+                f"{expression} | stats by ({_field_name(field)}) "
+                f"count() as hits",
+                size, aggregation.field in _NORMALISED_FIELDS),
+            **self._window(query)})
         #: A row carrying none of the grouped field comes back with the field
         #: absent. Elasticsearch labels those with `missing` and this dropped
         #: them, so the same panel over the same records disagreed by however
@@ -718,6 +738,15 @@ class VictoriaLogsSource(LogSource):
         fields — a row carrying none of them comes back with none of them set
         — so the first field present can decide here exactly as it does in
         the record and in the filter.
+
+        NOT cut in the query, unlike `_terms`: every row here is rewritten
+        into a level before it is merged, so the top `size` ROWS are not the
+        top `size` LEVELS. Measured on the lab over 2026-09-01..09-13, where
+        this answers 10 rows in 312 bytes that merge into 4 levels: cutting
+        the query to 4 rows reports ERROR 174 where the records hold 198 and
+        drops UNSPECIFIED altogether — a wrong number rather than a short
+        list. One row per combination of four severity fields is a bound in
+        itself, which one row per distinct `host` is not.
         """
         fields = ", ".join(_field_name(field) for field in _SEVERITY_FIELDS)
         rows = self._lines("/select/logsql/query", {
@@ -790,6 +819,37 @@ class VictoriaLogsSource(LogSource):
                      if sub_name and entry["sub"] else {}),
             ))
         return out
+
+
+#: Fields whose bucket keys are REWRITTEN before the buckets are merged.
+#: `_bucket_key` normalises a severity, so `warn` and `warning` both become
+#: WARN and two rows become one bucket — which means the top `size` rows are
+#: not the top `size` buckets, and the truncation cannot be pushed into the
+#: query for these.
+_NORMALISED_FIELDS = ("severity", "severity_text", "level")
+
+
+def _ranked(pipeline, size, normalised):
+    """`pipeline`, ranked and cut to `size` by VictoriaLogs rather than by us.
+
+    `| stats by (<field>)` answers with ONE ROW PER DISTINCT VALUE and the
+    adapter keeps `size` of them, so a panel asking for the top 10 hosts
+    parsed every host in the window on every dashboard load, and the Logs
+    page's field list asks about `trace_id`, which is one row per trace.
+    Measured on the lab over 2026-09-01..09-13: `stats by (trace_id)` answers
+    535 rows in 22,978 bytes and the same query with this clause 10 rows in
+    403 bytes; `stats by (host)` 16 rows in 603 bytes. The response grows
+    with the field's cardinality, which is unbounded in a real deployment,
+    while the panel needs `size` rows.
+
+    Not where the keys are rewritten (`_NORMALISED_FIELDS`), because there
+    the rows and the buckets are different things. The one rewrite this does
+    tolerate is `missing`, whose label can only meet a value spelled exactly
+    like it — and Elasticsearch merges those two into one bucket as well.
+    """
+    if normalised:
+        return pipeline
+    return f"{pipeline} | sort by (hits desc) | limit {size}"
 
 
 def _merge_buckets(pairs):

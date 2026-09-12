@@ -171,12 +171,19 @@ def _by_level(expression, values):
     return _filter_keeps(expression, rows)
 
 
-def _stats_by(fields):
+def _stats_by(fields, limit=None):
     """`| stats by (...) count() as hits` over RECORDS.
 
     One row per combination of values the records actually hold; a field a
     record does not carry is absent from its row, which is what VictoriaLogs
     returns and what the adapter has to read a missing value out of.
+
+    `limit` is `| sort by (hits desc) | limit N` applied by the BACKEND, as
+    the lab's VictoriaLogs applies it: to the rows, before the adapter sees
+    them. It has to be modelled here rather than assumed harmless, because
+    the rows and the buckets are the same thing only for a field whose keys
+    are not rewritten — and where they are, cutting the rows reports a wrong
+    number rather than a short list.
     """
     counts = {}
     for record in RECORDS:
@@ -188,7 +195,10 @@ def _stats_by(fields):
                if value is not None}
         row["hits"] = str(count)
         rows.append(row)
-    return rows
+    if limit is None:
+        return rows
+    rows.sort(key=lambda row: -int(row["hits"]))
+    return rows[:limit]
 
 
 def _field_values(field, limit):
@@ -315,8 +325,16 @@ class FakeVictoriaLogs(Harness):
             # either direction without the fake noticing.
             fields = [name.strip().strip('"')
                       for name in grouped.group(1).split(",")]
+            # And the ranking clause, if the adapter asked VictoriaLogs to
+            # cut the rows rather than carrying all of them home. A fake that
+            # ignored it would answer a bounded request with every row, so an
+            # adapter that dropped the clause would look identical to one
+            # that kept it.
+            cut = re.search(r"\| sort by \(hits desc\) \| limit (\d+)",
+                            (data or {}).get("query") or "")
             return FakeResponse(text="\n".join(
-                json.dumps(row) for row in _stats_by(fields)))
+                json.dumps(row) for row in
+                _stats_by(fields, int(cut.group(1)) if cut else None)))
 
         return FakeResponse(text="\n".join(json.dumps(row) for row in ROWS))
 
@@ -502,15 +520,22 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
         # `post`, not `get`: every VictoriaLogs endpoint is a POST, and
         # overriding the wrong one leaves the default fixture in place — a
         # test that exercises nothing and passes.
-        def values(url, data=None, **kwargs):
-            if "field_values" in url:
-                return FakeResponse(payload={"values": [
-                    {"value": "warn", "hits": 948},
-                    {"value": "warning", "hits": 1},
-                    {"value": "info", "hits": 4602}]})
-            return FakeResponse(payload={"values": []})
+        #
+        # Rows, not `field_values`: the sidebar is counted with `stats by`
+        # now, for the reason the panel beside it is. The two spellings are
+        # the lab's own — this is the same answer in the endpoint that can
+        # count it.
+        original = self.harness.post
 
-        self.harness.post = values
+        def rows(url, data=None, **kwargs):
+            if "| stats by (" not in ((data or {}).get("query") or ""):
+                return original(url, data=data, **kwargs)
+            return FakeResponse(text="\n".join(json.dumps(row) for row in [
+                {"level": "warn", "hits": "948"},
+                {"level": "warning", "hits": "1"},
+                {"level": "info", "hits": "4602"}]))
+
+        self.harness.post = rows
         from wdash.hub import Scope
         stats = self.source.field_stats(self._query(), Scope.unrestricted(),
                                         fields=["severity"])
@@ -519,31 +544,78 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
         self.assertEqual(len([v for v in stats[0].values if v.value == "WARN"]),
                          1)
 
-    def test_a_field_the_backend_cannot_count_is_left_out(self):
-        """High-cardinality fields answer with every value at zero hits. A
-        list of values with no numbers beside them is not a statistic, and
-        showing it invites somebody to read the zeros as real."""
+    def test_a_field_with_more_values_than_the_limit_is_still_counted(self):
+        """This test used to assert the defect, so it is the defect's shape.
+
+        It was `test_a_field_the_backend_cannot_count_is_left_out`, and its
+        premise — "high-cardinality fields answer with every value at zero
+        hits" — described `field_values`, not the backend. The field can be
+        counted; the endpoint the sidebar asked could not count it, because
+        its `limit` is applied to the values BEFORE they are counted. The
+        guard then dropped every such field without a word.
+
+        Measured on the lab over 2026-09-01..09-13, `top=10`: the sidebar
+        listed level, env, log.level, severity and severity_text and left out
+        `service` (22 distinct values over 2,103 records) and `host` (16) —
+        the two fields a field list exists for. Counted with `stats by` the
+        same call answers service auth-service 440, checkout-api 409,
+        payment-service 400 and host auth-service-3 170, payment-service-3
+        144.
+
+        `service` here holds four values and `top` is two, which is the shape
+        that answered in zeroes.
+        """
+        from wdash.hub import Scope
+        stats = self.source.field_stats(self._query(), Scope.unrestricted(),
+                                        fields=["service"], top=2)
+        self.assertEqual(
+            [(value.value, value.count) for value in stats[0].values],
+            [("api-gateway", 4), ("auth-service", 3)],
+            "the field the sidebar exists for, with the counts the records "
+            "hold rather than a list of names all reading zero")
+
+    def test_a_field_that_really_cannot_be_counted_says_so(self):
+        """`count()` never answers zero, so an all-zero answer is malformed
+        now rather than ordinary — and a field vanishing from the sidebar
+        with nothing on screen and nothing in the log is the project's
+        forbidden failure at sidebar scale."""
+        original = self.harness.post
+
         def uncountable(url, data=None, **kwargs):
-            if "field_values" in url:
-                return FakeResponse(payload={"values": [
-                    {"value": "abc", "hits": 0}, {"value": "def", "hits": 0}]})
-            return FakeResponse(payload={"values": []})
+            if "| stats by (" not in ((data or {}).get("query") or ""):
+                return original(url, data=data, **kwargs)
+            return FakeResponse(text=json.dumps({"trace_id": "abc",
+                                                 "hits": "0"}))
 
         self.harness.post = uncountable
         from wdash.hub import Scope
-        self.assertEqual(
-            self.source.field_stats(self._query(), Scope.unrestricted(),
-                                    fields=["trace_id"]),
-            [])
+        with self.assertLogs("wdash.hub.adapters.victorialogs",
+                             level="WARNING") as logged:
+            stats = self.source.field_stats(self._query(),
+                                            Scope.unrestricted(),
+                                            fields=["trace_id"])
+        self.assertEqual(stats, [])
+        self.assertTrue(any("trace_id" in line for line in logged.output),
+                        logged.output)
 
     def test_the_value_list_is_bounded(self):
         """`top` is what keeps a field with a thousand values from becoming a
-        thousand rows in a sidebar."""
+        thousand rows in a sidebar.
+
+        Bounded in the REQUEST as well as in the answer: `stats by` returns
+        one row per distinct value, so a sidebar asking about `host` used to
+        parse every host in the window to keep ten. The rows below are more
+        than `top` because a backend that ignored the clause would still have
+        to be cut here.
+        """
+        original = self.harness.post
+
         def many(url, data=None, **kwargs):
-            if "field_values" in url:
-                return FakeResponse(payload={"values": [
-                    {"value": f"v{i}", "hits": 100 - i} for i in range(40)]})
-            return FakeResponse(payload={"values": []})
+            if "| stats by (" not in ((data or {}).get("query") or ""):
+                return original(url, data=data, **kwargs)
+            return FakeResponse(text="\n".join(
+                json.dumps({"host": f"v{i}", "hits": str(100 - i)})
+                for i in range(40)))
 
         self.harness.post = many
         from wdash.hub import Scope
@@ -602,7 +674,70 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
         self.assertEqual(
             self._sent()["params"]["query"],
             'service:in("api-gateway", "auth-service", "checkout-api", '
-            '"payment-service") | stats by (service) count() as hits')
+            '"payment-service") | stats by (service) count() as hits '
+            '| sort by (hits desc) | limit 2')
+
+    def test_the_backend_cuts_the_ranking_for_a_field_it_can_cut(self):
+        """`stats by` answers with ONE ROW PER DISTINCT VALUE.
+
+        Where `field_values` sent `limit=size`, this sends none, so the
+        answer's size became the field's cardinality — the panel needs ten
+        rows and parses every one on every dashboard load, and the field list
+        asks about `trace_id`, which is one row per trace. Measured on the
+        lab over 2026-09-01..09-13: `stats by (trace_id)` answers 535 rows in
+        22,978 bytes and the same query cut to 10 in 403 bytes; `_msg` 1,873
+        rows in 95,207 bytes against 610. `host` is 16 rows on the lab and
+        unbounded in a real deployment, and `_terms` accepts any field.
+        """
+        from wdash.hub import Scope
+        from wdash.hub.aggregation import Terms
+
+        self.source.aggregate(self._query(),
+                              [Terms(name="t", field="service", size=3)],
+                              Scope.unrestricted())
+        self.assertIn("| sort by (hits desc) | limit 3",
+                      self._sent()["params"]["query"],
+                      "every distinct value came home to keep three")
+
+    def test_the_backend_does_not_cut_a_ranking_whose_keys_are_rewritten(self):
+        """Where the rows are not the buckets, cutting them is a wrong number.
+
+        A level is normalised before it is merged — `warn` and `warning` are
+        one WARN — so the top `size` ROWS are not the top `size` LEVELS. This
+        is the arm that has to stay uncut, and the fake applies the clause
+        the way the lab does so that adding it here is visible as a count
+        that is too small rather than as a list that is too short.
+        """
+        from wdash.hub import Scope
+        from wdash.hub.aggregation import Terms
+
+        original = self.harness.post
+
+        def spellings(url, data=None, **kwargs):
+            response = original(url, data=data, **kwargs)
+            if "| stats by (" not in ((data or {}).get("query") or ""):
+                return response
+            rows = [{"level": "warn", "hits": "948"},
+                    {"level": "warning", "hits": "1"},
+                    {"level": "info", "hits": "4602"}]
+            cut = re.search(r"\| limit (\d+)", (data or {}).get("query") or "")
+            if cut:
+                rows.sort(key=lambda row: -int(row["hits"]))
+                rows = rows[:int(cut.group(1))]
+            return FakeResponse(text="\n".join(json.dumps(r) for r in rows))
+
+        self.harness.post = spellings
+        result = self.source.aggregate(
+            self._query(), [Terms(name="t", field="level", size=2)],
+            Scope.unrestricted())
+
+        self.assertNotIn("| limit", self._sent()["params"]["query"],
+                         "a level ranking cut by rows loses a spelling")
+        self.assertEqual(
+            [(bucket.key, bucket.count) for bucket in result.get("t")],
+            [("INFO", 4602), ("WARN", 949)],
+            "WARN is 948 + 1, which the top two ROWS would have reported as "
+            "948 with the second spelling never arriving")
 
     def test_a_value_that_arrives_after_a_bigger_one_is_still_ranked(self):
         """Truncation happens after the sort, not as the rows arrive.
@@ -877,15 +1012,16 @@ class VictoriaLogsSpecificTest(unittest.TestCase):
         led to 0 results."""
         from wdash.hub import Scope
 
-        def values(url, data=None, **kwargs):
-            if "field_values" in url:
-                return FakeResponse(payload={"values": [
-                    {"value": "warn", "hits": 948},
-                    {"value": "warning", "hits": 1},
-                    {"value": "info", "hits": 4602}]})
-            return FakeResponse(payload={"values": []})
-
         original = self.harness.post
+
+        def values(url, data=None, **kwargs):
+            if "| stats by (" not in ((data or {}).get("query") or ""):
+                return original(url, data=data, **kwargs)
+            return FakeResponse(text="\n".join(json.dumps(row) for row in [
+                {"level": "warn", "hits": "948"},
+                {"level": "warning", "hits": "1"},
+                {"level": "info", "hits": "4602"}]))
+
         self.harness.post = values
         stats = self.source.field_stats(self._query(), Scope.unrestricted(),
                                         fields=["level"])

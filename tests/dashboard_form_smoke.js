@@ -164,8 +164,43 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
         await settle();
         check('a total that is only a floor says so',
               uncounted.w.document.getElementById('testResults')
-                  .textContent.includes('at least 5 matching'),
+                  .textContent.includes('At least 5 matching'),
               uncounted.w.document.getElementById('testResults').textContent);
+
+        // A store that answered only PART of the query still answers with a
+        // number, and this called that "Query test successful!" with an
+        // exact-looking count. The payload below is the demo's own answer to
+        // the button's own request against the DEFAULT source — the one most
+        // authors press — copied from /api/search.
+        const shards = build(template, {
+            total: 1831, partial: true, records: [],
+            warnings: ['5 of 9 shards failed: Fielddata is disabled on '
+                       + '[level] in [bad-logs-000001]'],
+            sources: [{ name: 'elasticsearch-logs', total: 1831, exact: true,
+                        failed: true }] });
+        shards.w.document.getElementById('testQuery').click();
+        await settle();
+        const said2 = shards.w.document.getElementById('testResults');
+        check('a store that answered in part is not a success',
+              !said2.textContent.includes('successful')
+              && said2.querySelector('.alert-warning')
+              && !said2.querySelector('.alert-success'),
+              said2.innerHTML);
+        check('and its count is a floor, with the reason',
+              said2.textContent.includes('At least 1,831 matching')
+              && /shards failed/.test(said2.textContent),
+              said2.textContent);
+
+        // The reason is whatever the backend said.
+        const planted = build(template, {
+            total: 1, partial: true, records: [],
+            warnings: ['<img src=x id=planted5>'],
+            sources: [{ name: 'es', exact: true, failed: true }] });
+        planted.w.document.getElementById('testQuery').click();
+        await settle();
+        check('a shard failure reason is text',
+              !planted.w.document.getElementById('planted5'),
+              planted.w.document.getElementById('testResults').innerHTML);
     }
 
     // The edit page's panel editor, its second script. A title went into a
