@@ -50,6 +50,12 @@ class SinkError(RuntimeError):
     def __init__(self, message, accepted=()):
         super().__init__(message)
         self.accepted = tuple(accepted)
+        #: How many rows this run DID mark as sent before it stopped — the
+        #: accepted part of the refused batch, plus every batch that went
+        #: whole before it. A screen that says "nothing was marked as sent"
+        #: after rows were marked sends somebody looking for a queue that has
+        #: already moved. `drain` adds its running total on the way out.
+        self.marked = len(self.accepted)
 
 
 class Sink:
@@ -69,12 +75,13 @@ def _accepted_status(response, destination):
     followed that is exactly the answer an SSO proxy gives.
     """
     if not 200 <= response.status_code < 300:
-        location = ""
-        try:
-            target = (response.headers or {}).get("Location")
-            location = f" to {target}" if target else ""
-        except Exception:
-            pass
+        # `getattr` rather than a bare `except` around the lookup: the only
+        # thing that ever raised here was a test double with no `headers`,
+        # and swallowing every error from reading a header in the one path
+        # whose whole job is to explain a refusal is how the explanation goes
+        # missing. The double has a `headers` attribute now.
+        target = (getattr(response, "headers", None) or {}).get("Location")
+        location = f" to {target}" if target else ""
         raise SinkError(
             f"{destination} answered HTTP {response.status_code}{location}: "
             f"{response.text[:200]}")
@@ -329,7 +336,14 @@ class AuditForwarder:
         """
         total = 0
         for _ in range(limit):
-            shipped = self.sweep(batch=batch)
+            try:
+                shipped = self.sweep(batch=batch)
+            except SinkError as exc:
+                # What earlier batches already shipped is part of what this
+                # run marked, and it is the caller's only way to know: the
+                # return value never arrives.
+                exc.marked += total
+                raise
             total += shipped
             if shipped < batch:
                 break

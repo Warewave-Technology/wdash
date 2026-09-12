@@ -25,10 +25,14 @@ from wdash.store.schema import audit, metadata  # noqa: E402
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, text=""):
+    def __init__(self, status_code=200, payload=None, text="", headers=None):
         self.status_code = status_code
         self._payload = payload if payload is not None else {}
         self.text = text or json.dumps(self._payload)
+        #: A real response has headers, and the sink reads Location off a
+        #: refusal to say where it was being sent. A double without them
+        #: forced a bare `except` into that path.
+        self.headers = dict(headers or {})
 
     def json(self):
         return self._payload
@@ -499,6 +503,30 @@ class PartialBulkTest(ForwarderTestCase):
         message = self._sweep(self._answer(201, 400, 201))
         self.assertIn("1 of 3", message)
         self.assertIn("mapper_parsing_exception", message)
+
+    def test_the_error_carries_how_many_rows_it_did_mark(self):
+        """The count is the caller's only way to know: the return value never
+        arrives. Without it the configuration page said "nothing was marked
+        as sent" over the top of rows that had been."""
+        self.write(3)
+        forwarder = AuditForwarder(
+            self.engine,
+            ElasticsearchSink("https://audit.example:9200",
+                              session=FakeHttp(self._answer(201, 400, 201))))
+        with self.assertRaises(SinkError) as caught:
+            forwarder.sweep()
+        self.assertEqual(caught.exception.marked, 2)
+
+    def test_a_drain_counts_the_batches_that_went_whole_as_well(self):
+        """`drain` walks several batches. The ones that went before the
+        refusal are marked too, and were being thrown away with the count."""
+        self.write(3)
+        forwarder = AuditForwarder(self.engine, CountingSink(fail_after=2))
+        with self.assertRaises(SinkError) as caught:
+            forwarder.drain(batch=1)
+        self.assertEqual(caught.exception.marked, 2)
+        self.assertEqual([row["subject"] for row in self.unforwarded()],
+                         ["role:2"])
 
     def test_an_answer_that_skips_documents_is_not_a_success(self):
         """Fewer items than actions means the far end is not the far end —

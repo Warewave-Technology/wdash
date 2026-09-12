@@ -293,5 +293,130 @@ class ImmutabilityTest(AuditTestCase):
             self.assertNotIn("clear", route)
 
 
+class UpgradeNoteTest(AuditTestCase):
+    """The shape change has to be said where the operator is.
+
+    `state` now reaches Elasticsearch as JSON text. An index created by an
+    earlier release mapped it as an object and refuses every row that has one
+    — measured against the lab cluster: document_parsing_exception, "object
+    mapping for [state] tried to parse field [state] as object, but found a
+    concrete value", on every sweep, with the queue never moving. Loud, but
+    only to somebody who already ran it.
+    """
+
+    def test_the_forwarding_form_says_what_an_existing_index_needs(self):
+        body = self.client.get("/admin/audit").get_data(as_text=True)
+        self.assertIn("state", body)
+        self.assertIn("reindex", body)
+
+    def test_the_readme_carries_the_upgrade_note(self):
+        readme = os.path.join(os.path.dirname(__file__), "..", "README.md")
+        with open(readme, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("Upgrading:", text)
+        self.assertIn("mapped `state` as an object", text)
+
+
+class ForwardNowTest(AuditTestCase):
+    """What the button says after a batch the destination half took.
+
+    A refused document no longer holds the whole batch — the rows the
+    destination accepted are marked before the error is re-raised — but the
+    page still said "nothing was marked as sent". That sends an administrator
+    to look for entries that have already gone, and the number they would
+    check against, the queue depth, has moved underneath them.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        from tests.support import serve_in_background
+
+        self.refuse = 1          # how many documents of each batch to refuse
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                raw = self.rfile.read(
+                    int(self.headers.get("Content-Length", 0)))
+                actions = len(
+                    [line for line in raw.decode().splitlines() if line]) // 2
+                items, refused = [], outer.refuse
+                for index in range(actions):
+                    if index < refused:
+                        items.append({"index": {
+                            "status": 400,
+                            "error": {"type": "document_parsing_exception"}}})
+                    else:
+                        items.append({"index": {"status": 201}})
+                body = json.dumps(
+                    {"errors": bool(refused), "items": items}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *arguments):
+                pass
+
+        self.server = serve_in_background(
+            HTTPServer(("127.0.0.1", 0), Handler))
+        self.client.post("/admin/audit/forwarding", data={
+            "kind": "elasticsearch", "enabled": "on",
+            "url": f"http://127.0.0.1:{self.server.server_port}",
+            "index": "wdash-audit", "username": "", "credential": ""})
+        for index in range(4):
+            self.app.store.audit.record("owner", "role saved",
+                                        subject=f"role:{index}")
+
+    def tearDown(self):
+        self.server.shutdown()
+        super().tearDown()
+
+    def _pending(self):
+        from wdash.store.forwarding import AuditForwarder
+        return AuditForwarder(self.app.store.engine, None).pending()
+
+    def _forward(self):
+        return self.client.post("/admin/audit/forward",
+                                follow_redirects=True).get_data(as_text=True)
+
+    def test_the_entries_it_did_take_are_reported_as_taken(self):
+        before = self._pending()
+        self.assertGreaterEqual(before, 3, "the setup wrote no audit rows")
+        body = self._forward()
+        self.assertIn("Forwarding stopped", body)
+        self.assertIn(f"{before - 1:,} entries the destination did accept "
+                      f"were marked as sent", body)
+        self.assertNotIn("nothing was marked as sent", body)
+        self.assertEqual(self._pending(), 1)
+
+    def test_a_wholly_refused_batch_still_says_nothing_was_marked(self):
+        """The other direction has to keep being true, or the sentence is
+        just as useless the other way round."""
+        self.refuse = 500
+        before = self._pending()
+        body = self._forward()
+        self.assertIn("nothing was marked as sent", body)
+        self.assertEqual(self._pending(), before)
+
+    def test_one_entry_is_singular(self):
+        from wdash.store.forwarding import AuditForwarder
+        AuditForwarder(self.app.store.engine, None)
+        with self.app.store.engine.begin() as connection:
+            from sqlalchemy import update as _update
+
+            from wdash.store.schema import audit
+            connection.execute(_update(audit).values(
+                forwarded_at=dt.datetime.now(dt.timezone.utc)))
+        self.app.store.audit.record("owner", "kept", subject="a")
+        self.app.store.audit.record("owner", "refused", subject="b")
+        body = self._forward()
+        self.assertIn("1 entry the destination did accept was marked as sent",
+                      body)
+
+
 if __name__ == "__main__":
     unittest.main()

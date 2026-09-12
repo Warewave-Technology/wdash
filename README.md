@@ -94,7 +94,12 @@ issues carries an explicit authorization scope.
   to Splunk or Elasticsearch — including everything recorded before forwarding
   was switched on. The recorded state travels to Elasticsearch as JSON text,
   so an index mapping cannot be broken by whatever one change happened to
-  contain; Splunk gets the object.
+  contain; Splunk gets the object. **Upgrading:** an audit index written by
+  an earlier release mapped `state` as an object, and such an index refuses
+  every row that has one — `document_parsing_exception`, on every sweep, for
+  ever. Roll the index over or reindex it before turning forwarding back on;
+  a new index picks up the new shape by itself. The refusal is loud (the
+  forwarding error and the queue depth on the audit page), never silent.
 
 ## Quick start
 

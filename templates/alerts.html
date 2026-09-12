@@ -23,11 +23,20 @@
     {# An alert that failed to send and was not noticed is the worst of both:
        nobody was told, and nobody knows they were not. One entry per subject
        — its latest word, not every attempt — and the runner tries each of
-       them again every pass, so the list drains by itself. #}
+       them again every pass, so the list drains by itself.
+
+       Except where it cannot: `evaluate_once` walks enabled rules only, and
+       deleting a rule leaves its history behind on purpose (the trail is
+       about something that has usually since been deleted). A row belonging
+       to a rule that is switched off or gone is still a real alert nobody
+       received, so it stays on the list — hiding it would be the silence
+       this banner is here to break. The sentence says so rather than
+       promising a drain that will not come. #}
     <strong>{{ undelivered }} alert(s) never reached anybody.</strong>
     The runner tries each of them again on every pass, a recovery as well as
     a firing alert, so this drains by itself once the channel works &mdash;
-    an entry that stays is a channel that is still broken.
+    an entry that stays belongs to a channel that is still broken, or to a
+    rule that has since been switched off or deleted, which nothing retries.
 </div>
 {% endif %}
 

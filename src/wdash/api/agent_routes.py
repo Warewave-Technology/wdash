@@ -76,24 +76,31 @@ def config():
     store.agents.seen(agent["id"], version=request.headers.get("X-Agent-Version"))
 
     monitors = store.monitors.for_agent(agent["id"])
-    return jsonify({
-        "agent": {"id": agent["id"], "name": agent["name"]},
-        "monitors": [{
+    checks, unreadable = [], set()
+    for m in monitors:
+        # The agent makes the request, so it needs the credentials. This is
+        # the ONLY place they leave the database — not the config page, not
+        # the audit trail, not a result. Over TLS, to a caller that proved it
+        # holds this agent's token.
+        filled = _credentials_for(store, m)
+        if filled.get("config_error"):
+            unreadable.add(m["id"])
+        checks.append({
             "id": m["id"], "name": m["name"], "kind": m["kind"],
             "target": m["target"],
             "interval_seconds": m["interval_seconds"],
             "timeout_seconds": m["timeout_seconds"],
             "assertions": m["assertions"],
-            # The agent makes the request, so it needs the credentials. This
-            # is the ONLY place they leave the database — not the config page,
-            # not the audit trail, not a result. Over TLS, to a caller that
-            # proved it holds this agent's token.
-            **_credentials_for(store, m),
-        } for m in monitors],
+            **filled,
+        })
+
+    return jsonify({
+        "agent": {"id": agent["id"], "name": agent["name"]},
+        "monitors": checks,
         # A version the agent can compare against what it already has, so a
         # poll that changes nothing costs one comparison rather than a
         # reschedule of everything.
-        "version": _configuration_version(monitors),
+        "version": _configuration_version(monitors, unreadable),
     })
 
 
@@ -162,7 +169,7 @@ def _journey_for(store, monitor):
     return out
 
 
-def _configuration_version(monitors):
+def _configuration_version(monitors, unreadable=()):
     """A hash of what was sent, so the agent can tell a change from a poll.
 
     Content-derived rather than a counter: a counter has to be bumped by
@@ -180,10 +187,21 @@ def _configuration_version(monitors):
     # `has_credentials` would not move when a password is REPLACED, so a
     # rotated credential would never reach the agent. Every edit bumps the
     # timestamp, including one that only changes a secret.
+    #
+    # Whether the credentials could be READ is part of what was sent too: a
+    # check whose secret will not decrypt goes out as `config_error` with no
+    # request, and nothing in the stored row differs between that and the
+    # working version. Left out, the version was byte-identical before and
+    # after somebody restored WDASH_ENCRYPTION_KEY, `_poll_config` returned
+    # early on the unchanged version, and the agent went on reporting the
+    # check down with "the key has probably changed" until it was restarted.
+    # The FACT, never the reason: the reason is a sentence, and a sentence
+    # that is reworded is not a configuration change.
+    unreadable = set(unreadable)
     payload = json.dumps(
         [[m["id"], m["kind"], m["target"], m["interval_seconds"],
           m["timeout_seconds"], m["assertions"], m.get("request"),
-          m.get("updated_at")] for m in monitors],
+          m.get("updated_at"), m["id"] in unreadable] for m in monitors],
         sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 

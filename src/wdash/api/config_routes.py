@@ -1492,11 +1492,22 @@ def run_audit_forwarding():
     try:
         shipped = forwarder.drain()
     except SinkError as exc:
-        # Not audited as a configuration change, because nothing changed. It
-        # is logged, and the queue depth on the page tells the same story.
+        # Not audited as a configuration change, because the configuration
+        # did not change. The QUEUE may well have: a destination that refuses
+        # one document out of a batch has the rest, and those rows are marked
+        # before the error is re-raised. Saying "nothing was marked as sent"
+        # over the top of that sends an administrator to look for entries
+        # that have already gone.
         logger.error(f"Audit forwarding failed: {exc}")
-        flash(f"Forwarding failed, and nothing was marked as sent: {exc}",
-              "error")
+        marked = getattr(exc, "marked", 0)
+        if marked:
+            flash(f"Forwarding stopped: {exc}. "
+                  f"{marked:,} entr{'y' if marked == 1 else 'ies'} the "
+                  f"destination did accept {'was' if marked == 1 else 'were'} "
+                  f"marked as sent.", "error")
+        else:
+            flash(f"Forwarding failed, and nothing was marked as sent: {exc}",
+                  "error")
         return redirect(url_for("config.audit_page"))
 
     flash(f"{shipped:,} entr{'y' if shipped == 1 else 'ies'} forwarded."

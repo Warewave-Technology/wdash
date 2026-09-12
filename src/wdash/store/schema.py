@@ -461,4 +461,15 @@ alert_history = Table(
     #: missed — the worst of both.
     Column("delivered", Boolean, nullable=False, default=False),
     Column("delivery_error", Text),
+    #: For the "never delivered" badge and its list, which ask for the LAST
+    #: row per (rule, subject) — `max(id) GROUP BY rule_id, subject`, over
+    #: the one table that grows a row per evaluation while a channel is
+    #: broken. Without it that group-by is a full scan into a temporary
+    #: B-tree on every render of /alerts and of the configuration page.
+    #: Measured on 200,000 rows over five subjects: 96 ms to 12 ms, the plan
+    #: going from SCAN + USE TEMP B-TREE FOR GROUP BY to a covering index
+    #: scan. NOT named `…_subject`: SQLAlchemy already auto-names the
+    #: single-column index on `subject` that, and `CREATE INDEX IF NOT
+    #: EXISTS` under the taken name silently does nothing.
+    Index("ix_wdash_alert_history_latest", "rule_id", "subject", "id"),
 )

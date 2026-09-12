@@ -739,10 +739,11 @@ class MonitorRepository:
         if not row or not row[0]:
             return {}
         try:
-            if self._secrets is None:
-                raise SecretsUnavailable(
-                    "WDASH_ENCRYPTION_KEY is not set in this process, so this "
-                    "check's stored credentials cannot be read.")
+            # No `self._secrets is None` guard: see ChannelRepository —
+            # the Store always hands a box in, and `SecretBox.open` says it
+            # better for a keyless one. The single repository built without a
+            # box (`ResultRepository.record`) only lists an agent's monitors
+            # and never opens a secret.
             return json.loads(self._secrets.open(row[0]) or "{}")
         except (SecretsCorrupt, SecretsUnavailable) as exc:
             logger.error(f"could not read the credentials for {monitor_id}: "

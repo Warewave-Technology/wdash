@@ -301,6 +301,16 @@
           <input class="form-control form-control-sm" name="index"
                  value="{{ forwarding.index or '' }}"
                  placeholder="wdash-audit">
+          {# The operator is the only one who can act on this, and this is
+             the only screen they see before the first batch goes. An index
+             created by an earlier release mapped `state` as an object and
+             refuses every row that has one, on every sweep, for ever. #}
+          <div class="form-text">
+            Elasticsearch: <code>state</code> is sent as JSON text. An index
+            written by a version before this one mapped it as an object and
+            will refuse those rows &mdash; roll it over or reindex it; a new
+            index needs nothing.
+          </div>
         </div>
         <div class="col-md-4">
           <label class="form-label small">Username</label>

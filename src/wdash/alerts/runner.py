@@ -202,7 +202,7 @@ class AlertRunner:
         sent = 0
         for decision in decisions:
             if decision.notify:
-                delivered, error = self._deliver(rule, decision)
+                delivered, error, retryable = self._deliver(rule, decision)
                 if not delivered:
                     # Leave `last_notified_at` unset so the next pass tries
                     # again. Otherwise a webhook that was down when the alert
@@ -214,13 +214,23 @@ class AlertRunner:
                     rule["id"], decision.subject, decision.notify,
                     decision.detail, delivered=delivered, error=error,
                     label=decision.label)
-                if not delivered and decision.notify == NOTIFY_RESOLVED:
+                if (not delivered and retryable
+                        and decision.notify == NOTIFY_RESOLVED):
                     # Keep the FIRING state, so the next pass produces the
                     # recovery again. Saving the OK state here loses it for
                     # good: the subject is healthy, so the machine never
                     # transitions again, and the last thing anybody was told
                     # is that it is broken. `last_notified_at` unset on a
                     # firing state only retries the FIRING message.
+                    #
+                    # Only while the next pass could plausibly do better.
+                    # A channel that has been deleted or switched off will
+                    # refuse identically for ever, and holding the FIRING
+                    # state for it means a subject that has since been
+                    # deleted keeps its `alert_state` row and earns a fresh
+                    # 'resolved' row on every pass — the retry that cannot
+                    # succeed defeating the forget below. The attempt is in
+                    # the history either way, so nothing goes quiet.
                     continue
 
             self._store.alert_state.save(rule["id"], decision.subject,
@@ -234,11 +244,20 @@ class AlertRunner:
         return sent
 
     def _deliver(self, rule, decision):
+        """Returns (delivered, error, retryable).
+
+        `retryable` says whether trying again in thirty seconds could end
+        differently. A receiver that refused, timed out or could not be
+        reached might well be back by then; a channel that has been deleted
+        or switched off will not be, and an alert held open waiting for it
+        waits for ever.
+        """
         channel = self._store.channels.get(rule["channel_id"])
         if channel is None:
-            return False, "the channel this rule sends to no longer exists"
+            return (False, "the channel this rule sends to no longer exists",
+                    False)
         if not channel["enabled"]:
-            return False, "the channel is disabled"
+            return False, "the channel is disabled", False
         body = payload(rule, decision, decision.notify)
         try:
             # Inside the try: reading the sealed half is part of delivering,
@@ -249,11 +268,11 @@ class AlertRunner:
             send(channel, secrets, body, session=self._session)
         except DeliveryError as exc:
             logger.warning(f"alert for {decision.label} was not delivered: {exc}")
-            return False, str(exc)
+            return False, str(exc), True
         except Exception as exc:
             logger.exception("unexpected failure delivering an alert")
-            return False, f"{type(exc).__name__}: {exc}"
-        return True, None
+            return False, f"{type(exc).__name__}: {exc}", True
+        return True, None, True
 
     def run_forever(self, interval=INTERVAL):
         logger.info(f"alert runner starting, evaluating every {interval}s")

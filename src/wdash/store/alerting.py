@@ -116,10 +116,11 @@ class ChannelRepository:
         if not row or not row[0]:
             return {}
         try:
-            if self._secrets is None:
-                raise SecretsUnavailable(
-                    "WDASH_ENCRYPTION_KEY is not set in this process, so this "
-                    "channel's sealed URL cannot be read.")
+            # No `self._secrets is None` guard: the Store always hands one in
+            # (`secret_box or SecretBox.from_environment()`, and
+            # `from_environment` returns a box whether or not the variable is
+            # set), so the branch could not fire — and `SecretBox.open`
+            # raises the better sentence for a keyless box anyway.
             return json.loads(self._secrets.open(row[0]) or "{}")
         except (SecretsCorrupt, SecretsUnavailable) as exc:
             logger.error(f"could not read the credentials for channel "

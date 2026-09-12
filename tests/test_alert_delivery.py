@@ -595,6 +595,31 @@ class ManagementPageTest(unittest.TestCase):
         grant(self.app, "admin", ["logs:read"], indices=["*"])
         self.assertEqual(self.client.get("/alerts").status_code, 302)
 
+    def test_the_banner_does_not_promise_a_drain_that_cannot_come(self):
+        """It said "an entry that stays is a channel that is still broken".
+
+        `evaluate_once` walks enabled rules only, and deleting a rule leaves
+        its history behind, so an entry belonging to a switched-off or
+        deleted rule stays for ever with every channel working. Measured: one
+        failed delivery, the rule disabled, ten passes — badge still 1; the
+        rule deleted — badge still 1.
+        """
+        channel = self._channel()
+        rule = self.app.store.rules.create(
+            name="r", kind="monitor_down", channel_id=channel["id"])
+        self.app.store.alert_history.record(
+            rule["id"], "m1", "firing", "500", delivered=False, error="500")
+        self.app.store.rules.update(rule["id"], enabled=False)
+        self.assertEqual(
+            self.app.store.alert_history.count(undelivered_only=True), 1,
+            "a disabled rule's undelivered row would have to be hidden for "
+            "the old sentence to be true")
+
+        body = self.client.get("/alerts").get_data(as_text=True)
+        self.assertIn("switched off or deleted", body)
+        self.assertNotIn("an entry that stays is a channel that is still "
+                         "broken", body)
+
 
 class HistoryLabelTest(AlertingTestCase):
     """A history row has to name what it is about.
@@ -889,12 +914,20 @@ class IncompleteListingTest(AlertingTestCase):
 
     def test_the_pass_says_which_source_could_not_be_read(self):
         """Skipping the resolution silently would be a second silent failure:
-        somebody reading the log has to be able to see why nothing moved."""
+        somebody reading the log has to be able to see why nothing moved.
+
+        The source's OWN words, not just the letters 'es': asserting on the
+        short name matched the runner's own sentence ("nothing was resolved
+        this pass"), so the whole warnings path from `MonitorPage` through
+        `Observed` could be deleted with this test still green.
+        """
         rule, runner = self._fired()
         self.failing["now"] = True
         with self.assertLogs("wdash.alerts.runner", "WARNING") as caught:
             runner.evaluate_once()
-        self.assertIn("es", " ".join(caught.output))
+        logged = " ".join(caught.output)
+        self.assertIn("es: read timed out", logged)
+        self.assertNotIn("no reason given", logged)
 
     def test_a_monitor_that_really_went_away_still_resolves(self):
         """The disappearance path is made conditional, not deleted: a monitor
@@ -1119,3 +1152,171 @@ class UndeliveredCountTest(AlertingTestCase):
             Monitor(id="m1", name="API", status=DOWN))).evaluate_once()
         AlertRunner(self.store, self._hub()).evaluate_once()
         self.assertEqual(self.store.alert_state.load(rule["id"]), {})
+
+    def test_a_firing_alert_that_could_not_be_sent_still_remembers_it_fired(self):
+        """The other half of the skip above, and the half no test held.
+
+        Widening it from "a failed RESOLVED delivery" to "any failed
+        delivery" passes every alerting test, and breaks the firing path
+        outright: the FIRING state is never written while the channel is
+        down, so the machine never transitions, no recovery is ever produced,
+        and the pass that finally reaches the receiver has nothing to say.
+        """
+        self.receiver.status = 500
+        rule = self.store.rules.create(
+            channel_id=self._channel()["id"], name="API down",
+            kind="monitor_down", threshold=1)
+        monitor = Monitor(id="m1", name="API", status=DOWN, error="500")
+        runner = AlertRunner(self.store, self._hub(monitor))
+        self.assertEqual(runner.evaluate_once(), 0)
+        self.assertEqual(
+            {subject: (s.state, s.failures) for subject, s
+             in self.store.alert_state.load(rule["id"]).items()},
+            {"m1": ("firing", 1)},
+            "the alert was not remembered, so nothing can recover from it")
+
+        # And the recovery it makes possible actually arrives.
+        self.receiver.status = 200
+        monitor.status = UP
+        self.assertEqual(runner.evaluate_once(), 1)
+        self.assertEqual(self.receiver.received[-1]["body"]["transition"],
+                         "resolved")
+
+
+class BadgeIndexTest(unittest.TestCase):
+    """The badge query has to be an indexed read, on an existing database too.
+
+    "Never delivered" now means the LAST row per (rule, subject), which is
+    what let it drain — and a `max(id) GROUP BY rule_id, subject` over the one
+    table that grows a row per evaluation while a channel is broken. It is
+    read on every render of /alerts and once on the configuration page.
+    Measured on SQLite with 200,000 rows over five subjects: 96 ms without
+    the index, 12 ms with it.
+    """
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.path + suffix):
+                os.unlink(self.path + suffix)
+
+    def _indexes(self, engine):
+        from sqlalchemy import inspect
+        with engine.connect() as connection:
+            return {index["name"]: list(index["column_names"]) for index
+                    in inspect(connection).get_indexes("wdash_alert_history")}
+
+    def test_a_new_database_has_it(self):
+        from wdash.store.database import build_engine
+        from wdash.store.migrations import migrate
+        engine = build_engine(f"sqlite:///{self.path}")
+        migrate(engine)
+        indexes = self._indexes(engine)
+        engine.dispose()
+        self.assertEqual(indexes.get("ix_wdash_alert_history_latest"),
+                         ["rule_id", "subject", "id"])
+
+    def test_a_database_that_predates_it_gets_it(self):
+        """The table was created at version 12 and that step will never run
+        again, so the index has to arrive as a migration of its own."""
+        from sqlalchemy import text
+
+        from wdash.store.database import build_engine
+        from wdash.store.migrations import migrate
+        engine = build_engine(f"sqlite:///{self.path}")
+        migrate(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                text("DROP INDEX ix_wdash_alert_history_latest"))
+            connection.execute(text(
+                "DELETE FROM wdash_schema_version WHERE version >= 15"))
+        self.assertNotIn("ix_wdash_alert_history_latest", self._indexes(engine))
+
+        migrate(engine)
+        indexes = self._indexes(engine)
+        with engine.connect() as connection:
+            applied = connection.execute(text(
+                "SELECT max(version) FROM wdash_schema_version")).scalar()
+        engine.dispose()
+        self.assertIn("ix_wdash_alert_history_latest", indexes)
+        self.assertGreaterEqual(applied, 15)
+
+    def test_the_name_is_not_the_one_sqlalchemy_already_took(self):
+        """`subject` is declared `index=True`, which SQLAlchemy auto-names
+        `ix_wdash_alert_history_subject`. A migration that spelt the new index
+        that way would be a `CREATE INDEX IF NOT EXISTS` that silently did
+        nothing — measured: the plan stayed a full scan at 86 ms.
+        """
+        from wdash.store.database import build_engine
+        from wdash.store.migrations import migrate
+        engine = build_engine(f"sqlite:///{self.path}")
+        migrate(engine)
+        indexes = self._indexes(engine)
+        engine.dispose()
+        self.assertEqual(indexes.get("ix_wdash_alert_history_subject"),
+                         ["subject"])
+
+
+class RetryThatCannotSucceedTest(AlertingTestCase):
+    """A recovery is held open for a channel that might come back, not for one
+    that cannot.
+
+    Holding the FIRING state until the recovery is delivered is right while
+    the receiver is merely down. It is wrong when the channel has been
+    deleted or switched off: that refusal is identical on every pass for
+    ever, so the subject keeps its `alert_state` row — defeating the forget
+    that exists "so the state table does not grow a row per deleted monitor
+    for ever" — and earns a fresh 'resolved' history row every thirty
+    seconds. Measured: six history rows after five passes, against two.
+    """
+
+    def _fired_then_vanished(self, passes=5, delete_channel=False):
+        # A closed port rather than a stopped receiver: a real refused
+        # connection, and one that is the same on every pass.
+        channel = self._channel(url="http://127.0.0.1:9/never")
+        rule = self.store.rules.create(
+            channel_id=channel["id"], name="API down", kind="monitor_down",
+            threshold=1)
+        AlertRunner(self.store, self._hub(
+            Monitor(id="m1", name="API", status=DOWN,
+                    error="500"))).evaluate_once()
+        if delete_channel:
+            self.store.channels.delete(channel["id"])
+        runner = AlertRunner(self.store, self._hub())      # the monitor is gone
+        for _ in range(passes):
+            runner.evaluate_once()
+        return rule
+
+    def test_a_deleted_channel_does_not_hold_a_vanished_subject_open(self):
+        rule = self._fired_then_vanished(delete_channel=True)
+        self.assertEqual(
+            [e["transition"] for e in
+             self.store.alert_history.recent(limit=100)],
+            ["resolved", "firing"],
+            "the resolution was written again on every pass")
+        self.assertEqual(self.store.alert_state.load(rule["id"]), {},
+                         "the deleted monitor kept its state row for ever")
+
+    def test_the_failure_is_still_on_the_record_and_on_the_badge(self):
+        """Bounding the retry must not be a way of forgetting it happened."""
+        self._fired_then_vanished(delete_channel=True)
+        resolved = [e for e in self.store.alert_history.recent(limit=100)
+                    if e["transition"] == "resolved"][0]
+        self.assertFalse(resolved["delivered"])
+        self.assertIn("no longer exists", resolved["delivery_error"])
+        self.assertEqual(self.store.alert_history.count(undelivered_only=True),
+                         1)
+
+    def test_a_receiver_that_is_merely_down_is_still_retried(self):
+        """The case the skip was added for is untouched: this one can work
+        again on the next pass, so the recovery stays owed."""
+        rule = self._fired_then_vanished(passes=3)
+        self.assertEqual(
+            {subject: (s.state, s.failures) for subject, s
+             in self.store.alert_state.load(rule["id"]).items()},
+            {"m1": ("firing", 1)},
+            "a transient outage threw the alert away")

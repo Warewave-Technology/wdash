@@ -1457,9 +1457,9 @@ class UnreadableCredentialsAgentTest(unittest.TestCase):
 
         # Sealed with one key, then read by a process holding another: what a
         # rotation, a lost key or a second deployment with its own key does.
-        self.sealed = Store.open(
-            f"sqlite:///{database}",
-            secret_box=SecretBox(SecretBox.generate_key()))
+        self.key = SecretBox.generate_key()
+        self.sealed = Store.open(f"sqlite:///{database}",
+                                 secret_box=SecretBox(self.key))
         self.monitor = self.sealed.monitors.create(
             name="billing", kind="http", target="https://billing.example/health",
             request={"auth": {"type": "bearer", "token": "TOKEN-A"}})
@@ -1547,3 +1547,71 @@ class UnreadableCredentialsAgentTest(unittest.TestCase):
         self.assertEqual(result["status"], "down")
         self.assertIn("WDASH_ENCRYPTION_KEY", result["error"])
         self.assertEqual(asked, [], "the request was made anyway")
+
+    def _version(self, key):
+        """The configuration version this database serves under `key`."""
+        from wdash.app import create_app
+        from wdash.config import Config
+
+        database = self.database
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "monitors"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = key
+            ELASTICSEARCH_URL = ""
+            DASHBOARD_STORAGE = "database"
+
+        app = create_app(TestConfig)
+        try:
+            reply = app.test_client().get(
+                "/api/agent/config",
+                headers={"Authorization": f"Bearer {self.token}"})
+            return reply.get_json()
+        finally:
+            app.store.engine.dispose()
+
+    def test_restoring_the_key_moves_the_version_the_agent_polls_on(self):
+        """Otherwise the repair never reaches a running agent.
+
+        `AgentRunner._poll_config` returns early when the version has not
+        moved, and the version hashed only the stored monitor row — which is
+        identical whether the check went out with its credential or with
+        `config_error`. So an agent that adopted the broken configuration kept
+        reporting the check down with "the key has probably changed" after the
+        operator had put the key back, until something else edited a monitor
+        or the agent was restarted.
+        """
+        from wdash.store.secrets import SecretBox
+
+        broken = self._version(SecretBox.generate_key())
+        fixed = self._version(self.key)
+        self.assertTrue(
+            any(m.get("config_error") for m in broken["monitors"]),
+            "the broken configuration was not broken")
+        self.assertFalse(any(m.get("config_error") for m in fixed["monitors"]))
+        self.assertNotEqual(
+            broken["version"], fixed["version"],
+            "the agent would have seen an unchanged version and kept the "
+            "configuration it could not run")
+
+    def test_a_poll_that_changes_nothing_still_reads_as_nothing(self):
+        """The version has to stay a comparison the agent can trust: two
+        polls of the same database in the same state are the same version."""
+        self.assertEqual(self._version(self.key)["version"],
+                         self._version(self.key)["version"])
+
+    def test_the_reason_is_not_what_is_hashed(self):
+        """A reworded message is not a configuration change. Only the FACT
+        that a check could not be configured belongs in the version."""
+        import wdash.api.agent_routes as routes
+        monitors = [{"id": "m1", "kind": "http", "target": "https://x/",
+                     "interval_seconds": 60, "timeout_seconds": 10,
+                     "assertions": {}, "request": {}, "updated_at": None}]
+        self.assertEqual(
+            routes._configuration_version(monitors, {"m1"}),
+            routes._configuration_version(monitors, ["m1"]))
+        self.assertNotEqual(
+            routes._configuration_version(monitors, {"m1"}),
+            routes._configuration_version(monitors, set()))
