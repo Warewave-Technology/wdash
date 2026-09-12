@@ -513,6 +513,106 @@ class MigrationCliTest(unittest.TestCase):
             [s.name for s in self.store().saved_searches.all_for("someone")],
             ["Mine"])
 
+    # ---------- a file the run will never open is not a requirement ----------
+
+    def test_a_deployment_that_has_never_saved_a_search_still_migrates(self):
+        """The application creates saved_searches.json on the first save, so
+        its absence beside a dashboards file is the ordinary state of an
+        installation whose users have not saved a search. Requiring it turned
+        that into "Nothing was read and nothing was written", exit 1 — and
+        the README's first command is this one."""
+        os.unlink(self.searches)
+        with self.configured_at(self.dashboards):
+            code, out, err = self.run_cli(
+                ["--database-url", f"sqlite:///{self.database}"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Dashboards:     2 moved", out)
+        self.assertIn("Saved searches: 0 moved", out)
+        self.assertEqual(
+            {d.name for d in self.store().dashboards.get_all_dashboards()},
+            {"Existing", "Private"})
+
+    def test_the_absent_searches_file_is_named_as_absent_not_as_empty(self):
+        """"0 moved" has to say which of the two it means, here as much as
+        anywhere: a file that is not there yet, or a file that is empty."""
+        os.unlink(self.searches)
+        with self.configured_at(self.dashboards):
+            _, out, _ = self.run_cli(
+                ["--database-url", f"sqlite:///{self.database}"])
+        self.assertIn(os.path.abspath(self.searches), out)
+        self.assertIn("not there yet", out)
+
+    def test_the_dry_run_the_readme_starts_with_needs_no_searches_file(self):
+        os.unlink(self.searches)
+        with self.configured_at(self.dashboards):
+            code, out, err = self.run_cli(
+                ["--database-url", f"sqlite:///{self.database}", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Dashboards:     2 to move", out)
+
+    def test_an_elasticsearch_run_does_not_ask_for_a_searches_file(self):
+        """--from-elasticsearch reads neither JSON file — it says so itself,
+        "not stored in Elasticsearch; skipped" — and it is the path the
+        removal of the Elasticsearch dashboard store points operators at. It
+        exited 1 over a saved_searches.json it would never have opened,
+        without contacting Elasticsearch at all."""
+        from unittest import mock
+
+        os.unlink(self.searches)
+        os.unlink(self.dashboards)
+        record = {"id": "from-es", "name": "Out of the index",
+                  "description": "", "query": "*", "created_by": "someone",
+                  "created_at": "2026-01-15T10:00:00+00:00",
+                  "index_patterns": ["app-*"]}
+        with self.configured_at(self.dashboards), mock.patch(
+                "wdash.store.migrate_cli._load_elasticsearch",
+                return_value=[record]) as reader:
+            code, out, err = self.run_cli(
+                ["--database-url", f"sqlite:///{self.database}",
+                 "--from-elasticsearch", "http://localhost:9200"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(reader.call_count, 1)
+        self.assertNotIn("not found", err)
+        self.assertIn("not stored in Elasticsearch; skipped", out)
+        self.assertEqual(
+            [d.name for d in self.store().dashboards.get_all_dashboards()],
+            ["Out of the index"])
+
+    def test_a_named_searches_file_that_is_not_there_still_stops_the_run(self):
+        """The guard is not dropped, only narrowed to files the run reads:
+        a path somebody typed is a path they expect to be read."""
+        missing = os.path.join(self.directory, "elsewhere", "searches.json")
+        code, out, err = self.run_cli(
+            ["--database-url", f"sqlite:///{self.database}",
+             "--dashboards", self.dashboards, "--saved-searches", missing])
+        self.assertEqual(code, 1)
+        self.assertIn(f"not found: {missing}", err)
+        self.assertNotIn("Done.", out)
+
+    def test_allowing_one_missing_file_does_not_allow_the_other(self):
+        """--allow-missing was all-or-nothing, and the refusal pointed
+        straight at it: switching off the check for a searches file switched
+        off the check on the dashboards path too, which is the state this
+        guard exists to refuse."""
+        missing_searches = os.path.join(self.directory, "no", "searches.json")
+        missing_dashboards = os.path.join(self.directory, "no", "dash.json")
+        code, out, err = self.run_cli(
+            ["--database-url", f"sqlite:///{self.database}",
+             "--dashboards", missing_dashboards,
+             "--saved-searches", missing_searches,
+             "--allow-missing-searches"])
+        self.assertEqual(code, 1)
+        self.assertIn(f"not found: {missing_dashboards}", err)
+        self.assertNotIn(f"not found: {missing_searches}", err)
+        self.assertNotIn("Done.", out)
+
+    def test_the_refusal_names_the_flag_for_the_file_that_is_missing(self):
+        missing = os.path.join(self.directory, "elsewhere", "dashboards.json")
+        _, _, err = self.run_cli(
+            ["--database-url", f"sqlite:///{self.database}",
+             "--dashboards", missing, "--saved-searches", self.searches])
+        self.assertIn("--allow-missing-dashboards", err)
+
 
 class SourcesThatShadowEachOtherAreReportedTest(unittest.TestCase):
     """A store that already has two sources sharing a name within one signal.
@@ -843,6 +943,34 @@ class AnRbacFileThatCannotBeUsedSaysSoTest(unittest.TestCase):
         self.assertEqual(store.settings.get("rbac.default_role"), "viewer")
         self.assertEqual(store.settings.get("rbac.user_roles"), {})
 
+    def test_an_unusable_roles_block_keeps_the_claim_mappings(self):
+        """`claim_mappings` names the claims an identity provider sends. It
+        is not a role mapping and does not depend on one, and dropping it
+        with the roles block is the same loss this file is about, one step
+        earlier: an installation whose provider sends `memberOf` goes back to
+        reading `groups`, every group mapping resolves nothing, and everybody
+        lands on the default role. Silently — import_claims is deliberately
+        quiet, and the ERROR above it enumerates group_roles, user_roles and
+        default_role.
+        """
+        path = self.written(
+            "roles: {}\n"
+            "claim_mappings:\n"
+            "  email_claim: mail\n"
+            "  username_claim: uid\n"
+            "  groups_claim: memberOf\n")
+        store, _ = self.seed(path)
+        self.assertEqual(store.settings.get("rbac.claim_mappings"),
+                         {"email_claim": "mail", "username_claim": "uid",
+                          "groups_claim": "memberOf"})
+
+    def test_a_file_that_cannot_be_parsed_at_all_keeps_nothing(self):
+        """The other side of it: a document that is not a mapping of blocks
+        has no claim_mappings to keep, and must not be invented."""
+        path = self.written("- admin\n- viewer\n")
+        store, _ = self.seed(path)
+        self.assertIsNone(store.settings.get("rbac.claim_mappings"))
+
     # ---------- the file is read, and points at roles it has not got ----------
 
     def test_a_group_mapped_to_an_undefined_role_is_named(self):
@@ -874,6 +1002,32 @@ class AnRbacFileThatCannotBeUsedSaysSoTest(unittest.TestCase):
             "default_role: readers\n")
         _, lines = self.seed(path, level="WARNING")
         self.assertTrue(any("readers" in line for line in lines), lines)
+
+    def test_a_default_role_the_file_names_is_quoted_as_the_file_s(self):
+        """The half that was already right, held so the other half cannot be
+        fixed by flattening both into one vague sentence."""
+        path = self.written(
+            "roles:\n  ops:\n    permissions: [logs:read]\n"
+            "default_role: readers\n")
+        _, lines = self.seed(path, level="WARNING")
+        self.assertTrue(
+            any("names 'readers' as the default role" in line
+                for line in lines), lines)
+
+    def test_a_file_with_no_default_role_is_not_blamed_for_naming_one(self):
+        """`default_role` falls back to 'viewer' in the code, so a file that
+        omits the key and defines no viewer was told it "names 'viewer' as
+        the default role and does not define it". The alarm is right —
+        everybody with no mapping gets nothing — but an operator sent to the
+        file to find `default_role: viewer` does not find it.
+        """
+        path = self.written("roles:\n  ops:\n    permissions: [logs:read]\n")
+        _, lines = self.seed(path, level="WARNING")
+        warnings = [line for line in lines if line.startswith("WARNING")]
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertNotIn("names 'viewer' as the default role", warnings[0])
+        self.assertIn("built-in default", warnings[0])
+        self.assertIn("viewer", warnings[0])
 
     def test_the_shipped_file_produces_nothing_above_info(self):
         """The one that matters: none of this may cry wolf on a fresh clone

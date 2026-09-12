@@ -234,8 +234,21 @@ def _warn_about_unknown_roles(path, parsed, roles_source):
                 f"{where} maps '{person}' to '{role}', which it does not "
                 f"define. That person falls through to the default role.")
 
-    default_role = parsed.get("default_role", "viewer")
-    if default_role not in known:
+    default_role = parsed.get("default_role")
+    if default_role is None:
+        # 'viewer' is the fallback this code supplies, not a name the file
+        # gave: reported as "<path> names 'viewer' as the default role", it
+        # sent an operator to the file to find a `default_role: viewer` line
+        # that is not in it. The alarm is the same — everybody with no
+        # mapping of their own gets nothing — and the repair is different.
+        if "viewer" not in known:
+            logger.warning(
+                f"{where} names no default_role, so the built-in default "
+                f"'viewer' is used — and this file does not define a role "
+                f"called 'viewer'. Everybody with no mapping of their own "
+                f"gets no permissions at all. Name a default_role this file "
+                f"defines, or define viewer.")
+    elif default_role not in known:
         logger.warning(
             f"{where} names '{default_role}' as the default role and does "
             f"not define it. Everybody with no mapping of their own gets no "
@@ -256,10 +269,18 @@ def import_claims(from_file, settings_repository):
         return False
     if settings_repository.get("rbac.claim_mappings") is not None:
         return False
+    # The parsed document, not `_read_rbac_file`: that one answers "can this
+    # file's roles be seeded from", and these mappings name the claims an
+    # identity provider sends, which has nothing to do with roles. Read
+    # through the stricter question, a file whose `roles` block was empty or
+    # mis-indented lost its claim_mappings too — so an installation whose
+    # provider sends `memberOf` went back to reading `groups`, every group
+    # mapping resolved nothing, and everybody fell to the default role.
+    #
     # Quietly: `seed` has already said whatever there is to say about this
     # file, and it says it in terms of seeding — which is not what is
     # happening here, and on a start after the first is not happening at all.
-    mappings = (_read_rbac_file(from_file, report=False)
+    mappings = (_parse_rbac_file(from_file, report=False)
                 or {}).get("claim_mappings")
     if not mappings:
         return False
@@ -268,18 +289,19 @@ def import_claims(from_file, settings_repository):
     return True
 
 
-def _read_rbac_file(path, report=True):
-    """Read the legacy YAML, returning None when it cannot be used.
+def _parse_rbac_file(path, report=True):
+    """The document, or None when the file itself cannot be read at all.
 
-    Every way of returning None now says so, with the absolute path. Two of
-    them used to be silent, and they are the two that happen: a file that is
-    not where the configuration says it is (a renamed ConfigMap key, a mount
-    path that moved, a pip install run outside the repository), and a file
-    whose `roles` block is mis-indented, misnamed — `role:` — or empty. Both
-    produced a running installation seeded with the built-in defaults, with
-    the file's own group_roles, user_roles and default_role dropped, and the
-    only line in the log was INFO "Seeded 3 roles from built-in defaults".
-    Seeding runs once, so what was dropped stayed dropped.
+    Separate from the `roles` question below, because they are two questions
+    and one caller asks only this one: `import_claims` wants the claim names
+    an identity provider sends, which a file with an unusable `roles` block
+    carries perfectly well.
+
+    Every way of returning None says so, with the absolute path. Two of them
+    used to be silent, and they are the two that happen: a file that is not
+    where the configuration says it is (a renamed ConfigMap key, a mount path
+    that moved, a pip install run outside the repository), and a file that is
+    not a mapping of blocks at all.
 
     Not fatal, deliberately: falling back leaves an installation somebody can
     sign in to and repair. It is loud instead. `report=False` is for the
@@ -314,17 +336,35 @@ def _read_rbac_file(path, report=True):
                 f"roles are being seeded instead and nothing in this file "
                 f"is applied.")
         return None
+    return data
 
+
+def _read_rbac_file(path, report=True):
+    """The document when its `roles` block can be seeded from, else None.
+
+    A `roles` block that is mis-indented, misnamed — `role:` — or empty was
+    silent, and the last of the three was worse than silent: it parsed, so
+    the built-in roles were seeded while the file's own group_roles,
+    user_roles and default_role were applied on top of them. Seeding runs
+    once, so what was dropped stayed dropped.
+    """
+    data = _parse_rbac_file(path, report)
+    if data is None:
+        return None
+
+    where = os.path.abspath(path)
     block = data.get("roles")
     if not isinstance(block, dict) or not block:
         if report:
             logger.error(
-                f"{where} defines no roles: `roles` is {_describe(block)}. "
-                f"The built-in default roles are being seeded instead, and "
-                f"this file's group_roles, user_roles and default_role are "
-                f"NOT applied either — importing the mappings from one place "
-                f"and the roles they name from another is how a group ends "
-                f"up pointing at a role nobody wrote.")
+                f"{where} defines no roles: `roles` is "
+                f"{_describe(block)}. The built-in default roles are being "
+                f"seeded instead, and this file's group_roles, user_roles "
+                f"and default_role are NOT applied either — importing the "
+                f"mappings from one place and the roles they name from "
+                f"another is how a group ends up pointing at a role nobody "
+                f"wrote. Its claim_mappings, which name claims and not "
+                f"roles, are still read.")
         return None
     return data
 

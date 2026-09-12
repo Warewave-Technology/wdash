@@ -877,9 +877,15 @@ Stated plainly, because they affect whether this fits your deployment:
 
   With no paths given it reads the file the application itself reads —
   `DASHBOARD_STORAGE_FILE` — and the saved searches beside it, prints both
-  absolute paths, and stops with a non-zero exit if one of them is not there
-  rather than reporting "0 moved". Pass `--allow-missing` for a deployment
-  that really has none.
+  absolute paths, and stops with a non-zero exit if a file it is about to
+  read is not there rather than reporting "0 moved". Pass
+  `--allow-missing-dashboards`, `--allow-missing-searches` or
+  `--allow-missing` for both, for a deployment that really has none.
+
+  A saved-searches file nobody named is not required: the application writes
+  it on the first save, so its absence means nobody has saved a search, and
+  the run says so and carries on. Neither JSON file is required with
+  `--from-elasticsearch`, which reads neither.
 
   The JSON files are left untouched, so the move is reversible.
 - **A source saved in the UI is used within a few seconds.** The worker that

@@ -1123,3 +1123,74 @@ class SignalFormTest(ConfigTestCase):
         # to `*`, which would read every index in the cluster to find nothing.
         self.assertEqual(hub.monitor_sources[0]._patterns,
                          ("heartbeat-*", "synthetics-*"))
+
+
+class ShadowedSourcesAreMarkedOnThePageTest(ConfigTestCase):
+    """Two sources sharing a name within one signal, as the page shows them.
+
+    `SourceRepository` refuses to make the pair now, and migration 15 reports
+    the pairs a store already had — once, at upgrade time. Neither covers a
+    collision that arrives afterwards: a pg_restore, an UPDATE run straight
+    against the database, an older node still writing rows. The page listed
+    both as ordinary healthy sources, and a trace search quietly answered
+    from one of them, so the only signal was a log line at the next hub
+    reload. A failure has to reach the screen it is about.
+    """
+
+    ELASTIC = {"url": "http://cluster:9200",
+               "logs": {"index_patterns": ["app-*"]},
+               "traces": {"index_patterns": ["*apm*"]}}
+
+    def shadow(self, name="prod", signals=("traces",), enabled=True,
+               identifier="shadow-one"):
+        """A row written the way the things that produce this write it:
+        straight into the table, past the repository's refusal."""
+        from datetime import datetime, timezone
+
+        from wdash.store.schema import sources
+
+        now = datetime.now(timezone.utc)
+        with self.app.store.engine.begin() as connection:
+            connection.execute(sources.insert().values(
+                id=identifier, name=name, kind="jaeger",
+                signal=list(signals)[0], signals=list(signals),
+                config={"url": "http://jaeger:16686"}, secrets=None,
+                enabled=enabled, created_at=now, updated_at=now))
+
+    def page(self):
+        return self.client.get("/admin/config").get_data(as_text=True)
+
+    def test_both_rows_of_a_colliding_pair_are_marked(self):
+        self.app.store.sources.create(
+            name="prod", signal=["logs", "traces"], kind="elasticsearch",
+            config=dict(self.ELASTIC))
+        self.shadow()
+        body = self.page()
+        self.assertEqual(body.count("only one of these answers a traces"), 2,
+                         "both rows of the pair have to say it")
+
+    def test_a_page_with_no_collision_says_nothing(self):
+        self.app.store.sources.create(
+            name="prod", signal=["logs", "traces"], kind="elasticsearch",
+            config=dict(self.ELASTIC))
+        self.assertNotIn("only one of these answers", self.page())
+
+    def test_the_legacy_pair_is_not_marked(self):
+        """One row for logs and one for traces sharing a name is the shape
+        migration 7 left on purpose. Neither shadows the other."""
+        self.app.store.sources.create(
+            name="eu", signal=["logs"], kind="elasticsearch",
+            config={"url": "http://cluster:9200",
+                    "logs": {"index_patterns": ["app-*"]}})
+        self.shadow(name="eu")
+        self.assertNotIn("only one of these answers", self.page())
+
+    def test_a_switched_off_row_shadows_nothing(self):
+        """Only enabled rows are built into adapters, so a disabled twin is
+        not answering in anybody's place — saying it is would be the same
+        kind of untrue sentence in the other direction."""
+        self.app.store.sources.create(
+            name="prod", signal=["logs", "traces"], kind="elasticsearch",
+            config=dict(self.ELASTIC))
+        self.shadow(enabled=False)
+        self.assertNotIn("only one of these answers", self.page())

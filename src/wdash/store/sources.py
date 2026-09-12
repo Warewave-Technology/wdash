@@ -268,7 +268,12 @@ class SourceRepository:
             return frozenset()
 
     def _shared_signals(self, name, signals, exclude_id=None):
-        """Signals another source of this name already serves, or None.
+        """(signals another source of this name holds, is it switched on).
+
+        `(None, False)` when the name is free for these signals. Whether the
+        holder is enabled comes back too because it changes what is true
+        about it, not whether it is refused: a disabled row is built into no
+        adapter and serves nothing.
 
         The database refuses a repeat of (name, legacy signal) and that is
         all it can refuse, so an Elasticsearch source called `prod` serving
@@ -286,24 +291,40 @@ class SourceRepository:
         wanted = set(signals)
         with self._engine.connect() as connection:
             rows = connection.execute(
-                select(sources.c.id, sources.c.signal, sources.c.signals)
+                select(sources.c.id, sources.c.signal, sources.c.signals,
+                       sources.c.enabled)
                 .where(sources.c.name == name)).mappings().all()
         for row in rows:
             if row["id"] == exclude_id:
                 continue
             shared = wanted & set(row["signals"] or [row["signal"]])
             if shared:
-                return sorted(shared)
-        return None
+                return sorted(shared), bool(row["enabled"])
+        return None, False
 
     def _refuse_a_taken_name(self, name, signals, exclude_id=None):
-        shared = self._shared_signals(name, signals, exclude_id)
-        if shared:
+        shared, serving = self._shared_signals(name, signals, exclude_id)
+        if not shared:
+            return
+        said = " and ".join(shared)
+        if serving:
             raise SourceError(
                 f"A source called '{name}' already exists and serves "
-                f"{' and '.join(shared)}. Two sources cannot share a name "
+                f"{said}. Two sources cannot share a name "
                 f"within one signal: only one of them can be reached by that "
                 f"name, so the other would answer nothing and say nothing.")
+        # A row that is switched off is built into no adapter, so it serves
+        # nothing — and "already exists and serves traces" is not true of it.
+        # Somebody disabling a source in order to replace it with a
+        # differently-kinded one of the same name was refused with that
+        # sentence and told nothing about how to get past it. The refusal
+        # itself stands: switching the old row back on would collide.
+        raise SourceError(
+            f"A source called '{name}' already exists, is switched off, and "
+            f"is configured for {said}. It answers nothing while it is off, "
+            f"but two sources cannot share a name within one signal, so "
+            f"switching it on again would leave one of them unreachable. "
+            f"Rename it or delete it first.")
 
     def all(self, signal=None, enabled_only=False):
         with self._engine.connect() as connection:

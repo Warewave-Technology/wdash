@@ -144,6 +144,37 @@ def _duplicate_sources():
     return list(warnings or [])
 
 
+def _shadowed_sources(rows):
+    """{source id: the signals another source of the same name also serves}.
+
+    The hub keys one registry per signal by name, so two enabled sources
+    sharing a name within one signal leave exactly one of them reachable and
+    the other answering nothing — in the `*` fan-out too. The repository
+    refuses to make such a pair now, and migration 15 reported the pairs a
+    store already had, once, at upgrade time. Neither covers a collision that
+    arrives afterwards: a pg_restore, an UPDATE run straight against the
+    database, an older node still writing rows. Until this, the page listed
+    both as ordinary healthy sources and the only signal was a log line at
+    the next hub reload.
+
+    Computed from the rows the page already holds, so it is one pass over a
+    list rather than another query. Disabled rows are left out: they are
+    built into no adapter, so they shadow nothing, and marking them would be
+    the same untrue sentence pointing the other way.
+    """
+    live = [row for row in rows if row.get("enabled")]
+    shared = {}
+    for index, row in enumerate(live):
+        for other in live[index + 1:]:
+            if row["name"] != other["name"]:
+                continue
+            both = set(row["signals"]) & set(other["signals"])
+            if both:
+                shared.setdefault(row["id"], set()).update(both)
+                shared.setdefault(other["id"], set()).update(both)
+    return {key: sorted(value) for key, value in shared.items()}
+
+
 def _store():
     return getattr(current_app, "store", None)
 
@@ -246,9 +277,14 @@ def config_page():
         return denied
 
     store = _store()
+    sources = store.sources.all()
     return render_template(
         "config.html",
-        sources=store.sources.all(),
+        sources=sources,
+        # Two sources of one name inside one signal, as the store stands right
+        # now. A collision can arrive after the upgrade that reported the ones
+        # it found, and the row it breaks is on this page.
+        shadowed_sources=_shadowed_sources(sources),
         source_kinds=SOURCE_KINDS,
         # {name: why} for a row that is stored and answers nothing. The list
         # used to be the stored rows alone, with no built or live state at
@@ -1274,6 +1310,20 @@ def _parse_moment(raw):
     return None
 
 
+def _driver_message(exc):
+    """The first line of a driver's message, for a person to read.
+
+    SQLAlchemy's `str(exc)` carries the whole statement and its bind
+    parameters — the actor, action and subject somebody filtered by among
+    them — after the first line. Rendered into an alert on the page it is a
+    multi-line SQL dump where one sentence was wanted, and repeated in the
+    export's JSON `detail`. The full text is already in the log, which is
+    where it belongs and where somebody debugging this will look.
+    """
+    lines = str(exc).strip().splitlines()
+    return lines[0] if lines else exc.__class__.__name__
+
+
 def _audit_filters():
     return {
         "actor": (request.args.get("actor") or "").strip() or None,
@@ -1315,7 +1365,7 @@ def audit_page():
         actions = store.audit.actions()
     except Exception as exc:
         logger.error(f"Could not read the audit trail: {exc}")
-        trail_error = str(exc)
+        trail_error = _driver_message(exc)
 
     # Sign-in attempts are not filtered by the same fields — they have no
     # action or subject — so they are shown as their own list rather than
@@ -1325,22 +1375,28 @@ def audit_page():
         attempts = store.signin.recent(limit=50)
     except Exception as exc:
         logger.error(f"Could not read sign-in attempts: {exc}")
-        attempts_error = str(exc)
+        attempts_error = _driver_message(exc)
 
+    # The third panel, and it answered the same broken table with the same
+    # emptiness: `pending` swallowed every error into 0 and the card read
+    # "0 entries waiting to be sent". A queue nobody could count is not a
+    # queue that is drained.
     forwarding = store.settings.get(AUDIT_FORWARDING) or {}
-    pending = 0
+    pending, forwarding_error = 0, None
     if forwarding.get("enabled"):
         try:
             forwarder = _forwarder(forwarding)
             pending = forwarder.pending() if forwarder else 0
         except Exception as exc:
             logger.error(f"Could not inspect the forwarding queue: {exc}")
+            forwarding_error = _driver_message(exc)
 
     return render_template(
         "audit.html",
         forwarding=forwarding,
         forwarding_kinds=AUDIT_DESTINATIONS,
         forwarding_pending=pending,
+        forwarding_error=forwarding_error,
         forwarding_secret_set=bool(_secret_present(store, AUDIT_FORWARDING)),
         entries=entries,
         total=total,
@@ -1386,7 +1442,7 @@ def audit_export():
         logger.error(f"Could not export the audit trail: {exc}")
         return jsonify({"error": "The audit trail could not be read, so "
                                  "this export would understate it.",
-                        "detail": str(exc)}), 503
+                        "detail": _driver_message(exc)}), 503
 
     import json
 
@@ -1534,6 +1590,16 @@ def run_audit_forwarding():
         else:
             flash(f"Forwarding failed, and nothing was marked as sent: {exc}",
                   "error")
+        return redirect(url_for("config.audit_page"))
+    except Exception as exc:
+        # The queue itself could not be read. This used to be a 0 out of
+        # `sweep`, which arrived here as "Nothing was waiting." on a green
+        # flash — an administrator told the backlog was clear by the one
+        # button whose job is to clear it.
+        logger.error(f"Could not read the audit forwarding queue: {exc}")
+        flash(f"The forwarding queue could not be read, so nothing was sent "
+              f"and nothing was marked. This is not an empty queue: "
+              f"{_driver_message(exc)}", "error")
         return redirect(url_for("config.audit_page"))
 
     flash(f"{shipped:,} entr{'y' if shipped == 1 else 'ies'} forwarded."

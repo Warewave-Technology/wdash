@@ -280,10 +280,22 @@
   <div class="card mb-3">
     <div class="card-body py-2 d-flex justify-content-between align-items-center">
       <div>
+        {% if forwarding_error %}
+        {# Not a zero. A queue that could not be counted is not a queue that
+           is drained, and this card said "0 entries waiting to be sent" over
+           the same unreadable table the trail above reports. #}
+        <span class="text-danger">
+          <i class="fas fa-triangle-exclamation"></i>
+          The forwarding queue could not be read, so how much is waiting is
+          unknown &mdash; not nothing.
+        </span>
+        <div class="mt-1"><code>{{ forwarding_error }}</code></div>
+        {% else %}
         <strong>{{ forwarding_pending }}</strong>
         <span class="text-muted" style="font-size:.85rem">
           entr{{ 'y' if forwarding_pending == 1 else 'ies' }} waiting to be sent
         </span>
+        {% endif %}
       </div>
       <form method="post" action="{{ url_for('config.run_audit_forwarding') }}">
         <button class="btn btn-sm btn-primary" type="submit">

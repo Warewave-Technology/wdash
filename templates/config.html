@@ -86,6 +86,21 @@
                   {{ source_failures[source.name] }}
                 </div>
               {% endif %}
+              {% set shadowed = shadowed_sources.get(source.id) %}
+              {% if shadowed %}
+              {# Two rows of one name inside one signal. The hub keys each
+                 signal's registry by name, so one of the pair answers
+                 everything and the other is never asked — while both render
+                 here as ordinary healthy sources. #}
+              <div class="text-danger mt-1" style="font-size:.78rem">
+                <i class="fas fa-triangle-exclamation"></i>
+                Another source is called <strong>{{ source.name }}</strong> and
+                serves {{ shadowed|join(' and ') }} too:
+                only one of these answers a {{ shadowed|join(' or ') }} query
+                and the other is never asked, the <code>*</code> fan-out
+                included. Rename or delete one of them.
+              </div>
+              {% endif %}
             </td>
             <td>
               {# Every signal, not the first one. `source.signal` is the legacy

@@ -24,9 +24,14 @@ can simply be repeated.
 With no --dashboards, the file the application itself reads is used —
 DASHBOARD_STORAGE_FILE, the same environment variable — and saved searches
 are taken from beside it, which is where the application keeps them. Both
-absolute paths are printed before anything is read, and a file that is not
-there stops the run instead of counting as none: "0 moved" is the answer this
-command must never give when it never looked.
+absolute paths are printed before anything is read, and a file this run will
+open that is not there stops it instead of counting as none: "0 moved" is the
+answer this command must never give when it never looked.
+
+Two files are deliberately not required. A --from-elasticsearch run opens
+neither JSON file, and a saved-searches path nobody named is created by the
+application on the first save — so its absence beside a dashboards file means
+nobody has saved one, which is printed as that rather than refused.
 """
 
 import argparse
@@ -203,8 +208,17 @@ def main(argv=None):
                              "beside the dashboards file, which is where the "
                              "application keeps it)")
     parser.add_argument("--allow-missing", action="store_true",
-                        help="treat a source file that is not there as empty, "
-                             "instead of refusing to run")
+                        help="treat every named source file that is not "
+                             "there as empty, instead of refusing to run")
+    # Per file, because the blanket flag turns the check off for both, and
+    # the refusal used to point an operator straight at it: somebody blocked
+    # over a searches file switched off the guard on the dashboards path too,
+    # which is the one the guard exists for.
+    parser.add_argument("--allow-missing-dashboards", action="store_true",
+                        help="this deployment really has no dashboards file")
+    parser.add_argument("--allow-missing-searches", action="store_true",
+                        help="this deployment really has no saved-searches "
+                             "file at the path named")
     parser.add_argument("--dry-run", action="store_true",
                         help="report what would move, change nothing")
     parser.add_argument("--from-elasticsearch", metavar="URL",
@@ -222,17 +236,44 @@ def main(argv=None):
     # nobody named is indistinguishable from "0 moved" against the right one.
     if not arguments.from_elasticsearch:
         print(f"Dashboard file: {dashboards_path}")
-    print(f"Searches file:  {searches_path}")
+        # Said, rather than left to "0 moved": a file that is not there yet
+        # and a file that is empty are different answers, and this is the
+        # one that is ordinary — the application creates saved_searches.json
+        # on the first save, so an installation whose users have not saved
+        # one has no such file.
+        yet = ("" if arguments.saved_searches or os.path.exists(searches_path)
+               else "  (not there yet: the application writes it on the "
+                    "first save)")
+        print(f"Searches file:  {searches_path}{yet}")
 
-    wanted = ([] if arguments.from_elasticsearch else [dashboards_path]) \
-        + [searches_path]
-    missing = [path for path in wanted if not os.path.exists(path)]
-    if missing and not arguments.allow_missing:
-        for path in missing:
+    # Only the files this run will actually open, and of those only the ones
+    # somebody named. A --from-elasticsearch run reads neither JSON file — it
+    # says so itself, a few lines down — and it exited 1 over a
+    # saved_searches.json it would never have touched, without so much as
+    # contacting Elasticsearch. A derived searches path that is not there is
+    # the ordinary "none saved yet", not a path nobody named.
+    blanket = arguments.allow_missing
+    required = []
+    if not arguments.from_elasticsearch:
+        required.append(
+            ("dashboards", dashboards_path,
+             blanket or arguments.allow_missing_dashboards))
+        if arguments.saved_searches:
+            required.append(
+                ("searches", searches_path,
+                 blanket or arguments.allow_missing_searches))
+    missing = [(what, path) for what, path, allowed in required
+               if not allowed and not os.path.exists(path)]
+    if missing:
+        for _, path in missing:
             print(f"not found: {path}", file=sys.stderr)
+        flags = " and ".join(f"--allow-missing-{what}"
+                             for what, _ in missing)
         print("Nothing was read and nothing was written. Name the files with "
-              "--dashboards and --saved-searches, or pass --allow-missing if "
-              "this deployment really has none.", file=sys.stderr)
+              f"--dashboards and --saved-searches, or pass {flags} if this "
+              "deployment really has none — one flag per file, so allowing "
+              "an absent searches file does not stop this checking the "
+              "dashboards path.", file=sys.stderr)
         return 1
 
     # Pass the RBAC file so an import run before the first app start does not

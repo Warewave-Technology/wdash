@@ -361,6 +361,102 @@ class ATrailThatCannotBeReadIsNotAnEmptyTrailTest(AuditTestCase):
         self.app.store.audit.record("owner", "role saved")
         self.app.store.signin.record("owner", "10.0.0.1", "failure")
 
+    def test_the_page_shows_the_driver_s_first_line_and_not_the_statement(self):
+        """SQLAlchemy's message carries the whole SELECT and its bind
+        parameters — the actor, action and subject somebody filtered by —
+        after the first line. It is escaped and the page is admin-only, so
+        this is not a leak; it is a multi-line SQL dump inside an alert,
+        where one sentence was wanted. The statement is already in the log.
+        """
+        self.hide("wdash_audit")
+        body = self.client.get("/admin/audit?actor=alice").get_data(as_text=True)
+        # What the driver says, not how it says it: SQLite answers "no such
+        # table" and Postgres "relation ... does not exist", and both name
+        # the table on the first line.
+        self.assertIn("wdash_audit", body)
+        self.assertNotIn("[SQL:", body)
+        self.assertNotIn("[parameters:", body)
+
+    def test_the_export_s_detail_is_one_line_too(self):
+        self.hide("wdash_audit")
+        response = self.client.get("/admin/audit/export?actor=alice")
+        self.assertEqual(response.status_code, 503)
+        detail = response.get_json()["detail"]
+        self.assertIn("wdash_audit", detail)
+        self.assertEqual(len(detail.splitlines()), 1, detail)
+
+
+class AForwardingQueueThatCannotBeCountedIsNotAnEmptyQueueTest(AuditTestCase):
+    """The third panel on the same screen, answering the same broken table.
+
+    `AuditForwarder.pending` returned 0 for any exception and `sweep`
+    returned 0 when the read of unforwarded rows failed, so the card said
+    "0 entries waiting to be sent" and the Forward button flashed "Nothing
+    was waiting." with a 200 — an administrator told the queue is drained
+    when nothing could be counted or read. One card below the trail this
+    commit's first half is about.
+    """
+
+    DESTINATION = {"enabled": True, "kind": "elasticsearch",
+                   # A port nothing listens on, and never reached: the read
+                   # of the queue fails first, which is the point.
+                   "url": "http://127.0.0.1:9/", "index": "wdash-audit",
+                   "verify_certs": False}
+
+    def setUp(self):
+        super().setUp()
+        for number in range(3):
+            self.app.store.audit.record("owner", "role saved",
+                                        subject=f"role:{number}")
+        self.app.store.settings.set("audit.forwarding", dict(self.DESTINATION))
+
+    def hide(self):
+        from sqlalchemy import text
+        with self.app.store.engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE wdash_audit RENAME TO wdash_audit_hidden"))
+
+    def forwarder(self):
+        from wdash.store.forwarding import AuditForwarder, build_sink
+        return AuditForwarder(
+            self.app.store.engine,
+            build_sink(dict(self.DESTINATION), "unused-token"))
+
+    def test_a_queue_that_can_be_read_still_reports_its_depth(self):
+        """The guard: the fix must not turn a countable queue into a
+        warning."""
+        body = self.client.get("/admin/audit").get_data(as_text=True)
+        self.assertIn("waiting to be sent", body)
+        self.assertNotIn("forwarding queue could not be read", body)
+
+    def test_the_card_says_it_could_not_be_counted(self):
+        self.hide()
+        body = self.client.get("/admin/audit").get_data(as_text=True)
+        self.assertIn("forwarding queue could not be read", body)
+        self.assertNotIn("waiting to be sent", body)
+
+    def test_the_button_does_not_report_an_empty_queue(self):
+        self.hide()
+        response = self.client.post("/admin/audit/forward",
+                                    follow_redirects=True)
+        body = response.get_data(as_text=True)
+        self.assertNotIn("Nothing was waiting.", body)
+        self.assertIn("could not be read", body)
+
+    def test_counting_raises_rather_than_answering_zero(self):
+        """Where the decision belongs, as with the trail itself: a count of
+        0 has told its caller something that is not true."""
+        self.hide()
+        with self.assertRaises(Exception):
+            self.forwarder().pending()
+
+    def test_a_sweep_raises_rather_than_reporting_nothing_shipped(self):
+        self.hide()
+        with self.assertRaises(Exception):
+            self.forwarder().sweep()
+        with self.assertRaises(Exception):
+            self.forwarder().drain()
+
 
 class ImmutabilityTest(AuditTestCase):
     def test_the_screen_offers_no_way_to_change_the_trail(self):

@@ -189,6 +189,37 @@ class OneNamePerSignalTest(SignalTestCase):
                                           signals=["logs", "traces"])
         self.assertEqual(saved["name"], "prod")
 
+    def test_an_enabled_holder_is_described_as_serving_the_signal(self):
+        """Held so the sentence below cannot be fixed by making both cases
+        vague."""
+        self.create(name="prod")
+        with self.assertRaises(SourceError) as caught:
+            self.store.sources.create(name="prod", signal=["traces"],
+                                      kind="jaeger", config=dict(self.JAEGER))
+        self.assertIn("already exists and serves traces",
+                      str(caught.exception))
+
+    def test_a_disabled_holder_is_not_said_to_serve_anything(self):
+        """Refusing is right — re-enabling it would collide — but the
+        refusal said the holder "already exists and serves traces", and a
+        disabled source serves nothing: only enabled rows are built into
+        adapters. Somebody switching a source off in order to replace it
+        with a differently-kinded one of the same name was blocked by a
+        sentence that was not true, and told nothing about how to proceed.
+        """
+        self.store.sources.create(name="prod", signal=["logs", "traces"],
+                                  kind="elasticsearch", config=dict(ES),
+                                  enabled=False)
+        with self.assertRaises(SourceError) as caught:
+            self.store.sources.create(name="prod", signal=["traces"],
+                                      kind="jaeger", config=dict(self.JAEGER))
+        message = str(caught.exception)
+        # The words two tests in tests.test_config_page.SourceTest depend on.
+        self.assertIn("already exists", message)
+        self.assertIn("traces", message)
+        self.assertIn("switched off", message)
+        self.assertNotIn("serves traces", message)
+
 
 class TheHubSaysWhenTwoSourcesShareANameTest(unittest.TestCase):
     """A store that already holds the pair `create` now refuses — made

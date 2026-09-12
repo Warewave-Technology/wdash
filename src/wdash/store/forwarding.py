@@ -22,14 +22,16 @@ collector on the other end, which every one of these destinations already has.
 """
 
 import json
-import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
 
 from .schema import audit
 
-logger = logging.getLogger(__name__)
+# No logger here on purpose. Both reads raise now, and the two callers — the
+# audit screen and its Forward button — are where a failure is turned into
+# something a person reads; logging it here as well only produced a line
+# nobody was looking at, under a page that said the queue was empty.
 
 #: How many rows one sweep ships. Bounded so a first run against months of
 #: history does not build one request the far end refuses.
@@ -274,16 +276,19 @@ class AuditForwarder:
         self._sink = sink
 
     def pending(self):
-        """How many rows are still waiting. For the configuration screen."""
+        """How many rows are still waiting. For the configuration screen.
+
+        Raises rather than answering 0. A queue nobody could count is not a
+        queue that is empty, and 0 is what the card rendered — "0 entries
+        waiting to be sent" — over a table that could not be read: the same
+        failure as the trail above it on the same screen, one card lower.
+        The page catches this and says so where the number would be.
+        """
         from sqlalchemy import func
-        try:
-            with self._engine.connect() as connection:
-                return connection.execute(
-                    select(func.count()).select_from(audit)
-                    .where(audit.c.forwarded_at.is_(None))).scalar() or 0
-        except Exception as exc:
-            logger.error(f"Could not count unforwarded audit rows: {exc}")
-            return 0
+        with self._engine.connect() as connection:
+            return connection.execute(
+                select(func.count()).select_from(audit)
+                .where(audit.c.forwarded_at.is_(None))).scalar() or 0
 
     def sweep(self, batch=BATCH):
         """Ship one batch. Returns how many rows were delivered.
@@ -291,17 +296,18 @@ class AuditForwarder:
         Rows are marked only after the sink accepts them. The other order —
         mark, then send — turns any failure into permanent silent loss, which
         is precisely what an audit trail must not do.
+
+        A read that fails raises, for the same reason: "0 delivered" and
+        "the queue could not be read" are different answers, and the button
+        that calls this flashed the first — "Nothing was waiting." with a
+        200 — for the second.
         """
-        try:
-            with self._engine.connect() as connection:
-                rows = connection.execute(
-                    select(audit)
-                    .where(audit.c.forwarded_at.is_(None))
-                    .order_by(audit.c.id)
-                    .limit(batch)).mappings().all()
-        except Exception as exc:
-            logger.error(f"Could not read unforwarded audit rows: {exc}")
-            return 0
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                select(audit)
+                .where(audit.c.forwarded_at.is_(None))
+                .order_by(audit.c.id)
+                .limit(batch)).mappings().all()
 
         if not rows:
             return 0
