@@ -148,13 +148,24 @@
                                         data-add-panel="trace_services">
                                     <i class="fas fa-project-diagram"></i> Services (traces)
                                 </button>
+                                <button type="button" class="btn btn-outline-info"
+                                        data-add-panel="monitors">
+                                    <i class="fas fa-heart-pulse"></i> Monitors
+                                </button>
+                                <button type="button" class="btn btn-outline-info"
+                                        data-add-panel="monitor_certificates">
+                                    <i class="fas fa-lock"></i> Certificates
+                                </button>
                             </div>
                         </div>
                         <div id="panelList" class="list-group"></div>
                         <input type="hidden" name="panels" id="panelsField">
                         <div class="form-text">
-                            Every panel is answered by the same request, so adding one
-                            costs an aggregation rather than a round trip.
+                            Every log panel is answered by the same request, so
+                            adding one costs an aggregation rather than a round
+                            trip. Traces and monitors are other sources: the
+                            first panel from each costs one more request, and
+                            every further panel from it costs nothing.
                         </div>
                     </div>
 
@@ -400,6 +411,15 @@ function panelRow(panel, index) {
         `<option value="${v}"${v === selected ? ' selected' : ''}>${
             v.replace('_', ' ')}</option>`).join('');
 
+    // "Is it up now" and "was it up all window" are two questions out of one
+    // fetch, so they are one panel type with a view rather than two types
+    // costing two round trips.
+    const viewOptions = (selected) =>
+        [['status', 'status right now'],
+         ['availability', 'availability over the window']].map(([v, label]) =>
+            `<option value="${v}"${v === selected ? ' selected' : ''}>${
+                label}</option>`).join('');
+
     const specific = panel.type === 'trace_services'
         ? `<div class="col-md-3">
              <label class="form-label small mb-0">Sort by</label>
@@ -412,6 +432,16 @@ function panelRow(panel, index) {
              <input type="number" class="form-control form-control-sm"
                     data-key="size" min="1" max="50" value="${panel.size || 10}">
            </div>`
+        : panel.type === 'monitors'
+        ? `<div class="col-md-3">
+             <label class="form-label small mb-0">Show</label>
+             <select class="form-select form-select-sm" data-key="view">
+               ${viewOptions(panel.view || 'status')}
+             </select>
+           </div>
+           <div class="col-md-2"></div>`
+        : panel.type === 'monitor_certificates'
+        ? '<div class="col-md-5"></div>'
         : panel.type === 'terms'
         ? `<div class="col-md-3">
              <label class="form-label small mb-0">Group by</label>
@@ -462,7 +492,9 @@ function panelRow(panel, index) {
       <small class="text-muted">${
           { terms: 'Top values',
             timeseries: 'Volume over time',
-            trace_services: 'Services by traffic — from traces, so this panel costs a second query'
+            trace_services: 'Services by traffic — from traces, so this panel costs a second query',
+            monitors: 'Monitor status — from the monitor sources, so this panel costs a second query, and it needs monitors:read to read',
+            monitor_certificates: 'TLS certificates — rides the monitor panel’s source, and needs monitors:read to read'
           }[panel.type] || panel.type}</small>`;
 
     row.querySelectorAll('[data-key]').forEach(input => {
@@ -510,6 +542,10 @@ document.querySelectorAll('[data-add-panel]').forEach(button => {
                           split_by: 'severity', width: 12 },
             trace_services: { type: 'trace_services', title: 'Services by traffic',
                               sort: 'spans', size: 10, width: 6 },
+            monitors: { type: 'monitors', title: 'Monitor status',
+                        view: 'status', width: 6 },
+            monitor_certificates: { type: 'monitor_certificates',
+                                    title: 'TLS certificates', width: 6 },
         };
         panels.push({ ...blank[type] });
         drawPanels();

@@ -21,9 +21,12 @@ import uuid
 
 #: Panel kinds and the fields each one needs.
 #:
-#: `signal` records which source answers it. Everything here reads logs today;
-#: it exists so a trace panel is an added row rather than a special case
-#: threaded through the renderer.
+#: `signal` records which source answers it, and it is now read rather than
+#: decorative: three signals are in this table — logs, traces, monitors — and
+#: a panel kind is filled, classified and kept off the log source's fate by
+#: the row alone, not by a special case threaded through the renderer.
+#: `needs_logs` and `dashboard_routes.FILLED_SIGNALS` are the two readers, and
+#: a row whose signal nothing fills fails the suite rather than a card.
 PANEL_TYPES = {
     "timeseries": {
         "label": "Volume over time",
@@ -43,10 +46,34 @@ PANEL_TYPES = {
         "description": "Span counts and error rates per service, from traces.",
         "fields": ("size", "sort"),
     },
+    "monitors": {
+        "label": "Monitor status",
+        "signal": "monitors",
+        "description": "One cell per check — is it up now, or how much of "
+                       "the window was it up for.",
+        "fields": ("view",),
+    },
+    "monitor_certificates": {
+        "label": "TLS certificates",
+        "signal": "monitors",
+        "description": "What the checks saw on the wire, and how long each "
+                       "certificate is still valid.",
+        "fields": (),
+    },
 }
 
 #: How a trace service panel is ordered.
 TRACE_SORTS = ("spans", "errors", "error_rate")
+
+#: What a monitor panel asks. Two questions, one panel type and one fetch:
+#: "is it up now" and "was it up all week" come out of the SAME listing —
+#: `MonitorPoint.down` and `.checks` ride along with the current state — so
+#: a second panel type would buy a second round trip and nothing else.
+#:
+#: Which one a panel is showing has to be said ON the panel: a grid reading
+#: 100% and a grid reading "up" look alike and mean different things, and the
+#: one that is wrong is the one nobody checked the caption of.
+MONITOR_VIEWS = ("status", "availability")
 
 #: Fields a terms panel may aggregate on. Restricted deliberately: an
 #: aggregation on an analysed text field either fails or returns tokenised
@@ -67,10 +94,17 @@ class PanelError(ValueError):
 def signals(panels):
     """Which sources a panel list needs.
 
-    Logs and traces live in different indices with different schemas, so they
-    cannot share one batched search. A dashboard of log panels stays at one
-    round trip; adding a trace panel costs a second. That is a real cost and
-    the code says so rather than hiding it.
+    Logs, traces and monitors live in different stores with different
+    schemas, so they cannot share one batched search. A dashboard of log
+    panels stays at one round trip; adding a trace panel costs a second and a
+    monitor panel a third. That is a real cost and the code says so rather
+    than hiding it.
+
+    Read from the table rather than branched on per type: a `signal` a panel
+    kind declares is one edit, and a chain of `if panel["type"] == ...` here
+    is a place the next panel kind gets forgotten and quietly counted as a
+    log panel — which is exactly how it would end up sharing the log
+    source's fate.
     """
     return {PANEL_TYPES[panel["type"]]["signal"] for panel in panels}
 
@@ -175,6 +209,14 @@ def normalise(panel, panel_id=None):
                 f"Available: {', '.join(TRACE_SORTS)}")
         out["size"] = max(1, min(MAX_SIZE, size))
         out["sort"] = sort
+
+    elif kind == "monitors":
+        view = (panel.get("view") or "status").strip()
+        if view not in MONITOR_VIEWS:
+            raise PanelError(
+                f"'{title}': cannot show '{view}'. "
+                f"Available: {', '.join(MONITOR_VIEWS)}")
+        out["view"] = view
 
     elif kind == "timeseries":
         split_by = (panel.get("split_by") or "").strip()

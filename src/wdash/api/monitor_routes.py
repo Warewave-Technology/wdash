@@ -495,18 +495,29 @@ def monitors_page():
         warning_days=EXPIRY_WARNING_DAYS, critical_days=EXPIRY_CRITICAL_DAYS)
 
 
-def _with_series(source, window):
-    """Ask for sparkline data, and cope with a source that cannot give it.
+def _series_listing(source, window):
+    """The listing, and whether the per-check series actually came with it.
 
     `monitors(window, scope, series=True)` is an extension to the interface,
     not part of it — a backend written against MonitorSource has a two-argument
     method and must keep working. Falling back rather than requiring every
     implementation to grow a keyword.
+
+    Which of the two happened is returned rather than swallowed, because the
+    fallback's empty series and a set of checks that genuinely never ran are
+    not the same answer: anything counted over the first is a number nobody
+    measured, and a caller that cannot tell them apart reports a live agent as
+    a silent one.
     """
     try:
-        return source.monitors(window, _scope(), series=True)
+        return source.monitors(window, _scope(), series=True), True
     except TypeError:
-        return source.monitors(window, _scope())
+        return source.monitors(window, _scope()), False
+
+
+def _with_series(source, window):
+    """The listing alone, for the callers that only draw what is in it."""
+    return _series_listing(source, window)[0]
 
 
 def _source_names():

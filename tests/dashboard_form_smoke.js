@@ -232,6 +232,59 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
               dom.window.document.getElementById('panelList').innerHTML);
     }
 
+    // The monitor rows of the same editor. A panel type the server accepts
+    // and the form cannot produce is a panel nobody can add without editing
+    // JSON by hand, which is the thing the panel editor exists to avoid.
+    {
+        const text = fs.readFileSync(path.join(ROOT, 'templates', 'dashboard_edit.html'), 'utf8');
+        const blocks = [...text.matchAll(/<script nonce="\{\{ csp_nonce \}\}">([\s\S]*?)<\/script>/g)]
+            .map(found => found[1]);
+        const editor = blocks[1]
+            .replace('{{ aggregatable_fields | tojson }}', JSON.stringify(['service']))
+            .replace('{{ panels | tojson }}', JSON.stringify(
+                [{ id: 'p1', type: 'terms', title: 'Top', field: 'service',
+                   size: 10, width: 6 }]));
+        const dom = new JSDOM(`<!doctype html><body><form>
+          <input id="query" value="*"><div><select id="index_patterns" multiple>
+          <option value="*" selected>*</option></select></div>
+          <button id="testQuery"></button><div id="testResults"></div>
+          <button type="button" data-add-panel="monitors"></button>
+          <button type="button" data-add-panel="monitor_certificates"></button>
+          <div id="panelList"></div><input type="hidden" id="panelsField">
+          </form></body>`, { runScripts: 'outside-only' });
+        const d = dom.window.document;
+        dom.window.eval(blocks[0]);
+        dom.window.eval(editor);
+
+        d.querySelector('[data-add-panel="monitors"]').click();
+        const rows = d.querySelectorAll('#panelList .list-group-item');
+        const view = rows[1].querySelector('[data-key="view"]');
+        check('the editor can add a monitor panel',
+              view && JSON.parse(d.getElementById('panelsField').value)[1].type
+                   === 'monitors',
+              d.getElementById('panelsField').value);
+        check('and it starts on status, the cheaper of the two questions',
+              view && view.value === 'status', view && view.value);
+
+        view.value = 'availability';
+        view.dispatchEvent(new dom.window.Event('change'));
+        d.querySelector('form').dispatchEvent(
+            new dom.window.Event('submit', { cancelable: true }));
+        check('and the view a person chose is what gets saved',
+              JSON.parse(d.getElementById('panelsField').value)[1].view
+                  === 'availability',
+              d.getElementById('panelsField').value);
+
+        d.querySelector('[data-add-panel="monitor_certificates"]').click();
+        const saved = JSON.parse(d.getElementById('panelsField').value);
+        check('the editor can add a certificate panel',
+              saved[2] && saved[2].type === 'monitor_certificates',
+              d.getElementById('panelsField').value);
+        check('a monitor row says the permission it needs to draw',
+              /monitors:read/.test(d.getElementById('panelList').textContent),
+              d.getElementById('panelList').textContent);
+    }
+
     console.log(failures.length ? `\n${failures.length} failure(s)`
                                 : '\nall dashboard form checks passed');
     process.exit(failures.length ? 1 : 0);

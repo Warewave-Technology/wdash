@@ -81,7 +81,38 @@ const PANEL_HINTS = Object.assign(Object.create(null), {
     timeseries: 'Click a segment to open those records in the Logs page',
     terms: 'Click a value to open those records in the Logs page',
     trace_services: 'Click a service to open it in the Traces page',
+    monitors: 'Click a check to open it in the Monitors page',
+    monitor_certificates: 'Click a row to open that check in the Monitors page',
 });
+
+
+/** Text into HTML. One definition: it was written inside drawServiceTable,
+ *  and every panel that renders markup needs the same one. */
+function escapeHtml(value) {
+    return String(value == null ? '' : value).replace(/[&<>"]/g,
+        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+
+/**
+ * A monitor's own page. Mirrors MonitorIdConverter.to_url, because the ids
+ * come from the documents and a link built with encodeURIComponent alone
+ * still resolves against its neighbours: `.` and `..` are dot segments
+ * however they are encoded, so an id of `..` linked to the home page.
+ *
+ * Down to the last character, on purpose. `encodeURIComponent` leaves
+ * ! ' ( ) * bare where Python's `quote(safe="")` percent-encodes them;
+ * nothing routes differently for those five, but a copy of a rule that
+ * agrees only approximately is a copy nobody can check, and the next
+ * character to diverge may be one that does matter. The two are held to one
+ * list of ids by MonitorLinkTest and the jsdom check of the same name.
+ */
+function monitorUrl(id) {
+    let text = String(id == null ? '' : id).replace(/~/g, '~7E');
+    if (text === '.' || text === '..') text = '~' + text;
+    return `/monitors/${encodeURIComponent(text).replace(
+        /[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())}`;
+}
 
 
 /**
@@ -532,6 +563,18 @@ class AsyncDashboard {
 
         if (panel.type === 'trace_services') {
             this.drawServiceTable(panel, slot);
+            this.removePanelOverlay(slot);
+            return;
+        }
+
+        if (panel.type === 'monitors') {
+            this.drawMonitorGrid(panel, slot);
+            this.removePanelOverlay(slot);
+            return;
+        }
+
+        if (panel.type === 'monitor_certificates') {
+            this.drawCertificateTable(panel, slot);
             this.removePanelOverlay(slot);
             return;
         }
@@ -1121,8 +1164,7 @@ class AsyncDashboard {
         container.classList.remove('d-none');
         container.style.overflowY = 'auto';
 
-        const escape = (value) => String(value).replace(/[&<>"]/g,
-            c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+        const escape = escapeHtml;
 
         container.innerHTML =
             '<table class="table table-sm mb-0" style="font-size:.8rem">' +
@@ -1146,6 +1188,176 @@ class AsyncDashboard {
             row.addEventListener('click', () => {
                 window.open(`/traces?service=${encodeURIComponent(row.dataset.service)}`,
                             '_blank');
+            });
+        });
+    }
+
+    /**
+     * The panel body, emptied and ready for markup rather than a canvas.
+     *
+     * Shared by the two monitor renderers: both replace the chart area
+     * wholesale, and both have to put the `.panel-empty` block away first or
+     * a panel that was empty a refresh ago keeps its message under the new
+     * content.
+     */
+    panelBody(slot) {
+        slot.querySelector('.panel-empty').classList.add('d-none');
+        const container = slot.querySelector('.chart-container');
+        container.classList.remove('d-none');
+        container.style.overflowY = 'auto';
+        return container;
+    }
+
+    /**
+     * One cell per check, down first.
+     *
+     * This is the panel that separates a quiet night from a dead log
+     * shipper, so an empty answer is never drawn as calm: a listing that
+     * came back short says which source did not answer, and a window with
+     * no check in it says that rather than showing nothing.
+     *
+     * Two questions out of one fetch — "is it up now" and "was it up all
+     * window" — and the panel says WHICH in words above the cells. A grid
+     * of green cells reading 100% and a grid of green cells reading "up"
+     * look alike and are different claims.
+     */
+    drawMonitorGrid(panel, slot) {
+        const rows = panel.rows || [];
+        const availability = panel.view === 'availability';
+
+        if (!rows.length) {
+            this.panelMessage(panel.id, panel.partial
+                ? ((panel.warnings || []).filter(Boolean).join('; ')
+                   || 'No monitor could be read: a source did not answer.')
+                : 'No monitor has reported in this window.');
+            return;
+        }
+
+        const container = this.panelBody(slot);
+        const counts = panel.counts || {};
+        const caption = availability
+            ? `Availability over the window, from the checks that ran — ${
+                rows.length} check${rows.length === 1 ? '' : 's'}`
+            : `Status at the last check — ${counts.down || 0} down, ${
+                counts.unknown || 0} unknown, ${counts.up || 0} up`;
+
+        const cell = (row) => {
+            const measure = availability
+                // Never "100%" over a check that did not run: 0 of 0 is not
+                // availability, and the count is beside the figure because
+                // 100% of 12 checks and 100% of 2,832 are not one claim.
+                ? (row.availability === null || row.availability === undefined
+                    ? '<small class="text-muted">no check ran</small>'
+                    : `<strong>${row.availability}%</strong>` +
+                      `<small class="text-muted"> of ${
+                          (row.checks || 0).toLocaleString()}</small>`)
+                : (row.duration_ms === null || row.duration_ms === undefined
+                    ? ''
+                    : `<small class="text-muted">${row.duration_ms} ms</small>`);
+            const when = row.checked_at
+                ? new Date(row.checked_at).toLocaleString()
+                : 'never checked';
+            return `<div class="border rounded px-2 py-1" role="button"
+                         data-monitor="${escapeHtml(row.id)}"
+                         style="min-width:11rem;flex:1 1 11rem">
+                <div class="d-flex justify-content-between align-items-center gap-2">
+                  <span class="monitor-status ${escapeHtml(row.status)}">${
+                      escapeHtml(row.status)}</span>
+                  ${measure}
+                </div>
+                <div class="text-truncate mt-1" title="${escapeHtml(row.name)}"
+                     style="font-size:.8rem">${escapeHtml(row.name)}</div>
+                <div class="text-muted text-truncate" style="font-size:.7rem"
+                     title="${escapeHtml(when)}">${escapeHtml(when)}</div>
+                ${row.error
+                    ? `<div class="text-danger text-truncate" style="font-size:.7rem"
+                            title="${escapeHtml(row.error)}">${
+                           escapeHtml(row.error)}</div>`
+                    : ''}
+            </div>`;
+        };
+
+        container.innerHTML =
+            `<div class="text-muted mb-2" style="font-size:.75rem">${
+                escapeHtml(caption)}</div>` +
+            '<div class="d-flex flex-wrap gap-2">' + rows.map(cell).join('') +
+            '</div>';
+
+        container.querySelectorAll('[data-monitor]').forEach(element => {
+            element.addEventListener('click', () => {
+                window.open(monitorUrl(element.dataset.monitor), '_blank');
+            });
+        });
+    }
+
+    /**
+     * What the checks saw on the wire, soonest expiry first.
+     *
+     * The bands and their words are the server's — `_certificate_state`,
+     * which the Monitors page uses too — so the product cannot grow a second
+     * definition of "expiring soon" in a template nobody remembers.
+     */
+    drawCertificateTable(panel, slot) {
+        const rows = panel.rows || [];
+        // "None of these checks use TLS" is a claim about the endpoints, and
+        // a list that is missing whichever region did not answer has no
+        // right to make it — the certificate expiring tomorrow may be the one
+        // that is absent.
+        const short = (panel.warnings || []).filter(Boolean);
+        if (!rows.length) {
+            this.panelMessage(panel.id, panel.partial
+                ? (short.join('; ')
+                   || 'No certificate could be read: a source did not answer.')
+                : 'None of the checks in this window used TLS. An HTTPS ' +
+                  'monitor reports its certificate on every run.');
+            return;
+        }
+
+        const container = this.panelBody(slot);
+        container.innerHTML =
+            '<table class="table table-sm mb-0" style="font-size:.8rem">' +
+            '<thead><tr><th style="width:6rem">Expires in</th>' +
+            '<th>Common name</th><th>Endpoint</th></tr></thead><tbody>' +
+            rows.map(row => {
+                // `expired` is not "very soon": it has already happened, and
+                // it is not another number in the same series.
+                const chip = row.expired
+                    ? '<span class="expiry-chip expired">expired</span>'
+                    : (row.days_remaining === null || row.days_remaining === undefined
+                        ? '<span class="text-muted">unknown</span>'
+                        : `<span class="expiry-chip ${escapeHtml(row.state)}">${
+                            row.days_remaining}d</span>`);
+                // `verified` is true, false or null, and null means the
+                // source did not say — Heartbeat never does. Only an
+                // explicit false earns the chip; rendering null as "not
+                // verified" would put a finding on every row on day one.
+                const chips =
+                    (row.tls_mode === 'expiry_only'
+                        ? '<span class="badge target-chip" title="This check does not verify the certificate. The expiry is all it can vouch for.">expiry only</span>'
+                        : row.verified === false
+                        ? '<span class="badge target-chip" title="This check verifies the certificate and its last run did not complete a verified handshake with this endpoint.">not verified</span>'
+                        : '');
+                return `<tr class="monitor-row-${escapeHtml(row.state)}"
+                            role="button" data-monitor="${escapeHtml(row.id)}">
+                    <td>${chip}</td>
+                    <td><code>${escapeHtml(row.common_name || '—')}</code> ${chips}</td>
+                    <td><code class="text-muted">${escapeHtml(row.location)}</code>
+                        <div><small class="text-muted">${
+                            escapeHtml(row.name)}</small></div></td></tr>`;
+            }).join('') + '</tbody></table>' +
+            `<div class="text-muted mt-2" style="font-size:.7rem">Warning below ${
+                panel.warning_days} days, urgent below ${
+                panel.critical_days}. Sorted by what expires first.</div>` +
+            (panel.partial
+                ? `<div class="text-warning mt-1" style="font-size:.7rem">${
+                    escapeHtml('A source did not answer, so an endpoint may '
+                               + 'be missing from this list: '
+                               + short.join('; '))}</div>`
+                : '');
+
+        container.querySelectorAll('[data-monitor]').forEach(element => {
+            element.addEventListener('click', () => {
+                window.open(monitorUrl(element.dataset.monitor), '_blank');
             });
         });
     }

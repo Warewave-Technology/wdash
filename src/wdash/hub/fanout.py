@@ -1024,14 +1024,41 @@ class FanOutMonitorSource(MonitorSource):
         return merged
 
     def certificates(self, window, scope):
-        merged = []
-        for _, certificates, error in self._parallel(
+        """What every member saw on the wire, and who could not be asked.
+
+        A member that failed was dropped silently here, which made a
+        certificate list a claim it has no right to make: the endpoints whose
+        region did not answer are simply absent, and a list of what is
+        expiring soon that is missing the one expiring tomorrow is worse than
+        no list. The same machinery `monitors` already carries — the failures
+        named, the answer marked short — so a caller can say so.
+        """
+        merged, warnings, missing = [], [], []
+        for source, certificates, error in self._parallel(
                 lambda s: s.certificates(window, scope)):
-            if error is None and certificates:
-                merged.extend(certificates)
+            if error is not None:
+                missing.append(source.name)
+                warnings.append(_named(source, error))
+                continue
+            merged.extend(certificates or [])
         merged.sort(key=lambda m: (m.certificate.days_remaining is None,
                                    m.certificate.days_remaining or 0))
-        return merged
+        out = _MergedCertificates(merged)
+        out.warnings = tuple(warnings)
+        out.missing_sources = tuple(dict.fromkeys(missing))
+        return out
+
+
+class _MergedCertificates(list):
+    """Certificates from the members that answered, and the ones that did not.
+
+    A plain list cannot say it is short, and a short certificate list is
+    indistinguishable from an endpoint estate with no TLS on it.
+    """
+    #: Why each missing member is missing, named.
+    warnings = ()
+    #: Members that were asked and did not answer.
+    missing_sources = ()
 
 
 class _CountedChecks(list):

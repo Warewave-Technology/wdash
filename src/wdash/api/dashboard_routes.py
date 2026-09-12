@@ -24,6 +24,7 @@ from .access import request_scope
 from ..hub import (
     Capability, DateHistogram, LogQuery, Scope, Terms, TimeWindow,
 )
+from ..hub.models import DOWN, UNKNOWN, UP
 from ..hub.query import DEFAULT_LOG_FIELDS
 from ..dashboard import DashboardStorageError
 from ..store.objects import ObjectConflict as DashboardConflict
@@ -34,9 +35,17 @@ from ..dashboard.thresholds import (
 )
 from ..dashboard.visibility import VISIBILITIES, can_view, explain
 from ..dashboard.panels import (
-    AGGREGATABLE_FIELDS, PanelError, needs_logs, normalise_all, signal_of,
+    AGGREGATABLE_FIELDS, MONITOR_VIEWS, PanelError, needs_logs, normalise_all,
+    signal_of,
 )
 from ..hub.aggregation import AggregationResult
+# The certificate bands and the scope monitors are read under come from the
+# Monitors page rather than being written again here. A dashboard that
+# invented its own "expiring soon" would give the product two thresholds, and
+# a dashboard that narrowed monitors by the viewer's LOG scope would
+# contradict ElasticsearchMonitorSource.containers, which says in as many
+# words that monitor visibility is a permission and not an index pattern.
+from . import monitor_routes
 
 dashboard_bp = Blueprint("dashboards", __name__)
 
@@ -49,16 +58,20 @@ _HEATMAP_BARS = 24
 
 #: The signals this route knows how to answer, and nothing more.
 #:
-#: "logs" rides the batched aggregation; "traces" is `_trace_panels`. A panel
-#: type registered in `PANEL_TYPES` with any other signal has nothing to fill
-#: it, and the cost of forgetting that is the one failure this package exists
-#: to remove: `_panel_results` would read the panel's id out of the LOG
-#: result, find nothing, and send an empty bucket list, which the client
-#: draws as "No data in this window" — a claim about the data, made about a
-#: question nobody asked. So a panel no filler answered gets a reason
-#: instead, and `tests.test_panel_reasons` fails the day a row is added here
-#: without one.
-FILLED_SIGNALS = frozenset({"logs", "traces"})
+#: "logs" rides the batched aggregation; "traces" is `_trace_panels` and
+#: "monitors" is `_monitor_panels`. A panel type registered in `PANEL_TYPES`
+#: with any other signal has nothing to fill it, and the cost of forgetting
+#: that is the one failure this package exists to remove: `_panel_results`
+#: would read the panel's id out of the LOG result, find nothing, and send an
+#: empty bucket list, which the client draws as "No data in this window" — a
+#: claim about the data, made about a question nobody asked. So a panel no
+#: filler answered gets a reason instead, and `tests.test_panel_reasons`
+#: fails the day a row is added here without one.
+#:
+#: "monitors" was the worked example of that failure when this set was
+#: written — a row registered with no filler, measured as a card reading
+#: quiet. It has a filler now, and the guard is the same guard.
+FILLED_SIGNALS = frozenset({"logs", "traces", "monitors"})
 
 
 def _logs(dashboard=None):
@@ -310,6 +323,217 @@ def _trace_panels(panels, window, scope):
     return out
 
 
+#: Panel kinds a monitor source answers.
+_MONITOR_PANELS = ("monitors", "monitor_certificates")
+
+#: Down first, then the checks nothing has reported, then the healthy ones.
+#:
+#: A monitor whose agent has gone quiet is NOT filed with the ones that
+#: passed. "Unknown" is the state this whole signal exists to make visible —
+#: a check that has stopped running looks exactly like a quiet night from
+#: every other panel on the board — so it sorts above "up" and never below
+#: it.
+_STATUS_ORDER = {DOWN: 0, UNKNOWN: 1, UP: 2}
+
+
+def _monitor_availability(monitor):
+    """Availability over the window, counted in RUNS rather than in buckets.
+
+    `MonitorPoint.checks` is how many runs a bucket covers and `.down` how
+    many of them failed, so the sums over the series are the window's own
+    arithmetic. Counting buckets instead would call a bucket holding six runs
+    of which one failed one failure out of one — the reasoning
+    `monitor_routes._availability` sets out at length, borrowed rather than
+    re-derived.
+
+    `None` when nothing ran, never 100.0: zero of zero is not "available",
+    and "100%" printed over an agent that has been silent all week is the
+    loudest possible lie on the board. The check count ships beside the
+    percentage for the same reason — 100% of 12 checks and 100% of 2,832 are
+    not the same claim.
+    """
+    checks = sum(point.checks for point in monitor.series)
+    down = sum(point.down for point in monitor.series)
+    return {"checks": checks, "down": down,
+            "availability": (round(100.0 * (checks - down) / checks, 2)
+                             if checks else None)}
+
+
+def _monitor_row(monitor, view):
+    row = {
+        "id": monitor.id,
+        "name": monitor.name or monitor.id,
+        "status": monitor.status,
+        "type": monitor.type,
+        "location": monitor.location,
+        "checked_at": (monitor.checked_at.isoformat()
+                       if monitor.checked_at else None),
+        "duration_ms": (round(monitor.duration_ms, 1)
+                        if monitor.duration_ms is not None else None),
+        "error": monitor.error,
+        "source": monitor.source,
+    }
+    if view == "availability":
+        row.update(_monitor_availability(monitor))
+    return row
+
+
+def _certificate_row(monitor):
+    certificate = monitor.certificate
+    return {
+        "id": monitor.id,
+        "name": monitor.name or monitor.id,
+        "location": monitor.location,
+        "common_name": certificate.common_name,
+        "issuer": certificate.issuer,
+        "not_after": (certificate.not_after.isoformat()
+                      if certificate.not_after else None),
+        "days_remaining": certificate.days_remaining,
+        "expired": certificate.expired,
+        # Computed here, exactly as the Monitors page computes it, so the
+        # dashboard cannot grow a second set of expiry bands.
+        "state": monitor_routes._certificate_state(certificate),
+        "key": certificate.key_description,
+        # Tri-state, and `None` means the source did not say — Heartbeat
+        # never does. The renderer must print nothing for it: rendered as
+        # "not verified" it would be a finding invented on every row.
+        "verified": certificate.verified,
+        "tls_mode": monitor.tls_mode,
+    }
+
+
+def _monitor_panels(panels, scope, window):
+    """Fill in the monitor-backed panels.
+
+    Monitors are a third source, so like traces they cannot ride the log
+    batch: one extra round trip for the listing however many status panels
+    the board holds, and a second only when a certificate panel is on it.
+    A missing or failing monitor backend costs those panels, never the page.
+
+    `monitors:read` is checked HERE, on the scope, at the moment the panel is
+    filled — not on the route, which asks only about `dashboard:*`. Both
+    halves of that matter. A shared dashboard must not become a way to see
+    monitors a role was never granted, which is why the check exists at all;
+    and a colleague who lacks the permission must still be able to read the
+    rest of the board, which is why it refuses THIS PANEL with a reason
+    instead of widening the dashboard's visibility rule.
+
+    The listing itself is read under the monitors' own scope rather than the
+    viewer's log scope, which is what `monitor_routes._scope` builds. A
+    role's index patterns are about log data;
+    `ElasticsearchMonitorSource.containers` says so and refuses to filter by
+    them, and a dashboard that did would show an empty grid to almost
+    everybody — a failure wearing the clothes of "nothing is down".
+    """
+    wanted = [p for p in panels if p["type"] in _MONITOR_PANELS]
+    if not wanted:
+        return {}
+
+    def refuse(reason, only=None):
+        return {p["id"]: {"error": reason} for p in (only or wanted)}
+
+    if not scope.has("monitors:read"):
+        return refuse("Monitors need the monitors:read permission, which "
+                      "this role does not have. The rest of this dashboard "
+                      "is unaffected.")
+
+    hub = getattr(current_app, "hub", None)
+    source = hub.monitors(hub.ALL_SOURCES) if hub else None
+    if source is None or not source.supports(Capability.MONITOR_LIST):
+        return refuse("No monitor backend is configured.")
+
+    out = {}
+    listings = [p for p in wanted if p["type"] == "monitors"]
+    if listings:
+        try:
+            # Carries the monitor scope, and says whether the per-check
+            # series came with it: a source written against the two-argument
+            # interface has no history to give, and availability counted over
+            # the series it did not send is a number nobody measured.
+            page, history = monitor_routes._series_listing(source, window)
+        except Exception as exc:
+            current_app.logger.warning(f"Monitor panel failed: {exc}")
+            out.update(refuse("Monitor data could not be loaded.", listings))
+        else:
+            ordered = sorted(
+                page.monitors,
+                key=lambda m: (_STATUS_ORDER.get(m.status, _STATUS_ORDER[UNKNOWN]),
+                               (m.name or m.id).lower()))
+            notes = [str(note) for note in (page.warnings or ()) if note]
+            for panel in listings:
+                # The view reaches the client on the panel DEFINITION, which
+                # every filled panel is built from — repeating it here was a
+                # second copy of one fact, and a mutation that deleted it
+                # changed nothing, which is how it was found.
+                view = panel.get("view") or MONITOR_VIEWS[0]
+                if view == "availability" and not history:
+                    # Not "0 of 0 checks", which the grid draws as "no check
+                    # ran" — beside a timestamp from a second ago and a green
+                    # "up" chip. That cell contradicts itself and it asserts
+                    # the agent is silent when it is not. Refused in the
+                    # source's name, the shape a missing capability already
+                    # takes, and only this VIEW of the panel: the same source
+                    # answers "is it up now" perfectly well.
+                    out[panel["id"]] = {"error": (
+                        f"{source.name} does not keep monitor history, so "
+                        f"availability over this window cannot be counted. "
+                        f"That is a gap in what can be read here, not a run "
+                        f"of checks that all passed. The status view of this "
+                        f"panel still works.")}
+                    continue
+                rendered = {"counts": page.counts,
+                            "rows": [_monitor_row(m, view) for m in ordered]}
+                if page.partial:
+                    # One source of several not answering is not "those
+                    # checks are all passing": it is a shorter list nobody
+                    # can read as one.
+                    rendered["partial"] = True
+                    rendered["warnings"] = notes
+                out[panel["id"]] = rendered
+
+    certificates = [p for p in wanted if p["type"] == "monitor_certificates"]
+    if certificates:
+        if not source.supports(Capability.TLS_CERTIFICATES):
+            out.update(refuse(
+                f"{source.name} does not report TLS certificates. That is a "
+                f"gap in what can be read here, not evidence that the "
+                f"endpoints have none.", certificates))
+        else:
+            try:
+                seen = source.certificates(window, monitor_routes._scope())
+            except Exception as exc:
+                current_app.logger.warning(f"Certificate panel failed: {exc}")
+                out.update(refuse("TLS certificates could not be loaded.",
+                                  certificates))
+            else:
+                # What expires first, first — the only order this list is
+                # read in. A monitor whose expiry the source did not give
+                # sorts last rather than as "expires today".
+                rows = sorted(
+                    (_certificate_row(m) for m in seen if m.certificate),
+                    key=lambda r: (r["days_remaining"] is None,
+                                   r["days_remaining"] or 0))
+                # The fan-out keeps a member that could not be asked out of
+                # the merge, so without this the panel drew a list missing a
+                # whole region's endpoints and said nothing — and an empty
+                # one reads as "none of these checks use TLS", which is a
+                # claim about the endpoints made when nobody could be asked.
+                short = [str(note)
+                         for note in (getattr(seen, "warnings", ()) or ())
+                         if note]
+                for panel in certificates:
+                    rendered = {
+                        "rows": rows,
+                        "warning_days": monitor_routes.EXPIRY_WARNING_DAYS,
+                        "critical_days": monitor_routes.EXPIRY_CRITICAL_DAYS,
+                    }
+                    if getattr(seen, "missing_sources", ()) or short:
+                        rendered["partial"] = True
+                        rendered["warnings"] = short
+                    out[panel["id"]] = rendered
+    return out
+
+
 def _without_log_containers(dashboard, scope, time_range, failure, status):
     """Answer the panels the log source is not needed for, and say why the
     rest are empty. Returns (payload, status) for jsonify.
@@ -328,10 +552,15 @@ def _without_log_containers(dashboard, scope, time_range, failure, status):
     arrives at the search.
 
     A trace panel needs the window and the caller's scope and nothing else —
-    `_trace_panels` has had that shape since traces arrived — and the
-    monitor, certificate and alert panels coming after it are the same shape
-    again. An operator opens a board in an Elasticsearch outage precisely to
-    tell a dead shipper from a quiet night.
+    `_trace_panels` has had that shape since traces arrived — and the monitor
+    and certificate panels are that same shape again, which is why they are
+    filled here by the same two lines and not by a second copy of this
+    function. An operator opens a board in an Elasticsearch outage precisely
+    to tell a dead shipper from a quiet night, and the monitor grid is the
+    panel that answers it: until this existed it was the FIRST thing to
+    disappear in that outage, because `_targets` resolves the log source
+    before any panel is filled. The alert panels coming after are the same
+    shape once more.
 
     So: fill what can be filled, and give every panel that cannot a reason of
     its own instead of an empty card.
@@ -361,7 +590,11 @@ def _without_log_containers(dashboard, scope, time_range, failure, status):
 
     reason = failure.get("error") or "The log source could not be reached."
     standalone = [panel for panel in panels if not needs_logs(panel)]
+    # One line per signal this route can answer, over the panels the log
+    # source is not needed for. `standalone` rather than `panels`, so a
+    # filler is never handed a panel that belongs to another source.
     filled = _trace_panels(standalone, window, scope)
+    filled.update(_monitor_panels(standalone, scope, window))
     for panel in panels:
         if needs_logs(panel):
             filled[panel["id"]] = {"buckets": [], "error": reason}
@@ -1193,8 +1426,10 @@ def api_dashboard_data(dashboard_id):
             "error_count": counts["error"],
         }),
         "thresholds": dashboard.thresholds,
-        "panels": _panel_results(panels, result,
-                                 _trace_panels(panels, query.window, scope)),
+        "panels": _panel_results(
+            panels, result,
+            {**_trace_panels(panels, query.window, scope),
+             **_monitor_panels(panels, scope, query.window)}),
         "dashboard_patterns": dashboard.index_patterns,
         "resolved_containers": _shown(resolved, allowed),
         "total_resolved": len(resolved),

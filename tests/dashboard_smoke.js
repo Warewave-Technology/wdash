@@ -108,7 +108,11 @@ function makeDashboard(responder) {
     // call and never becomes a property of `window`. The page loads this as a
     // <script>, where it would; here the export is appended so the SAME eval
     // can see the binding and hand it out.
-    w.eval(source + '\n;window.AsyncDashboard = AsyncDashboard;');
+    // `monitorUrl` goes out with it: it is a module-level function the page
+    // never needs by name, and the only way to hold it to the route's own
+    // converter here is to be able to call it.
+    w.eval(source + '\n;window.AsyncDashboard = AsyncDashboard;'
+                  + '\n;window.monitorUrl = monitorUrl;');
     return w;
 }
 
@@ -847,6 +851,297 @@ async function main() {
     });
     check('and without asking the backend for a colour change', () =>
         assert(fetched.count === 0, `it fetched ${fetched.count} time(s)`));
+
+    // ---- monitors on the board ------------------------------------------
+    //
+    // The panel that tells a quiet night from a dead log shipper. Every
+    // failure mode of it has to look like a failure: an empty grid, a
+    // percentage over a check that never ran, or a certificate verdict
+    // nobody measured would each read as "all clear".
+
+    const MONITOR = { id: 'm1', title: 'Checks', type: 'monitors', width: 6 };
+
+    const grid = await loadWith({
+        panels: [{
+            ...MONITOR, view: 'status',
+            counts: { up: 1, down: 1, unknown: 0 },
+            rows: [
+                { id: 'down-1', name: 'Lab endpoint (down)', status: 'down',
+                  duration_ms: 1.6, checked_at: '2026-09-12T11:25:42Z',
+                  error: 'received status code 500 expecting [200]',
+                  location: 'lab:8080' },
+                { id: 'up-1', name: 'Lab endpoint (up)', status: 'up',
+                  duration_ms: 1.6, checked_at: '2026-09-12T11:25:42Z',
+                  error: '', location: 'lab:8080' },
+            ],
+        }],
+    });
+    check('a monitor grid draws one cell per check', () => {
+        const cells = grid.document.querySelectorAll('[data-monitor]');
+        assert(cells.length === 2, `${cells.length} cell(s) drawn`);
+    });
+    check('a monitor grid stops spinning', () =>
+        assert(spinning(grid) === 0, `${spinning(grid)} spinner(s) left`));
+    check('a down cell carries its status and its reason', () => {
+        const cell = grid.document.querySelector('[data-monitor="down-1"]');
+        assert(/status code 500/.test(cell.textContent),
+               `the reason is missing: "${cell.textContent}"`);
+        assert(cell.querySelector('.monitor-status.down'),
+               'the down chip is missing');
+    });
+    check('a status grid says it is showing status', () => {
+        const text = grid.document.querySelector('.chart-container').textContent;
+        assert(/Status at the last check/.test(text), `caption was "${text}"`);
+        assert(!/Availability/.test(text), 'it also claimed availability');
+    });
+    check('the monitor hint does not promise a filter', () => {
+        const hint = grid.document.querySelector('.panel-hint').textContent;
+        assert(!/filter by it/i.test(hint), `the hint reads "${hint}"`);
+        assert(/Monitors page/.test(hint), `the hint reads "${hint}"`);
+    });
+
+    const uptime = await loadWith({
+        panels: [{
+            ...MONITOR, view: 'availability',
+            counts: { up: 1, down: 0, unknown: 1 },
+            rows: [
+                { id: 'a1', name: 'Lab shop journey', status: 'up',
+                  checked_at: '2026-09-12T11:25:56Z', error: '',
+                  checks: 945, down: 11, availability: 98.84 },
+                { id: 'a2', name: 'Never ran', status: 'unknown',
+                  checked_at: null, error: 'no agent has reported',
+                  checks: 0, down: 0, availability: null },
+            ],
+        }],
+    });
+    check('an availability grid says it is showing availability', () => {
+        const text = uptime.document.querySelector('.chart-container').textContent;
+        assert(/Availability over the window/.test(text),
+               `caption was "${text}"`);
+    });
+    check('a percentage never travels without its check count', () => {
+        const cell = uptime.document.querySelector('[data-monitor="a1"]');
+        assert(/98\.84%/.test(cell.textContent), cell.textContent);
+        assert(/945/.test(cell.textContent),
+               `the check count is missing: "${cell.textContent}"`);
+    });
+    check('a check that never ran is not a hundred percent', () => {
+        const cell = uptime.document.querySelector('[data-monitor="a2"]');
+        assert(/no check ran/.test(cell.textContent), cell.textContent);
+        assert(!/%/.test(cell.textContent),
+               `it printed a percentage: "${cell.textContent}"`);
+    });
+
+    // `quiet` is taken by the log panel's own empty-window check above, and
+    // the two are different claims about different sources.
+    const noMonitor = await loadWith({
+        panels: [{ ...MONITOR, view: 'status', counts: {}, rows: [] }],
+    });
+    check('a window with no monitor in it says so rather than drawing calm', () => {
+        const text = noMonitor.document.querySelector('.panel-empty small').textContent;
+        assert(/No monitor has reported/.test(text), `message was "${text}"`);
+    });
+
+    const short = await loadWith({
+        panels: [{ ...MONITOR, view: 'status', counts: {}, rows: [],
+                   partial: true, warnings: ['region-b: connection refused'] }],
+    });
+    check('a listing that came back short names the source that did not answer', () => {
+        const text = short.document.querySelector('.panel-empty small').textContent;
+        assert(/region-b/.test(text), `message was "${text}"`);
+    });
+
+    const hostile = await loadWith({
+        panels: [{
+            ...MONITOR, view: 'status', counts: { down: 1 },
+            rows: [{ id: 'x', name: '<img src=x onerror=alert(1)>',
+                     status: 'down', duration_ms: 1, checked_at: null,
+                     error: '<script>bad()</script>', location: '' }],
+        }],
+    });
+    check('a monitor name is text, not markup', () => {
+        assert(!hostile.document.querySelector('#panelGrid img'),
+               'a name planted an img tag');
+        assert(!hostile.document.querySelector('#panelGrid script'),
+               'an error message planted a script tag');
+    });
+
+    const certificates = await loadWith({
+        panels: [{
+            id: 'c1', title: 'Certificates', type: 'monitor_certificates',
+            width: 6, warning_days: 30, critical_days: 7,
+            rows: [
+                { id: 'gone', name: 'TLS endpoint (expiring)',
+                  common_name: 'expiring.lab.local', location: 'lab:8443',
+                  days_remaining: -25, expired: true, state: 'expired',
+                  verified: null, tls_mode: '' },
+                { id: 'soon', name: 'Payments', common_name: 'pay.lab.local',
+                  location: 'lab:9443', days_remaining: 3, expired: false,
+                  state: 'critical', verified: false, tls_mode: '' },
+                { id: 'fine', name: 'TLS endpoint (valid)',
+                  common_name: 'healthy.lab.local', location: 'lab:8444',
+                  days_remaining: 328, expired: false, state: 'ok',
+                  verified: null, tls_mode: '' },
+            ],
+        }],
+    });
+    check('an expired certificate says expired, not a negative number', () => {
+        const row = certificates.document.querySelector('[data-monitor="gone"]');
+        assert(/expired/i.test(row.textContent), row.textContent);
+        assert(!/-25/.test(row.textContent),
+               `it printed the raw day count: "${row.textContent}"`);
+    });
+    check('the band comes from the server, not from the day count', () => {
+        const chip = certificates.document
+            .querySelector('[data-monitor="soon"] .expiry-chip');
+        assert(chip.classList.contains('critical'),
+               `chip classes were "${chip.className}"`);
+    });
+    check('a certificate nobody measured a verdict for carries no verdict', () => {
+        const row = certificates.document.querySelector('[data-monitor="fine"]');
+        assert(!/not verified/i.test(row.textContent), row.textContent);
+    });
+    check('a handshake that really failed does say so', () => {
+        const row = certificates.document.querySelector('[data-monitor="soon"]');
+        assert(/not verified/i.test(row.textContent), row.textContent);
+    });
+    check('the thresholds the bands came from are printed under them', () => {
+        const text = certificates.document
+            .querySelector('.chart-container').textContent;
+        assert(/below 30 days/.test(text) && /below 7/.test(text),
+               `the footnote read "${text}"`);
+    });
+
+    // A list that is missing whichever region did not answer must not read
+    // as the whole estate. The certificate expiring tomorrow may be exactly
+    // the one that is absent.
+    const shortList = await loadWith({
+        panels: [{
+            id: 'c1', title: 'Certificates', type: 'monitor_certificates',
+            width: 6, warning_days: 30, critical_days: 7,
+            partial: true, warnings: ['region-b: connection refused'],
+            rows: [
+                { id: 'fine', name: 'TLS endpoint (valid)',
+                  common_name: 'healthy.lab.local', location: 'lab:8444',
+                  days_remaining: 328, expired: false, state: 'ok',
+                  verified: null, tls_mode: '' },
+            ],
+        }],
+    });
+    check('a certificate list that came back short says which source is missing', () => {
+        const text = shortList.document
+            .querySelector('.chart-container').textContent;
+        assert(/region-b/.test(text), `the card said "${text}"`);
+        assert(/may be missing/.test(text), `the card said "${text}"`);
+    });
+
+    const noneAnswered = await loadWith({
+        panels: [{ id: 'c1', title: 'Certificates',
+                   type: 'monitor_certificates', width: 6, rows: [],
+                   partial: true,
+                   warnings: ['region-b: connection refused'] }],
+    });
+    check('no source answering is not "none of these checks use TLS"', () => {
+        const text = noneAnswered.document
+            .querySelector('.panel-empty small').textContent;
+        assert(/region-b/.test(text), `message was "${text}"`);
+        assert(!/used TLS/.test(text),
+               `it made a claim about the endpoints: "${text}"`);
+    });
+
+    const noTls = await loadWith({
+        panels: [{ id: 'c1', title: 'Certificates',
+                   type: 'monitor_certificates', width: 6, rows: [] }],
+    });
+    check('no certificate in the window is not an empty card', () => {
+        const text = noTls.document.querySelector('.panel-empty small').textContent;
+        assert(/None of the checks in this window used TLS/.test(text),
+               `message was "${text}"`);
+    });
+
+    const denied = await loadWith({
+        panels: [{ ...MONITOR, error: 'Monitors need the monitors:read permission.' }],
+    });
+    check('a panel refused for want of a permission says which', () => {
+        const text = denied.document.querySelector('.panel-empty small').textContent;
+        assert(/monitors:read/.test(text), `message was "${text}"`);
+    });
+
+    // The board that is half answerable: the log source is down, the monitor
+    // source is not. The panels draw, and the four tiles above them are the
+    // LOG source's — nobody counted them. Printed as zeros they read "0
+    // records, 0 errors, 0.00%" over a healthy green grid, which is the
+    // quiet night this whole panel exists to disprove.
+    //
+    // The body says so by OMITTING the counts — there is no flag to read, and
+    // `updateStats` prints an em dash for a count that is not there. The
+    // check above ('a count that did not run is an em dash, not zero') pins
+    // that rule over a board of log panels; this one pins it in the case that
+    // made it urgent, with something healthy drawn underneath.
+    const halfDead = await loadWith({
+        error: 'Unable to connect to elasticsearch. Please check the connection.',
+        error_type: 'elasticsearch_connection',
+        previous_period: null, status: null,
+        panels: [{
+            ...MONITOR, view: 'status', counts: { up: 1, down: 0, unknown: 0 },
+            rows: [{ id: 'up-1', name: 'Checkout', status: 'up',
+                     duration_ms: 1.6, checked_at: '2026-09-12T11:25:42Z',
+                     error: '', location: 'lab:8080' }],
+        }],
+    });
+    check('counts nobody could make are not printed as zero', () => {
+        const tiles = ['totalHits', 'errorCount', 'warnCount', 'infoCount']
+            .map(id => halfDead.document.getElementById(id).textContent);
+        assert(tiles.every(text => text === '—'),
+               `the tiles read ${JSON.stringify(tiles)}`);
+        assert(halfDead.document.getElementById('errorRate').textContent === '—',
+               'the error rate was reported as 0.00%');
+    });
+    check('and the monitor grid is still drawn beside them', () => {
+        assert(halfDead.document.querySelector('[data-monitor="up-1"]'),
+               'the panel that survives the outage was not drawn');
+        const box = halfDead.document.getElementById('dashboardMessage');
+        assert(/Unable to connect/.test(box.textContent),
+               `the reason was not said: "${box.textContent}"`);
+    });
+
+    // Real counts still print. A tile that says "-" whatever the answer is
+    // would pass the check above and tell nobody anything.
+    const counted = await loadWith({
+        total_hits: 1234, error_count: 12, warn_count: 3, info_count: 1219,
+        error_rate: 0.0097, panels: [],
+    });
+    check('a board that was counted still prints its counts', () => {
+        assert(counted.document.getElementById('totalHits').textContent === '1,234',
+               counted.document.getElementById('totalHits').textContent);
+        assert(counted.document.getElementById('errorRate').textContent === '0.97%',
+               counted.document.getElementById('errorRate').textContent);
+    });
+
+    // One rule, two copies: the link a cell opens is built in JavaScript and
+    // the route's converter is Python. MonitorLinkTest holds the same ids to
+    // the same strings on the Python side.
+    const LINKS = {
+        '.': '~.',
+        '..': '~..',
+        '~': '~7E',
+        'a~b': 'a~7Eb',
+        'a/b': 'a%2Fb',
+        "o'brien": 'o%27brien',
+        'a(b)c': 'a%28b%29c',
+        'a*b': 'a%2Ab',
+        '!x': '%21x',
+        'héllo': 'h%C3%A9llo',
+        'plain-id_1.2': 'plain-id_1.2',
+    };
+    check('a monitor link is the same one segment the route builds', () => {
+        const built = {};
+        Object.keys(LINKS).forEach(id => {
+            built[id] = grid.monitorUrl(id).replace('/monitors/', '');
+        });
+        assert(JSON.stringify(built) === JSON.stringify(LINKS),
+               `the link builder produced ${JSON.stringify(built)}`);
+    });
 
     console.log('');
     if (failures.length) {
