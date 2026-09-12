@@ -505,7 +505,18 @@ class AsyncDashboard {
         // answer is that nothing happened. Only say so when there is genuinely
         // nothing to plot.
         if (!buckets.length || total === 0) {
-            this.panelMessage(panel.id, 'No data in this window');
+            // And only when nothing on this panel says otherwise. 'No data in
+            // this window' is a claim about the DATA; a panel whose question
+            // could not be asked at all — a Loki terms over a field that is
+            // not a label, an Elasticsearch group-by on a field that index
+            // maps as text — has no such answer, and printing one here while
+            // the reason sat in the page-level alert is this project's own
+            // forbidden failure. The reason arrives per panel now, so prefer
+            // it to the literal.
+            const reasons = (panel.warnings || []).filter(Boolean);
+            this.panelMessage(panel.id,
+                              reasons.length ? reasons.join('; ')
+                                             : 'No data in this window');
             if (this.charts[panel.id]) {
                 this.charts[panel.id].destroy();
                 delete this.charts[panel.id];
@@ -639,11 +650,20 @@ class AsyncDashboard {
             if (el) el.textContent = value;
         };
 
-        set('totalHits', (data.total_hits || 0).toLocaleString());
-        set('errorCount', (data.error_count || 0).toLocaleString());
-        set('warnCount', (data.warn_count || 0).toLocaleString());
-        set('infoCount', (data.info_count || 0).toLocaleString());
-        set('errorRate', `${((data.error_rate || 0) * 100).toFixed(2)}%`);
+        // A count the server did not send is one that did not run — the log
+        // source was unreachable, and the response carries the panels that
+        // could still be answered plus the reason. Printing 0 there is the
+        // same failure-as-emptiness the panels were just stopped from
+        // telling, and 0 is the loudest possible version of it: "no errors".
+        // A count of zero still arrives AS zero and still reads as zero.
+        const known = (value, format) =>
+            (value === undefined || value === null) ? '—' : format(value);
+
+        set('totalHits', known(data.total_hits, v => v.toLocaleString()));
+        set('errorCount', known(data.error_count, v => v.toLocaleString()));
+        set('warnCount', known(data.warn_count, v => v.toLocaleString()));
+        set('infoCount', known(data.info_count, v => v.toLocaleString()));
+        set('errorRate', known(data.error_rate, v => `${(v * 100).toFixed(2)}%`));
 
         this.renderDeltas(data.previous_period);
         this.renderStatus(data.status);

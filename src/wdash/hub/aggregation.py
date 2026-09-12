@@ -61,12 +61,35 @@ class AggregationResult:
     #: Conflating the two lets a backend outage render as "traffic dropped to
     #: zero" — a comparison against it would be a confident lie.
     failed: bool = False
+    #: The subset of `warnings` that belongs to ONE aggregation, filed under
+    #: its name: {name: [reason, ...]}.
+    #:
+    #: A dashboard names every aggregation after the panel that asked for it,
+    #: so this is what lets a panel draw its own reason instead of "No data in
+    #: this window". Matching the text was tried and cannot work: Loki
+    #: prefixes two of its reasons with the aggregation name and nothing else
+    #: does, Elasticsearch's commonest one ("'x' cannot be aggregated on these
+    #: indices") names only the field, so two panels over the same field are
+    #: indistinguishable, and a fan-out puts the SOURCE name in front of
+    #: everything ("lab-loki: panel-3: …"), which defeats a prefix test
+    #: outright. A key survives all three.
+    #:
+    #: `warnings` still carries every reason, attributed or not: the page-level
+    #: list is where a shard failure and a scope message belong, and those name
+    #: no aggregation.
+    notes: dict = field(default_factory=dict)
 
     def get(self, name):
         return self.buckets.get(name, [])
+
+    def reasons(self, name):
+        """Why this aggregation has nothing to show, as a tuple of strings."""
+        return tuple(str(reason) for reason in self.notes.get(name, ())
+                     if reason)
 
     def to_dict(self):
         return {"total": self.total,
                 "buckets": {k: [b.to_dict() for b in v] for k, v in self.buckets.items()},
                 "warnings": list(self.warnings),
+                "notes": {k: list(v) for k, v in self.notes.items()},
                 "failed": self.failed}

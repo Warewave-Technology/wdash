@@ -75,6 +75,21 @@ def signals(panels):
     return {PANEL_TYPES[panel["type"]]["signal"] for panel in panels}
 
 
+def needs_logs(panel):
+    """Does this panel's question go to the log source?
+
+    One route fills every panel, and it resolved the LOG source's containers
+    before filling any of them — so a log backend that was down, or a scope
+    that reached none of the dashboard's containers, took down panels that
+    never ask it anything. A panel whose signal is not "logs" is answerable
+    from the window and the caller's scope alone.
+
+    A predicate rather than a list of type names, so the next panel type
+    answers this by filling in its `signal` row above and nothing else.
+    """
+    return PANEL_TYPES[panel["type"]]["signal"] == "logs"
+
+
 def default_panels():
     """The panels a dashboard gets when it does not specify any.
 

@@ -619,16 +619,16 @@ class ElasticsearchLogSource(LogSource):
         if not targets:
             return AggregationResult(warnings=("the scope permits no containers",))
 
-        warnings = []
+        warnings, notes = [], {}
         body = {"size": 0, "query": self._build_query(query),
                 "aggs": {}, "track_total_hits": True}
         for agg in aggregations:
-            translated = self._translate_agg(agg, targets, query, warnings)
+            translated = self._translate_agg(agg, targets, query, warnings, notes)
             if translated is not None:
                 body["aggs"][agg.name] = translated
 
         if not body["aggs"]:
-            return AggregationResult(warnings=tuple(warnings))
+            return AggregationResult(warnings=tuple(warnings), notes=notes)
 
         try:
             response = _search(self._es, targets, body,
@@ -637,7 +637,7 @@ class ElasticsearchLogSource(LogSource):
             # An empty panel and "the query could not run" are different things.
             # Carrying the reason and returning empty beats a 500.
             return AggregationResult(warnings=tuple(warnings) + (str(exc)[:200],),
-                                     failed=True)
+                                     notes=notes, failed=True)
 
         raw = response.get("aggregations") or {}
         try:
@@ -647,10 +647,11 @@ class ElasticsearchLogSource(LogSource):
                 buckets={agg.name: self._read_buckets(raw.get(agg.name), agg)
                          for agg in aggregations if agg.name in raw},
                 warnings=tuple(warnings) + ((shards,) if shards else ()),
+                notes=notes,
             )
         except MalformedResponse as exc:
             return AggregationResult(warnings=tuple(warnings) + (str(exc),),
-                                     failed=True)
+                                     notes=notes, failed=True)
 
     def multi_aggregate(self, requests, scope):
         targets = None
@@ -664,28 +665,32 @@ class ElasticsearchLogSource(LogSource):
                     return [AggregationResult(warnings=(str(exc),), failed=True)
                             for _ in requests]
             if not targets:
-                metadata.append((aggregations, ["the scope permits no containers"]))
+                metadata.append((aggregations,
+                                 ["the scope permits no containers"], {}))
                 continue
 
-            warnings = []
+            warnings, notes = [], {}
             aggs = {}
             for agg in aggregations:
-                translated = self._translate_agg(agg, targets, query, warnings)
+                translated = self._translate_agg(agg, targets, query, warnings,
+                                                 notes)
                 if translated is not None:
                     aggs[agg.name] = translated
-            metadata.append((aggregations, warnings))
+            metadata.append((aggregations, warnings, notes))
             bodies.append((targets, {"size": 0, "query": self._build_query(query),
                                      "aggs": aggs, "track_total_hits": True}))
 
         if not bodies:
-            return [AggregationResult(warnings=tuple(w)) for _, w in metadata]
+            return [AggregationResult(warnings=tuple(w), notes=n)
+                    for _, w, n in metadata]
 
         responses = _multi_search(self._es, bodies, timeout="30s")
         out = []
-        for (aggregations, warnings), response in zip(metadata, responses):
+        for (aggregations, warnings, notes), response in zip(metadata, responses):
             if response is None:
                 out.append(AggregationResult(
-                    warnings=tuple(warnings) + ("query failed",), failed=True))
+                    warnings=tuple(warnings) + ("query failed",),
+                    notes=notes, failed=True))
                 continue
             raw = response.get("aggregations") or {}
             try:
@@ -694,13 +699,35 @@ class ElasticsearchLogSource(LogSource):
                     total=_count(response["hits"]["total"], "the total"),
                     buckets={agg.name: self._read_buckets(raw.get(agg.name), agg)
                              for agg in aggregations if agg.name in raw},
-                    warnings=tuple(warnings) + ((shards,) if shards else ())))
+                    warnings=tuple(warnings) + ((shards,) if shards else ()),
+                    notes=notes))
             except MalformedResponse as exc:
                 out.append(AggregationResult(
-                    warnings=tuple(warnings) + (str(exc),), failed=True))
+                    warnings=tuple(warnings) + (str(exc),),
+                    notes=notes, failed=True))
         return out
 
-    def _translate_agg(self, agg, targets, query, warnings):
+    def _translate_agg(self, agg, targets, query, warnings, notes=None,
+                       owner=None):
+        """Neutral aggregation -> Elasticsearch aggregation node, or None.
+
+        A refusal goes into `warnings` for the page AND, when `notes` is given,
+        under the name of the aggregation it belongs to so the panel that asked
+        can draw it. The text names the field, never the aggregation — two
+        panels grouping by the same unmapped field produce the same sentence
+        twice — which is why the attribution is a key and not a prefix.
+
+        `owner` carries that key down the sub-aggregation recursion: a split
+        that cannot be translated is the reason the PANEL's series is not
+        split, and the panel is what is on screen.
+        """
+        owner = agg.name if owner is None else owner
+
+        def refuse(reason):
+            warnings.append(reason)
+            if notes is not None:
+                notes.setdefault(owner, []).append(reason)
+
         if isinstance(agg, DateHistogram):
             histogram = {
                 "field": "@timestamp",
@@ -724,22 +751,22 @@ class ElasticsearchLogSource(LogSource):
             # on failure — two round trips and a guess.
             path = self._resolve_agg_field(targets, agg.field)
             if path is None:
-                warnings.append(
-                    f"'{agg.field}' cannot be aggregated on these indices "
-                    "(it may not be mapped as keyword)")
+                refuse(f"'{agg.field}' cannot be aggregated on these indices "
+                       "(it may not be mapped as keyword)")
                 return None
             terms = {"field": path, "size": agg.size, "order": {"_count": "desc"}}
             if agg.missing is not None:
                 terms["missing"] = agg.missing
             node = {"terms": terms}
         else:
-            warnings.append(f"unknown aggregation type: {type(agg).__name__}")
+            refuse(f"unknown aggregation type: {type(agg).__name__}")
             return None
 
         if agg.sub:
             node["aggs"] = {}
             for child in agg.sub:
-                translated = self._translate_agg(child, targets, query, warnings)
+                translated = self._translate_agg(child, targets, query, warnings,
+                                                 notes, owner)
                 if translated is not None:
                     node["aggs"][child.name] = translated
             if not node["aggs"]:

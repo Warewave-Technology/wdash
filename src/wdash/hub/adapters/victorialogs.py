@@ -646,6 +646,7 @@ class VictoriaLogsSource(LogSource):
             # an inner wildcard or NOT * answered with Flask's HTML 500.
             return AggregationResult(failed=True, warnings=(str(exc),))
         buckets, warnings, total = {}, [], 0
+        notes = {}
         failed = False
 
         for aggregation in aggregations or ():
@@ -658,15 +659,22 @@ class VictoriaLogsSource(LogSource):
                     buckets[aggregation.name] = rows
                     total = max(total, sum(row.count for row in rows))
                 else:
-                    warnings.append(
-                        f"{type(aggregation).__name__} is not supported by "
-                        f"VictoriaLogs")
+                    reason = (f"{type(aggregation).__name__} is not supported "
+                              f"by VictoriaLogs")
+                    warnings.append(reason)
+                    # And under the name of the aggregation as well, so the
+                    # panel that asked draws the reason rather than "No data
+                    # in this window". The page keeps its copy: a reader
+                    # looking at the alert above the grid needs it too.
+                    notes.setdefault(aggregation.name, []).append(reason)
             except Exception as exc:
                 failed = True
                 warnings.append(f"{aggregation.name}: {exc}")
+                notes.setdefault(aggregation.name, []).append(
+                    f"this panel could not be counted: {exc}")
 
         return AggregationResult(buckets=buckets, total=total, failed=failed,
-                                 warnings=tuple(warnings))
+                                 warnings=tuple(warnings), notes=notes)
 
     def histogram(self, query, scope):
         """Volume over time, as the hub asks for it.

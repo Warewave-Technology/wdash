@@ -497,7 +497,20 @@ class LokiLogSource(LogSource):
                 else ("no streams reported any data in this time range",)))
 
         buckets, warnings, total = {}, [], 0
+        notes = {}
         failed = False
+
+        def attribute(aggregation, reason):
+            """File a reason under the aggregation — the panel — it is about.
+
+            The page keeps its own copy in `warnings`, spelled as it always
+            was; this one is what the panel draws where its chart would be, so
+            it carries no name prefix. Both, because a reader looking at the
+            alert above the grid and a reader looking at one card need the
+            same fact in two places.
+            """
+            notes.setdefault(aggregation.name, []).append(reason)
+
         for aggregation in aggregations:
             try:
                 if isinstance(aggregation, DateHistogram):
@@ -507,24 +520,30 @@ class LokiLogSource(LogSource):
                         # Counted whole: the split is not done here, and a
                         # series drawn unsplit under a split legend is a
                         # breakdown nobody asked Loki for.
-                        warnings.append(
-                            f"{aggregation.name}: Loki does not split this "
-                            f"series; it is the total")
+                        reason = ("Loki does not split this series; it is "
+                                  "the total")
+                        warnings.append(f"{aggregation.name}: {reason}")
+                        attribute(aggregation, reason)
                 elif isinstance(aggregation, Terms):
                     rows, note = self._terms_buckets(query, targets, aggregation)
                     buckets[aggregation.name] = rows
                     if note:
-                        warnings.append(note)
+                        warnings.append(f"{aggregation.name}: {note}")
+                        attribute(aggregation, note)
                     total = max(total, sum(row.count for row in rows))
                 else:
-                    warnings.append(
-                        f"{type(aggregation).__name__} is not supported by Loki")
+                    reason = (f"{type(aggregation).__name__} is not supported "
+                              f"by Loki")
+                    warnings.append(reason)
+                    attribute(aggregation, reason)
             except Exception as exc:
                 failed = True
                 warnings.append(f"{aggregation.name} failed: {exc}")
+                attribute(aggregation, f"this panel could not be counted: {exc}")
 
         return AggregationResult(total=total, buckets=buckets,
-                                 warnings=tuple(warnings), failed=failed)
+                                 warnings=tuple(warnings), notes=notes,
+                                 failed=failed)
 
     def _instant(self, expression, query):
         body = self._get("/loki/api/v1/query", {
@@ -586,9 +605,12 @@ class LokiLogSource(LogSource):
             counts[key] = counts.get(key, 0) + int(float(value[1]))
 
         if unlabelled and not counts:
-            return [], (f"{aggregation.name}: '{aggregation.field}' is not a "
-                        f"Loki label on these streams and cannot be counted "
-                        f"by value")
+            # Unprefixed: the caller puts the aggregation's name in front of
+            # it for the page's warning list and files the bare sentence under
+            # that name for the panel, which does not need to be told which
+            # panel it is.
+            return [], (f"'{aggregation.field}' is not a Loki label on these "
+                        f"streams and cannot be counted by value")
 
         rows = [Bucket(key=key, count=count) for key, count in counts.items()]
         rows.sort(key=lambda bucket: bucket.count, reverse=True)

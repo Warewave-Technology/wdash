@@ -287,6 +287,64 @@ async function main() {
         assert(/No accessible indices/.test(text), `the page said "${text}"`);
     });
 
+    // A panel that could not be ANSWERED, as opposed to one that was answered
+    // with nothing. 'No data in this window' is a claim about the data; a
+    // Loki terms over a field that is not a label, or an Elasticsearch
+    // group-by on a field that index maps as text, has no such answer. The
+    // reason used to sit only in the page-level alert, which names the source
+    // and not the panel, while the card in the middle of the screen said the
+    // window was quiet.
+    const unanswerable = await loadWith({
+        total_hits: 0,
+        warnings: ["'host' is not a Loki label on these streams"],
+        panels: [{ ...PANEL, buckets: [], partial: true,
+                   warnings: ["'host' is not a Loki label on these streams"] }],
+    });
+    check('an unanswerable panel prints its reason, not the empty literal', () => {
+        const text = unanswerable.document
+            .querySelector('.panel-empty small').textContent;
+        assert(/not a Loki label/.test(text), `the card said "${text}"`);
+        assert(!/No data in this window/.test(text), `the card said "${text}"`);
+    });
+    check('an unanswerable panel stops spinning', () =>
+        assert(spinning(unanswerable) === 0,
+               `${spinning(unanswerable)} spinner(s) left`));
+
+    // And the case that must NOT change: a window that really is quiet still
+    // says so, because a panel with no reason has nothing better to print.
+    const quiet = await loadWith({
+        total_hits: 0,
+        panels: [{ ...PANEL, buckets: [] }],
+    });
+    check('a genuinely quiet window still says no data', () => {
+        const text = quiet.document.querySelector('.panel-empty small').textContent;
+        assert(/No data in this window/.test(text), `the card said "${text}"`);
+    });
+
+    // A count the server did not send is a count that did not run. Zero is
+    // the loudest possible version of that lie: "no errors".
+    const outage = await loadWith({
+        error: 'Unable to connect to lab-es. Please check the connection.',
+        error_type: 'elasticsearch_connection',
+        panels: [{ ...PANEL, buckets: [],
+                   error: 'Unable to connect to lab-es.' }],
+    });
+    check('a count that did not run is an em dash, not zero', () => {
+        const cards = ['totalHits', 'errorCount', 'warnCount', 'infoCount'];
+        cards.forEach(id => {
+            const text = outage.document.getElementById(id).textContent;
+            assert(text === '—', `${id} read "${text}"`);
+        });
+        const rate = outage.document.getElementById('errorRate').textContent;
+        assert(rate === '—', `errorRate read "${rate}"`);
+    });
+    check('a count of zero still reads as zero', () => {
+        // `empty` above was loaded with total_hits: 0 explicitly — a window
+        // that really held nothing. Zero is the answer there and must survive.
+        const real = empty.document.getElementById('totalHits').textContent;
+        assert(real === '0', `totalHits read "${real}" for a real zero`);
+    });
+
     // A partial answer: panels drawn, with a note about what could not be
     // counted. The note reached the browser and stopped there.
     const noted = await loadWith({

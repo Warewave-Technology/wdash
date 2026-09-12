@@ -34,8 +34,9 @@ from ..dashboard.thresholds import (
 )
 from ..dashboard.visibility import VISIBILITIES, can_view, explain
 from ..dashboard.panels import (
-    AGGREGATABLE_FIELDS, PanelError, normalise_all,
+    AGGREGATABLE_FIELDS, PanelError, needs_logs, normalise_all,
 )
+from ..hub.aggregation import AggregationResult
 
 dashboard_bp = Blueprint("dashboards", __name__)
 
@@ -296,6 +297,69 @@ def _trace_panels(panels, window, scope):
     return out
 
 
+def _without_log_containers(dashboard, scope, time_range, failure, status):
+    """Answer the panels the log source is not needed for, and say why the
+    rest are empty. Returns (payload, status) for jsonify.
+
+    The log source decided the whole page. `_targets` resolves ITS containers
+    before a single panel is filled, so three things that have nothing to do
+    with a trace panel took it down with them: the log backend unreachable
+    (503, and the client's `showLoadError` then wipes the grid), the dashboard
+    naming a source that is gone (400), and a scope that reaches none of the
+    dashboard's containers (200 with `panels: []`, an empty grid under one
+    sentence). A trace panel needs the window and the caller's scope and
+    nothing else — `_trace_panels` has had that shape since traces arrived —
+    and the monitor, certificate and alert panels coming after it are the same
+    shape again. An operator opens a board in an Elasticsearch outage
+    precisely to tell a dead shipper from a quiet night.
+
+    So: fill what can be filled, and give every panel that cannot a reason of
+    its own instead of an empty card.
+
+    The status code is only lowered to 200 when something CAN be answered. A
+    board of log panels alone has nothing to show, and saying so in the status
+    line — which is what the client's error path reads — beats a 200 carrying
+    an empty grid. The counts are left OUT of the payload rather than sent as
+    zeros: `total_hits: 0` under a dead backend is the same lie the panels
+    were just stopped from telling, and the client prints an em dash for a
+    number that did not run.
+    """
+    try:
+        panels = dashboard.get_panels()
+    except PanelError:
+        # The panel list itself is unreadable; there is nothing to fill and
+        # the failure in hand is still the true one.
+        return failure, status
+
+    if status != 200 and all(needs_logs(panel) for panel in panels):
+        return failure, status
+
+    try:
+        window = TimeWindow.of(time_range)
+    except Exception:
+        return failure, status
+
+    reason = failure.get("error") or "The log source could not be reached."
+    standalone = [panel for panel in panels if not needs_logs(panel)]
+    filled = _trace_panels(standalone, window, scope)
+    for panel in panels:
+        if needs_logs(panel):
+            filled[panel["id"]] = {"buckets": [], "error": reason}
+
+    payload = dict(failure)
+    payload.update({
+        "panels": _panel_results(panels, AggregationResult(), filled),
+        "previous_period": None,
+        # Not `evaluate_thresholds` over zeros: "within thresholds" is a claim
+        # about numbers, and there are none.
+        "status": None,
+        "thresholds": dashboard.thresholds,
+        "level_queries": _level_queries(),
+        "time_range": time_range,
+    })
+    return payload, 200
+
+
 def _panel_aggregations(panels, window):
     """Translate the panel list into neutral aggregations.
 
@@ -322,7 +386,23 @@ def _panel_aggregations(panels, window):
 
 
 def _panel_results(panels, result, extra=None):
-    """Attach each panel's data to its definition for the wire."""
+    """Attach each panel's data to its definition for the wire.
+
+    And the reason it has none, when the source gave one. A panel that could
+    not be answered drew "No data in this window" — a literal in the client —
+    while the reason sat in the page-level alert, which names the source and
+    not the panel. Measured on the lab: an Elasticsearch panel grouping by a
+    field that index maps as text is dropped from the aggregation entirely, so
+    `result.get(panel_id)` is [] and the only "'severity' cannot be aggregated
+    on these indices" on screen was one line among the page's warnings, with
+    nothing saying WHICH of two panels over that field it was about.
+
+    `notes` is keyed by aggregation name, and `_panel_aggregations` names
+    every aggregation after its panel, so this is a lookup. Matching the
+    warning TEXT was the cheaper-looking option and does not work: only Loki
+    prefixes the aggregation name, and a fan-out puts the source name in
+    front of everything.
+    """
     extra = extra or {}
     out = []
     for panel in panels:
@@ -331,6 +411,14 @@ def _panel_results(panels, result, extra=None):
             rendered.update(extra[panel["id"]])
         else:
             rendered["buckets"] = _buckets(result.get(panel["id"]))
+            reasons = list(result.reasons(panel["id"]))
+            if reasons:
+                # The same pair the trace panels use, so the client learns one
+                # shape: `partial` puts the reason in the card header when
+                # there are numbers beside it, and `renderPanel` prefers it to
+                # the empty-window literal when there are none.
+                rendered["partial"] = True
+                rendered["warnings"] = reasons
         out.append(rendered)
     return out
 
@@ -945,27 +1033,38 @@ def api_dashboard_data(dashboard_id):
                         "dashboard_id": dashboard_id}), 404
 
     scope = _scope()
+    # Read before the log source is resolved, because the panels that do not
+    # need it are answerable whatever it says.
+    time_range = request.args.get("time_range", "1h")
     try:
         _, resolved, allowed = _targets(dashboard, scope)
     except SourceMissing as exc:
-        return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
+        payload, status = _without_log_containers(
+            dashboard, scope, time_range,
+            {"error": str(exc), "error_type": "source_missing"}, 400)
+        return jsonify(payload), status
     except Exception as exc:
-        return jsonify(_unreachable(dashboard, exc)), 503
+        payload, status = _without_log_containers(
+            dashboard, scope, time_range, _unreachable(dashboard, exc), 503)
+        return jsonify(payload), status
 
     if not allowed:
-        # Returning empty data beats an error: the dashboard opens with a blank panel
-        return jsonify({"error": "No accessible indices for dashboard data.",
-                        "error_type": "no_accessible_containers",
-                        "dashboard_patterns": dashboard.index_patterns,
-                        "resolved_containers": _shown(resolved, allowed),
-                        "total_resolved": len(resolved),
-                        "total_hits": 0, "panels": [],
-                        "queried_containers": []}), 200
+        # Returning empty data beats an error: the dashboard opens, every
+        # panel that needs a container it may not read saying so in its own
+        # card. The counts really are zero here — no container was queried —
+        # which is not the same statement as a backend that did not answer.
+        payload, status = _without_log_containers(
+            dashboard, scope, time_range,
+            {"error": "No accessible indices for dashboard data.",
+             "error_type": "no_accessible_containers",
+             "dashboard_patterns": dashboard.index_patterns,
+             "resolved_containers": _shown(resolved, allowed),
+             "total_resolved": len(resolved),
+             "total_hits": 0, "error_count": 0, "warn_count": 0,
+             "info_count": 0, "error_rate": 0.0,
+             "queried_containers": []}, 200)
+        return jsonify(payload), status
 
-    # Every panel from a SINGLE Elasticsearch request. This used to mean
-    # separate queries plus a second round of "retry with service if
-    # service.keyword fails".
-    time_range = request.args.get("time_range", "1h")
     # An ad-hoc filter carried in the URL. Together with time_range this makes
     # a dashboard link reproduce what the sender was actually looking at —
     # "the dashboard" and "the dashboard, this window, this filter" are
@@ -988,7 +1087,8 @@ def api_dashboard_data(dashboard_id):
 
     # Every panel plus the summary counts in ONE request. Adding a panel costs
     # an aggregation, not a round trip — which is what makes an arbitrary panel
-    # list affordable at all.
+    # list affordable at all. It used to mean separate queries per panel plus a
+    # second round of "retry with service if service.keyword fails".
     aggregations = _panel_aggregations(panels, query.window)
     # The stat cards are not a panel: they are the summary every dashboard
     # carries, so their aggregation is always present regardless of the list.

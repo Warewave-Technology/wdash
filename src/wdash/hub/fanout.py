@@ -363,7 +363,7 @@ class FanOutLogSource(LogSource):
         results = self._parallel(
             lambda source: source.aggregate(query, aggregations, scope))
 
-        merged, warnings = {}, []
+        merged, warnings, notes = {}, [], {}
         total, failed = 0, False
 
         for source, result, error in results:
@@ -375,6 +375,17 @@ class FanOutLogSource(LogSource):
                 failed = True
             warnings.extend(f"{source.name}: {warning}"
                             for warning in result.warnings or ())
+            # A reason stays attached to the aggregation it is about, and
+            # gains the name of the source that gave it. The page-level list
+            # above puts that name in FRONT of a text that may already start
+            # with the aggregation's own name ("lab-loki: panel-3: …"), which
+            # is why matching a panel by prefix cannot work and this carries a
+            # key instead. Here the name earns its place: one member of a
+            # fan-out refusing a panel the other answered is the whole point
+            # of saying which.
+            for name, reasons in (getattr(result, "notes", None) or {}).items():
+                notes.setdefault(name, []).extend(
+                    f"{source.name}: {reason}" for reason in reasons)
             total += result.total
 
             for name, buckets in (result.buckets or {}).items():
@@ -387,6 +398,7 @@ class FanOutLogSource(LogSource):
             buckets={name: _ordered(buckets)
                      for name, buckets in merged.items()},
             warnings=tuple(warnings),
+            notes=notes,
             failed=failed)
 
     def histogram(self, query, scope):
