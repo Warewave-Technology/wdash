@@ -274,6 +274,193 @@ class RefusedRangeTest(_Board):
         payload = self.data(start="2026-09-08T14:00:00Z").get_json()
         self.assertEqual(payload["error_type"], "invalid_time_range")
 
+    def test_a_range_NAME_that_cannot_be_read_is_refused_too(self):
+        """The half of the refusal that was missing, and the one this
+        package's own UI started emitting.
+
+        `TimeWindow.of` falls back to the default hour for anything
+        `parse_range` cannot read, so `?time_range=custom` — which the picker
+        writes into the address bar whenever the two boxes are not yet
+        filled — was answered 200 with the last hour's numbers and the word
+        "custom" echoed back. A shared link built that way opens on an hour
+        nobody chose, under a control reading "Between two times", with no
+        warning of any kind. Measured against the lab: `?time_range=custom`
+        returned total_hits 0 for a board whose 24h window held 4,311.
+        """
+        response = self.data(time_range="custom")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error_type"], "invalid_time_range")
+        self.assertIn("custom", response.get_json()["error"])
+        self.assertEqual(self.es.requests, [], "it asked for an hour anyway")
+
+    def test_a_range_name_nobody_sent_is_still_the_default_hour(self):
+        """The other half: no `time_range` at all is not a refusal."""
+        response = self.data()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["time_range"], "1h")
+
+
+class PanelEndpointWindowTest(_Board):
+    """The five per-panel endpoints, given the window the board is on.
+
+    They took `start` and `end` and IGNORED them, answering the default hour
+    under the caller's own absolute range. That is this project's named
+    failure rather than a missing feature: measured on the lab over a window
+    holding 26 errors, `/data` answered 26 while `/stats` answered 0 and
+    `/log-levels` and `/services` answered empty lists — a quiet hour, told in
+    the one shape a reader cannot tell from a real one. `heatmap` was worse
+    again: its buckets came back stamped today.
+
+    They agree with `/data` now because they build the window the same way it
+    does, before the aggregations rather than after — which is also what lets
+    the two histogram endpoints bucket the window they actually queried
+    instead of one derived separately from a string that was never sent.
+    """
+
+    START = "2026-09-08T14:00:00Z"
+    END = "2026-09-08T15:00:00Z"
+    ENDPOINTS = ("stats", "log-levels", "services", "heatmap", "timeline")
+
+    def ask(self, suffix, **args):
+        query = "&".join(f"{key}={value}" for key, value in args.items())
+        return self.client.get(f"/api/dashboard/b1/{suffix}?{query}")
+
+    def test_each_of_them_asks_the_window_it_was_given(self):
+        """Read off the REQUEST, which is recorded before the answer is
+        computed: `ModelledES` does not model a date histogram, so the two
+        histogram endpoints answer `failed` here whatever window they ask
+        for. What is measured is the question, which is what was wrong."""
+        for suffix in self.ENDPOINTS:
+            with self.subTest(endpoint=suffix):
+                self.es.requests.clear()
+                self.ask(suffix, start=self.START, end=self.END)
+                self.assertTrue(self.es.requests, f"{suffix} asked nothing")
+                gte, lte = self.windows()[0]
+                self.assertTrue(gte.startswith("2026-09-08T14:00"),
+                                f"{suffix} asked from {gte}")
+                self.assertTrue(lte.startswith("2026-09-08T15:0"),
+                                f"{suffix} asked until {lte}")
+
+    def test_a_histogram_endpoint_buckets_the_window_it_queried(self):
+        """One window, one interval, both from the same place.
+
+        The trap in the middle of this fix: `timeline` and `heatmap` built a
+        window of their own from `time_range` purely to choose an interval.
+        Reading the bounds from the range and the interval from the string
+        would ask for seven days and draw them five minutes at a time — two
+        thousand buckets, which is not a chart.
+        """
+        units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+        end = datetime(2026, 9, 8, 15, tzinfo=timezone.utc)
+        start = end - timedelta(days=7)
+        for suffix, name in (("timeline", "timeline"),
+                             ("heatmap", "heatmap_data")):
+            with self.subTest(endpoint=suffix):
+                self.es.requests.clear()
+                self.ask(suffix,
+                         start=start.isoformat().replace("+00:00", "Z"),
+                         end=end.isoformat().replace("+00:00", "Z"))
+                body = self.es.requests[0]["body"]
+                asked = next(c["range"]["@timestamp"]
+                             for c in body["query"]["bool"]["must"] if "range" in c)
+                span = (_at(asked["lte"]) - _at(asked["gte"])).total_seconds()
+                self.assertGreater(span, 6 * 86400, f"{suffix} asked {span}s")
+                interval = body["aggs"][name]["date_histogram"]["fixed_interval"]
+                size = int(interval[:-1]) * units[interval[-1]]
+                self.assertGreaterEqual(span / size, 8, f"{span / size:.0f} buckets")
+                self.assertLessEqual(span / size, 200, f"{span / size:.0f} buckets")
+
+    def test_a_window_they_cannot_build_is_refused_by_name(self):
+        """Half a range is not the default hour here either."""
+        for suffix in self.ENDPOINTS:
+            with self.subTest(endpoint=suffix):
+                self.es.requests.clear()
+                response = self.ask(suffix, start=self.START)
+                self.assertEqual(response.status_code, 400, suffix)
+                self.assertEqual(response.get_json()["error_type"],
+                                 "invalid_time_range")
+                self.assertEqual(self.es.requests, [], f"{suffix} asked anyway")
+
+    def test_a_relative_range_still_reaches_them_unchanged(self):
+        for suffix in self.ENDPOINTS:
+            with self.subTest(endpoint=suffix):
+                self.es.requests.clear()
+                self.ask(suffix, time_range="24h")
+                gte, lte = self.windows()[0]
+                span = (_at(lte) - _at(gte)).total_seconds()
+                self.assertGreaterEqual(span, 24 * 3600)
+                self.assertLess(span, 25 * 3600)
+
+
+class RefreshCostTest(_Board):
+    """What one refresh costs, and whether the product says so truthfully.
+
+    The interval control exists to protect the backend behind the board, so
+    the sentence printed under it is the whole point of the control — and it
+    was printing numbers that do not reproduce. The shape is the part an
+    operator acts on: Elasticsearch answers a whole board in ONE request
+    (every panel rides one msearch), while the Loki and VictoriaLogs adapters
+    loop and issue a request per AGGREGATION — which is the panels, plus the
+    summary the stat cards need, plus the summary again over the baseline
+    window.
+
+    So the count is measurable rather than remembered, and this holds the
+    sentence to it.
+    """
+
+    PANELS = [{"id": f"p{index}", "type": "terms", "field": "service",
+               "title": f"Panel {index}", "width": 3}
+              for index in range(8)]
+
+    def aggregations(self):
+        """Every aggregation one refresh asks for, across both windows."""
+        return sum(len(request["body"].get("aggs") or {})
+                   for request in self.es.requests)
+
+    def test_a_whole_board_is_one_elasticsearch_request(self):
+        calls = []
+        real = self.es.msearch
+        self.es.msearch = lambda **kw: (calls.append(kw), real(**kw))[1]
+
+        self.data(time_range="24h")
+        self.assertEqual(len(calls), 1,
+                         f"eight panels took {len(calls)} round trips")
+
+    def test_the_other_two_are_asked_once_per_aggregation(self):
+        """Eight panels plus the summary plus its baseline, so ten."""
+        self.data(time_range="24h")
+        self.assertEqual(self.aggregations(), 10, "the arithmetic moved")
+
+    def test_the_sentence_beside_the_control_prints_what_was_measured(self):
+        """The numbers in the product, against the numbers this run produced.
+
+        The shipped sentence said "2 requests to Elasticsearch, 9 to Loki, 10
+        to VictoriaLogs". Counted at the transport against the lab — every
+        callable on the Elasticsearch client and a recording session for the
+        other two — one refresh of an eight-panel board at 24h is 1, 10 and
+        10. The Loki figure is the one the control exists for and it was the
+        one that understated.
+        """
+        import re
+
+        self.data(time_range="24h")
+        per_aggregation = self.aggregations()
+
+        with open(os.path.join(os.path.dirname(__file__), "..", "templates",
+                               "dashboard_view.html"), encoding="utf-8") as handle:
+            markup = handle.read()
+        sentence = re.search(r'id="refreshCost".*?</small>', markup, re.S)
+        self.assertIsNotNone(sentence, "the cost sentence is gone")
+        said = " ".join(sentence.group(0).split())
+
+        self.assertRegex(said, r"\b1 request to Elasticsearch\b",
+                         "Elasticsearch answers a whole board in one request")
+        for name in ("Loki", "VictoriaLogs"):
+            self.assertRegex(
+                said, rf"\b{per_aggregation} to {name}\b",
+                f"the sentence does not print the {per_aggregation} requests "
+                f"an eight-panel refresh makes on {name}")
+
 
 class PanelHeightTest(unittest.TestCase):
     """One clamped int beside width. No migration: the record is JSON."""
@@ -368,6 +555,57 @@ class CreateFormTest(_Board):
         self.assertEqual(panels[0]["field"], "host")
         self.assertEqual(panels[0]["height"], 450)
         self.assertEqual(made.thresholds["error_count"]["warning"], 5)
+
+    def test_a_refused_create_hands_back_the_board_its_author_built(self):
+        """What lifting the editor onto this form made possible to lose.
+
+        The editor was rendered from `default_panels()` BEFORE the POST was
+        read and re-rendered unchanged on the error path, marked as the
+        default set — so an author who built six panels and then mistyped the
+        query got the standard three back with nothing on the page saying so,
+        and the next press stored a board with no panels at all. Before D13
+        there was nothing to lose here; the create form had no panel editor.
+        """
+        built = [{"type": "terms", "field": "host", "title": "mine 1"},
+                 {"type": "terms", "field": "service", "title": "mine 2"}]
+        page = self.client.post("/dashboard/create", data={
+            "name": "Half made", "query": "level:(", "index_patterns": ["*"],
+            "panels": json.dumps(built)}).get_data(as_text=True)
+
+        self.assertIn("mine 1", page, "the author's panels were thrown away")
+        self.assertIn("mine 2", page)
+        self.assertNotIn("Volume by Severity", page,
+                         "the defaults were put back under the author's work")
+        # And the list that comes back is a CHOSEN one, so the next press
+        # stores it rather than posting an empty field.
+        self.assertIn("const DEFAULTED = false", page)
+
+    def test_a_refused_edit_hands_back_the_board_too(self):
+        """The same loss, on the form it was always possible on."""
+        change_dashboard(self.app, self.dashboard, panels=[
+            normalise({"type": "terms", "field": "host",
+                       "title": "as-it-was-stored"})])
+        built = [{"type": "terms", "field": "host", "title": "mine 1"}]
+        page = self.client.post("/dashboard/b1/edit", data={
+            "name": "Board", "query": "level:(", "index_patterns": ["*"],
+            "panels": json.dumps(built)}).get_data(as_text=True)
+
+        self.assertIn("mine 1", page)
+        self.assertNotIn("as-it-was-stored", page,
+                         "the stored panels were put back under the edit")
+
+    def test_a_panel_list_that_cannot_be_read_falls_back_rather_than_vanishing(self):
+        """A form whose hidden field arrived corrupt still has to render.
+
+        The fallback is the set the form was rendered from, which is the only
+        list there is — and it is marked as the default set only when it
+        really is one.
+        """
+        page = self.client.post("/dashboard/create", data={
+            "name": "Broken", "query": "*", "index_patterns": ["*"],
+            "panels": "{not json"}).get_data(as_text=True)
+        self.assertIn("Volume by Severity", page)
+        self.assertIn("const DEFAULTED = true", page)
 
 
 class DuplicateTest(_Board):
@@ -472,6 +710,36 @@ class DuplicateTest(_Board):
         response = self.duplicate()
         self.assertIn("Access denied", response.get_data(as_text=True))
         self.assertEqual(self.copies(), [])
+
+    def test_it_needs_the_permission_to_view_one_as_well(self):
+        """The half of `view_dashboard`'s gate that was missing.
+
+        The route's docstring said the source is read "behind exactly the gate
+        `view_dashboard` uses". It was not: `view_dashboard` asks for
+        `dashboard:view` and THEN `_may_view`, and this asked only the second.
+        Permissions are freely composable, so create-without-view is a role
+        somebody can write — and it made this route a reader. Measured before
+        the fix: signed in as a principal holding create and edit only, GET
+        /dashboards and GET /dashboard/<id> both redirected away, while POST
+        /dashboard/<id>/duplicate on another user's SHARED board succeeded and
+        put its query and description on a form the same principal could open.
+        """
+        install_dashboard(self.app, Dashboard(
+            "payroll", "Payroll", "the salaries index and how to find it",
+            "service:hr-salaries AND level:ERROR", "alice",
+            index_patterns=["app-*"], visibility="shared"))
+        self.sign_in("bob", ["dashboard:create", "dashboard:edit"])
+        grant(self.app, "bob",
+              permissions=["dashboard:create", "dashboard:edit"],
+              indices=["*"], trace_indices=["*"], services=["*"])
+
+        # Not followed: before the fix this redirected to the copy, whose page
+        # redirects away again, and the test client calls that a loop rather
+        # than reporting what was made.
+        response = self.client.post("/dashboard/payroll/duplicate")
+        self.assertEqual(self.copies(), [],
+                         "a board this principal may not open was copied")
+        self.assertIn("/dashboards", response.headers.get("Location", ""))
 
     def test_the_list_offers_the_button(self):
         page = self.client.get("/dashboards").get_data(as_text=True)

@@ -454,6 +454,45 @@ class SinglePanelRequestTest(DashboardContractTest):
                 [(b["key"], b["count"]) for b in combined_buckets],
                 [(b["key"], b["count"]) for b in separate[key]], suffix)
 
+    def test_the_panel_endpoints_agree_on_an_absolute_window_too(self):
+        """The same invariant, for a window the range string cannot name.
+
+        It held for relative ranges only. These endpoints read `time_range`
+        and IGNORED `start`/`end` rather than refusing them, so the same
+        parameters that made /data answer last Tuesday made every one of them
+        answer the last hour — and answer it with counts of zero and empty
+        lists, which is what a quiet window looks like. Measured on the lab
+        before the fix: /data 26 errors, /stats 0, /log-levels [], /services
+        [], /heatmap bucketed from today.
+
+        The window each one asked for is read off the REQUEST, so this cannot
+        pass on a fixture that ignores the bounds it is given.
+        """
+        def asked():
+            clauses = self.es.searches[0]["body"]["query"]["bool"]["must"]
+            return next(next(iter(c["range"].values()))
+                        for c in clauses if "range" in c)
+
+        window = {"start": "2026-09-08T14:00:00Z", "end": "2026-09-08T15:00:00Z"}
+        self.es.searches.clear()
+        combined = self.get("data", **window).get_json()
+        bounds = asked()
+        self.assertTrue(bounds["gte"].startswith("2026-09-08T14:00"), bounds)
+
+        for suffix, key, panel_id in (
+                ("log-levels", "log_levels", "default-levels"),
+                ("services", "services", "default-services"),
+                ("heatmap", "heatmap_data", "default-volume")):
+            with self.subTest(endpoint=suffix):
+                self.es.searches.clear()
+                separate = self.get(suffix, **window).get_json()
+                self.assertEqual(asked(), bounds,
+                                 f"{suffix} asked a different window")
+                self.assertEqual(
+                    [(b["key"], b["count"])
+                     for b in self.panel(combined, panel_id)["buckets"]],
+                    [(b["key"], b["count"]) for b in separate[key]], suffix)
+
     def test_data_carries_the_error_rate(self):
         """A share, not just a count: 8 errors in 100 is 8%, in 100k it is not."""
         payload = self.get("data").get_json()

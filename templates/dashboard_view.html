@@ -46,6 +46,15 @@
                          reviewing an incident after it has ended. -->
                     <option value="custom">Between two times&hellip;</option>
                 </select>
+                <!-- The bounds the server actually queried, filled from the
+                     response. "Last 1 hour" does not say WHICH hour, and the
+                     window is aligned outwards onto cache boundaries before
+                     it is asked — up to a minute wider on a short range — so
+                     a reader comparing a count against another tool has no
+                     way to see the minute it came from unless it is printed.
+                     The payload has carried these bounds since the absolute
+                     range shipped and nothing read them. -->
+                <small class="text-muted d-block mt-1" id="resolvedWindow"></small>
             </div>
             <div class="col-md-4">
                 <label for="dashboardFilter" class="form-label">
@@ -107,17 +116,38 @@
         <div class="row mt-2">
             <div class="col-md-8">
                 <!-- What a refresh costs, said where the interval is chosen
-                     rather than left for an operator to discover. Every log
-                     panel rides ONE Elasticsearch msearch whatever the panel
-                     count; the Loki and VictoriaLogs adapters loop and issue
-                     a request per aggregation. Counted at the transport
-                     against the lab, eight panels over 24 hours. -->
+                     rather than left for an operator to discover.
+
+                     The SHAPE is the part to act on and it is asymmetric: a
+                     whole board rides one Elasticsearch msearch whatever the
+                     panel count, while the Loki and VictoriaLogs adapters
+                     loop and issue a request per AGGREGATION — the panels,
+                     plus the summary the stat cards need, plus that summary
+                     again over the baseline window. So their number is the
+                     panel count plus two, which is why eight panels cost ten
+                     requests and not eight.
+
+                     Counted at the transport against the lab on a warm tab
+                     (a recording session for the two HTTP backends, and every
+                     callable on the Elasticsearch client), eight panels over
+                     24 hours, with two different mixes of panel type:
+                     1 / 10 / 10 both times. The figures this replaces —
+                     2 / 9 / 10 — did not reproduce, and the one that was
+                     wrong was Loki's, the backend the control exists to
+                     protect. tests.test_dashboard_controls.RefreshCostTest
+                     holds this sentence to what the route actually asks. -->
                 <small class="text-muted" id="refreshCost">
-                    Every log panel rides one Elasticsearch request; Loki and
-                    VictoriaLogs are asked once per panel. Measured on an
-                    eight-panel board: 2 requests to Elasticsearch, 9 to Loki,
-                    10 to VictoriaLogs &mdash; per open tab, every interval.
+                    Elasticsearch answers a whole board in one request whatever
+                    the panel count; Loki and VictoriaLogs are asked once per
+                    panel, plus once for the summary and once for its
+                    comparison. Measured on an eight-panel board over 24 hours:
+                    1 request to Elasticsearch, 10 to Loki, 10 to VictoriaLogs
+                    &mdash; per open tab, every interval.
                 </small>
+                <!-- Filled by the client, and empty when there is nothing to
+                     say: a fixed window cannot produce a different answer, so
+                     auto-refresh is not offered while one is in force. -->
+                <small class="text-muted d-block" id="refreshNote"></small>
             </div>
             <div class="col-md-4 text-end">
                 <small class="text-muted">Last updated: <span id="lastUpdated">-</span></small>

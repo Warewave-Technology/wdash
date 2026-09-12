@@ -212,9 +212,21 @@ def _requested_window(args=None):
     dashboard, and the day there is, it needs its own window and not this one.
     """
     args = request.args if args is None else args
-    time_range = args.get("time_range", "1h")
+    time_range = args.get("time_range") or timerange.DEFAULT_RANGE
     start, end = args.get("start"), args.get("end")
     if not start and not end:
+        # A relative range nobody can read is refused rather than defaulted.
+        # `TimeWindow.of` answers the last hour for anything `parse_range`
+        # cannot parse, and this route's own picker started emitting one:
+        # `?time_range=custom` is what the address bar holds while the two
+        # absolute boxes are being filled in, and a link copied at that moment
+        # opened on the last hour with "custom" echoed back and no warning.
+        # An hour of real data under a control naming a different window is
+        # the failure the absolute refusal above exists to prevent.
+        if timerange.parse_range(time_range) is None:
+            raise TimeRangeError(
+                f"'{time_range}' is not a time range. Use one of the offered "
+                f"ranges (for example 1h or 24h), or a start and an end.")
         return TimeWindow.of(time_range), time_range
     # Half a range is refused rather than completed from `now`. "From last
     # Tuesday 14:00 until whenever this page loaded" is a window nobody asked
@@ -1153,6 +1165,9 @@ def _query(dashboard, allowed, window, narrow=None):
 def _panel(dashboard_id, aggregations, empty):
     """Shared flow for the per-panel endpoints.
 
+    `aggregations` is either a list or a callable taking the window, for the
+    two endpoints whose histogram interval has to follow it.
+
     Returns (payload, status); the payload is handed straight to jsonify.
     """
     if not current_user.has_permission("dashboard:view"):
@@ -1162,6 +1177,19 @@ def _panel(dashboard_id, aggregations, empty):
     if not dashboard or not _may_view(dashboard):
         return {"error": "Dashboard not found",
                 "error_type": "dashboard_not_found"}, 404
+
+    # The same window `/data` builds, from the same place, before anything is
+    # asked. These endpoints used to read `time_range` alone and IGNORE an
+    # absolute range rather than refuse it, so a caller asking for last
+    # Tuesday was answered about the last hour — measured on the lab, a window
+    # holding 26 errors read as 0 here while `/data` read 26, and
+    # `/log-levels` and `/services` answered empty lists. A quiet hour and a
+    # question nobody asked are indistinguishable on the wire, which is the
+    # one failure this product refuses to ship.
+    try:
+        window, _ = _requested_window()
+    except TimeRangeError as exc:
+        return {"error": str(exc), "error_type": "invalid_time_range"}, 400
 
     scope = _scope()
     try:
@@ -1176,17 +1204,16 @@ def _panel(dashboard_id, aggregations, empty):
     if not allowed:
         return dict(empty), 200
 
-    # The relative range alone, deliberately. These endpoints are kept for API
-    # compatibility and the UI does not call them; two of them ALSO build a
-    # histogram interval of their own from `time_range`, so accepting an
-    # absolute window here would query one window and bucket it by another —
-    # a board asked for last Tuesday drawn at this morning's resolution.
-    # Whoever gives them an absolute range should get the window they asked
-    # for AND the interval that goes with it, which means handing this helper
-    # the window before the aggregations are built.
+    # The window first, THEN the aggregations that are shaped by it. Two of
+    # these endpoints choose a histogram interval, and they used to choose it
+    # from a second window built separately from the range string — so any
+    # window not derivable from that string would have been queried at an
+    # interval belonging to another one. Handing them the window is what makes
+    # "ask for seven days" and "draw seven days" the same decision.
+    if callable(aggregations):
+        aggregations = aggregations(window)
     try:
-        query = _query(dashboard, allowed,
-                       TimeWindow.of(request.args.get("time_range", "1h")))
+        query = _query(dashboard, allowed, window)
     except QueryError as exc:
         return {"error": f"Invalid dashboard query: {exc}",
                 "error_type": "invalid_query"}, 400
@@ -1587,6 +1614,46 @@ def _editor_context(panels, thresholds, defaulted):
             "thresholds": thresholds}
 
 
+def _resubmitted(panels, defaulted):
+    """The editor context for a form that was REFUSED, holding what was typed.
+
+    A validation error re-rendered the editor from the stored (or default)
+    list, so a board built in the editor and then refused for a mistyped query
+    came back as somebody else's panels — and, on the create form, marked as
+    the default set, which made the next press post an empty field and store a
+    board with no panels at all. The author's work disappeared with nothing on
+    the page saying it had.
+
+    That mattered nowhere before this form had an editor. It is the whole
+    point of the create form now, which is why the submitted list comes back
+    instead: a refusal is "fix this one field", not "start again".
+
+    Falls back to what was passed in when the field is absent (the editor
+    posts it empty while the list is still the untouched default set) or when
+    it cannot be read at all — there is no third list to show, and a form that
+    renders no panels cannot be corrected.
+    """
+    raw = (request.form.get("panels") or "").strip()
+    if raw:
+        try:
+            panels, defaulted = normalise_all(json.loads(raw)), False
+        except (json.JSONDecodeError, PanelError):
+            pass
+
+    # The four threshold boxes come back AS TYPED, unparsed: when the refusal
+    # is about one of them ("a warning threshold must be below its critical
+    # one"), the number to correct has to still be on screen. An empty box is
+    # an empty box — this runs only on a POST, so the form said what it said.
+    typed = {}
+    for metric in METRICS:
+        levels = {level: (request.form.get(f"threshold_{metric}_{level}") or "").strip()
+                  for level in ("warning", "critical")}
+        levels = {level: value for level, value in levels.items() if value}
+        if levels:
+            typed[metric] = levels
+    return _editor_context(panels, typed, defaulted)
+
+
 @dashboard_bp.route("/dashboard/create", methods=["GET", "POST"])
 @login_required
 def create_dashboard():
@@ -1600,9 +1667,12 @@ def create_dashboard():
         fields, error = _dashboard_form()
         if error:
             flash(error, "error")
+            # With what was typed, not with the defaults this page was
+            # rendered from: the board was built in that editor.
             return render_template("dashboard_create.html", indices=indices,
                                    sources=_source_names(),
-                                   visibilities=VISIBILITIES, **editor)
+                                   visibilities=VISIBILITIES,
+                                   **_resubmitted(default_panels(), True))
 
         try:
             dashboard = _manager().create_dashboard(
@@ -1613,7 +1683,8 @@ def create_dashboard():
                   "Check the server logs and try again.", "error")
             return render_template("dashboard_create.html", indices=indices,
                                    sources=_source_names(),
-                                   visibilities=VISIBILITIES, **editor)
+                                   visibilities=VISIBILITIES,
+                                   **_resubmitted(default_panels(), True))
 
         flash("Dashboard created successfully", "success")
         return redirect(url_for("dashboards.view_dashboard", dashboard_id=dashboard.id))
@@ -1667,7 +1738,9 @@ def edit_dashboard(dashboard_id):
             return render_template("dashboard_edit.html", dashboard=dashboard,
                                    indices=_form_indices(),
                                    sources=_source_names(),
-                                   visibilities=VISIBILITIES, **editor)
+                                   visibilities=VISIBILITIES,
+                                   **_resubmitted(dashboard.get_panels(),
+                                                  not dashboard.panels))
         # The revision the form was rendered from. The database store refuses
         # a write against a stale one — its docstring said "the edit form
         # passes it", and the form did not, so optimistic locking was
@@ -1735,11 +1808,19 @@ def duplicate_dashboard(dashboard_id):
     freezing today's `default_panels()` into the duplicate would make the copy
     stop following the defaults the moment it was made.
 
-    Requires `dashboard:create`, which is what it does. The source is read
-    behind exactly the gate `view_dashboard` uses, 404 and not 403, so this
-    route cannot become a way to find out which dashboard ids exist.
+    Requires `dashboard:create`, which is what it does, AND `dashboard:view`,
+    because it reads a board — both halves of `view_dashboard`'s gate, in its
+    order. The second was missing: only `_may_view` was asked, and
+    `dashboard:view` was not, so a role holding create without view — which
+    the permission model lets anybody write — could copy a shared board it was
+    not allowed to open and then read its query and its description on the
+    copy's own edit form. A dashboard's name and query ARE information; that
+    is why `dashboard/visibility.py` exists. Past that gate the source is read
+    the way `view_dashboard` reads it, 404 and not 403, so this route cannot
+    become a way to find out which dashboard ids exist.
     """
-    if not current_user.has_permission("dashboard:create"):
+    if not (current_user.has_permission("dashboard:create")
+            and current_user.has_permission("dashboard:view")):
         flash("Access denied: insufficient permissions", "error")
         return redirect(url_for("dashboards.dashboards_page"))
 
@@ -2053,11 +2134,11 @@ def api_dashboard_stats(dashboard_id):
 @dashboard_bp.route("/api/dashboard/<dashboard_id>/timeline")
 @login_required
 def api_dashboard_timeline(dashboard_id):
-    window = TimeWindow.of(request.args.get("time_range", "1h"))
     result, status = _panel(
         dashboard_id,
-        [DateHistogram(name="timeline", interval=_timeline_interval(window),
-                       min_count=0)],
+        lambda window: [DateHistogram(name="timeline",
+                                      interval=_timeline_interval(window),
+                                      min_count=0)],
         {"timeline": []})
     if status is not None:
         return jsonify(result), status
@@ -2098,11 +2179,11 @@ def api_dashboard_services(dashboard_id):
 def api_dashboard_heatmap(dashboard_id):
     result, status = _panel(
         dashboard_id,
-        [DateHistogram(name="heatmap_data",
-                       interval=_heatmap_interval(
-                           TimeWindow.of(request.args.get("time_range", "1h"))),
-                       min_count=0,
-                       sub=(Terms(name="log_levels", field="severity", size=10),))],
+        lambda window: [DateHistogram(
+            name="heatmap_data",
+            interval=_heatmap_interval(window),
+            min_count=0,
+            sub=(Terms(name="log_levels", field="severity", size=10),))],
         {"heatmap_data": []})
     if status is not None:
         return jsonify(result), status

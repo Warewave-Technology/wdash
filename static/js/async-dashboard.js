@@ -291,9 +291,19 @@ class AsyncDashboard {
     showRangeInputs() {
         const row = document.getElementById('customRange');
         if (!row) return;
-        row.classList.toggle(
-            'd-none',
-            document.getElementById('timeRange')?.value !== 'custom');
+        row.classList.toggle('d-none', !this.isAbsolute());
+    }
+
+    /**
+     * Whether the picker is on the absolute range at all.
+     *
+     * Said once, because four things now turn on it — which boxes are shown,
+     * which parameters are asked for, what goes in the address bar, and
+     * whether this tab keeps querying at all: a window with both ends fixed
+     * cannot produce a different answer however often it is asked.
+     */
+    isAbsolute() {
+        return document.getElementById('timeRange')?.value === 'custom';
     }
 
     /**
@@ -307,7 +317,7 @@ class AsyncDashboard {
      * for a question nobody asked.
      */
     absoluteBounds() {
-        if (document.getElementById('timeRange')?.value !== 'custom') return null;
+        if (!this.isAbsolute()) return null;
         const from = document.getElementById('rangeStart')?.value || '';
         const to = document.getElementById('rangeEnd')?.value || '';
         if (!from || !to) return null;
@@ -321,7 +331,7 @@ class AsyncDashboard {
 
     /** Why the chosen range cannot be asked for, or '' when it can. */
     rangeProblem() {
-        if (document.getElementById('timeRange')?.value !== 'custom') return '';
+        if (!this.isAbsolute()) return '';
         if (this.absoluteBounds()) return '';
         const from = document.getElementById('rangeStart')?.value || '';
         const to = document.getElementById('rangeEnd')?.value || '';
@@ -352,9 +362,21 @@ class AsyncDashboard {
             // question, and the recipient's page would have to pick.
             params.set('start', bounds.start);
             params.set('end', bounds.end);
-        } else {
+        } else if (!this.isAbsolute()) {
             params.set('time_range',
                        document.getElementById('timeRange')?.value || '1h');
+        } else {
+            // "custom" is the NAME of a control, not a window, and this used
+            // to write it into the address bar the moment the picker moved —
+            // where the Share button copies it. The server read it as a range
+            // it could not parse and answered the default hour, so a link
+            // copied mid-edit opened on an hour nobody had chosen. Whatever
+            // window the link already named is kept until the two boxes name
+            // a new one: half a window is not a view to share.
+            const already = new URLSearchParams(window.location.search);
+            ['start', 'end', 'time_range'].forEach(key => {
+                if (already.has(key)) params.set(key, already.get(key));
+            });
         }
 
         const filter = (document.getElementById('dashboardFilter')?.value || '').trim();
@@ -382,6 +404,10 @@ class AsyncDashboard {
             timeRange.addEventListener('change', () => {
                 this.showRangeInputs();
                 this.syncUrl();
+                // Which window is being asked decides whether asking again
+                // can change the answer, so the refresh control follows the
+                // picker rather than waiting for somebody to touch it.
+                this.applyRefreshChoice();
                 this.load();
             });
         }
@@ -479,6 +505,14 @@ class AsyncDashboard {
         // things this page can do.
         const problem = this.rangeProblem();
         if (problem) {
+            // And the board goes with it. Refusing while leaving the previous
+            // window's numbers and charts on screen is the same failure said
+            // twice: a page of real figures under a control reading "Between
+            // two times", sourced from the last answer rather than from any
+            // question now being asked. Measured before this line: switching
+            // the picker to the absolute range left totalHits at 4,311 and
+            // three charts drawn, with a one-line banner above them.
+            this.clearBoard();
             this.showMessage(problem, [], 'warning');
             return;
         }
@@ -518,6 +552,27 @@ class AsyncDashboard {
             // the same thing.
             if (queued) await this.load(queued);
         }
+    }
+
+    /**
+     * Take every answer off the screen, because none of them is one any more.
+     *
+     * The counts go to the same em dash a count that did not run gets — "we
+     * did not ask", which is exactly true — rather than to zero, which would
+     * be the loudest possible lie. The panels are removed rather than left
+     * spinning: nothing is loading, and a spinner would promise an answer
+     * that is not coming until the control names a window.
+     */
+    clearBoard() {
+        this.updateStats({});
+        this.renderWindow(null);
+        Object.values(this.charts).forEach(chart => chart.destroy());
+        this.charts = {};
+        document.querySelectorAll('.panel-slot').forEach(slot => slot.remove());
+        document.querySelector('#panelGrid .grid-loading')?.remove();
+        // So a drill-down cannot carry the filter of a window nobody is
+        // looking at any more; `openLogs` falls back to the stored query.
+        this.lastData = null;
     }
 
     showAllLoadingStates() {
@@ -593,6 +648,7 @@ class AsyncDashboard {
 
         try {
             this.updateStats(data);
+            this.renderWindow(data.window);
         } catch (error) {
             console.error('Stat render error:', error);
         }
@@ -1057,6 +1113,39 @@ class AsyncDashboard {
         }
     }
 
+    /**
+     * The bounds that were actually queried, under the control that named them.
+     *
+     * The response has carried this block since the absolute range shipped
+     * and nothing read it, which made it a field with no consumer and the
+     * page a screen with no answer to "which hour is this?". Two readers need
+     * it. "Last 1 hour" does not say which hour — on a board left open since
+     * this morning it is the hour that ended when the last refresh ran, not
+     * the one ending now. And every window is aligned outwards onto cache
+     * boundaries before it is asked, so an hour somebody typed exactly is
+     * queried as sixty-one minutes: harmless in an aggregation, and worth a
+     * minute of confusion to anyone comparing a count against another tool.
+     * Printing the bounds is the whole fix for both.
+     *
+     * `bounds` rather than `window`, which is taken.
+     */
+    renderWindow(bounds) {
+        const el = document.getElementById('resolvedWindow');
+        if (!el) return;
+        if (!bounds || !bounds.start || !bounds.end) {
+            el.textContent = '';
+            return;
+        }
+        const from = new Date(bounds.start);
+        const to = new Date(bounds.end);
+        if (isNaN(from.getTime()) || isNaN(to.getTime())) {
+            el.textContent = '';
+            return;
+        }
+        el.textContent =
+            `Asked over ${from.toLocaleString()} → ${to.toLocaleString()}`;
+    }
+
     showStatsError() {
         ['totalHits', 'errorCount', 'warnCount', 'infoCount'].forEach(id => {
             const el = document.getElementById(id);
@@ -1105,9 +1194,24 @@ class AsyncDashboard {
         // the card said 30,576.
         params.set('dashboard', this.dashboardId);
 
-        if (start && end) {
+        // The window the BOARD is on, not the name of the control that chose
+        // it. `time_range` used to be forwarded raw, which became "custom" the
+        // moment an absolute range was in use — and the Logs page cannot use
+        // that: it selects "custom" with two empty boxes, issues no search,
+        // and says "Please select both start and end time". So every stat
+        // card and every terms panel on a board pointed at a past incident
+        // opened a dead end, for exactly the reader the absolute range was
+        // built for — somebody looking at last Tuesday who then wants the
+        // records behind a number. Only the histogram path, which passes
+        // explicit bucket bounds, ever survived.
+        const bucketed = start && end;
+        const bounds = bucketed ? null : this.absoluteBounds();
+        if (bucketed) {
             params.set('start', this.pickerTime(start));
             params.set('end', this.pickerTime(end));
+        } else if (bounds) {
+            params.set('start', this.pickerTime(new Date(bounds.start)));
+            params.set('end', this.pickerTime(new Date(bounds.end)));
         } else {
             params.set('time_range', document.getElementById('timeRange')?.value || '1h');
         }
@@ -1759,8 +1863,12 @@ class AsyncDashboard {
         const btn = document.getElementById('autoRefreshBtn');
         const seconds = this.refreshSeconds();
         // "Off" is a choice, not a rate. Starting anyway at some default
-        // would ask on behalf of somebody who had just said not to.
-        if (!btn || !seconds) return;
+        // would ask on behalf of somebody who had just said not to. A window
+        // with both ends fixed is the same refusal for a different reason:
+        // last Tuesday 14:00 to 15:00 cannot answer differently in ten
+        // seconds, so every one of those refreshes is ten Loki requests
+        // (measured) spent re-fetching a number that cannot have moved.
+        if (!btn || !seconds || this.isAbsolute()) return;
 
         clearInterval(this.autoRefreshInterval);
         // Quiet, and only while the tab is actually being looked at. A
@@ -1799,8 +1907,22 @@ class AsyncDashboard {
     applyRefreshChoice() {
         const btn = document.getElementById('autoRefreshBtn');
         const seconds = this.refreshSeconds();
-        if (btn) btn.disabled = !seconds;
-        if (!seconds) {
+        // A fixed window is not a rate anybody can choose between: it cannot
+        // produce a new answer at any interval. Said where the cost is said,
+        // because it is the same subject — this is the one control on the
+        // page whose purpose is what the board costs the backend behind it.
+        const fixed = this.isAbsolute();
+        const note = document.getElementById('refreshNote');
+        if (note) {
+            note.textContent = fixed
+                ? 'Both ends of this window are fixed, so it cannot answer '
+                  + 'differently: auto-refresh is unavailable while it is in force.'
+                : '';
+        }
+        const interval = document.getElementById('refreshInterval');
+        if (interval) interval.disabled = fixed;
+        if (btn) btn.disabled = fixed || !seconds;
+        if (fixed || !seconds) {
             if (this.isAutoRefreshing) this.stopAutoRefresh();
             return;
         }

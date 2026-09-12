@@ -64,6 +64,8 @@ function makeDashboard(responder) {
             <option value="30" selected>30s</option>
             <option value="60">1m</option>
         </select>
+        <small id="refreshNote"></small>
+        <small id="resolvedWindow"></small>
         <input id="dashboardFilter" value="">
         <div id="dashboardMessage" class="alert d-none"></div>
         <div id="panelGrid"></div>
@@ -1522,6 +1524,203 @@ async function main() {
         check('the chosen interval is written into the address bar', () =>
             assert(/[?&]refresh=30\b/.test(w.location.search),
                    w.location.search));
+        w.setInterval = real;
+    }
+
+    // ------------------------------------------------------------------
+    // What the review found: the board answered the absolute window and
+    // everything AROUND the board went on describing a relative one.
+    // ------------------------------------------------------------------
+
+    /** A dashboard on an absolute window, loaded. */
+    async function onAbsoluteWindow(body = { panels: [] }) {
+        const w = controlled(body);
+        const dashboard = await started(w);
+        const d = w.document;
+        d.getElementById('timeRange').value = 'custom';
+        d.getElementById('rangeStart').value = '2026-09-08T14:00';
+        d.getElementById('rangeEnd').value = '2026-09-08T15:00';
+        d.getElementById('timeRange').dispatchEvent(new w.Event('change'));
+        await settle(dashboard);
+        return w;
+    }
+
+    // A drill-down out of a board pointed at last Tuesday forwarded the
+    // SELECT's value, which is "custom" — a word the Logs page cannot use.
+    // It selects the custom range with two empty boxes, issues no search and
+    // says "Please select both start and end time for custom range". So the
+    // reader the absolute window exists for — somebody reviewing an incident
+    // who wants the records behind a number — got a dead end from every stat
+    // card and every terms panel on the board.
+    {
+        const w = await onAbsoluteWindow();
+        const dashboard = w.dashboard;
+        dashboard.lastData = { effective_query: 'env:prod' };
+        const opened = [];
+        w.open = (url) => opened.push(new URL(url, 'http://localhost'));
+
+        dashboard.openLogs({ extra: '(level:ERROR OR level:FATAL)' });
+        check('a drill-down off an absolute board carries that window', () => {
+            const sent = opened[0].searchParams;
+            assert(!sent.has('time_range'),
+                   `it sent time_range=${sent.get('time_range')}`);
+            assert(sent.get('start') === '2026-09-08 14:00'
+                   && sent.get('end') === '2026-09-08 15:00',
+                   `it sent ${opened[0].search}`);
+        });
+        check('and it is still the dashboard\'s own containers', () =>
+            assert(opened[0].searchParams.get('dashboard') === 'd1',
+                   opened[0].search));
+
+        // A bucket click already passed explicit bounds and must keep them:
+        // the bar covers one bucket, not the whole board.
+        dashboard.openLogs({ start: new Date('2026-09-08T14:10'),
+                             end: new Date('2026-09-08T14:20'),
+                             service: 'api' });
+        check('a bar still opens its own bucket, not the whole window', () =>
+            assert(opened[1].searchParams.get('start') === '2026-09-08 14:10'
+                   && opened[1].searchParams.get('end') === '2026-09-08 14:20',
+                   opened[1].search));
+    }
+
+    // A relative board is unchanged: the range NAME is what the Logs page
+    // wants there, and it is a name that page can read.
+    {
+        const w = controlled();
+        const dashboard = await started(w);
+        const opened = [];
+        w.open = (url) => opened.push(new URL(url, 'http://localhost'));
+        dashboard.openLogs({ level: 'ERROR' });
+        check('a relative board still sends the range it is on', () =>
+            assert(opened[0].searchParams.get('time_range') === '1h'
+                   && !opened[0].searchParams.has('start'),
+                   opened[0].search));
+    }
+
+    // Refusing to ask left the last window's answer on screen, under a
+    // control naming a window it did not come from.
+    {
+        const w = controlled({
+            total_hits: 4311, error_count: 452, warn_count: 3, info_count: 1,
+            window: { start: '2026-09-08T14:00:00Z', end: '2026-09-08T15:01:00Z' },
+            panels: [{ ...PANEL, buckets: [{ key: 'ERROR', count: 12 }] }],
+        });
+        const dashboard = await started(w);
+        const d = w.document;
+        assert(d.getElementById('totalHits').textContent === '4,311',
+               'the fixture never drew anything');
+
+        w.asked.length = 0;
+        d.getElementById('timeRange').value = 'custom';
+        d.getElementById('timeRange').dispatchEvent(new w.Event('change'));
+        await settle(dashboard);
+
+        check('a window that cannot be asked for leaves no numbers behind', () =>
+            assert(d.getElementById('totalHits').textContent === '—'
+                   && d.getElementById('errorCount').textContent === '—',
+                   `${d.getElementById('totalHits').textContent} / `
+                   + `${d.getElementById('errorCount').textContent}`));
+        check('and no panels drawn from the window before it', () =>
+            assert(d.querySelectorAll('.panel-slot').length === 0
+                   && spinning(w) === 0,
+                   `${d.querySelectorAll('.panel-slot').length} panel(s), `
+                   + `${spinning(w)} spinner(s)`));
+        check('and it still says why, rather than only going blank', () =>
+            assert(/both a start and an end/i.test(
+                       d.getElementById('dashboardMessage').textContent),
+                   d.getElementById('dashboardMessage').textContent));
+        check('and the address bar does not name a window nobody chose', () =>
+            assert(!/time_range=custom/.test(w.location.search),
+                   w.location.search));
+    }
+
+    // The window the server really queried, which nothing showed. "Last 1
+    // hour" does not say which hour, and every window is aligned outwards
+    // before it is asked — an hour somebody typed is queried as 61 minutes.
+    {
+        const w = await loadWith({
+            total_hits: 7,
+            window: { start: '2026-09-08T14:00:00Z', end: '2026-09-08T15:01:00Z' },
+            panels: [],
+        });
+        const shown = w.document.getElementById('resolvedWindow').textContent;
+        check('the bounds actually queried are printed beside the picker', () => {
+            const from = new Date('2026-09-08T14:00:00Z').toLocaleString();
+            const to = new Date('2026-09-08T15:01:00Z').toLocaleString();
+            assert(shown.includes(from) && shown.includes(to),
+                   `it shows "${shown}"`);
+        });
+
+        const none = await loadWith({ total_hits: 0, panels: [] });
+        check('and a response without them says nothing rather than "Invalid Date"',
+              () => assert(none.document.getElementById('resolvedWindow')
+                               .textContent === '',
+                           none.document.getElementById('resolvedWindow').textContent));
+    }
+
+    // Auto-refresh on a window that cannot change. Ten Loki requests per
+    // refresh (measured) spent re-asking about last Tuesday.
+    {
+        const w = await onAbsoluteWindow();
+        const d = w.document;
+        const delays = [];
+        const real = w.setInterval;
+        w.setInterval = (fn, ms) => { delays.push(ms); return real(() => {}, 1e9); };
+
+        check('a fixed window takes the refresh controls away', () =>
+            assert(d.getElementById('autoRefreshBtn').disabled
+                   && d.getElementById('refreshInterval').disabled,
+                   `button ${d.getElementById('autoRefreshBtn').disabled}, `
+                   + `select ${d.getElementById('refreshInterval').disabled}`));
+        check('and says why where the cost of a refresh is said', () =>
+            assert(/cannot answer differently/i.test(
+                       d.getElementById('refreshNote').textContent),
+                   d.getElementById('refreshNote').textContent));
+
+        // Dispatched rather than pressed: a disabled button fires nothing, so
+        // a click would measure the attribute and not the guard behind it.
+        d.getElementById('autoRefreshBtn').dispatchEvent(new w.Event('click'));
+        check('and a press that gets through starts no timer', () =>
+            assert(!w.dashboard.isAutoRefreshing && delays.length === 0,
+                   `${w.dashboard.isAutoRefreshing} ${JSON.stringify(delays)}`));
+
+        // Back to a relative range and it is available again — the point is
+        // that a fixed window cannot change, not that refreshing is bad.
+        d.getElementById('timeRange').value = '24h';
+        d.getElementById('timeRange').dispatchEvent(new w.Event('change'));
+        await settle(w.dashboard);
+        check('a relative range gets them back', () =>
+            assert(!d.getElementById('autoRefreshBtn').disabled
+                   && !d.getElementById('refreshInterval').disabled
+                   && d.getElementById('refreshNote').textContent === '',
+                   d.getElementById('refreshNote').textContent));
+        d.getElementById('autoRefreshBtn').dispatchEvent(new w.Event('click'));
+        check('and refreshing still works there', () =>
+            assert(w.dashboard.isAutoRefreshing && delays.length === 1,
+                   JSON.stringify(delays)));
+        // Stopped, or the timer this started outlives the suite and node
+        // waits for it: a hung run is not a failing check but it reads like
+        // one.
+        w.dashboard.stopAutoRefresh();
+        w.setInterval = real;
+    }
+
+    // A watched board that is then pointed at a past window stops watching.
+    {
+        const w = controlled();
+        const dashboard = await started(w);
+        const d = w.document;
+        const real = w.setInterval;
+        w.setInterval = (fn, ms) => real(() => {}, 1e9);
+        d.getElementById('autoRefreshBtn').click();
+        assert(dashboard.isAutoRefreshing, 'it never started');
+
+        d.getElementById('timeRange').value = 'custom';
+        d.getElementById('timeRange').dispatchEvent(new w.Event('change'));
+        await settle(dashboard);
+        check('a running refresh stops when the window becomes a fixed one', () =>
+            assert(!dashboard.isAutoRefreshing, 'it is still refreshing'));
+        dashboard.stopAutoRefresh();
         w.setInterval = real;
     }
 
