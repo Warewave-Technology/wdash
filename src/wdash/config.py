@@ -148,20 +148,32 @@ class Config:
     DASHBOARD_STORAGE_FILE = (os.environ.get('DASHBOARD_STORAGE_FILE')
                               or DEFAULT_DASHBOARD_FILE)
 
-    # Where dashboards are persisted: 'file' (default) or 'database'.
+    # Where dashboards are persisted — and saved searches with them, because
+    # one setting covers both: 'database' (default) or 'file'. Leaving the
+    # searches on the JSON file when dashboards moved made the migration a
+    # half-truth once already.
     #
     # The file store keeps everything in one JSON document, so two workers
     # editing different dashboards at the same moment lose one of the edits —
-    # silently, since both writes succeed. Anything running more than one
-    # worker should use 'database', which stores one row per dashboard and
-    # refuses a genuinely conflicting write instead. Move the existing files
-    # in with `python -m wdash.store.migrate_cli` before switching.
+    # silently, since both writes succeed. Measured here, three trials each:
+    # 4 processes x 8 creates reported 32 successes and left 9 rows in the
+    # file, every trial; the same 32 into SQLite reported 32 and left 32,
+    # every trial. The metadata database is opened and migrated
+    # before this setting is read, so 'file' does not avoid a database, it
+    # adds a second store beside one that is always there.
+    #
+    # 'file' remains supported and behaves exactly as it always has. An
+    # installation that has JSON files and never set this is told at
+    # start-up, by name and with the command to run — see
+    # `_files_left_behind` in app.py — rather than shown an empty list.
+    # Move the existing files in with `python -m wdash.store.migrate_cli`.
     #
     # 'elasticsearch' was a third option and has been removed; app.py refuses
     # it at start-up rather than falling through to the file store. This
     # comment recommended it for exactly the deployment it no longer works
     # for, which is how an operator ends up following it into a refusal.
-    DASHBOARD_STORAGE = (os.environ.get('DASHBOARD_STORAGE') or 'file').strip().lower()
+    DASHBOARD_STORAGE = (os.environ.get('DASHBOARD_STORAGE')
+                         or 'database').strip().lower()
     DASHBOARD_INDEX = os.environ.get('DASHBOARD_INDEX') or 'wdash-dashboards'
     
     # Security Settings

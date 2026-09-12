@@ -10,7 +10,7 @@ import os
 import sys
 import unittest
 
-from tests.support import search_body
+from tests.support import install_dashboard, search_body
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -126,7 +126,7 @@ class DashboardContractTest(unittest.TestCase):
 
         dashboard = Dashboard(dashboard_id=DASH_ID, name="Test", description="",
                               query="*", created_by="u", index_patterns=["app-*"])
-        self.app.dashboard_manager.dashboards[DASH_ID] = dashboard
+        install_dashboard(self.app, dashboard)
 
         self.client = self.app.test_client()
         self.login(["dashboard:view"])
@@ -750,7 +750,8 @@ class SharedViewTest(DashboardContractTest):
 
     def test_the_filter_narrows_rather_than_replaces(self):
         """Substituting would show data the dashboard was never scoped to."""
-        self.app.dashboard_manager.dashboards[DASH_ID].query = "level:ERROR"
+        self.app.dashboard_manager.update_dashboard(
+            DASH_ID, query="level:ERROR")
         self.get("data", q='service:"api"')
         clauses = self.es.searches[0]["body"]["query"]["bool"]["must"]
         rendered = str(clauses)
@@ -762,7 +763,8 @@ class SharedViewTest(DashboardContractTest):
         around it: `(level:ERROR) AND (service:none) OR (*)` counts
         everything, and the filter replaced the dashboard's query instead of
         narrowing it."""
-        self.app.dashboard_manager.dashboards[DASH_ID].query = "level:ERROR"
+        self.app.dashboard_manager.update_dashboard(
+            DASH_ID, query="level:ERROR")
         response = self.get("data", q="service%3Anone)%20OR%20(*")
         self.assertEqual(response.status_code, 400)
         self.assertIn("Invalid filter", response.get_json()["error"])
@@ -870,7 +872,7 @@ class DrillDownScopeTest(unittest.TestCase):
         self.dashboard = Dashboard(dashboard_id=DASH_ID, name="App board",
                                    description="", query="*", created_by="u",
                                    index_patterns=["app-logs-*"])
-        self.app.dashboard_manager.dashboards[DASH_ID] = self.dashboard
+        install_dashboard(self.app, self.dashboard)
 
         self.client = self.app.test_client()
         permissions = ["dashboard:view", "logs:read"]
@@ -940,7 +942,7 @@ class DrillDownScopeTest(unittest.TestCase):
         private = Dashboard(dashboard_id="private-1", name="Fraud",
                             description="", query="*", created_by="alice",
                             index_patterns=["app-logs-*"], visibility=PRIVATE)
-        self.app.dashboard_manager.dashboards["private-1"] = private
+        install_dashboard(self.app, private)
         before = len(self.es.requests)
         reply = self.client.get(
             f"/api/search?{self.WINDOW}&q=*&dashboard=private-1")
@@ -1000,7 +1002,7 @@ class DrillDownScopeTest(unittest.TestCase):
         board = Dashboard(dashboard_id="archive-1", name="Archive board",
                           description="", query="*", created_by="u",
                           index_patterns=["app-logs-*"], source="archive")
-        self.app.dashboard_manager.dashboards["archive-1"] = board
+        install_dashboard(self.app, board)
         return archive
 
     def test_a_drill_down_says_which_source_answered_it(self):
@@ -1035,7 +1037,7 @@ class DrillDownScopeTest(unittest.TestCase):
         board = Dashboard(dashboard_id="shared-1", name="Theirs",
                           description="", query="*", created_by="someone-else",
                           index_patterns=["app-logs-*"])
-        self.app.dashboard_manager.dashboards["shared-1"] = board
+        install_dashboard(self.app, board)
         return board
 
     def source_is_down(self):
@@ -1081,7 +1083,7 @@ class DrillDownScopeTest(unittest.TestCase):
         private = Dashboard(dashboard_id="private-2", name="Fraud",
                             description="", query="*", created_by="alice",
                             index_patterns=["app-logs-*"], visibility=PRIVATE)
-        self.app.dashboard_manager.dashboards["private-2"] = private
+        install_dashboard(self.app, private)
         self.source_is_down()
 
         for dashboard_id in ("private-2", "no-such-board"):
@@ -1128,7 +1130,7 @@ class DrillDownScopeTest(unittest.TestCase):
         elsewhere = Dashboard(dashboard_id="far-1", name="Far", description="",
                               query="*", created_by="u",
                               index_patterns=["nothing-here-*"])
-        self.app.dashboard_manager.dashboards["far-1"] = elsewhere
+        install_dashboard(self.app, elsewhere)
         reply = self.client.get(f"/api/search?{self.WINDOW}&q=*&dashboard=far-1")
         self.assertEqual(reply.status_code, 403)
         payload = reply.get_json()

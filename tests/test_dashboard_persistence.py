@@ -52,16 +52,29 @@ class FakeES:
 
 
 class RouteTest(unittest.TestCase):
+    #: Named rather than inherited from the default. These are the JSON
+    #: file store's own tests — two of them reach for `storage_path` and
+    #: break the write — and they ran on the default only because the
+    #: default used to be 'file'. Said here, they go on saying what they
+    #: always said: an installation that sets DASHBOARD_STORAGE=file gets
+    #: exactly the behaviour it got before the default moved.
+    #:
+    #: `DatabaseRouteTest` below runs the same route behaviours against the
+    #: store people now get without setting anything.
+    STORAGE = "file"
+
     def setUp(self):
         handle, self.storage = tempfile.mkstemp(suffix=".json")
         os.close(handle)
         with open(self.storage, "w") as file:
             file.write("[]")
+        backend = self.STORAGE
 
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "dash-persistence"
             DASHBOARD_STORAGE_FILE = self.storage
+            DASHBOARD_STORAGE = backend
 
         from wdash.hub import Hub
         from wdash.hub.adapters import ElasticsearchLogSource
@@ -217,6 +230,68 @@ class PanelFormTest(RouteTest):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"panelList", response.data)
         self.assertIn(b"Hosts", response.data)
+
+
+class DatabaseRouteTest(RouteTest):
+    """The same routes against the store an installation now gets by default.
+
+    Everything RouteTest checks — the query validated before it is stored, a
+    name of spaces refused, whitespace trimmed, panels re-validated — used to
+    be checked against the JSON file only, because that was the default.
+    Nothing here is new behaviour; it is the same behaviour, asked of the
+    store people actually run.
+    """
+
+    STORAGE = "database"
+
+    def _breaking_the_store(self):
+        """Make the next write fail the way a database in trouble fails.
+
+        The file store's version of this is pointing `storage_path` at a
+        directory that is not there. The repository has no path to break, so
+        the write itself is made to raise the error it raises — the route
+        must report a save that did not happen as a save that did not
+        happen, whichever store refused it.
+        """
+        from unittest import mock
+
+        from wdash.dashboard.dashboard_manager import DashboardStorageError
+
+        def refuse(*args, **kwargs):
+            raise DashboardStorageError("no connection to the database")
+
+        return mock.patch.object(self.manager, "create_dashboard", refuse), \
+            mock.patch.object(self.manager, "update_dashboard", refuse)
+
+    def test_a_failed_save_is_not_reported_as_success(self):
+        create, _ = self._breaking_the_store()
+        with create:
+            response = self.create(name="lost")
+        self.assertNotIn(b"created successfully", response.data)
+        self.assertIn(b"NOT been created", response.data)
+        self.assertNotIn("lost", self.names())
+
+    def test_a_failed_edit_says_the_change_was_not_applied(self):
+        self.create(name="original")
+        dashboard = next(d for d in self.manager.get_all_dashboards())
+        _, update = self._breaking_the_store()
+        with update:
+            response = self.client.post(
+                f"/dashboard/{dashboard.id}/edit",
+                data={"name": "renamed", "query": "*", "description": "",
+                      "index_patterns": ["*"]}, follow_redirects=True)
+        self.assertIn(b"NOT applied", response.data)
+        self.assertIn("original", self.names())
+
+
+class DatabasePanelFormTest(DatabaseRouteTest, PanelFormTest):
+    """Panels through the form, into the database store.
+
+    `DatabaseRouteTest` first, so the two storage-failure tests are the ones
+    that break a database write rather than the ones that break a file path.
+    """
+
+    STORAGE = "database"
 
 
 class StorageTest(unittest.TestCase):
@@ -402,6 +477,9 @@ class IsolationTest(unittest.TestCase):
             SECRET_KEY = "isolation"
             DATABASE_URL = "sqlite:///:memory:"
             ELASTICSEARCH_URL = ""
+            # The isolation being checked belongs to the file store, and
+            # the file store is no longer what an app gets by not saying.
+            DASHBOARD_STORAGE = "file"
 
         app = create_app(TestConfig)
         path = app.dashboard_manager.storage_path
@@ -421,6 +499,7 @@ class IsolationTest(unittest.TestCase):
                 SECRET_KEY = "isolation"
                 DATABASE_URL = "sqlite:///:memory:"
                 ELASTICSEARCH_URL = ""
+                DASHBOARD_STORAGE = "file"
                 DASHBOARD_STORAGE_FILE = chosen
 
             app = create_app(TestConfig)

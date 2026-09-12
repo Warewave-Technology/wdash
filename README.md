@@ -179,10 +179,10 @@ rather than two owners.
 | `LOGS_PER_PAGE` | Records per page in the log list | `50` |
 | `SESSION_COOKIE_SECURE` | Send the session cookie over HTTPS only. Also enables HSTS | `False` |
 | `TRUSTED_PROXY_COUNT` | How many reverse proxies sit in front of WDash. `0` ignores `X-Forwarded-For` entirely — trusting it without knowing the depth lets a client name its own address and step around the per-address rate limit | `0` |
-| `DASHBOARD_STORAGE_FILE` | Dashboard persistence file (file store only) | `data/dashboards.json` |
+| `DASHBOARD_STORAGE_FILE` | The JSON dashboard file: where `DASHBOARD_STORAGE=file` keeps dashboards, where the saved searches sit beside them, and the path the start-up check reads to tell an unmigrated installation what it still has | `data/dashboards.json` |
 | `DATABASE_URL` | Metadata store: `postgresql://…` or `sqlite:///…` | `sqlite:///data/wdash.db` |
 | `WDASH_ENCRYPTION_KEY` | Encrypts secrets held in the metadata store. Without it, secrets cannot be saved at all | — |
-| `DASHBOARD_STORAGE` | Where dashboards **and saved searches** live: `database` or `file` (default). Run the migration before switching &mdash; flipping it without one presents an empty list as though nothing had ever been saved | `file` |
+| `DASHBOARD_STORAGE` | Where dashboards **and saved searches** live: `database` (default) or `file`. An installation with JSON files it has not migrated is told at start-up, naming both files and the command &mdash; rather than being shown an empty list as though nothing had ever been saved | `database` |
 | `DASHBOARD_INDEX` | Kept out of log search. The Elasticsearch dashboard store has been removed, but an installation that used it still has the index sitting in the cluster, and without this a search over `*` returns dashboards as bodyless records | `wdash-dashboards` |
 | `MAX_SEARCH_RESULTS` | Upper bound on page size | `1000` |
 
@@ -847,10 +847,14 @@ as a break, because `>=3.8` was never installable: `psycopg` has required
   all, so the configuration page cannot save OIDC or LDAP credentials. It
   refuses rather than writing them as text, which is the right failure — but it
   is a failure you want to meet before you need the page.
-- **Use `DASHBOARD_STORAGE=database` with more than one worker**, and run the
-  migration first. The JSON file store reads the whole file, mutates it and
-  writes it back, so two workers editing different dashboards lose one of the
-  edits — silently, because both writes succeed.
+- **Run the migration before upgrading an installation that has JSON files.**
+  `DASHBOARD_STORAGE=database` is the default now, so a deployment that never
+  set the variable moves with the upgrade. Nothing is deleted and the start-up
+  log names both files, but until the migration is run those dashboards and
+  saved searches are not on the pages. `DASHBOARD_STORAGE=file` goes on
+  reading them, with one worker: the JSON file store reads the whole file,
+  mutates it and writes it back, so two workers editing different dashboards
+  lose one of the edits — silently, because both writes succeed.
 - **Protect the local administrator account.** It is a permanent credential
   that keeps working when the identity provider does not, which is exactly what
   makes it worth stealing.
@@ -933,16 +937,24 @@ docker run -d wdash-browser \
 
 Stated plainly, because they affect whether this fits your deployment:
 
-- **The metadata store is new and not yet the default.** Dashboards and saved
-  searches still default to the JSON file until an existing deployment has run
-  the migration; flipping it silently would leave every stored dashboard
-  behind. Migrate with:
+- **Upgrading from the JSON files takes one command.** Dashboards and saved
+  searches are kept in the metadata database by default. An installation
+  that was running before that — it has a `data/dashboards.json`, and
+  perhaps a `data/saved_searches.json` beside it — has not lost anything,
+  but nothing is reading those files any more. WDash says so at start-up,
+  naming both files, how many records in each the database does not have,
+  and the command below; it says nothing when there is no file, when the
+  file is empty, or once the records are in. Migrate with:
 
   ```bash
   PYTHONPATH=src python -m wdash.store.migrate_cli --dry-run
   PYTHONPATH=src python -m wdash.store.migrate_cli
-  # then set DASHBOARD_STORAGE=database
   ```
+
+  `DASHBOARD_STORAGE=file` keeps the JSON files, unchanged and supported,
+  for a deployment that wants to stay on them. One worker only: the file
+  store reads the whole document, changes it and writes it back, so two
+  workers editing different dashboards lose one of the edits.
 
   With no paths given it reads the file the application itself reads —
   `DASHBOARD_STORAGE_FILE` — and the saved searches beside it, prints both

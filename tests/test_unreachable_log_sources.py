@@ -242,6 +242,12 @@ class VictoriaLogsDashboardTest(unittest.TestCase):
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "vl-dashboard"
+            # The fixture dashboard is edited in place and then
+            # fetched through a route, which is a property of the
+            # file manager's cache: it hands out the object it
+            # stores. Said here rather than inherited from the
+            # default, which is now the database.
+            DASHBOARD_STORAGE = "file"
 
         self.harness = FakeVictoriaLogs()
         self.app = create_app(TestConfig)

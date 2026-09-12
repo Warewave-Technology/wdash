@@ -54,8 +54,11 @@ else
     echo "⚠️  curl not found, skipping Elasticsearch connectivity check"
 fi
 
-# Create dashboards.json if it doesn't exist
-if [ ! -f data/dashboards.json ]; then
+# Create dashboards.json if it doesn't exist — only for a deployment that
+# asked for the file store. Dashboards live in the metadata database by
+# default, and writing an empty JSON file nothing reads leaves a decoy
+# beside the real store for whoever goes looking next.
+if [ "${DASHBOARD_STORAGE:-database}" = "file" ] && [ ! -f data/dashboards.json ]; then
     echo "📊 Creating empty dashboards file..."
     mkdir -p data
     echo "[]" > data/dashboards.json

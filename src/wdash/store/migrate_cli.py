@@ -9,11 +9,13 @@ a deletion with extra steps.
     PYTHONPATH=src python -m wdash.store.migrate_cli \
         --from-elasticsearch http://localhost:9200
 
-Run before switching DASHBOARD_STORAGE to 'database'. The default is not
-flipped automatically: doing so would leave every stored dashboard behind and
-present an empty list as though nothing had ever been saved — the failure this
-codebase keeps trying to avoid, where "no data" and "we did not look" are
-indistinguishable.
+The database IS where dashboards and saved searches live — DASHBOARD_STORAGE
+defaults to 'database' — so an installation that predates that runs this once
+and is done. Until it does, the application names both JSON files at start-up,
+with the counts and this command, rather than presenting an empty list as
+though nothing had ever been saved: "no data" and "we did not look" have to be
+different sentences. Nothing here deletes anything, and DASHBOARD_STORAGE=file
+goes on reading the files for a deployment that would rather not move.
 
     PYTHONPATH=src python -m wdash.store.migrate_cli --dry-run
     PYTHONPATH=src python -m wdash.store.migrate_cli
@@ -314,8 +316,9 @@ def main(argv=None):
     if arguments.dry_run:
         print("\nNothing was written. Re-run without --dry-run to migrate.")
     else:
-        print("\nDone. Set DASHBOARD_STORAGE=database to use it — the same"
-              " setting covers dashboards and saved searches.")
+        print("\nDone. Nothing further to set: DASHBOARD_STORAGE is"
+              " 'database' by default, and the same setting covers"
+              " dashboards and saved searches.")
         print("The JSON files are left untouched, so this is reversible.")
     return 0
 

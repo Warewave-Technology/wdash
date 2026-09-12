@@ -92,6 +92,33 @@ def grant(app, username="u", permissions=(), indices=("*",),
     store.rbac.invalidate()
 
 
+def install_dashboard(app, dashboard):
+    """Put a ready-made `Dashboard` into whichever store the app is using.
+
+    Tests used to write straight into `app.dashboard_manager.dashboards`,
+    which is the JSON manager's in-memory cache and exists on nothing else.
+    Dashboards default to the database now, so those tests failed on an
+    AttributeError rather than on the panel behaviour they were about.
+
+    The two stores are reached differently on purpose: the file manager
+    invents its own id and cannot be told one, while the repository takes
+    `dashboard_id` — the parameter the migration needs for exactly this
+    reason, that identity has to survive.
+    """
+    manager = app.dashboard_manager
+    if hasattr(manager, "dashboards"):          # the JSON file manager
+        manager.dashboards[dashboard.id] = dashboard
+        return dashboard
+    manager.create_dashboard(
+        dashboard_id=dashboard.id, name=dashboard.name,
+        description=dashboard.description, query=dashboard.query,
+        created_by=dashboard.created_by, created_at=dashboard.created_at,
+        index_patterns=list(dashboard.index_patterns),
+        panels=dashboard.panels, thresholds=dashboard.thresholds,
+        visibility=dashboard.visibility, source=dashboard.source)
+    return manager.get_dashboard(dashboard.id)
+
+
 def session_for(username="u", user_id="1", email="u@x", groups=()):
     """The identity half of a session. Authorization comes from the store."""
     return {"id": user_id, "email": email, "username": username,

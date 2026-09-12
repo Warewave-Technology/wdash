@@ -146,6 +146,12 @@ class TracePanelTest(unittest.TestCase):
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "trace-panels"
+            # The fixture dashboard is edited in place and then
+            # fetched through a route, which is a property of the
+            # file manager's cache: it hands out the object it
+            # stores. Said here rather than inherited from the
+            # default, which is now the database.
+            DASHBOARD_STORAGE = "file"
 
         self.es = FakeES()
         self.app = create_app(TestConfig)
@@ -311,6 +317,12 @@ class WireTest(unittest.TestCase):
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "panels"
+            # The fixture dashboard is edited in place and then
+            # fetched through a route, which is a property of the
+            # file manager's cache: it hands out the object it
+            # stores. Said here rather than inherited from the
+            # default, which is now the database.
+            DASHBOARD_STORAGE = "file"
 
         self.es = FakeES()
         self.app = create_app(TestConfig)
@@ -398,6 +410,12 @@ class SourceBindingTest(unittest.TestCase):
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "source-binding"
+            # The fixture dashboard is edited in place and then
+            # fetched through a route, which is a property of the
+            # file manager's cache: it hands out the object it
+            # stores. Said here rather than inherited from the
+            # default, which is now the database.
+            DASHBOARD_STORAGE = "file"
 
         self.primary = FakeES()
         self.secondary = FakeES()

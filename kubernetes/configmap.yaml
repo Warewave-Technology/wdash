@@ -35,12 +35,15 @@ data:
   # replica count, the Recreate strategy and the alert evaluator's place in
   # this pod are all free to change. See kubernetes/README.md.
   DATABASE_URL: "sqlite:////data/wdash.db"
-  # Keeps the dashboards with the rest of the metadata. Left as "file" they
-  # go to DASHBOARD_STORAGE_FILE instead, so half the state is on the volume
-  # and half is in the database.
+  # Keeps the dashboards and the saved searches with the rest of the
+  # metadata. This is the default; it is spelt out because setting it to
+  # "file" sends them to DASHBOARD_STORAGE_FILE instead, so half the state
+  # is on the volume as JSON and half is in the database.
   DASHBOARD_STORAGE: "database"
-  # Still read with DASHBOARD_STORAGE=database: saved searches take their
-  # directory from it. On the volume, or they are lost at every restart.
+  # Still read with DASHBOARD_STORAGE=database, in two ways: it is where a
+  # switch to "file" would put them, and it is the path the start-up check
+  # looks at to tell an upgrade that its old JSON files have not been
+  # migrated. On the volume, or an upgrade cannot see them at all.
   DASHBOARD_STORAGE_FILE: "/data/dashboards.json"
 
   # Elasticsearch.

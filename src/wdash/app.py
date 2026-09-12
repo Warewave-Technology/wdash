@@ -10,6 +10,7 @@ import json
 import threading
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
 from flask_login import LoginManager, login_required, current_user
+from sqlalchemy import select
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -55,6 +56,118 @@ class SavedSearchesUnavailable(RuntimeError):
     unreadable file into "you have no saved searches", and then the next
     create wrote that emptiness over everybody's.
     """
+
+
+def saved_searches_beside(dashboards_file):
+    """Where the JSON saved searches live, given the dashboards file.
+
+    One function rather than two identical `os.path.join` calls, because the
+    start-up check and the store that actually reads them have to name the
+    same file. They did not have to before: the check did not exist.
+    """
+    return os.path.join(os.path.dirname(dashboards_file),
+                        'saved_searches.json')
+
+
+def _json_rows(path):
+    """The records a JSON store holds — or None when it cannot be read.
+
+    Three answers, not two, and for the reason `SavedSearchesUnavailable`
+    exists: no file is nothing left behind, an empty file is nothing left
+    behind, and a file that cannot be parsed is NOT nothing. Counting it as
+    zero is how a failure comes to look like emptiness.
+    """
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            rows = json.load(handle)
+    except Exception:
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def _left_behind(rows, already_there):
+    """Of `rows`, the ones the database has no record of.
+
+    Matched by id, which is what the migration matches on — it skips an
+    object already present — so a deployment that has run the migration and
+    kept its JSON files (the migration leaves them, deliberately, so it is
+    reversible) is told nothing. A warning that cannot be silenced except by
+    deleting data is a warning people learn to scroll past.
+    """
+    if rows is None:
+        return None
+    return [row for row in rows
+            if not isinstance(row, dict) or row.get('id') not in already_there]
+
+
+def _stored_ids(store):
+    """The dashboard and saved-search ids already in the metadata database."""
+    from .store.schema import dashboards as dashboards_table
+    from .store.schema import saved_searches as searches_table
+
+    with store.engine.connect() as connection:
+        return ({row[0] for row in
+                 connection.execute(select(dashboards_table.c.id))},
+                {row[0] for row in
+                 connection.execute(select(searches_table.c.id))})
+
+
+def files_left_behind(store, dashboards_file):
+    """What to say at start-up about JSON files nothing is reading, or None.
+
+    DASHBOARD_STORAGE decides where dashboards AND saved searches live —
+    one setting, two files — so an installation that upgrades into the
+    'database' default without having migrated loses sight of both. The
+    saved searches are the half that is easy to miss: they are not on the
+    dashboards page, so nobody goes looking for them until a shift when the
+    query they always run is gone.
+
+    Silent about a deployment that has no file, an empty file, or one whose
+    records are all in the database already. A file that cannot be read is
+    named as unreadable rather than skipped, because "nothing to migrate"
+    and "could not tell" are different sentences.
+    """
+    searches_file = saved_searches_beside(dashboards_file)
+    dashboard_ids, search_ids = _stored_ids(store)
+
+    lines = []
+    for path, present, one, many in (
+            (dashboards_file, dashboard_ids, "dashboard", "dashboards"),
+            (searches_file, search_ids, "saved search", "saved searches")):
+        outstanding = _left_behind(_json_rows(path), present)
+        if outstanding is None:
+            lines.append(f"{os.path.abspath(path)} cannot be read, so "
+                         f"whether it holds {many} nobody can see is unknown")
+        elif outstanding:
+            count = len(outstanding)
+            lines.append(f"{os.path.abspath(path)} holds {count} "
+                         f"{one if count == 1 else many} that the metadata "
+                         f"database does not")
+
+    if not lines:
+        return None
+
+    # Only the files that are there are named on the command line: the
+    # migration refuses a path it was told to read and cannot find, so a
+    # command that names an absent file is a command that exits 1. An
+    # unnamed searches file is derived from the dashboards one, which is
+    # this same path, and its absence is the ordinary "nobody has saved one".
+    arguments = ["--dashboards", dashboards_file]
+    if not os.path.exists(dashboards_file):
+        arguments.append("--allow-missing-dashboards")
+    if os.path.exists(searches_file):
+        arguments += ["--saved-searches", searches_file]
+
+    return (
+        "DASHBOARD_STORAGE is 'database', and " + "; ".join(lines) + ". "
+        "Nothing has been deleted and nothing is being read from these "
+        "files. Move them in with:\n"
+        "  PYTHONPATH=src python -m wdash.store.migrate_cli "
+        + " ".join(arguments) + "\n"
+        "or set DASHBOARD_STORAGE=file to go on reading them, which is "
+        "still supported.")
 
 
 def create_app(config_class=Config):
@@ -206,12 +319,45 @@ def create_app(config_class=Config):
             "no alert channel can be defined or delivered to, and no check "
             "can carry credentials")
 
-    # Where dashboards live. 'database' is the destination; 'file' remains the
-    # default until an existing deployment has run the migration, because
-    # flipping it silently would leave every stored dashboard behind.
-    storage = str(app.config.get('DASHBOARD_STORAGE', 'file')).lower()
+    # Where dashboards and saved searches live. 'database' is the default:
+    # the metadata database is opened and migrated a few lines above whatever
+    # this says, so 'file' does not avoid a database, it adds a second store
+    # beside one that is always there.
+    #
+    # 'file' stays supported and unchanged. What the default flip cost is an
+    # installation that had JSON files and never set the variable, and that
+    # is what the warning below is for — by name, both files, with the
+    # command, instead of an empty list that says "Create your first".
+    #
+    # The file path is resolved once, before the branch, because both halves
+    # need it: the file store writes to it, and the database store reads it
+    # to see what an unmigrated installation still has. Same isolation the
+    # metadata store gets, and for the same reason it needed it: a test run
+    # must not touch the repository's data directory. It did — 3,000 fixture
+    # dashboards accumulated in `data/dashboards.json` across runs, and the
+    # saved searches from test runs went to `data/saved_searches.json`
+    # beside them, because that path was derived from the un-isolated
+    # setting. Nor should a test run be WARNED about the repository's files.
+    #
+    # Compared against the literal default so an explicitly configured path
+    # is never discarded.
+    storage_file = app.config['DASHBOARD_STORAGE_FILE']
+    if app.config.get('TESTING') and storage_file == DEFAULT_DASHBOARD_FILE:
+        import tempfile
+        storage_file = os.path.join(tempfile.mkdtemp(prefix="wdash-test-"),
+                                    "dashboards.json")
+
+    storage = str(app.config.get('DASHBOARD_STORAGE', 'database')).lower()
     if storage == 'database':
         dashboard_manager = store.dashboards
+        try:
+            left_behind = files_left_behind(store, storage_file)
+        except Exception as exc:        # never at the cost of starting
+            app.logger.error(f"Could not check for JSON stores left "
+                             f"behind: {exc}")
+            left_behind = None
+        if left_behind:
+            app.logger.warning(left_behind)
     elif storage == 'elasticsearch':
         # Removed. Refused rather than quietly falling through to the file
         # store, which would present an empty list as though every dashboard
@@ -222,21 +368,8 @@ def create_app(config_class=Config):
             "into the metadata database first:\n"
             "  PYTHONPATH=src python -m wdash.store.migrate_cli \\\n"
             "      --from-elasticsearch $ELASTICSEARCH_URL\n"
-            "then set DASHBOARD_STORAGE=database.")
+            "then unset DASHBOARD_STORAGE — 'database' is the default.")
     else:
-        # Same isolation the metadata store gets, and for the same reason it
-        # needed it: a test run must not write into the repository's data
-        # directory. It did — 3,000 fixture dashboards accumulated in
-        # `data/dashboards.json` across runs, and the dashboards page rendered
-        # every one of them into a seven-megabyte response.
-        #
-        # Compared against the literal default so an explicitly configured
-        # path is never discarded.
-        storage_file = app.config['DASHBOARD_STORAGE_FILE']
-        if app.config.get('TESTING') and storage_file == DEFAULT_DASHBOARD_FILE:
-            import tempfile
-            storage_file = os.path.join(tempfile.mkdtemp(prefix="wdash-test-"),
-                                        "dashboards.json")
         dashboard_manager = DashboardManager(storage_file)
     
     # Store services in app context
@@ -397,11 +530,18 @@ def create_app(config_class=Config):
     # The file path also inherits the DASHBOARD_STORAGE_FILE directory, so a
     # deployment that pointed dashboards elsewhere moved its searches too
     # without being told.
-    searches_in_database = str(
-        app.config.get('DASHBOARD_STORAGE', 'file')).lower() == 'database'
-    SAVED_SEARCHES_FILE = os.path.join(
-        os.path.dirname(app.config['DASHBOARD_STORAGE_FILE']),
-        'saved_searches.json')
+    #
+    # `storage` above, not a second read of the setting with its own default:
+    # the two defaults disagreed the moment one of them moved, and a
+    # deployment whose config object simply has no DASHBOARD_STORAGE would
+    # have read its dashboards from the database and its searches from a file.
+    #
+    # `storage_file` above, not the raw setting, for the same reason: derived
+    # from the setting, a TESTING app that named no path wrote its saved
+    # searches into the repository's `data/` directory while its dashboards
+    # went to a temporary one.
+    searches_in_database = storage == 'database'
+    SAVED_SEARCHES_FILE = saved_searches_beside(storage_file)
 
     @contextlib.contextmanager
     def _saved_search_lock():
