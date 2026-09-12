@@ -493,6 +493,70 @@
               </div>
             </div>
 
+            <!-- ---------------- TLS ---------------- -->
+            <div class="col-12" data-tls><hr class="my-2">
+              <label class="form-label small">The certificate</label>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="tls_mode"
+                       value="verify" id="monitorTlsVerify" checked>
+                <label class="form-check-label small" for="monitorTlsVerify">
+                  Verify it</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="tls_mode"
+                       value="expiry_only" id="monitorTlsExpiryOnly">
+                <label class="form-check-label small" for="monitorTlsExpiryOnly">
+                  Do not verify &mdash; expiry only, and this check will send
+                  nothing</label>
+              </div>
+              <div class="form-text" style="font-size:.7rem">
+                Not verifying means talking to whatever answered, so a check
+                in that mode carries no headers, no cookies and no
+                authentication &mdash; the expiry is all it can vouch for.
+              </div>
+            </div>
+            <div class="col-md-8" data-tls-verify>
+              <label class="form-label small">Trust this certificate</label>
+              <textarea class="form-control form-control-sm" name="tls_certificate"
+                        id="monitorTlsCertificate" rows="3"
+                        spellcheck="false"
+                        placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+              <div class="form-text" style="font-size:.7rem">
+                For a private certificate. Pasted, not a path: the agent owns
+                no files. Trusted <em>instead of</em> the public roots, so a
+                wrong paste fails loudly rather than passing through a path
+                nobody meant. For an <code>http</code> check paste the
+                authority that signed the endpoint (or the endpoint's own
+                self-signed certificate); for a <code>browser</code> journey
+                paste the endpoint's own &mdash; measured, a browser matches
+                the public key it is shown, not the authority behind it.
+              </div>
+            </div>
+            <div class="col-md-4" data-tls-name>
+              <label class="form-label small">Expected certificate name</label>
+              <input class="form-control form-control-sm" name="tls_expected_name"
+                     id="monitorTlsExpectedName" placeholder="payments.internal">
+              <div class="form-text" style="font-size:.7rem">
+                When the check reaches it at an address the certificate does
+                not name &mdash; an IP, a port-forward, a tunnel. Leave empty
+                and the address itself has to be named by the certificate.
+              </div>
+            </div>
+            <div class="col-12" data-forget>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox"
+                       name="forget_request" id="monitorForgetRequest">
+                <label class="form-check-label small" for="monitorForgetRequest">
+                  Forget what this check sends &mdash; its headers, cookies and
+                  authentication, stored credentials included</label>
+              </div>
+              <div class="form-text" style="font-size:.7rem">
+                The way a check that authenticates becomes one that does not
+                verify. There is no other: a stored credential is otherwise
+                kept for ever, because a blank box means "leave it alone".
+              </div>
+            </div>
+
             <div class="col-12" data-http-only><hr class="my-1"></div>
             <div class="col-12" data-http-only>
               <label class="form-label small">How to make the request</label>

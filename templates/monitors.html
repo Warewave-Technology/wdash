@@ -142,6 +142,15 @@
                                             monitor_id=m.id, window=window,
                                             source=request.args.get('source') or None) }}"
                         >{{ m.name }}</a>
+                        {# From the check's own definition, not from its last
+                           result: a check whose agent has gone quiet or whose
+                           certificate could not be read still does not verify
+                           it, and that is worth saying on every row. #}
+                        {% if m.tls_mode == 'expiry_only' %}
+                        <span class="badge target-chip"
+                              title="This check does not verify the certificate. The expiry is all it can vouch for, and it sends nothing."
+                        >expiry only</span>
+                        {% endif %}
                         {% if m.error %}
                         <small class="text-danger">{{ m.error }}</small>
                         {% endif %}
@@ -242,7 +251,24 @@
                         </span>
                         {% endif %}
                     </td>
-                    <td><code>{{ c.common_name or '—' }}</code></td>
+                    <td><code>{{ c.common_name or '—' }}</code>
+                        {# Two different facts, said differently, and NOTHING
+                           where nobody measured one: a row whose source
+                           cannot report a verdict — every Heartbeat row, and
+                           every result written before this existed — carries
+                           no chip at all. An unknown rendered as a chip is a
+                           chip on every row on day one, which is a chip
+                           people learn to skip. #}
+                        {% if m.tls_mode == 'expiry_only' %}
+                        <span class="badge target-chip"
+                              title="This check does not verify the certificate. The expiry below is all it can vouch for."
+                        >expiry only</span>
+                        {% elif c.verified == false %}
+                        <span class="badge target-chip"
+                              title="This check verifies the certificate and its last run did not complete a verified handshake with this endpoint. The certificate below was read without verification."
+                        >not verified</span>
+                        {% endif %}
+                    </td>
                     <td><code class="text-muted">{{ m.location }}</code>
                         <div><small class="text-muted">{{ m.name }}</small></div>
                     </td>

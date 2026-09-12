@@ -98,6 +98,41 @@ function build() {
         <input type="checkbox" name="signals" value="monitors" id="sourceSignalMonitors">
       </div>
       <input type="hidden" name="signals" id="sourceSignalFixed" disabled value="">
+      <!-- The check editor, as the page renders it: every field fillMonitor
+           writes to, and the blocks applyMonitorKind shows and hides. A
+           field the editor forgets keeps whatever the DOM last held, and the
+           save writes that — which for the TLS boxes would mean one check's
+           certificate saved onto the next one. -->
+      <h5 id="monitorModalTitle"></h5>
+      <input id="monitorId"><input id="monitorName"><input id="monitorTarget">
+      <input id="monitorInterval"><input id="monitorTimeout">
+      <input id="monitorStatus"><input id="monitorBody">
+      <input id="monitorMaxDuration"><input id="monitorHeadersPresent">
+      <input id="monitorHeadersMatch"><input id="monitorRequestHeaders">
+      <input id="monitorRequestCookies"><input id="monitorAuthUsername">
+      <input id="monitorAuthPassword"><input id="monitorAuthToken">
+      <input type="checkbox" id="monitorEnabled">
+      <select id="monitorKind"><option value="http">http</option>
+        <option value="tcp">tcp</option>
+        <option value="browser">browser</option></select>
+      <select id="monitorAuthType"><option value="">none</option>
+        <option value="basic">basic</option></select>
+      <div data-tls id="tlsSection">
+        <input type="radio" name="tls_mode" value="verify" id="monitorTlsVerify">
+        <input type="radio" name="tls_mode" value="expiry_only"
+               id="monitorTlsExpiryOnly">
+      </div>
+      <div data-tls-verify id="tlsCertificateField">
+        <textarea id="monitorTlsCertificate"></textarea></div>
+      <div data-tls-name id="tlsNameField">
+        <input id="monitorTlsExpectedName"></div>
+      <div data-forget id="forgetField">
+        <input type="checkbox" id="monitorForgetRequest"></div>
+      <button class="edit-monitor" data-monitor='{"id":"m1","name":"Payments","kind":"http","target":"https://payments.internal/health","interval_seconds":60,"timeout_seconds":10,"assertions":{},"request":{"headers":{"X-Tenant-Token":"abc"}},"has_credentials":true,"steps":[],"secret_names":[],"enabled":true,"agent_ids":[],"tls":{"mode":"verify","certificate":"-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----\\n","expected_name":"payments.internal"}}'></button>
+      <button class="edit-monitor" id="editWaived" data-monitor='{"id":"m2","name":"Lab","kind":"http","target":"https://lab.internal/","interval_seconds":60,"timeout_seconds":10,"assertions":{},"request":{},"has_credentials":false,"steps":[],"secret_names":[],"enabled":true,"agent_ids":[],"tls":{"mode":"expiry_only"}}'></button>
+      <button id="addMonitorBtn"></button>
+      <div class="modal fade" id="monitorModal"></div>
+
       <div data-kind="elasticsearch" data-needs="logs" id="logPatternField"></div>
       <div data-kind="elasticsearch" data-needs="traces" id="tracePatternField"></div>
       <div data-kind="elasticsearch" data-needs="monitors" id="monitorPatternField"></div>
@@ -113,7 +148,12 @@ function build() {
     global.window = w;
     global.document = w.document;
     w.bootstrap = { Modal: class { constructor() {} show() {}
-                                   static getInstance() { return null; } } };
+                                   static getInstance() { return null; }
+                                   // The check editor opens its modal
+                                   // this way; without it jsdom reports
+                                   // an uncaught TypeError per click.
+                                   static getOrCreateInstance() {
+                                       return new this(); } } };
 
     const calls = [];
     w.fetch = (url, options) => {
@@ -168,7 +208,12 @@ function buildMappings(roleNames, mappings, defaultRole) {
     global.window = w;
     global.document = w.document;
     w.bootstrap = { Modal: class { constructor() {} show() {}
-                                   static getInstance() { return null; } } };
+                                   static getInstance() { return null; }
+                                   // The check editor opens its modal
+                                   // this way; without it jsdom reports
+                                   // an uncaught TypeError per click.
+                                   static getOrCreateInstance() {
+                                       return new this(); } } };
     w.fetch = () => Promise.resolve({ json: () => Promise.resolve({}) });
     w.eval(fs.readFileSync(path.join(ROOT, 'static/js/config.js'), 'utf8'));
     return w;
@@ -724,6 +769,70 @@ function type(w, id, value) {
     check('a source that answered with nothing still matches nothing',
           /matches nothing/i.test(verdict(unlisted, 'roleContainers')),
           verdict(unlisted, 'roleContainers'));
+
+    // ---------------------------------------------------------------------
+    // The check editor's TLS boxes
+    //
+    // A certificate is public and is shown back — that is why it lives beside
+    // the request rather than in the secret box — so the editor has to fill
+    // it, and has to clear it for the next check. What must NOT be carried
+    // over is the "forget what this check sends" tick: it empties a check's
+    // request, and inheriting it from the last modal would empty one nobody
+    // asked about.
+    // ---------------------------------------------------------------------
+    const checks = build().w;
+    const hidden = (id) => checks.document.getElementById(id)
+        .classList.contains('d-none');
+
+    checks.document.querySelector('.edit-monitor')
+        .dispatchEvent(new checks.Event('click'));
+    check('the pasted certificate is shown back',
+          checks.document.getElementById('monitorTlsCertificate').value
+              .includes('BEGIN CERTIFICATE'),
+          checks.document.getElementById('monitorTlsCertificate').value);
+    check('and the name it is expected to carry',
+          checks.document.getElementById('monitorTlsExpectedName').value
+              === 'payments.internal');
+    check('a verifying check shows both boxes',
+          !hidden('tlsCertificateField') && !hidden('tlsNameField'));
+    check('a check that sends something is offered the way to stop',
+          !hidden('forgetField'));
+    check('and the tick starts clear',
+          !checks.document.getElementById('monitorForgetRequest').checked);
+
+    checks.document.getElementById('monitorForgetRequest').checked = true;
+    checks.document.getElementById('editWaived')
+        .dispatchEvent(new checks.Event('click'));
+    check('the next check does not inherit the last one\'s certificate',
+          checks.document.getElementById('monitorTlsCertificate').value === ''
+          && checks.document.getElementById('monitorTlsExpectedName').value === '',
+          checks.document.getElementById('monitorTlsCertificate').value);
+    check('nor its tick to forget what it sends',
+          !checks.document.getElementById('monitorForgetRequest').checked);
+    check('a check that does not verify has its radio chosen',
+          checks.document.getElementById('monitorTlsExpiryOnly').checked
+          && !checks.document.getElementById('monitorTlsVerify').checked);
+    check('and is not offered boxes that would be refused',
+          hidden('tlsCertificateField') && hidden('tlsNameField'));
+    check('a check that sends nothing is not offered a way to stop',
+          hidden('forgetField'));
+
+    checks.document.getElementById('addMonitorBtn')
+        .dispatchEvent(new checks.Event('click'));
+    check('a new check starts by verifying',
+          checks.document.getElementById('monitorTlsVerify').checked
+          && checks.document.getElementById('monitorTlsCertificate').value === '');
+
+    // A tcp check opens a socket and never sees a certificate, and a journey
+    // has no name to expect: measured, a pinned key is accepted whatever name
+    // the certificate carries.
+    checks.document.getElementById('monitorKind').value = 'tcp';
+    checks.applyMonitorKind();
+    check('a tcp check is offered no TLS section at all', hidden('tlsSection'));
+    checks.document.getElementById('monitorKind').value = 'browser';
+    checks.applyMonitorKind();
+    check('a journey may name a certificate but not a name',
+          !hidden('tlsCertificateField') && hidden('tlsNameField'));
 
     console.log(failures.length ? `\n${failures.length} failure(s)`
                                 : '\nall role editor checks passed');

@@ -91,6 +91,12 @@ def config():
             "interval_seconds": m["interval_seconds"],
             "timeout_seconds": m["timeout_seconds"],
             "assertions": m["assertions"],
+            # What this check trusts, or waives. The pasted certificate is
+            # public and the agent needs it to build a trust store of its
+            # own: it owns no files and reads nothing local, so a path here
+            # would be a configuration error on each agent host that WDash
+            # could not see and that would look like an outage.
+            "tls": m.get("tls") or {},
             **filled,
         })
 
@@ -122,9 +128,32 @@ def _credentials_for(store, monitor):
         return {"request": {}, "config_error": str(exc)}
 
 
+def _expiry_only(monitor):
+    """Whether this check was told not to verify the certificate."""
+    from ..store.monitoring import EXPIRY_ONLY, tls_mode
+    return tls_mode(monitor.get("tls")) == EXPIRY_ONLY
+
+
 def _request_for(store, monitor):
     """The public request configuration with its credentials filled back in."""
     request = dict(monitor.get("request") or {})
+    if _expiry_only(monitor):
+        # NOTHING, not merely no sealed values. A check that does not verify
+        # the certificate is talking to whatever answered, and a header typed
+        # into the plain box — X-Tenant-Token, X-Session — is stored in the
+        # open and would go out all the same; so would a basic-auth username
+        # with no stored password, which `requests` prepares into a real
+        # Authorization header.
+        #
+        # Loud, because the store refuses to SAVE this combination: a row
+        # that holds both was hand-edited or written by an older build, and a
+        # silent 401 an hour later is not something anybody can act on.
+        if request or monitor.get("has_credentials"):
+            logger.error(
+                f"check '{monitor.get('name')}' does not verify the "
+                f"certificate, so nothing it was configured to send was sent "
+                f"to the agent — no headers, no cookies, no authentication")
+        return {}
     # A journey's secrets are a journey's, and go with its steps (see
     # `_journey_for`). Read as request secrets, one named `headers` was
     # merged as a header dictionary: the configuration answered 500 to every
@@ -164,6 +193,18 @@ def _journey_for(store, monitor):
     if monitor.get("kind") != "browser":
         return {}
     out = {"steps": monitor.get("steps") or []}
+    if _expiry_only(monitor):
+        # Same rule as an http check's headers, and the same reason: a
+        # journey that does not verify the certificate types its password
+        # into whatever answered. The store refuses to save the pair, so
+        # reaching this is a hand-edited row — the step then fails with "this
+        # journey uses {{ secret.x }} and there is no such secret", which
+        # names the cause, rather than a sign-in that quietly gives it away.
+        if monitor.get("has_credentials"):
+            logger.error(
+                f"journey '{monitor.get('name')}' does not verify the "
+                f"certificate, so its secrets were not sent to the agent")
+        return out
     if monitor.get("has_credentials"):
         out["secrets"] = store.monitors.credentials(monitor["id"])
     return out
@@ -197,11 +238,18 @@ def _configuration_version(monitors, unreadable=()):
     # check down with "the key has probably changed" until it was restarted.
     # The FACT, never the reason: the reason is a sentence, and a sentence
     # that is reworded is not a configuration change.
+    #
+    # The TLS setting is in here for the same reason the request is: it is
+    # part of what the agent runs. It is NOT covered by `updated_at` — that
+    # moves on every edit and would make this test pass whatever the payload
+    # held, which is exactly how a field gets left out of a version hash and
+    # nobody notices.
     unreadable = set(unreadable)
     payload = json.dumps(
         [[m["id"], m["kind"], m["target"], m["interval_seconds"],
           m["timeout_seconds"], m["assertions"], m.get("request"),
-          m.get("updated_at"), m["id"] in unreadable] for m in monitors],
+          m.get("tls"), m.get("updated_at"), m["id"] in unreadable]
+         for m in monitors],
         sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 

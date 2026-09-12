@@ -59,6 +59,123 @@ MIN_SECRET_SEEN = 4
 #: The fields a page could be holding a secret in.
 FIELDS = "input, textarea"
 
+#: How long to spend reading the certificate the journey's endpoint presents.
+#: A journey's own budget is minutes; a certificate read that took minutes
+#: would hold a browser slot open for a fact that is worth having and not
+#: worth waiting for.
+CERTIFICATE_TIMEOUT = 5
+
+#: The two TLS decisions a monitor can carry. Same words as the http check,
+#: and an unfamiliar one means the same thing there: verify.
+VERIFY, EXPIRY_ONLY = "verify", "expiry_only"
+
+#: What Chromium calls a certificate it would not accept.
+_REFUSED = ("err_cert", "err_ssl", "ssl_error", "err_bad_ssl")
+
+
+def _mode(tls):
+    mode = ((tls or {}).get("mode") or VERIFY)
+    return mode if mode in (VERIFY, EXPIRY_ONLY) else VERIFY
+
+
+def _pins(pem):
+    """The public keys Chromium will accept despite a certificate error.
+
+    One per certificate in the pasted PEM, as base64 of the SHA-256 of its
+    SubjectPublicKeyInfo — the form
+    `--ignore-certificate-errors-spki-list` takes. Every certificate in the
+    paste is pinned rather than a chosen one: which of them the endpoint
+    actually presents is not something a form can know, and a pin for a key
+    nothing presents simply never matches.
+
+    Measured (Chromium 151, a leaf signed by a private CA, served at
+    127.0.0.1): the leaf's key -> HTTP 200; the CA's key -> still
+    ERR_CERT_AUTHORITY_INVALID; another host's leaf -> ERR_CERT_AUTHORITY_
+    INVALID; the right key against a different endpoint -> refused. The
+    waiver it grants for that key is total, expiry included, which is why the
+    certificate is still read and still reaches the expiry alert.
+    """
+    if not pem:
+        return ()
+    import base64
+    import hashlib
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding, PublicFormat,
+    )
+    try:
+        found = x509.load_pem_x509_certificates(pem.encode())
+    except Exception as exc:
+        # Refused at the form, so reaching this means a hand-written row.
+        # Said rather than crashed: a journey that cannot pin still runs, and
+        # fails with the browser's own certificate error.
+        logger.error(f"the certificate this journey was told to trust could "
+                     f"not be read ({type(exc).__name__}); it was not pinned")
+        return ()
+    out = []
+    for certificate in found:
+        der = certificate.public_key().public_bytes(
+            Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+        out.append(base64.b64encode(hashlib.sha256(der).digest()).decode())
+    return tuple(out)
+
+
+def _certificate_of(monitor):
+    """The certificate this journey's endpoint presents, or None.
+
+    Read here at all because otherwise "expiry only" would promise a journey
+    a clock it never produced: a journey stored no TLS blob, so every https
+    journey was invisible on the certificate screen while every http check
+    beside it reported one. The same verification-free read the http path
+    uses — what is on the wire, including the expired and the self-signed,
+    which are the ones worth reporting.
+    """
+    from .checks import _certificate
+    return _certificate(monitor.get("target") or "", CERTIFICATE_TIMEOUT)
+
+
+def _refused_certificate(message):
+    text = str(message or "").lower()
+    return any(marker in text for marker in _REFUSED)
+
+
+def _verdict(monitor, tls, failure):
+    """Whether this journey's navigation completed a verified handshake.
+
+    None for a journey that makes no handshake, False for the waiver and for
+    a certificate the browser refused, True otherwise — including a pinned
+    one, where the endpoint proved it holds the private key for exactly the
+    public key this monitor names.
+    """
+    if not str(monitor.get("target") or "").lower().startswith("https://"):
+        return None
+    if _mode(tls) == EXPIRY_ONLY or _refused_certificate(failure):
+        return False
+    return True
+
+
+def _tls_advice(failure, tls):
+    """The failure, plus the sentence that names the setting answering it.
+
+    Appended only to a certificate refusal, and never advising anybody to
+    turn verification off to hide an expiry — a browser that refuses an
+    expired certificate says ERR_CERT_DATE_INVALID, and the sentence for that
+    one names the pin, which does not pretend the expiry away: the expiry is
+    still read, still shown and still alerted on.
+    """
+    if not _refused_certificate(failure):
+        return failure
+    if (tls or {}).get("certificate"):
+        return (f"{failure} — the certificate this journey trusts is not the "
+                f"one this endpoint presented: a browser matches the "
+                f"endpoint's own public key, not the authority that signed "
+                f"it.")
+    return (f"{failure} — this journey's browser trusts what the image it "
+            f"runs in trusts. Paste the certificate this endpoint presents "
+            f"and the browser will accept that key and no other, or set the "
+            f"check to expiry only.")
+
 
 def run_journey(monitor, secrets=None, launcher=None, now=None):
     """Run one journey and return a result dictionary.
@@ -87,9 +204,13 @@ def run_journey(monitor, secrets=None, launcher=None, now=None):
     hidden = [str(v) for v in (secrets or {}).values() if v]
     budget = min(int(monitor.get("timeout_seconds") or 60), MAX_TOTAL_SECONDS)
 
+    tls = monitor.get("tls") or {}
+    waive = _mode(tls) == EXPIRY_ONLY
+    pins = _pins(tls.get("certificate"))
+
     try:
         browser = launcher or _chromium
-        with browser() as page:
+        with browser(ignore_https_errors=waive, certificate_pins=pins) as page:
             failure, shot = _walk(page, steps, plan, secrets, hidden, budget,
                                   clock)
     except ImportError:
@@ -109,30 +230,50 @@ def run_journey(monitor, secrets=None, launcher=None, now=None):
                        f"the browser could not start: {_clean(exc, hidden)}",
                        _since(clock), plan)
 
-    return _result(monitor, started, "down" if failure else "up", failure or "",
-                   _since(clock), plan, screenshot=shot)
+    return _result(monitor, started, "down" if failure else "up",
+                   _tls_advice(failure or "", tls), _since(clock), plan,
+                   screenshot=shot, tls=_certificate_of(monitor),
+                   handshake_verified=_verdict(monitor, tls, failure))
 
 
 class _chromium:
     """Playwright, opened and closed. Separate so tests can pass their own."""
 
-    def __init__(self):
+    def __init__(self, ignore_https_errors=False, certificate_pins=()):
         # Set before anything can fail, so that closing down knows what got
         # as far as existing.
         self._playwright = self._browser = self._context = None
+        self._ignore = bool(ignore_https_errors)
+        self._pins = tuple(certificate_pins or ())
 
     def __enter__(self):
         from playwright.sync_api import sync_playwright
+        args = ["--disable-dev-shm-usage"]
+        if self._pins:
+            # A pin, not a blanket. Measured against Chromium 151: a
+            # certificate error is ignored only for a chain carrying one of
+            # these public keys — the leaf's own key works, the key of the CA
+            # that signed it does NOT (still ERR_CERT_AUTHORITY_INVALID), a
+            # pin for another host's certificate is refused, and the same pin
+            # against a different endpoint is refused. So this is the
+            # journey's answer to a private certificate, and a journey behind
+            # one may keep its credentials: the endpoint proved it holds the
+            # private key for exactly the public key the monitor names.
+            args.append("--ignore-certificate-errors-spki-list="
+                        + ",".join(self._pins))
         try:
             self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(
-                args=["--disable-dev-shm-usage"])
+            self._browser = self._playwright.chromium.launch(args=args)
             self._context = self._browser.new_context(
                 viewport=VIEWPORT,
                 # A journey signs in. Carrying a profile between runs would
                 # mean the second run never exercises the login, and the check
                 # quietly stops testing the thing it was written for.
-                ignore_https_errors=False)
+                #
+                # True only where the monitor says "expiry only" — a blanket
+                # waiver, unlike the pin above, which is why the store refuses
+                # to let such a journey hold a secret.
+                ignore_https_errors=self._ignore)
             return self._context.new_page()
         except BaseException:
             # Python does not call `__exit__` when `__enter__` raises, and
@@ -361,7 +502,7 @@ def _since(clock):
 
 
 def _result(monitor, started, status, error, duration_us, steps,
-            screenshot=None):
+            screenshot=None, tls=None, handshake_verified=None):
     out = {
         "monitor_id": monitor["id"],
         "started_at": started.isoformat(),
@@ -369,6 +510,10 @@ def _result(monitor, started, status, error, duration_us, steps,
         "duration_us": duration_us,
         "error": error or "",
         "steps": steps,
+        # Same two fields an http check reports, so a journey is a row on the
+        # certificate screen like any other check rather than a blank.
+        "tls": tls,
+        "handshake_verified": handshake_verified,
     }
     if screenshot:
         out["screenshot"] = screenshot

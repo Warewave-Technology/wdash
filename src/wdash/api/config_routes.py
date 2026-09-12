@@ -1900,6 +1900,14 @@ def save_monitor():
         request_config["auth"] = {"type": "bearer",
                                   "token": form.get("auth_token") or None}
 
+    # What this check trusts, or waives. Always read, including the empty
+    # shape: "verify against the public roots" is a decision the form can
+    # make, so a submission that clears the certificate has to clear it in
+    # the store rather than leaving the old one behind.
+    tls = {"mode": form.get("tls_mode") or "verify",
+           "certificate": form.get("tls_certificate"),
+           "expected_name": form.get("tls_expected_name")}
+
     fields = dict(
         name=form.get("name"), kind=form.get("kind"),
         target=form.get("target"),
@@ -1907,6 +1915,7 @@ def save_monitor():
         timeout_seconds=form.get("timeout_seconds"),
         assertions=assertions,
         request=request_config,
+        tls=tls,
         agent_ids=form.getlist("agent_ids"))
 
     if form.get("kind") == "browser":
@@ -1934,7 +1943,14 @@ def save_monitor():
         if monitor_id:
             before = store.monitors.get(monitor_id)
             saved = store.monitors.update(
-                monitor_id, enabled=form.get("enabled") == "on", **fields)
+                monitor_id, enabled=form.get("enabled") == "on",
+                # The only way a check that sends something can become one
+                # that does not verify. Without it the refusal is a dead end:
+                # measured, a stored credential cannot otherwise be removed
+                # at all, and the administrator would have to delete the
+                # check and build it again.
+                forget_request=form.get("forget_request") == "on",
+                **fields)
             if saved is None:
                 flash("No such monitor.", "error")
                 return redirect(url_for("config.config_page") + "#tab-monitors")
@@ -1944,6 +1960,17 @@ def save_monitor():
                            f"{_where(before['target'])} and were not carried "
                            f"to {_where(saved['target'])}: type them again if "
                            f"that needs them.")
+            if (before and tls.get("certificate")
+                    and not saved["tls"].get("certificate")):
+                # Said for the same reason the credentials are: a certificate
+                # is pasted because THAT endpoint presents it, so it does not
+                # follow the check to another host — and a person who cannot
+                # see that it was dropped is a person whose check is now down
+                # for a reason the form does not show.
+                dropped += (f" The certificate it was told to trust was for "
+                            f"{_where(before['target'])} and was not carried "
+                            f"to {_where(saved['target'])}: paste the new "
+                            f"one.")
             _audit("monitor updated", subject=saved["name"],
                    target=_without_password(saved["target"]),
                    has_credentials=saved["has_credentials"],
@@ -1953,6 +1980,13 @@ def save_monitor():
                 created_by=getattr(current_user, "username", None), **fields)
             _audit("monitor created", subject=saved["name"])
     except MonitoringError as exc:
+        # Audited, not only flashed. A refusal that a check does not verify
+        # its certificate AND holds a credential is the record of an attempt
+        # to send one somewhere nothing vouches for — the same treatment a
+        # refused source save gets, and the copy still there next week.
+        _audit("monitor save refused", subject=form.get("name") or monitor_id,
+               state={"reason": str(exc), "target": _without_password(
+                   form.get("target") or ""), "tls_mode": tls["mode"]})
         flash(str(exc), "error")
         return redirect(url_for("config.config_page") + "#tab-monitors")
 

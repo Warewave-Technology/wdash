@@ -430,10 +430,17 @@ def _payload(page, certificates):
                 "fingerprint": m.certificate.fingerprint,
                 "key": m.certificate.key_description,
                 "signature_algorithm": m.certificate.signature_algorithm,
+                #: Whether the check's own handshake was verified on the run
+                #: that reported this certificate. True, false, or null for
+                #: a source that does not say — Heartbeat never does.
+                "verified": m.certificate.verified,
             }
         return {
             "id": m.id, "name": m.name, "type": m.type, "url": m.url,
             "location": m.location, "status": m.status,
+            #: "verify", "expiry_only", or "" where the source has no such
+            #: notion. The check's own decision, from its definition.
+            "tls_mode": m.tls_mode,
             "checked_at": m.checked_at.isoformat() if m.checked_at else None,
             "duration_ms": (round(m.duration_ms, 1)
                             if m.duration_ms is not None else None),

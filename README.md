@@ -71,7 +71,13 @@ issues carries an explicit authorization scope.
   pulls configuration and pushes results back. Both appear on one page with
   response-time history, per-monitor detail and the TLS certificates the checks
   saw. A silent agent leaves its monitors `unknown` rather than `down`: a probe
-  that stopped looking is not a site that stopped answering.
+  that stopped looking is not a site that stopped answering. A check behind a
+  private certificate may name the certificate to trust — pasted, trusted
+  instead of the public roots, and only for that check's own origin — or say
+  "expiry only", which does not verify at all and therefore sends no headers,
+  no cookies and no authentication. The page says which, and never guesses:
+  a source that cannot report whether a handshake was verified says nothing
+  rather than claiming either.
 - **Browser journeys** — multi-step checks through real Chromium: sign in, add
   to basket, check out. A journey is a step list rather than a script, so it
   can be shown as rows, every step is timed on its own, and a failure names the

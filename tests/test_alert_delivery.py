@@ -416,6 +416,34 @@ class ObservationTest(AlertingTestCase):
                     certificate=Certificate(not_after=now - timedelta(days=3))))
         self.assertIn("expired", observations[0].detail)
 
+    def test_an_expiry_alert_from_an_unverified_check_says_what_it_is_worth(self):
+        """The clock is still worth paging about — it is the only thing such
+        a check can vouch for — and saying so is what stops the alert being
+        read as evidence that the endpoint is trusted."""
+        now = datetime.now(timezone.utc)
+        observations = self._observe(
+            {"kind": "certificate_expiring", "days_before": 30},
+            Monitor(id="waived", status=UP, tls_mode="expiry_only",
+                    certificate=Certificate(not_after=now + timedelta(days=5))))
+        self.assertIn("expires in 5 day(s)", observations[0].detail)
+        self.assertIn("does not verify the certificate",
+                      observations[0].detail)
+
+    def test_a_verifying_check_gets_no_such_sentence(self):
+        """It would be on every alert, which is how a sentence stops being
+        read."""
+        now = datetime.now(timezone.utc)
+        observations = self._observe(
+            {"kind": "certificate_expiring", "days_before": 30},
+            Monitor(id="ordinary", status=UP, tls_mode="verify",
+                    certificate=Certificate(not_after=now + timedelta(days=5))),
+            # And a Heartbeat row, which has no such notion at all: inventing
+            # one would put the sentence on every row it writes.
+            Monitor(id="heartbeat", status=UP,
+                    certificate=Certificate(not_after=now + timedelta(days=5))))
+        for observation in observations:
+            self.assertNotIn("does not verify", observation.detail)
+
     def test_an_empty_selector_watches_everything(self):
         """A monitor added later is covered without anybody remembering to add
         it — the omission nobody notices until the outage."""

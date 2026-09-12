@@ -1615,3 +1615,1001 @@ class UnreadableCredentialsAgentTest(unittest.TestCase):
         self.assertNotEqual(
             routes._configuration_version(monitors, {"m1"}),
             routes._configuration_version(monitors, set()))
+
+
+# ---------------------------------------------------------------------------
+# A check's own TLS decision
+# ---------------------------------------------------------------------------
+
+def _certificates(scratch):
+    """A private CA, a second one, and the leaves they signed.
+
+    Both extensions OpenSSL 3 insists on are here — KeyUsage(key_cert_sign)
+    on the authority and an Authority Key Identifier on the leaf. Measured
+    without them: the chain is refused with "CA cert does not include key
+    usage extension" and "Missing Authority Key Identifier", so every case
+    below would fail for a reason that has nothing to do with what it is
+    about.
+    """
+    import datetime as dt
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    now = dt.datetime.now(dt.timezone.utc)
+    out = {}
+
+    def key():
+        return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    def authority(common):
+        k = key()
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common)])
+        certificate = (
+            x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(k.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(days=1))
+            .not_valid_after(now + dt.timedelta(days=365))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None),
+                           critical=True)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+                k.public_key()), critical=False)
+            .add_extension(x509.KeyUsage(
+                digital_signature=True, content_commitment=False,
+                key_encipherment=False, data_encipherment=False,
+                key_agreement=False, key_cert_sign=True, crl_sign=True,
+                encipher_only=False, decipher_only=False), critical=True)
+            .sign(k, hashes.SHA256()))
+        return certificate, k
+
+    def leaf(common, ca, ca_key, tag):
+        k = key()
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name(
+                [x509.NameAttribute(NameOID.COMMON_NAME, common)]))
+            .issuer_name(ca.subject).public_key(k.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(days=1))
+            .not_valid_after(now + dt.timedelta(days=90))
+            .add_extension(x509.SubjectAlternativeName(
+                [x509.DNSName(common)]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None),
+                           critical=True)
+            .add_extension(x509.AuthorityKeyIdentifier
+                           .from_issuer_public_key(ca_key.public_key()),
+                           critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+                k.public_key()), critical=False)
+            .sign(ca_key, hashes.SHA256()))
+        cert_path = os.path.join(scratch, f"{tag}.crt")
+        key_path = os.path.join(scratch, f"{tag}.key")
+        with open(cert_path, "wb") as handle:
+            handle.write(certificate.public_bytes(serialization.Encoding.PEM))
+        with open(key_path, "wb") as handle:
+            handle.write(k.private_bytes(serialization.Encoding.PEM,
+                                         serialization.PrivateFormat.PKCS8,
+                                         serialization.NoEncryption()))
+        return certificate, cert_path, key_path
+
+    ours, ours_key = authority("Warewave Internal CA")
+    theirs, theirs_key = authority("Somebody Else's CA")
+    out["ca_pem"] = ours.public_bytes(serialization.Encoding.PEM).decode()
+    out["other_ca_pem"] = theirs.public_bytes(
+        serialization.Encoding.PEM).decode()
+    out["leaf"], out["leaf_crt"], out["leaf_key"] = leaf(
+        "payments.internal", ours, ours_key, "payments")
+    out["second"], out["second_crt"], out["second_key"] = leaf(
+        "billing.internal", theirs, theirs_key, "billing")
+    return out
+
+
+def _tls_listener(cert_path, key_path, redirect_to=None):
+    """A real HTTPS server on 127.0.0.1. Returns it; shut it down after.
+
+    Real rather than faked, because everything this file asserts about trust
+    is a property of OpenSSL, urllib3 and requests together — a fake session
+    would assert what the test author believed those three do.
+    """
+    import ssl as _ssl
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from tests.support import serve_in_background
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if redirect_to:
+                self.send_response(302)
+                self.send_header("Location", redirect_to)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    context = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_path, key_path)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    return serve_in_background(server)
+
+
+class TlsSettingTest(StoreTestCase):
+    """What a check may decide about the certificate, and what it may not.
+
+    Most of these are one rule: a check that does not verify the certificate
+    is talking to whatever answered, so it must send NOTHING. Asked about the
+    REQUEST rather than about the secret box, which is the whole point — only
+    six header names are sealed wherever they are typed, and `X-Tenant-Token`
+    in the plain box is stored in the open, leaves `has_credentials` False and
+    still goes out on the wire.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.mkdtemp()
+        cls.certificates = _certificates(cls.scratch)
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        shutil.rmtree(cls.scratch, ignore_errors=True)
+
+    def setUp(self):
+        super().setUp()
+        from wdash.store.secrets import SecretBox
+        # A store WITH a key: half of what is asserted here is about a check
+        # that HOLDS a credential, and the default fixture cannot store one.
+        self.store.engine.dispose()
+        self.store = Store.open(f"sqlite:///{self.database}",
+                                secret_box=SecretBox(SecretBox.generate_key()))
+
+    def _pem(self, key="ca_pem"):
+        return self.certificates[key]
+
+    def test_a_pasted_certificate_is_stored_and_shown_back(self):
+        """Shown back on purpose: a certificate is public, and "which one
+        does this check trust" is the question the form has to answer."""
+        monitor = self._monitor(
+            tls={"mode": "verify", "certificate": self._pem(),
+                 "expected_name": "payments.internal"})
+        self.assertEqual(monitor["tls"]["mode"], "verify")
+        self.assertIn("BEGIN CERTIFICATE", monitor["tls"]["certificate"])
+        self.assertEqual(monitor["tls"]["expected_name"], "payments.internal")
+        import sqlalchemy
+
+        from wdash.store.schema import monitors as table
+        with self.store.engine.connect() as connection:
+            stored = connection.execute(sqlalchemy.select(table.c.tls).where(
+                table.c.id == monitor["id"])).scalar()
+        self.assertIn("BEGIN CERTIFICATE", json.dumps(stored))
+
+    def test_no_setting_stores_nothing(self):
+        """NULL and "verify against the public roots" are one fact. Two of
+        them would make every check written before this differ from every one
+        written after it, for no reason anybody could see."""
+        self.assertEqual(self._monitor()["tls"], {})
+
+    def test_a_check_that_sends_a_sealed_credential_cannot_stop_verifying(self):
+        with self.assertRaises(MonitoringError) as caught:
+            self._monitor(request={"auth": {"type": "basic", "username": "svc",
+                                            "password": "P4SS"}},
+                          tls={"mode": "expiry_only"})
+        self.assertIn("does not verify", str(caught.exception))
+        self.assertIn("svc", str(caught.exception))
+
+    def test_a_plain_header_counts_as_something_it_would_send(self):
+        """`X-Tenant-Token` is not one of the six names sealed wherever they
+        are typed, so it is stored in the OPEN, leaves `has_credentials`
+        False — and still goes out, to whatever answered."""
+        with self.assertRaises(MonitoringError) as caught:
+            self._monitor(request={"headers": {"X-Tenant-Token": "abc123"}},
+                          tls={"mode": "expiry_only"})
+        self.assertIn("X-Tenant-Token", str(caught.exception))
+        self.assertNotIn("abc123", str(caught.exception))
+
+    def test_a_username_with_no_stored_password_counts_too(self):
+        """`requests` prepares ('svc', '') into a real Authorization header:
+        measured, `Basic c3ZjOg==`. Nothing about it is in `secrets`."""
+        with self.assertRaises(MonitoringError) as caught:
+            self._monitor(request={"auth": {"type": "basic",
+                                            "username": "svc"}},
+                          tls={"mode": "expiry_only"})
+        self.assertIn("svc", str(caught.exception))
+
+    def test_a_check_that_sends_nothing_may_stop_verifying(self):
+        """The refusal has to refuse a combination, not the setting."""
+        monitor = self._monitor(tls={"mode": "expiry_only"})
+        self.assertEqual(monitor["tls"]["mode"], "expiry_only")
+
+    def test_the_stored_row_is_untouched_when_the_edit_is_refused(self):
+        monitor = self._monitor(
+            request={"auth": {"type": "basic", "username": "svc",
+                              "password": "P4SS"}})
+        with self.assertRaises(MonitoringError):
+            self.store.monitors.update(monitor["id"],
+                                       tls={"mode": "expiry_only"})
+        again = self.store.monitors.get(monitor["id"])
+        self.assertEqual(again["tls"], {})
+        self.assertTrue(again["has_credentials"])
+        self.assertEqual(self.store.monitors.credentials(monitor["id"]),
+                         {"auth_password": "P4SS"})
+
+    def test_forgetting_what_it_sends_empties_the_open_half_as_well(self):
+        """The escape hatch, and the only one there is: measured, a stored
+        credential cannot otherwise be removed at all. It has to clear the
+        PUBLIC request too, or the check goes on sending the header the
+        refusal was about."""
+        monitor = self._monitor(
+            request={"headers": {"X-Tenant-Token": "abc123"},
+                     "auth": {"type": "basic", "username": "svc",
+                              "password": "P4SS"}})
+        saved = self.store.monitors.update(
+            monitor["id"], forget_request=True, tls={"mode": "expiry_only"})
+        self.assertEqual(saved["request"], {})
+        self.assertFalse(saved["has_credentials"])
+        self.assertEqual(self.store.monitors.credentials(monitor["id"]), {})
+        self.assertEqual(saved["tls"]["mode"], "expiry_only")
+
+    def test_retargeting_and_forgetting_and_waiving_in_one_save(self):
+        """Three branches of `update` write the secrets, so the rule has to
+        be evaluated against what the save LEAVES BEHIND. Read off the row as
+        it stands, this legitimate save is refused for a credential it is in
+        the act of removing."""
+        monitor = self._monitor(
+            target="https://payments.internal/health",
+            request={"auth": {"type": "basic", "username": "svc",
+                              "password": "P4SS"}})
+        saved = self.store.monitors.update(
+            monitor["id"], target="https://billing.internal/health",
+            forget_request=True, tls={"mode": "expiry_only"})
+        self.assertEqual(saved["target"], "https://billing.internal/health")
+        self.assertEqual(saved["tls"]["mode"], "expiry_only")
+        self.assertFalse(saved["has_credentials"])
+
+    def test_a_certificate_does_not_follow_a_check_to_another_host(self):
+        """It was pasted because THAT endpoint presents it. Same rule as a
+        stored credential — and unlike one it is shown on the form, so
+        pasting it again is one deliberate act rather than a lost secret."""
+        monitor = self._monitor(target="https://payments.internal/health",
+                                tls={"certificate": self._pem()})
+        saved = self.store.monitors.update(
+            monitor["id"], target="https://billing.internal/health")
+        self.assertEqual(saved["tls"], {})
+
+    def test_another_path_on_the_same_host_keeps_the_certificate(self):
+        monitor = self._monitor(target="https://payments.internal/health",
+                                tls={"certificate": self._pem()})
+        saved = self.store.monitors.update(
+            monitor["id"], target="https://payments.internal/ready")
+        self.assertIn("BEGIN CERTIFICATE", saved["tls"]["certificate"])
+
+    def test_a_setting_on_a_tcp_check_is_refused(self):
+        with self.assertRaises(MonitoringError) as caught:
+            self._monitor(kind="tcp", target="db.internal:5432",
+                          tls={"mode": "expiry_only"})
+        self.assertIn("never sees a certificate", str(caught.exception))
+
+    def test_a_setting_on_an_http_target_is_refused(self):
+        """A setting stored and ignored is the shape this package exists to
+        remove."""
+        with self.assertRaises(MonitoringError) as caught:
+            self._monitor(target="http://plain.internal/health",
+                          tls={"certificate": self._pem()})
+        self.assertIn("plain http check", str(caught.exception))
+
+    def test_a_private_key_is_refused_and_says_to_rotate_it(self):
+        with self.assertRaises(MonitoringError) as caught:
+            self._monitor(tls={"certificate":
+                               "-----BEGIN PRIVATE KEY-----\nx\n"
+                               "-----END PRIVATE KEY-----\n"})
+        self.assertIn("rotate", str(caught.exception))
+
+    def test_something_that_is_not_a_certificate_is_refused(self):
+        with self.assertRaises(MonitoringError):
+            self._monitor(tls={"certificate": "hello"})
+
+    def test_a_bundle_is_refused_by_size(self):
+        """It goes into a JSON column, into every /api/agent/config response
+        for every agent on every poll, and into the version hash."""
+        from wdash.store.monitoring import MAX_TLS_PEM_BYTES
+        with self.assertRaises(MonitoringError) as caught:
+            self._monitor(tls={"certificate":
+                               self._pem() * (MAX_TLS_PEM_BYTES // 100)})
+        self.assertIn("KB", str(caught.exception))
+
+    def test_a_certificate_and_a_waiver_are_opposite_instructions(self):
+        with self.assertRaises(MonitoringError):
+            self._monitor(tls={"mode": "expiry_only",
+                               "certificate": self._pem()})
+
+    def test_an_expected_name_needs_a_certificate(self):
+        with self.assertRaises(MonitoringError):
+            self._monitor(tls={"expected_name": "payments.internal"})
+
+    def test_an_unknown_mode_is_refused_rather_than_read_as_verify(self):
+        with self.assertRaises(MonitoringError):
+            self._monitor(tls={"mode": "trust-me"})
+
+
+class JourneyTlsTest(StoreTestCase):
+    """A journey behind a private certificate, which is the commonest one.
+
+    A journey that signs in CANNOT exist without a stored secret, so "a
+    journey may not name a certificate, and expiry-only carries no
+    credentials" would leave every internal sign-in journey with no working
+    configuration at all. Measured against Chromium 151, it has one: a pinned
+    public key.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.mkdtemp()
+        cls.certificates = _certificates(cls.scratch)
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        shutil.rmtree(cls.scratch, ignore_errors=True)
+
+    def setUp(self):
+        super().setUp()
+        from wdash.store.secrets import SecretBox
+        # A journey that signs in cannot exist without a stored secret, which
+        # is the whole reason this class is separate.
+        self.store.engine.dispose()
+        self.store = Store.open(f"sqlite:///{self.database}",
+                                secret_box=SecretBox(SecretBox.generate_key()))
+
+    STEPS = [{"kind": "goto", "value": "https://payments.internal/login"},
+             {"kind": "fill", "selector": "#p",
+              "value": "{{ secret.password }}"},
+             {"kind": "expect_text", "value": "hello"}]
+
+    def _journey(self, **kwargs):
+        options = dict(name="Sign in", kind="browser", target=None,
+                       interval_seconds=60, timeout_seconds=30,
+                       steps=self.STEPS,
+                       journey_secrets={"password": "P4SS"})
+        options.update(kwargs)
+        return self.store.monitors.create(**options)
+
+    def test_a_sign_in_journey_may_name_the_certificate_it_trusts(self):
+        monitor = self._journey(
+            tls={"certificate": self.certificates["ca_pem"]})
+        self.assertTrue(monitor["has_credentials"])
+        self.assertIn("BEGIN CERTIFICATE", monitor["tls"]["certificate"])
+
+    def test_a_sign_in_journey_may_not_waive_verification(self):
+        with self.assertRaises(MonitoringError) as caught:
+            self._journey(tls={"mode": "expiry_only"})
+        self.assertIn("certificate this endpoint presents",
+                      str(caught.exception))
+
+    def test_a_journey_with_no_secret_may_waive_it(self):
+        monitor = self._journey(
+            steps=[{"kind": "goto", "value": "https://payments.internal/"},
+                   {"kind": "expect_text", "value": "hello"}],
+            journey_secrets={}, tls={"mode": "expiry_only"})
+        self.assertEqual(monitor["tls"]["mode"], "expiry_only")
+
+    def test_an_expected_name_on_a_journey_is_refused(self):
+        """Measured: a pinned key is accepted whatever name the certificate
+        carries, so a name typed here would be stored and never consulted."""
+        with self.assertRaises(MonitoringError) as caught:
+            self._journey(tls={"certificate": self.certificates["ca_pem"],
+                               "expected_name": "payments.internal"})
+        self.assertIn("public key", str(caught.exception))
+
+    def test_forgetting_a_journey_secret_is_refused_rather_than_offered(self):
+        """It would leave a step with nothing to type: the escape hatch would
+        be a way to break a check."""
+        monitor = self._journey()
+        with self.assertRaises(MonitoringError) as caught:
+            self.store.monitors.update(monitor["id"], forget_request=True)
+        self.assertIn("nothing to type", str(caught.exception))
+
+
+class TlsTrustTest(unittest.TestCase):
+    """The agent against real TLS listeners with a real private chain.
+
+    Behavioural rather than mocked, and that is deliberate: every claim here
+    is a property of OpenSSL, urllib3 and requests together — which version
+    re-arms verification from the `verify` argument, which layer re-checks
+    the host name — and a fake session would assert what the author believed
+    those three do. An upgrade that moves one of those hooks fails these
+    loudly rather than quietly trusting less, or more.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.mkdtemp()
+        cls.certificates = _certificates(cls.scratch)
+        cls.ours = _tls_listener(cls.certificates["leaf_crt"],
+                                 cls.certificates["leaf_key"])
+        cls.theirs = _tls_listener(cls.certificates["second_crt"],
+                                   cls.certificates["second_key"])
+        cls.port = cls.ours.server_address[1]
+        cls.other_port = cls.theirs.server_address[1]
+        cls.elsewhere = _tls_listener(
+            cls.certificates["leaf_crt"], cls.certificates["leaf_key"],
+            redirect_to=f"https://127.0.0.1:{cls.other_port}/next")
+        cls.redirect_port = cls.elsewhere.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        for server in (cls.ours, cls.theirs, cls.elsewhere):
+            server.shutdown()
+            server.server_close()
+        shutil.rmtree(cls.scratch, ignore_errors=True)
+
+    def _check(self, tls=None, port=None):
+        from wdash.agent.checks import run_check
+        return run_check({
+            "id": "m1", "name": "payments", "kind": "http",
+            "target": f"https://127.0.0.1:{port or self.port}/",
+            "timeout_seconds": 5, "assertions": {}, "request": {},
+            "tls": tls or {}})
+
+    def test_a_private_certificate_is_down_and_the_reason_names_the_setting(self):
+        """The failure is where somebody needs to be told the setting exists
+        — not on a form they were not looking at."""
+        result = self._check()
+        self.assertEqual(result["status"], "down")
+        self.assertIn("unable to get local issuer certificate",
+                      result["error"])
+        self.assertIn("Name the certificate to trust", result["error"])
+        self.assertIs(result["handshake_verified"], False)
+
+    def test_the_certificate_and_the_name_it_carries_make_it_up(self):
+        result = self._check({"mode": "verify",
+                              "certificate": self.certificates["ca_pem"],
+                              "expected_name": "payments.internal"})
+        self.assertEqual(result["status"], "up", result["error"])
+        self.assertIs(result["handshake_verified"], True)
+        self.assertEqual(result["tls"]["common_name"], "payments.internal")
+
+    def test_without_the_expected_name_the_address_has_to_be_named(self):
+        """The setting does not paper over the name: an endpoint reached at
+        an address its certificate does not carry is still down, and the
+        reason says which box answers it."""
+        result = self._check({"certificate": self.certificates["ca_pem"]})
+        self.assertEqual(result["status"], "down")
+        self.assertIn("mismatch", result["error"])
+        self.assertIn("Expected certificate name", result["error"])
+
+    def test_the_wrong_certificate_is_still_down(self):
+        result = self._check({"certificate": self.certificates["other_ca_pem"],
+                              "expected_name": "payments.internal"})
+        self.assertEqual(result["status"], "down")
+        self.assertIn("did not sign", result["error"])
+        self.assertIs(result["handshake_verified"], False)
+
+    def test_expiry_only_reports_the_clock_and_says_it_did_not_verify(self):
+        result = self._check({"mode": "expiry_only"})
+        self.assertEqual(result["status"], "up", result["error"])
+        self.assertIs(result["handshake_verified"], False)
+        self.assertEqual(result["tls"]["common_name"], "payments.internal")
+        self.assertTrue(result["tls"]["not_after"])
+
+    def test_the_waiver_does_not_travel_to_the_redirect(self):
+        """Bounded to the monitor's own origin, exactly as its credentials
+        are: a redirect to a sign-in page on another host is asked for with
+        the public roots like anybody else's."""
+        result = self._check({"mode": "expiry_only"}, port=self.redirect_port)
+        self.assertEqual(result["status"], "down")
+        self.assertIn("TLS handshake failed", result["error"])
+
+    def test_expiry_only_does_not_fill_the_log_with_warnings(self):
+        """urllib3 warns once per request, and this is a setting somebody
+        chose on purpose — a line per check per interval is how a log becomes
+        unreadable. Filtered around the call rather than disabled for the
+        process, which would silence the agent's own unverified link to
+        WDash for ever."""
+        import warnings
+
+        import urllib3
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            self._check({"mode": "expiry_only"})
+        self.assertEqual(
+            [w for w in seen
+             if issubclass(w.category,
+                           urllib3.exceptions.InsecureRequestWarning)], [])
+
+    def test_a_plain_http_target_says_nothing_about_a_handshake(self):
+        """None, not False. There was no handshake to make, and False is a
+        finding."""
+        from wdash.agent.checks import run_check
+        result = run_check({"id": "m1", "name": "plain", "kind": "http",
+                            "target": "http://127.0.0.1:9/", "request": {},
+                            "timeout_seconds": 2, "assertions": {}})
+        self.assertEqual(result["status"], "down")
+        self.assertIsNone(result["handshake_verified"])
+
+    def test_the_adapter_is_mounted_where_requests_will_look_for_it(self):
+        """Both forms of the prefix, and this is the case the whole feature
+        turned on: `PreparedRequest.prepare_url` does NOT add the port a
+        scheme implies, so a prefix built from the port-filled origin —
+        `https://payments.internal:443/` — never matches the ordinary
+        `https://payments.internal/`. Measured with requests 2.32.5:
+        `get_adapter` returns the DEFAULT adapter for that prefix, so both
+        settings were silently ignored on every https check at the default
+        port, which is most of them.
+
+        Asserted at this level because binding port 443 needs root; every
+        listener in this class has an explicit port, which is exactly why
+        this would pass with the bug in place.
+        """
+        import requests
+
+        from wdash.agent.checks import _trust
+        session = requests.Session()
+        default = session.get_adapter("https://payments.internal/")
+        _trust(session, "https://payments.internal/",
+               {"certificate": self.certificates["ca_pem"]})
+        self.assertIsNot(session.get_adapter("https://payments.internal/"),
+                         default)
+        self.assertIsNot(
+            session.get_adapter("https://payments.internal:443/health"),
+            default)
+        # And nowhere else: another host and another port keep the session's
+        # own adapter and the public roots, and so does the other scheme —
+        # which has an adapter of its own.
+        for elsewhere in ("https://billing.internal/",
+                          "https://payments.internal:8443/"):
+            self.assertIs(session.get_adapter(elsewhere), default, elsewhere)
+        self.assertIs(session.get_adapter("http://payments.internal/"),
+                      session.adapters["http://"])
+
+    def test_a_pasted_certificate_is_trusted_instead_of_the_public_roots(self):
+        """Not in addition to them. A certificate is pasted because the
+        service is not public, and the public roots beside it would let a
+        wrong paste through a path nobody meant — the check would look like
+        it was working.
+
+        Counted AFTER a real request, which is the only moment it can be
+        counted: `requests`'s own `cert_verify` resolves the `verify`
+        argument to the system CA bundle and urllib3 loads it into this very
+        context at connect time. Measured with the stock implementation left
+        in place: 122 certificates in the context after one request, of which
+        the pasted one was one. With it overridden: 1.
+        """
+        import requests
+
+        from wdash.agent.checks import _trust
+        url = f"https://127.0.0.1:{self.port}/"
+        session = requests.Session()
+        _trust(session, url, {"certificate": self.certificates["ca_pem"],
+                              "expected_name": "payments.internal"})
+        session.get(url, timeout=5).close()
+        context = (session.get_adapter(url)
+                   .poolmanager.connection_pool_kw["ssl_context"])
+        self.assertEqual(len(context.get_ca_certs()), 1)
+
+    def test_a_session_without_mount_is_left_alone(self):
+        """`run_check` takes a caller's session, and a fake in a test has no
+        `mount`. Reaching into one would turn a TLS setting into a crash on
+        every check that used it."""
+        from wdash.agent.checks import _trust
+        self.assertFalse(_trust(object(), "https://x/", {"certificate": "x"}))
+
+
+class TlsReasonTest(unittest.TestCase):
+    """Which failures the discoverability sentence is appended to.
+
+    Measured, the four common TLS failures are distinguishable from the
+    message, and two of them are not answered by naming a certificate. The
+    expired one is the important one: "set the check to expiry only" against
+    `certificate has expired` is advice to switch verification off to stop
+    seeing an expiry, which is the one thing the TLS screen exists to show.
+    """
+
+    def _reason(self, text, tls=None):
+        import requests
+
+        from wdash.agent.checks import _reason
+        return _reason(requests.exceptions.SSLError(text), tls)
+
+    def test_an_untrusted_chain_is_told_about_the_setting(self):
+        sentence = self._reason(
+            "certificate verify failed: unable to get local issuer certificate")
+        self.assertIn("Name the certificate to trust", sentence)
+
+    def test_a_self_signed_certificate_is_told_too(self):
+        sentence = self._reason(
+            "certificate verify failed: self-signed certificate in "
+            "certificate chain")
+        self.assertIn("Name the certificate to trust", sentence)
+
+    def test_an_expired_certificate_is_told_nothing(self):
+        """The expiry IS the finding."""
+        sentence = self._reason(
+            "certificate verify failed: certificate has expired")
+        self.assertNotIn("expiry only", sentence)
+        self.assertNotIn("Name the certificate", sentence)
+
+    def test_a_wrong_name_is_not_answered_by_naming_an_authority(self):
+        sentence = self._reason(
+            "certificate verify failed: Hostname mismatch, certificate is "
+            "not valid for 'localhost'")
+        self.assertNotIn("expiry only", sentence)
+
+    def test_a_wrong_name_under_a_pasted_certificate_names_the_right_box(self):
+        sentence = self._reason(
+            "certificate verify failed: IP address mismatch, certificate is "
+            "not valid for '127.0.0.1'",
+            {"mode": "verify", "certificate": "-----BEGIN CERTIFICATE-----"})
+        self.assertIn("Expected certificate name", sentence)
+
+    def test_a_check_that_already_names_one_is_told_it_did_not_sign(self):
+        sentence = self._reason(
+            "certificate verify failed: unable to get local issuer certificate",
+            {"mode": "verify", "certificate": "-----BEGIN CERTIFICATE-----"})
+        self.assertIn("did not sign", sentence)
+
+    def test_a_check_that_is_not_verifying_is_told_nothing(self):
+        """Whatever went wrong, the setting is not it."""
+        sentence = self._reason(
+            "certificate verify failed: self-signed certificate",
+            {"mode": "expiry_only"})
+        self.assertNotIn("expiry only", sentence)
+        self.assertNotIn("Name the certificate", sentence)
+
+
+class WithheldFromTheAgentTest(unittest.TestCase):
+    """What /api/agent/config refuses to send, and why it is loud about it.
+
+    The store refuses to SAVE a check that does not verify the certificate
+    and still sends something, so a row holding both was hand-edited or
+    written by an older build. Withheld here as well because this endpoint is
+    the only place any of it leaves the database, and a silent 401 an hour
+    later is not something anybody can act on.
+    """
+
+    def setUp(self):
+        import tempfile as _tempfile
+
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.secrets import SecretBox
+
+        handle, self.database = _tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        database = self.database
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "withheld"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = SecretBox.generate_key()
+            ELASTICSEARCH_URL = ""
+            DASHBOARD_STORAGE = "database"
+
+        self.app = create_app(TestConfig)
+        self.client = self.app.test_client()
+        self.agent, self.token = self.app.store.agents.create("one")
+        self.headers = {"Authorization": f"Bearer {self.token}"}
+
+    def tearDown(self):
+        self.app.store.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.database + suffix):
+                os.unlink(self.database + suffix)
+
+    def _hand_edit(self, monitor_id, tls):
+        """What an older build or a hand-edited row leaves behind."""
+        import sqlalchemy
+
+        from wdash.store.schema import monitors as table
+        with self.app.store.engine.begin() as connection:
+            connection.execute(sqlalchemy.update(table)
+                               .where(table.c.id == monitor_id)
+                               .values(tls=tls))
+
+    def test_nothing_it_would_send_reaches_the_agent(self):
+        monitor = self.app.store.monitors.create(
+            name="billing", kind="http", target="https://billing.internal/",
+            interval_seconds=60, timeout_seconds=10,
+            request={"headers": {"X-Tenant-Token": "PLAIN-TOKEN"},
+                     "cookies": {"session": "C00KIE"},
+                     "auth": {"type": "basic", "username": "svc",
+                              "password": "P4SS"}})
+        self._hand_edit(monitor["id"], {"mode": "expiry_only"})
+
+        with self.assertLogs("wdash.api.agent_routes", "ERROR") as logged:
+            response = self.client.get("/api/agent/config",
+                                       headers=self.headers)
+        body = response.get_data(as_text=True)
+        check = response.get_json()["monitors"][0]
+        self.assertEqual(check["request"], {})
+        self.assertEqual(check["tls"], {"mode": "expiry_only"})
+        for secret in ("PLAIN-TOKEN", "C00KIE", "P4SS", "X-Tenant-Token",
+                       "svc"):
+            self.assertNotIn(secret, body)
+        self.assertIn("billing", "\n".join(logged.output))
+
+    def test_a_journey_in_that_state_is_not_handed_its_secrets(self):
+        monitor = self.app.store.monitors.create(
+            name="Sign in", kind="browser", target=None, interval_seconds=60,
+            timeout_seconds=30,
+            steps=[{"kind": "goto", "value": "https://payments.internal/"},
+                   {"kind": "fill", "selector": "#p",
+                    "value": "{{ secret.password }}"},
+                   {"kind": "expect_text", "value": "hello"}],
+            journey_secrets={"password": "P4SS"})
+        self._hand_edit(monitor["id"], {"mode": "expiry_only"})
+
+        with self.assertLogs("wdash.api.agent_routes", "ERROR"):
+            response = self.client.get("/api/agent/config",
+                                       headers=self.headers)
+        check = response.get_json()["monitors"][0]
+        self.assertNotIn("secrets", check)
+        self.assertNotIn("P4SS", response.get_data(as_text=True))
+
+    def test_a_verifying_check_is_handed_what_it_needs(self):
+        """The withholding must be about the setting, not about the endpoint:
+        a rule that withheld from everything would be a rule that breaks
+        every authenticated check."""
+        self.app.store.monitors.create(
+            name="billing", kind="http", target="https://billing.internal/",
+            interval_seconds=60, timeout_seconds=10,
+            request={"auth": {"type": "basic", "username": "svc",
+                              "password": "P4SS"}})
+        response = self.client.get("/api/agent/config", headers=self.headers)
+        check = response.get_json()["monitors"][0]
+        self.assertEqual(check["request"]["auth"]["password"], "P4SS")
+
+    def test_the_certificate_reaches_the_agent(self):
+        """It has to: the agent owns no files and reads nothing local, so a
+        path here would be a configuration error on each agent host that
+        WDash could not see and that would look like an outage."""
+        scratch = tempfile.mkdtemp()
+        try:
+            pem = _certificates(scratch)["ca_pem"]
+        finally:
+            import shutil
+            shutil.rmtree(scratch, ignore_errors=True)
+        self.app.store.monitors.create(
+            name="payments", kind="http", target="https://payments.internal/",
+            interval_seconds=60, timeout_seconds=10,
+            tls={"certificate": pem, "expected_name": "payments.internal"})
+        check = self.client.get(
+            "/api/agent/config", headers=self.headers).get_json()["monitors"][0]
+        self.assertIn("BEGIN CERTIFICATE", check["tls"]["certificate"])
+        self.assertEqual(check["tls"]["expected_name"], "payments.internal")
+
+    def test_the_version_moves_when_only_the_tls_setting_changes(self):
+        """Asserted against `_configuration_version` directly, with the SAME
+        `updated_at`. Through `update()` this passes either way — every edit
+        bumps the timestamp, and the timestamp is already hashed — so a test
+        that went through the route would catch nothing, and the field could
+        be left out of the payload with nobody noticing.
+        """
+        import wdash.api.agent_routes as routes
+        base = {"id": "m1", "kind": "http", "target": "https://x/",
+                "interval_seconds": 60, "timeout_seconds": 10,
+                "assertions": {}, "request": {}, "updated_at": "fixed"}
+        verifying = dict(base, tls={})
+        waived = dict(base, tls={"mode": "expiry_only"})
+        self.assertNotEqual(routes._configuration_version([verifying]),
+                            routes._configuration_version([waived]))
+
+
+class VerdictReachesThePageTest(StoreTestCase):
+    """From the agent's result to the neutral model, without a page.
+
+    The verdict is a column of its own rather than a key inside the
+    certificate blob, and this is why: the blob is NULL exactly when no
+    certificate could be read — an http target, an agent behind a proxy, an
+    endpoint that closes the second connection — and those are the runs where
+    the verdict still has to survive.
+    """
+
+    def _reported(self, result):
+        from wdash.hub.adapters import store_monitors
+        from wdash.hub.query import TimeWindow
+        from wdash.hub.scope import Scope
+        agent, _ = self._agent()
+        monitor = self._monitor(**result.pop("monitor", {}))
+        self.store.results.record(agent["id"], [dict(
+            {"monitor_id": monitor["id"], "started_at": _now().isoformat(),
+             "status": "up"}, **result)])
+        source = store_monitors.StoreMonitorSource(self.store)
+        page = source.monitors(TimeWindow.of("1h"), Scope(containers=("*",)))
+        return page.monitors[0]
+
+    CERTIFICATE = {"common_name": "payments.internal",
+                   "not_after": "2027-01-01T00:00:00+00:00"}
+
+    def test_an_unverified_run_says_so(self):
+        monitor = self._reported({"tls": dict(self.CERTIFICATE),
+                                  "handshake_verified": False})
+        self.assertIs(monitor.certificate.verified, False)
+
+    def test_a_verified_run_says_so(self):
+        monitor = self._reported({"tls": dict(self.CERTIFICATE),
+                                  "handshake_verified": True})
+        self.assertIs(monitor.certificate.verified, True)
+
+    def test_a_result_written_before_the_column_existed_says_nothing(self):
+        """None, not False. Every row written before this change carries no
+        verdict, and an unknown must never render as a finding."""
+        monitor = self._reported({"tls": dict(self.CERTIFICATE)})
+        self.assertIsNone(monitor.certificate.verified)
+
+    def test_the_mode_comes_from_the_definition_not_the_result(self):
+        """So a check whose certificate could not be read — the branch-office
+        agent behind a proxy, where `_certificate` opens a raw socket while
+        `requests` honours the proxy — still says on the page that it does
+        not verify."""
+        monitor = self._reported(
+            {"monitor": {"tls": {"mode": "expiry_only"}}})
+        self.assertIsNone(monitor.certificate)
+        self.assertTrue(monitor.expiry_only)
+
+    def test_a_check_that_has_never_run_still_has_a_mode(self):
+        from wdash.hub.adapters import store_monitors
+        from wdash.hub.query import TimeWindow
+        from wdash.hub.scope import Scope
+        self._monitor(tls={"mode": "expiry_only"})
+        source = store_monitors.StoreMonitorSource(self.store)
+        page = source.monitors(TimeWindow.of("1h"), Scope(containers=("*",)))
+        self.assertEqual(page.monitors[0].status, UNKNOWN)
+        self.assertTrue(page.monitors[0].expiry_only)
+
+    def test_an_agent_that_claims_a_verdict_in_words_is_not_believed(self):
+        """Everything on the ingest endpoint is a claim, so only a real
+        boolean is kept."""
+        monitor = self._reported({"tls": dict(self.CERTIFICATE),
+                                  "handshake_verified": "yes"})
+        self.assertIsNone(monitor.certificate.verified)
+
+    def test_a_stored_verdict_that_is_not_a_boolean_reads_as_nothing(self):
+        """The same guard one layer down, where a row written straight into
+        the database arrives. `bool("yes")` is the reading that turns a
+        claim nobody checked into a reassurance on the page."""
+        from wdash.hub.adapters.store_monitors import _certificate
+        self.assertIsNone(_certificate({"common_name": "x"}, "yes").verified)
+        self.assertIs(_certificate({"common_name": "x"}, True).verified, True)
+
+
+class TlsFormTest(unittest.TestCase):
+    """The check form: two settings, one escape hatch, and an audited refusal.
+
+    The escape hatch is not optional. Measured before it: a stored credential
+    cannot be removed at all — `update` replaces `secrets` only when
+    something new is supplied — so a refusal without it would leave the
+    administrator deleting the check and building it again.
+    """
+
+    def setUp(self):
+        import tempfile as _tempfile
+
+        from tests.support import grant
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.secrets import SecretBox
+
+        handle, self.database = _tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        database = self.database
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "tls-form"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = SecretBox.generate_key()
+            ELASTICSEARCH_URL = ""
+            DASHBOARD_STORAGE = "database"
+
+        self.app = create_app(TestConfig)
+        self.client = self.app.test_client()
+        grant(self.app, "admin", ["system:admin", "monitors:read"],
+              indices=["*"])
+        with self.client.session_transaction() as session:
+            session["user_data"] = {
+                "id": "u1", "username": "admin", "email": "a@b", "groups": [],
+                "role": "admin",
+                "permissions": ["system:admin", "monitors:read"],
+                "allowed_indices": ["*"]}
+            session["_user_id"] = "u1"
+        self.scratch = tempfile.mkdtemp()
+        self.pem = _certificates(self.scratch)["ca_pem"]
+
+    def tearDown(self):
+        import shutil
+        self.app.store.engine.dispose()
+        shutil.rmtree(self.scratch, ignore_errors=True)
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.database + suffix):
+                os.unlink(self.database + suffix)
+
+    def _save(self, **extra):
+        data = {"name": "Payments", "kind": "http",
+                "target": "https://payments.internal/health",
+                "interval_seconds": "60", "timeout_seconds": "10",
+                "enabled": "on"}
+        data.update(extra)
+        return self.client.post("/admin/monitors", data=data,
+                                follow_redirects=True)
+
+    def _monitor(self):
+        return self.app.store.monitors.all()[0]
+
+    def test_a_pasted_certificate_is_saved_and_shown_on_the_table(self):
+        page = self._save(tls_mode="verify", tls_certificate=self.pem,
+                          tls_expected_name="payments.internal")
+        monitor = self._monitor()
+        self.assertIn("BEGIN CERTIFICATE", monitor["tls"]["certificate"])
+        self.assertEqual(monitor["tls"]["expected_name"], "payments.internal")
+        self.assertIn(">own certificate</span>", page.get_data(as_text=True))
+
+    def test_waiving_verification_is_shown_on_the_table(self):
+        page = self._save(tls_mode="expiry_only")
+        self.assertEqual(self._monitor()["tls"]["mode"], "expiry_only")
+        # The markup, not the phrase: the modal's own radio says "expiry
+        # only" on every render of this page, so a looser assertion passes
+        # with the badge deleted.
+        self.assertIn(">expiry only</span>", page.get_data(as_text=True))
+
+    def test_a_check_that_sends_a_header_cannot_waive_it_and_is_audited(self):
+        """The header is in the PLAIN box, so nothing about it is in
+        `secrets` and `has_credentials` is False — and it would still go out,
+        over the channel this setting stops verifying."""
+        self._save()
+        monitor_id = self._monitor()["id"]
+        page = self._save(id=monitor_id, tls_mode="expiry_only",
+                          request_headers="X-Tenant-Token: abc123")
+        body = page.get_data(as_text=True)
+        self.assertIn("X-Tenant-Token", body)
+        self.assertIn("Forget what this check sends", body)
+        self.assertEqual(self.app.store.monitors.get(monitor_id)["tls"], {})
+
+        actions = [row["action"] for row in self.app.store.audit.recent()]
+        self.assertIn("monitor save refused", actions)
+
+    def test_forgetting_and_waiving_in_one_submission_saves_both(self):
+        self._save(request_headers="X-Tenant-Token: abc123",
+                   auth_type="basic", auth_username="svc",
+                   auth_password="P4SS")
+        monitor_id = self._monitor()["id"]
+        self.assertTrue(self.app.store.monitors.get(monitor_id)
+                        ["has_credentials"])
+
+        self._save(id=monitor_id, tls_mode="expiry_only",
+                   forget_request="on",
+                   request_headers="X-Tenant-Token: abc123",
+                   auth_type="basic", auth_username="svc")
+        saved = self.app.store.monitors.get(monitor_id)
+        self.assertEqual(saved["tls"]["mode"], "expiry_only")
+        self.assertEqual(saved["request"], {})
+        self.assertFalse(saved["has_credentials"])
+        self.assertEqual(self.app.store.monitors.credentials(monitor_id), {})
+
+    def test_a_certificate_is_not_carried_to_a_new_host_and_the_page_says_so(self):
+        self._save(tls_mode="verify", tls_certificate=self.pem,
+                   tls_expected_name="payments.internal")
+        monitor_id = self._monitor()["id"]
+        page = self._save(id=monitor_id, target="https://billing.internal/x",
+                          tls_mode="verify", tls_certificate=self.pem,
+                          tls_expected_name="payments.internal")
+        self.assertEqual(self.app.store.monitors.get(monitor_id)["tls"], {})
+        self.assertIn("was not carried", page.get_data(as_text=True))
+
+    def test_a_refusal_says_what_is_wrong_rather_than_500(self):
+        page = self._save(tls_mode="verify", tls_certificate="not a pem")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("BEGIN CERTIFICATE", page.get_data(as_text=True))
+        self.assertEqual(self.app.store.monitors.all(), [])

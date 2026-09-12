@@ -571,6 +571,18 @@ class Certificate:
     key_curve: str = ""
     signature_algorithm: str = ""
     serial_number: str = ""
+    #: Whether the check that reported this certificate completed a VERIFIED
+    #: handshake with the endpoint. Tri-state, and None is the default on
+    #: purpose: it means the source did not say. Heartbeat never says — its
+    #: documents carry no such field, and the lab's own configuration sets
+    #: `ssl.verification_mode: none` — so defaulting to False would invent a
+    #: finding and defaulting to True would invent a reassurance.
+    #:
+    #: About the HANDSHAKE, not about this certificate: the certificate here
+    #: was read on a second, deliberately unverified connection, so on a host
+    #: that answers two connections differently they are not necessarily the
+    #: same certificate.
+    verified: object = None
 
     def _remaining(self):
         if self.not_after is None:
@@ -642,6 +654,15 @@ class Monitor:
     error: str = ""
     tags: tuple = field(default_factory=tuple)
     certificate: object = None
+    #: This check's own TLS decision, as its DEFINITION states it: "verify",
+    #: "expiry_only", or "" for a source that does not have the notion.
+    #:
+    #: From the definition rather than from the last result, because that is
+    #: the only one of the two that is always there: a check whose agent has
+    #: gone quiet, whose certificate could not be read, or that has never run
+    #: still has a mode, and "this check does not verify the certificate" is
+    #: a fact about how it is configured.
+    tls_mode: str = ""
     #: Recent history, coarse enough to draw in a table cell. Empty unless the
     #: caller asked for it — the extra aggregation is not free, and the
     #: certificate screen has no use for it.
@@ -654,6 +675,18 @@ class Monitor:
     @property
     def is_down(self):
         return self.status == DOWN
+
+    @property
+    def expiry_only(self):
+        """Whether this check deliberately does not verify the certificate.
+
+        One rule, read by the page and by the alert, so the chip and the
+        sentence can never disagree. The mode is the fact: `verified is
+        False` on a result also covers a verifying check whose handshake
+        simply FAILED, and labelling that one "expiry only" would be a claim
+        about a setting nobody chose.
+        """
+        return self.tls_mode == "expiry_only"
 
     @property
     def location(self):

@@ -27,6 +27,17 @@ MAX_BODY = 512 * 1024
 
 USER_AGENT = "wdash-agent"
 
+#: The two TLS decisions a monitor can carry. Spelled here rather than
+#: imported from the store: the agent runs on its own image, against a server
+#: it only talks JSON to, and an unfamiliar value means the same as no value —
+#: verify.
+VERIFY, EXPIRY_ONLY = "verify", "expiry_only"
+
+
+def _mode(tls):
+    mode = ((tls or {}).get("mode") or VERIFY)
+    return mode if mode in (VERIFY, EXPIRY_ONLY) else VERIFY
+
 
 def _now():
     return datetime.now(timezone.utc)
@@ -94,6 +105,17 @@ def _http_with(client, monitor):
     clock = time.monotonic()
     timeout = monitor.get("timeout_seconds") or 10
     assertions = monitor.get("assertions") or {}
+    tls = monitor.get("tls") or {}
+    secure = str(monitor.get("target") or "").lower().startswith("https://")
+    # Mounted on this monitor's own origin and nowhere else, so a hop anywhere
+    # else gets the session's default adapter and the public roots — the same
+    # rule `_at_home` applies to what the check was given to send.
+    if secure and _mode(tls) == VERIFY and tls.get("certificate"):
+        _trust(client, monitor["target"], tls)
+    # The waiver, likewise bounded to its own origin: "do not verify" was
+    # chosen about THIS endpoint, and a redirect somewhere else is asked for
+    # as a stranger would ask.
+    waive = secure and _mode(tls) == EXPIRY_ONLY
 
     # The monitor's timeout bounds the whole exchange, not each socket read.
     # What `requests` is given is the wait for the NEXT byte, so a target that
@@ -115,10 +137,17 @@ def _http_with(client, monitor):
     elif auth.get("type") == "bearer" and auth.get("token"):
         headers["Authorization"] = f"Bearer {auth['token']}"
 
+    # What this check's OWN handshake did, recorded on its own whether or not
+    # a certificate could be read afterwards — an http:// target, an agent
+    # behind a proxy and an endpoint that closes the second connection all
+    # produce no certificate, and those are exactly the runs where the verdict
+    # still has to be written. None means "no handshake to make"; False means
+    # "not a verified one", which covers the failure path and the waiver.
+    verified = False if secure else None
     try:
         response = _get_following(client, monitor["target"], headers,
                                   credentials, request.get("cookies") or None,
-                                  deadline)
+                                  deadline, waive)
     except _Overran as exc:
         # The hops themselves ran the budget out. Named separately from a
         # slow body, because "the response did not finish" about a check that
@@ -128,7 +157,8 @@ def _http_with(client, monitor):
                        f"the redirects did not finish within {timeout}s "
                        f"({hops} hop(s) followed)",
                        duration_us=int((time.monotonic() - clock) * 1_000_000),
-                       tls=_certificate(monitor["target"], timeout))
+                       tls=_certificate(monitor["target"], timeout),
+                       handshake_verified=verified)
     except Exception as exc:
         elapsed = int((time.monotonic() - clock) * 1_000_000)
         # The certificate is read even though the request failed, and
@@ -138,9 +168,16 @@ def _http_with(client, monitor):
         # A monitor that goes down for a certificate and cannot say which
         # certificate is a monitor that has told you nothing.
         return _result(monitor, started, "down",
-                       _redact(_reason(exc), request),
+                       _redact(_reason(exc, tls), request),
                        duration_us=elapsed,
-                       tls=_certificate(monitor["target"], timeout))
+                       tls=_certificate(monitor["target"], timeout),
+                       handshake_verified=verified)
+    if secure:
+        # The exchange completed. In verify mode that means a verified
+        # handshake with this endpoint; in expiry-only mode it means the
+        # opposite, and the point of the whole package is that the two are
+        # told apart on the page.
+        verified = _mode(tls) == VERIFY
 
     # The body is read either way. Kept only when something is asserted about
     # it, but always consumed: the timing would otherwise measure the headers
@@ -170,7 +207,8 @@ def _http_with(client, monitor):
         return _result(monitor, started, "down",
                        _redact(f"reading the response failed: {_reason(exc)}",
                                request),
-                       duration_us=elapsed, http_status=response.status_code)
+                       duration_us=elapsed, http_status=response.status_code,
+                       handshake_verified=verified)
     finally:
         response.close()
 
@@ -192,12 +230,13 @@ def _http_with(client, monitor):
                         f"{timeout}s timeout"),
                        duration_us=elapsed,
                        http_status=response.status_code,
-                       tls=_certificate(monitor["target"], timeout))
+                       tls=_certificate(monitor["target"], timeout),
+                       handshake_verified=verified)
     certificate = _certificate(monitor["target"], timeout)
     failure = _assert_http(response, body, elapsed, assertions)
     return _result(monitor, started, "down" if failure else "up", failure,
                    duration_us=elapsed, http_status=response.status_code,
-                   tls=certificate)
+                   tls=certificate, handshake_verified=verified)
 
 
 #: Hops a check follows before it calls the target down.
@@ -242,6 +281,97 @@ def _origin(url):
         parts.port or {"http": 80, "https": 443}.get(scheme))
 
 
+def _origin_prefixes(url):
+    """The mount prefixes that match this target as `requests` prepares it.
+
+    BOTH forms, and that is the whole point. `PreparedRequest.prepare_url`
+    does not add the port a scheme implies, so a prefix built from the
+    port-filled origin — `https://payments.internal:443/` — never matches the
+    ordinary `https://payments.internal/`, and an adapter mounted on it is
+    silently never used: the check stays down with the same OpenSSL message
+    and the setting the administrator chose does nothing. Measured against
+    requests 2.32.5, `Session.get_adapter('https://payments.internal/')`
+    returns the DEFAULT adapter for that prefix and the mounted one for
+    `https://payments.internal:8443/health` — which is why every port in
+    every measurement behind this package was a non-default one until this
+    was looked at.
+
+    The written form covers the default port; the port-filled form covers a
+    target somebody typed `:443` into. Neither matches another host, another
+    port or the other scheme, which is what bounds both settings to the
+    monitor's own origin.
+    """
+    from urllib.parse import urlsplit
+    parts = urlsplit(url)
+    scheme = (parts.scheme or "").lower()
+    # Userinfo is stripped by `prepare_url` into the auth argument, so it is
+    # not part of what `get_adapter` matches on either.
+    netloc = (parts.netloc or "").lower().rpartition("@")[2]
+    if not scheme or not netloc:
+        return ()
+    prefixes = {f"{scheme}://{netloc}/"}
+    if not parts.port:
+        implied = {"http": 80, "https": 443}.get(scheme)
+        if implied:
+            prefixes.add(f"{scheme}://{netloc}:{implied}/")
+    return tuple(sorted(prefixes))
+
+
+def _trust(client, target, tls):
+    """Mount an adapter that trusts the pasted certificate, and only it.
+
+    Trusted EXCLUSIVELY: a certificate is pasted because the endpoint is not
+    public, and adding the public roots beside it would let a mis-pasted or
+    simply wrong certificate pass through a path nobody meant — the check
+    would look like it was working. Measured,
+    `ssl.create_default_context(cadata=…)` holds exactly the pasted
+    certificates and no public root, PROVIDED `cert_verify` is overridden:
+    the stock one loads the system bundle into our context on every request.
+
+    Mounted rather than passed per request because `assert_hostname` is a
+    connection-pool argument; a session that has no `mount` — a fake in a
+    test, a caller's own object — is left exactly as it was.
+    """
+    import ssl
+
+    mount = getattr(client, "mount", None)
+    if mount is None:
+        return False
+    import requests.adapters
+
+    pem = tls.get("certificate") or ""
+    expected = tls.get("expected_name") or ""
+
+    class Trusting(requests.adapters.HTTPAdapter):
+        def cert_verify(self, conn, url, verify, cert):
+            # Deliberately nothing. The stock implementation resolves
+            # `verify` to the system CA bundle and loads it into the pool's
+            # context, so a pasted authority ended up ONE of the trusted
+            # roots rather than the only one: measured, a public host still
+            # verified through this adapter until this override was added.
+            return
+
+        def init_poolmanager(self, *args, **kwargs):
+            context = ssl.create_default_context(cadata=pem)
+            if expected:
+                # urllib3 re-checks the name itself whatever the context
+                # says, so turning `check_hostname` off is not enough on its
+                # own: measured, a cadata context with check_hostname False
+                # still raised "hostname 'localhost' doesn't match". The
+                # pool argument is what asserts the name the certificate
+                # actually carries. SNI is unchanged — the server still
+                # chooses what it would choose for a real client.
+                context.check_hostname = False
+                kwargs["assert_hostname"] = expected
+            kwargs["ssl_context"] = context
+            return super().init_poolmanager(*args, **kwargs)
+
+    adapter = Trusting()
+    for prefix in _origin_prefixes(target):
+        mount(prefix, adapter)
+    return True
+
+
 def _at_home(home, url):
     """Whether a hop to `url` may carry what the monitor was given to send.
 
@@ -255,7 +385,36 @@ def _at_home(home, url):
     return (home[0], home[2]) == ("http", 80) and here == ("https", home[1], 443)
 
 
-def _get_following(client, url, headers, credentials, cookies, deadline):
+def _waived(client, url, **kwargs):
+    """One hop with verification off, and without silencing the process.
+
+    `verify=False` is the documented way to say this and it does everything a
+    CERT_NONE adapter does: measured on this session, the next hop to another
+    host still failed with `self-signed certificate`, so the waiver does not
+    travel. urllib3 warns once per request, which for a setting somebody
+    chose on purpose is a line per check per interval, so the warning is
+    filtered HERE — around this call — rather than disabled for the process:
+    the agent's own link to WDash has its own `verify` switch, and a
+    process-wide `disable_warnings` would silence the one line that says that
+    link is unverified.
+
+    `catch_warnings` restores the global filter state on exit, and the agent
+    runs checks on threads, so another thread's InsecureRequestWarning could
+    be swallowed for the width of this call. A missed log line is the smaller
+    cost; the alternative silences that line for ever.
+    """
+    import warnings
+
+    import urllib3
+
+    with warnings.catch_warnings():
+        warnings.simplefilter(
+            "ignore", urllib3.exceptions.InsecureRequestWarning)
+        return client.get(url, verify=False, **kwargs)
+
+
+def _get_following(client, url, headers, credentials, cookies, deadline,
+                   waive=False):
     """GET `url`, following redirects by hand, inside one deadline.
 
     Every hop is given what is LEFT of the check's budget rather than the
@@ -276,6 +435,11 @@ def _get_following(client, url, headers, credentials, cookies, deadline):
     else (see `_at_home`); a hop anywhere else is asked for as a stranger
     would ask. Cookies a site sets on the way are kept by the session, which
     scopes them to the host that set them.
+
+    `waive` — the monitor's "expiry only" — is bounded by the same rule and
+    for the same reason: not verifying was chosen about THIS endpoint, and a
+    redirect to a sign-in page on another host is asked for with the public
+    roots like anybody else's.
     """
     import requests
     from urllib.parse import urljoin
@@ -287,13 +451,15 @@ def _get_following(client, url, headers, credentials, cookies, deadline):
         if left <= 0:
             raise _Overran(hop)
         own = _at_home(home, current)
-        response = client.get(
+        options = dict(
             # Never zero: a timeout of 0 is "no timeout" to `requests`, which
             # is the opposite of what a spent budget means.
-            current, timeout=max(0.1, left), stream=True, allow_redirects=False,
+            timeout=max(0.1, left), stream=True, allow_redirects=False,
             headers=headers if own else {"User-Agent": USER_AGENT},
             auth=credentials if own else None,
             cookies=cookies if own else None)
+        response = (_waived(client, current, **options) if (waive and own)
+                    else client.get(current, **options))
         location = response.headers.get("location")
         if response.status_code not in _REDIRECTS or not location:
             return response
@@ -385,16 +551,69 @@ def _credential_values(request):
             yield str(auth[key])
 
 
-def _reason(exception):
+#: What OpenSSL says when nothing the check trusts vouches for the chain.
+#: Both spellings: OpenSSL 3 hyphenates, 1.1 does not.
+_UNTRUSTED = ("self-signed certificate", "self signed certificate",
+              "unable to get local issuer certificate")
+
+#: And when the chain is fine but the name is not. The third is urllib3's own
+#: wording from `assert_hostname`, which is not an OpenSSL message at all.
+_MISNAMED = ("hostname mismatch", "ip address mismatch", "doesn't match")
+
+
+def _tls_advice(reason, tls):
+    """The one sentence that names the setting THIS failure is answered by.
+
+    Appended only to the reasons it actually answers. Measured, the four
+    common TLS failures are distinguishable from the message:
+
+        unable to get local issuer certificate   nothing local vouches for it
+        self-signed certificate                  the same, for one certificate
+        Hostname/IP address mismatch             trusted, wrong name
+        certificate has expired                  the expiry IS the finding
+
+    An expired certificate gets NOTHING appended. "Set the check to expiry
+    only" against `certificate has expired` is advice to switch verification
+    off in order to stop seeing an expiry — the one thing the TLS screen
+    exists to show.
+    """
+    if _mode(tls) != VERIFY:
+        # It was not verifying; whatever went wrong, the setting is not it.
+        return ""
+    text = (reason or "").lower()
+    pasted = bool((tls or {}).get("certificate"))
+    if any(marker in text for marker in _UNTRUSTED):
+        if not pasted:
+            return (" — this check verifies the certificate, and nothing it "
+                    "trusts vouches for this one. Name the certificate to "
+                    "trust (the endpoint's own, or the authority that signed "
+                    "it), or set the check to expiry only.")
+        return (" — the certificate this check was told to trust did not "
+                "sign the one this endpoint presented.")
+    if any(marker in text for marker in _MISNAMED) and pasted:
+        if not (tls or {}).get("expected_name"):
+            return (" — the certificate is trusted and does not name this "
+                    "address. Type the name it carries into 'Expected "
+                    "certificate name'.")
+    return ""
+
+
+def _reason(exception, tls=None):
     """A short sentence rather than a repr.
 
     This ends up on a page as "why is it down", and
     `ConnectionError(MaxRetryError(...))` is not an answer anybody reads.
+
+    `tls` is the monitor's own TLS setting, so a handshake failure can say
+    which setting would answer it — the moment somebody needs to know the
+    setting exists is the moment it has just failed, not a form they were not
+    looking at.
     """
     import requests
 
     if isinstance(exception, requests.exceptions.SSLError):
-        return f"TLS handshake failed: {_innermost(exception)}"
+        inner = _innermost(exception)
+        return f"TLS handshake failed: {inner}{_tls_advice(inner, tls)}"
     if isinstance(exception, requests.exceptions.ConnectTimeout):
         return "timed out connecting"
     if isinstance(exception, requests.exceptions.ReadTimeout):

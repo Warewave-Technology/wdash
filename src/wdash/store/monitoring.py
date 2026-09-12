@@ -100,7 +100,7 @@ RETENTION_SETTING = "monitoring.retention_days"
 #: fifteen-second report from every agent.
 PRUNE_EVERY = timedelta(hours=1)
 
-#: Rows per INSERT statement. Nine columns each, so this stays well under
+#: Rows per INSERT statement. Twelve columns each, so this stays well under
 #: SQLite's 32,766-variable ceiling with room for the column count to grow.
 INSERT_CHUNK = 1000
 
@@ -401,6 +401,205 @@ def split_request(request):
     return public, secret
 
 
+#: What a check may decide about TLS.
+#:
+#: `verify` is what every check does today and what a NULL column means: the
+#: certificate is verified, against the public roots unless the check names a
+#: certificate of its own. `expiry_only` is the explicit waiver — do not
+#: verify, read the certificate anyway — and it is the reason the rest of this
+#: section exists: a check that does not verify is talking to whatever
+#: answered, so it must send nothing.
+TLS_MODES = ("verify", "expiry_only")
+VERIFY, EXPIRY_ONLY = TLS_MODES
+
+#: Bounds on the pasted PEM. It goes into a JSON column, into the public
+#: shape, and into every /api/agent/config response for every agent on every
+#: poll — the same reason `_steps_of` bounds a journey's steps. A private CA
+#: and its intermediates are two or three certificates and a few kilobytes;
+#: anything past this is somebody pasting a bundle.
+MAX_TLS_PEM_BYTES = 16 * 1024
+MAX_TLS_CERTIFICATES = 8
+
+
+def tls_mode(tls):
+    """The mode of a stored `tls` blob. "verify" for NULL and for nonsense.
+
+    One place, because "no setting" and "verify" must never be two different
+    answers: a monitor written before the column existed verifies, and so does
+    one whose setting somebody hand-edited into something this version does
+    not know.
+    """
+    mode = ((tls or {}).get("mode") or VERIFY)
+    return mode if mode in TLS_MODES else VERIFY
+
+
+def split_tls(tls, kind, target):
+    """This check's TLS decision, checked against what it can act on.
+
+    Returns the blob to store, or None for "verify against the public roots".
+
+    Every refusal here is about a setting that would be STORED AND IGNORED,
+    which is the shape this package exists to remove: a monitor whose pasted
+    certificate does nothing is a monitor whose owner believes it is trusted.
+    """
+    tls = dict(tls or {})
+    mode = (tls.get("mode") or VERIFY).strip().lower()
+    pem = (tls.get("certificate") or "").strip()
+    expected = (tls.get("expected_name") or "").strip()
+
+    if mode not in TLS_MODES:
+        raise MonitoringError(
+            f"'{mode}' is not a TLS setting. Available: "
+            f"{', '.join(TLS_MODES)}.")
+    if mode == VERIFY and not pem and not expected:
+        # Nothing to store. NULL and "verify against the public roots" are
+        # the same fact, and writing a blob that says so would make every
+        # existing monitor differ from every new one for no reason.
+        return None
+
+    if kind == "tcp":
+        raise MonitoringError(
+            "A tcp check opens a socket and never sees a certificate, so a "
+            "TLS setting on one would be stored and ignored.")
+    if not (target or "").lower().startswith("https://"):
+        raise MonitoringError(
+            "A plain http check has no certificate to trust or to waive. "
+            "Point this check at https://, or leave the TLS setting alone.")
+
+    if mode == EXPIRY_ONLY and pem:
+        raise MonitoringError(
+            "Naming a certificate to trust and then not verifying it are "
+            "opposite instructions. Pick one.")
+    if expected and not pem:
+        raise MonitoringError(
+            "An expected certificate name only applies to a certificate this "
+            "check was given to trust. Paste that certificate, or leave the "
+            "name empty and the address is what the certificate has to name.")
+    if expected and kind == BROWSER:
+        # Measured, Chromium 151: a pinned key is accepted whatever name the
+        # certificate carries — the same run answers 200 against a leaf that
+        # names payments.internal reached at 127.0.0.1. A name typed here
+        # would be stored and never consulted.
+        raise MonitoringError(
+            "A journey's browser trusts a certificate by its public key, "
+            "whatever name it carries, so an expected name here would be "
+            "stored and ignored.")
+
+    out = {"mode": mode}
+    if pem:
+        out["certificate"] = _trusted_pem(pem)
+    if expected:
+        out["expected_name"] = _expected_name(expected)
+    return out
+
+
+def _trusted_pem(pem):
+    """The pasted PEM, parsed and bounded. Raises with what is wrong with it.
+
+    Parsed rather than stored as typed: a PEM that is not a certificate
+    reaches the agent, fails to build a trust store there, and turns into a
+    check that is down for a reason nobody looking at the form can see.
+    """
+    from cryptography import x509
+
+    if len(pem.encode("utf-8", "replace")) > MAX_TLS_PEM_BYTES:
+        raise MonitoringError(
+            f"That certificate is over {MAX_TLS_PEM_BYTES // 1024}KB. Paste "
+            f"the one authority that signed this endpoint, not a bundle.")
+    if "PRIVATE KEY" in pem:
+        # Said rather than quietly dropped: somebody who pasted a key has
+        # pasted it into a form, a browser's history and this process's
+        # memory, and the only useful sentence is the one that says so.
+        raise MonitoringError(
+            "That is a private key, not a certificate. Paste the "
+            "certificate — and rotate the key you just pasted. Nothing was "
+            "saved.")
+    try:
+        found = x509.load_pem_x509_certificates(pem.encode())
+    except Exception as exc:
+        raise MonitoringError(
+            f"That is not a certificate in PEM form ({type(exc).__name__}). "
+            f"It begins -----BEGIN CERTIFICATE-----.") from exc
+    if not found:
+        raise MonitoringError(
+            "There is no certificate in what was pasted. It begins "
+            "-----BEGIN CERTIFICATE-----.")
+    if len(found) > MAX_TLS_CERTIFICATES:
+        raise MonitoringError(
+            f"That is {len(found)} certificates. At most "
+            f"{MAX_TLS_CERTIFICATES} — an authority and its intermediates, "
+            f"not a trust store.")
+    return pem
+
+
+def _expected_name(name):
+    """The name the certificate has to carry, checked as a host name."""
+    if len(name) > 253 or any(c.isspace() for c in name):
+        raise MonitoringError(
+            f"'{name[:60]}' is not a host name. It is the name the "
+            f"certificate carries, for example payments.internal.")
+    return name
+
+
+def _sends(public, has_secrets):
+    """What a check would put on the wire, named. Empty when it sends nothing.
+
+    Asked about the REQUEST rather than about the secret box. Only six header
+    names are sealed wherever they are typed; `X-Tenant-Token` typed into the
+    plain header box is stored in the open, leaves `has_credentials` False,
+    and still goes out on the wire — over the deliberately unverified channel,
+    to whatever answered.
+    """
+    public = public or {}
+    out = []
+    headers = sorted(public.get("headers") or {})
+    if headers:
+        out.append(f"the {', '.join(headers)} header(s)")
+    cookies = sorted(public.get("cookie_names") or ())
+    if cookies:
+        out.append(f"the {', '.join(cookies)} cookie(s)")
+    auth = public.get("auth") or {}
+    if auth.get("type") == "basic":
+        # A username with no stored password still goes out as a real
+        # Authorization header: `requests` prepares ('svc', '') as
+        # `Basic c3ZjOg==`.
+        out.append(f"basic authentication as '{auth.get('username')}'")
+    elif auth.get("type") == "bearer":
+        out.append("a bearer token")
+    if has_secrets:
+        out.append("its stored credentials")
+    return out
+
+
+def _refuse_unverified_request(mode, kind, public, has_secrets):
+    """A check that does not verify must send nothing. Both directions.
+
+    Evaluated against the state the save WOULD LEAVE BEHIND rather than the
+    row as it stands, because one submission can retarget a check, turn
+    verification off and clear what it sends, and a rule that reads the
+    current row refuses that save for a credential it is in the act of
+    removing.
+    """
+    if mode != EXPIRY_ONLY:
+        return
+    if kind == BROWSER:
+        if has_secrets:
+            raise MonitoringError(
+                "This journey signs in, and a journey that does not verify "
+                "the certificate types its password into whatever answered. "
+                "Paste the certificate this endpoint presents — the browser "
+                "will accept that key and no other — or remove the step that "
+                "uses the secret.")
+        return
+    sending = _sends(public, has_secrets)
+    if sending:
+        raise MonitoringError(
+            f"This check does not verify the certificate, so it is talking "
+            f"to whatever answered — and it would still send "
+            f"{'; '.join(sending)}. Tick 'Forget what this check sends' and "
+            f"save, or leave verification on.")
+
+
 #: Response assertions that name a header.
 def _check_response_headers(assertions):
     for name in (assertions.get("headers_present") or ()):
@@ -411,6 +610,12 @@ def _check_response_headers(assertions):
             raise MonitoringError(
                 f"Expecting header '{name}' to match nothing is the same as "
                 f"expecting it to exist — use the presence check instead.")
+
+
+#: "This save did not mention it", for a column whose stored value can also
+#: be None. `tls=None` means "verify against the public roots"; leaving the
+#: argument out means "keep whatever is there".
+_KEEP = object()
 
 
 class MonitorRepository:
@@ -471,7 +676,7 @@ class MonitorRepository:
     def create(self, name, kind, target, interval_seconds=60,
                timeout_seconds=10, assertions=None, labels=None,
                agent_ids=(), created_by=None, request=None, steps=None,
-               journey_secrets=None):
+               journey_secrets=None, tls=None):
         steps, target = self._journey(kind, steps, target)
         kind, target, interval, timeout = self.validate(
             kind, target, interval_seconds, timeout_seconds)
@@ -494,6 +699,9 @@ class MonitorRepository:
             raise MonitoringError(
                 "Headers, cookies and authentication apply to http checks only.")
 
+        setting = split_tls(tls, kind, target)
+        _refuse_unverified_request(tls_mode(setting), kind, public, bool(secret))
+
         now = _now()
         row = {
             "id": str(uuid.uuid4()),
@@ -502,6 +710,7 @@ class MonitorRepository:
             "assertions": assertions,
             "request": public,
             "secrets": self._seal(secret),
+            "tls": setting,
             "steps": [x.as_dict() for x in steps] if steps else None,
             "labels": labels or {},
             "enabled": True,
@@ -514,14 +723,26 @@ class MonitorRepository:
         return self.get(row["id"])
 
     def update(self, monitor_id, agent_ids=None, request=None, steps=None,
-               journey_secrets=None, **changes):
+               journey_secrets=None, tls=_KEEP, forget_request=False,
+               **changes):
+        """Change a check. `tls` left alone keeps the stored setting.
+
+        A sentinel rather than None, because None is a value this column
+        holds: it is what "verify against the public roots" is stored as, and
+        a caller clearing the setting must not be indistinguishable from one
+        that never mentioned it.
+        """
         allowed = {"name", "kind", "target", "interval_seconds",
                    "timeout_seconds", "assertions", "labels", "enabled"}
         values = {k: v for k, v in changes.items() if k in allowed}
+        # Read once, up front. Three branches below write `values['secrets']`
+        # and two of them used to fetch this themselves; the TLS rule has to
+        # be evaluated against what all of them leave behind, so there is one
+        # `current` and one place that decides.
+        current = self.get(monitor_id)
+        if current is None:
+            return None
         if steps is not None:
-            current = self.get(monitor_id)
-            if current is None:
-                return None
             kind = values.get("kind", current["kind"])
             parsed, values["target"] = self._journey(kind, steps, None)
             values["steps"] = [x.as_dict() for x in parsed]
@@ -546,10 +767,8 @@ class MonitorRepository:
             # credential every time somebody edited the interval.
             if secret:
                 values["secrets"] = self._seal(secret)
+        moved = False
         if {"kind", "target", "interval_seconds", "timeout_seconds"} & set(values):
-            current = self.get(monitor_id)
-            if current is None:
-                return None
             kind, target, interval, timeout = self.validate(
                 values.get("kind", current["kind"]),
                 values.get("target", current["target"]),
@@ -557,14 +776,58 @@ class MonitorRepository:
                 values.get("timeout_seconds", current["timeout_seconds"]))
             values.update(kind=kind, target=target,
                           interval_seconds=interval, timeout_seconds=timeout)
+            moved = not may_follow(current["target"], target)
             if (steps is None and "secrets" not in values
-                    and current["has_credentials"]
-                    and not may_follow(current["target"], target)):
+                    and current["has_credentials"] and moved):
                 # Not carried to a new destination: a blank box means "keep
                 # it", and keeping it meant retargeting a check at a listener
                 # collected its sealed headers, cookies and password without
                 # any of them ever being shown. Rule 4 in store/secrets.py.
                 values["secrets"] = None
+
+        kind = values.get("kind", current["kind"])
+        target = values.get("target", current["target"])
+        if forget_request:
+            if kind == BROWSER:
+                raise MonitoringError(
+                    "A journey's secrets are named by its steps, so forgetting "
+                    "them would leave a step with nothing to type. Remove the "
+                    "step that uses the secret, or paste the certificate this "
+                    "journey should trust.")
+            # The whole request, not only the sealed half. A header typed into
+            # the plain box is stored in the open and still goes out on the
+            # wire, so an escape that only emptied `secrets` would leave the
+            # check sending exactly what the refusal was about.
+            values["request"] = None
+            values["secrets"] = None
+        if tls is not _KEEP:
+            values["tls"] = split_tls(tls, kind, target)
+        if moved:
+            # A certificate is pasted because THAT endpoint presents it, so it
+            # does not follow the check to another host any more than a
+            # password does. The MODE does: "do not verify" is a radio on the
+            # form, part of every submission, and carries nothing anywhere.
+            # Unlike a password, the certificate is shown on the form, so
+            # pasting it again for the new host is one deliberate act rather
+            # than a lost secret — and the save says it was dropped.
+            after = dict((values["tls"] if "tls" in values
+                          else current["tls"]) or {})
+            # Both popped, never short-circuited: a name left behind with its
+            # certificate removed is a setting `split_tls` refuses, and the
+            # whole save would be refused with a message about a box nobody
+            # touched.
+            dropped = after.pop("certificate", None)
+            dropped = after.pop("expected_name", None) or dropped
+            if dropped:
+                values["tls"] = split_tls(after, kind, target)
+
+        after_request = (values["request"] if "request" in values
+                         else current["request"])
+        after_secrets = (bool(values["secrets"]) if "secrets" in values
+                         else current["has_credentials"])
+        after_tls = values["tls"] if "tls" in values else current["tls"]
+        _refuse_unverified_request(tls_mode(after_tls), kind, after_request,
+                                   after_secrets)
         values["updated_at"] = _now()
 
         with self._engine.begin() as connection:
@@ -770,6 +1033,11 @@ class MonitorRepository:
             #: without a screen that can leak the answer.
             "request": row["request"] or {},
             "has_credentials": bool(row["secrets"]),
+            #: This check's own TLS decision. Shown back in full, certificate
+            #: included: a certificate is public, and the one question the
+            #: form has to be able to answer is WHICH one this check trusts.
+            #: `{}` reads as mode "verify" everywhere (see `tls_mode`).
+            "tls": row["tls"] or {},
             #: The step list, for a journey. The placeholders are shown as
             #: written — `{{ secret.password }}` is not a password.
             "steps": row["steps"] or [],
@@ -946,7 +1214,7 @@ class ResultRepository:
                 rows.append(row)
             if not rows:
                 return 0
-            # Chunked. A single multi-VALUES insert binds eleven parameters
+            # Chunked. A single multi-VALUES insert binds twelve parameters
             # per row, and SQLite refuses the statement past its limit —
             # "too many SQL variables", which says nothing about the batch
             # being too big. The endpoint caps at 500, so the live path never
@@ -1005,6 +1273,12 @@ class ResultRepository:
             "http_status": self._number(agent_id, monitor_id, result,
                                         "http_status", *HTTP_STATUS_RANGE),
             "tls": _certificate_of(monitor_id, result),
+            #: A claim like every other field here, so only a real boolean is
+            #: kept: an agent that sends "yes" says nothing, and NULL already
+            #: means "this run does not say".
+            "handshake_verified": (result["handshake_verified"]
+                                   if isinstance(result.get("handshake_verified"),
+                                                 bool) else None),
             "steps": _steps_of(result),
         }
 

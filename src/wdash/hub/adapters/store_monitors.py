@@ -81,12 +81,26 @@ def _aware(value):
     return value.replace(tzinfo=timezone.utc)
 
 
-def _certificate(payload):
+def _mode(definition):
+    """A check's stored TLS decision, in the neutral model's words.
+
+    Read through the store's own rule so "no setting", "verify" and a value
+    this version does not recognise are one answer rather than three.
+    """
+    from ...store.monitoring import tls_mode
+    return tls_mode(definition.get("tls"))
+
+
+def _certificate(payload, verified=None):
     """The stored TLS blob as a neutral Certificate.
 
     The agent already writes this shape, so there is nothing to map — which
     is deliberate: a translation here would be a second place for the field
     names to drift.
+
+    `verified` comes from the result's own column rather than from inside
+    this blob: the blob is NULL exactly when no certificate could be read,
+    and the verdict has to survive that.
     """
     if not payload:
         return None
@@ -110,6 +124,10 @@ def _certificate(payload):
         key_size=int(payload.get("key_size") or 0),
         key_curve=payload.get("key_curve", ""),
         signature_algorithm=payload.get("signature_algorithm", ""),
+        # Only a real boolean. Every result written before the column existed
+        # reads None — "this run does not say" — which must render as
+        # nothing, not as a finding.
+        verified=verified if isinstance(verified, bool) else None,
     )
 
 
@@ -232,7 +250,8 @@ class StoreMonitorSource(MonitorSource):
             status = UNKNOWN
             checked_at = _aware(result["started_at"])
             duration = (result["duration_us"] or 0) / 1000.0
-            certificate = _certificate(result["tls"])
+            certificate = _certificate(result["tls"],
+                                       result.get("handshake_verified"))
             ref = None
             # `last_seen_at` is None for an agent that has never checked in —
             # which is reachable the moment somebody registers one and it
@@ -252,7 +271,8 @@ class StoreMonitorSource(MonitorSource):
             status = UNKNOWN
             checked_at = _aware(result["started_at"])
             duration = (result["duration_us"] or 0) / 1000.0
-            certificate = _certificate(result["tls"])
+            certificate = _certificate(result["tls"],
+                                       result.get("handshake_verified"))
             ref = None
             detail = (f"no result since {checked_at:%H:%M} — this check runs "
                       f"every {definition.get('interval_seconds') or 60}s, so "
@@ -263,7 +283,8 @@ class StoreMonitorSource(MonitorSource):
             checked_at = _aware(result["started_at"])
             duration = (result["duration_us"] or 0) / 1000.0
             error = result["error"] or ""
-            certificate = _certificate(result["tls"])
+            certificate = _certificate(result["tls"],
+                                       result.get("handshake_verified"))
             ref = SourceRef(backend=self.backend, container="wdash_monitor_results",
                             id=str(result["id"]))
             detail = ""
@@ -281,6 +302,11 @@ class StoreMonitorSource(MonitorSource):
             type=definition["kind"], url=definition["target"],
             status=status, checked_at=checked_at, duration_ms=duration,
             error=error, tags=tags, certificate=certificate,
+            # From the DEFINITION, which is here whether or not a result is:
+            # a check that has never run, whose agent has gone quiet or whose
+            # certificate could not be read still has a TLS decision, and
+            # that decision is what the page says out loud.
+            tls_mode=_mode(definition),
             source=self.name, ref=ref)
 
     @staticmethod

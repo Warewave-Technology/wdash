@@ -2294,3 +2294,128 @@ class DocumentValuesOnThePageTest(unittest.TestCase):
         page = self.client.get("/monitors/journey?window=1h").get_data(as_text=True)
         self.assertIn('class="journey-step other"', page)
         self.assertNotIn('class="journey-step x', page)
+
+
+class WhatThePageSaysAboutVerificationTest(unittest.TestCase):
+    """Three facts, told apart on the page.
+
+    A check that deliberately does not verify; a verifying check whose last
+    handshake FAILED; and a source that cannot say either way — Heartbeat,
+    whose documents carry no such field and whose lab configuration sets
+    `ssl.verification_mode: none`. The third one gets NOTHING: a chip on
+    every row on day one is a chip people learn to skip, and an unknown
+    rendered as a finding is a claim nobody measured.
+    """
+
+    def setUp(self):
+        from tests.support import claim, grant
+        from wdash.app import create_app
+        from wdash.config import Config
+
+        database = os.path.join(tempfile.mkdtemp(), "verification.db")
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "verification"
+            DATABASE_URL = f"sqlite:///{database}"
+
+        soon = _now() + dt.timedelta(days=40)
+        rows = [
+            Monitor(id="waived", name="Lab TLS", status=UP, source="lab",
+                    url="https://lab.internal/", tls_mode="expiry_only",
+                    certificate=Certificate(common_name="lab.internal",
+                                            not_after=soon, verified=False)),
+            Monitor(id="failed", name="Payments", status=DOWN, source="lab",
+                    url="https://payments.internal/", tls_mode="verify",
+                    certificate=Certificate(common_name="payments.internal",
+                                            not_after=soon, verified=False)),
+            Monitor(id="verified", name="Public", status=UP, source="lab",
+                    url="https://www.example.com/", tls_mode="verify",
+                    certificate=Certificate(common_name="www.example.com",
+                                            not_after=soon, verified=True)),
+            Monitor(id="heartbeat", name="Heartbeat row", status=UP,
+                    source="lab", url="https://beat.internal/",
+                    certificate=Certificate(common_name="beat.internal",
+                                            not_after=soon)),
+        ]
+
+        class Source:
+            name = "lab"
+            capabilities = frozenset({"monitor_list", "tls_certificates"})
+
+            def supports(self, capability):
+                return capability in self.capabilities
+
+            def monitors(self, window, scope, series=False):
+                return MonitorPage(monitors=list(rows), sources=("lab",))
+
+            def history(self, monitor_id, window, scope, limit=None):
+                return []
+
+            def series(self, monitor_id, window, scope, points=120):
+                return []
+
+            def certificates(self, window, scope):
+                return list(rows)
+
+            def health(self):
+                return True, "ok"
+
+            def containers(self, scope):
+                return []
+
+        self.app = create_app(TestConfig)
+        self.app.hub.replace_all(monitors=[Source()])
+        claim(self.app)
+        grant(self.app, "u", ["monitors:read"])
+        self.client = self.app.test_client()
+        with self.client.session_transaction() as session:
+            session["user_data"] = {"id": "1", "email": "u@x", "username": "u",
+                                    "groups": []}
+            session["_user_id"] = "1"
+
+    def _page(self):
+        return self.client.get("/monitors?window=1h").get_data(as_text=True)
+
+    def _row(self, page, needle):
+        """The table row a name appears in."""
+        rows = page.split("<tr")
+        found = [r for r in rows if needle in r]
+        self.assertTrue(found, f"no row holding {needle!r}")
+        return found
+
+    def test_a_check_that_does_not_verify_says_so_on_every_row_it_has(self):
+        page = self._page()
+        for row in self._row(page, "Lab TLS"):
+            self.assertIn("expiry only", row)
+        for row in self._row(page, "lab.internal"):
+            self.assertIn("expiry only", row)
+
+    def test_a_verifying_check_whose_handshake_failed_is_not_called_that(self):
+        """"Expiry only" is a claim about a SETTING. A verifying check whose
+        handshake merely failed never chose it, and labelling it so would
+        invent a configuration nobody made."""
+        for row in self._row(self._page(), "payments.internal"):
+            self.assertNotIn("expiry only", row)
+        self.assertIn("not verified", self._page())
+
+    def test_a_verified_row_carries_no_chip_at_all(self):
+        for row in self._row(self._page(), "www.example.com"):
+            self.assertNotIn("expiry only", row)
+            self.assertNotIn("not verified", row)
+
+    def test_a_source_that_cannot_say_says_nothing(self):
+        """Heartbeat never reports a verdict. Rendering that as a chip would
+        put a label on every row it writes, for ever."""
+        for row in self._row(self._page(), "beat.internal"):
+            self.assertNotIn("expiry only", row)
+            self.assertNotIn("not verified", row)
+
+    def test_the_api_carries_both_facts(self):
+        payload = self.client.get(
+            "/api/monitors?window=1h").get_json()
+        by_id = {m["id"]: m for m in payload["certificates"]}
+        self.assertEqual(by_id["waived"]["tls_mode"], "expiry_only")
+        self.assertIs(by_id["waived"]["certificate"]["verified"], False)
+        self.assertIs(by_id["verified"]["certificate"]["verified"], True)
+        self.assertIsNone(by_id["heartbeat"]["certificate"]["verified"])

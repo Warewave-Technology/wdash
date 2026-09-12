@@ -105,10 +105,21 @@ def observe(rule, source, store, window, now):
             remaining = certificate.days_remaining
             if remaining is None:
                 continue
+            detail = (f"expired {abs(remaining)} day(s) ago"
+                      if certificate.expired
+                      else f"expires in {remaining} day(s)")
+            if monitor.expiry_only:
+                # The clock is still worth paging about — it is the only
+                # thing this check can vouch for, and saying so is what stops
+                # somebody reading the alert as evidence the endpoint is
+                # trusted. Only where the check's own definition says it:
+                # Heartbeat does not report a verdict, and inventing one
+                # would put this sentence on every row it writes.
+                detail = (f"{detail} — this check does not verify the "
+                          f"certificate, so the expiry is all it can vouch "
+                          f"for")
             out.append(Observation(
-                monitor.id, remaining <= days,
-                (f"expired {abs(remaining)} day(s) ago" if certificate.expired
-                 else f"expires in {remaining} day(s)"),
+                monitor.id, remaining <= days, detail,
                 f"{monitor.name} ({certificate.common_name})"))
         return Observed(out, complete, warnings)
 

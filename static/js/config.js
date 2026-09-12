@@ -745,6 +745,13 @@ document.querySelectorAll('.pick-target').forEach(button => {
 // Checks WDash runs itself
 // ---------------------------------------------------------------------------
 
+//: Whether the check now in the modal sends anything — a header, a cookie,
+//: authentication, or a stored credential. What decides whether the "forget
+//: what this check sends" box is offered: a checkbox that empties a check's
+//: request is not something to leave on screen where there is nothing to
+//: empty.
+let monitorSends = false;
+
 /**
  * Fill the check form from a row, or clear it for a new one.
  *
@@ -790,6 +797,27 @@ function fillMonitor(monitor) {
     value('monitorHeadersMatch', Object.entries(assertions.headers_match || {})
         .map(([k, v]) => `${k}: ${v}`).join('\n'));
 
+    // The TLS decision, shown back in full. A certificate is public — that
+    // is why it lives beside the request rather than in the secret box — and
+    // the one question this form has to answer is WHICH one the check trusts.
+    const tls = (monitor && monitor.tls) || {};
+    const expiryOnly = document.getElementById('monitorTlsExpiryOnly');
+    const verify = document.getElementById('monitorTlsVerify');
+    if (expiryOnly) { expiryOnly.checked = tls.mode === 'expiry_only'; }
+    if (verify) { verify.checked = tls.mode !== 'expiry_only'; }
+    value('monitorTlsCertificate', tls.certificate || '');
+    value('monitorTlsExpectedName', tls.expected_name || '');
+
+    // Never carried over from the last check the modal held: ticked by
+    // accident it empties what a check sends, and it is offered at all only
+    // where there is something to forget.
+    const forget = document.getElementById('monitorForgetRequest');
+    if (forget) { forget.checked = false; }
+    monitorSends = !!(monitor && (monitor.has_credentials
+        || Object.keys(request.headers || {}).length
+        || (request.cookie_names || []).length
+        || (request.auth || {}).type));
+
     const auth = request.auth || {};
     const authType = document.getElementById('monitorAuthType');
     if (authType) { authType.value = auth.type || ''; }
@@ -823,6 +851,29 @@ function applyMonitorKind() {
     document.querySelectorAll('[data-http-only]').forEach(element => {
         element.classList.toggle('d-none', kind !== 'http');
     });
+    // A tcp check opens a socket and never sees a certificate, so it gets no
+    // TLS section at all; a journey gets the decision and the certificate but
+    // no expected name, because a browser matches the key it is shown
+    // whatever name the certificate carries.
+    const expiryOnly = document.getElementById(
+        'monitorTlsExpiryOnly')?.checked;
+    document.querySelectorAll('[data-tls]').forEach(element => {
+        element.classList.toggle('d-none', kind === 'tcp');
+    });
+    document.querySelectorAll('[data-tls-verify]').forEach(element => {
+        element.classList.toggle('d-none', kind === 'tcp' || expiryOnly);
+    });
+    document.querySelectorAll('[data-tls-name]').forEach(element => {
+        element.classList.toggle('d-none', kind !== 'http' || expiryOnly);
+    });
+    // Offered only where there is something to forget, and never for a
+    // journey: its secrets are named by its steps, so forgetting one leaves
+    // a step with nothing to type — which would make the escape hatch a way
+    // to break a check.
+    document.querySelectorAll('[data-forget]').forEach(element => {
+        element.classList.toggle('d-none',
+                                 !monitorSends || kind === 'browser');
+    });
     document.querySelectorAll('[data-browser-only]').forEach(element => {
         element.classList.toggle('d-none', kind !== 'browser');
     });
@@ -846,6 +897,11 @@ function applyMonitorKind() {
 
 document.getElementById('monitorKind')?.addEventListener('change', applyMonitorKind);
 document.getElementById('monitorAuthType')?.addEventListener('change', applyMonitorKind);
+// Both radios: the certificate boxes belong to "verify", and leaving them on
+// screen under "do not verify" offers a setting that would be refused.
+['monitorTlsVerify', 'monitorTlsExpiryOnly'].forEach(id => {
+    document.getElementById(id)?.addEventListener('change', applyMonitorKind);
+});
 
 document.getElementById('addMonitorBtn')?.addEventListener('click', () => {
     fillMonitor(null);

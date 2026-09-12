@@ -455,6 +455,15 @@
             {% if not monitor.enabled %}
             <span class="badge bg-secondary ms-1">disabled</span>
             {% endif %}
+            {% if monitor.tls.mode == 'expiry_only' %}
+            <span class="badge target-chip ms-1"
+                  title="This check does not verify the certificate, and sends nothing."
+            >expiry only</span>
+            {% elif monitor.tls.certificate %}
+            <span class="badge target-chip ms-1"
+                  title="This check verifies against a certificate it was given, instead of the public roots."
+            >own certificate</span>
+            {% endif %}
           </td>
           <td><span class="badge bg-secondary">{{ monitor.kind }}</span></td>
           <td><code class="text-muted">{{ monitor.target }}</code></td>

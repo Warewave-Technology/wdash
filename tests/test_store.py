@@ -1198,3 +1198,84 @@ class SimultaneousWriteTest(unittest.TestCase):
             lambda: self.store.settings.set("auth.ldap", {"enabled": True}))
         self.assertEqual(failures, [])
         self.assertEqual(self.store.settings.get("auth.ldap"), {"enabled": True})
+
+
+class MonitorTlsUpgradeTest(unittest.TestCase):
+    """Version 17 on a store that already has checks and results in it.
+
+    Two columns, both NULL, and nothing else touched. What the upgrade must
+    not do is change a single existing check's behaviour: NULL on
+    `wdash_monitors.tls` has to read as "verify against the public roots",
+    which is what every check did before the column existed, and NULL on
+    `wdash_monitor_results.handshake_verified` has to read as "this run does
+    not say" — not as verified, and not as a finding.
+
+    Runs on both dialects: with WDASH_TEST_POSTGRES set, `build_engine` puts
+    this store in a Postgres schema instead, and the ALTERs are the part most
+    likely to differ between the two.
+    """
+
+    def _at_sixteen(self):
+        from datetime import datetime, timezone
+
+        from sqlalchemy import text
+
+        from wdash.store import migrations
+
+        engine = build_engine("sqlite:///:memory:")
+        every = migrations.MIGRATIONS
+        migrations.MIGRATIONS = [step for step in every if step[0] <= 16]
+        try:
+            migrations.migrate(engine)
+        finally:
+            migrations.MIGRATIONS = every
+
+        now = datetime.now(timezone.utc).isoformat()
+        with engine.begin() as connection:
+            # Migration 1 builds the tables from schema.py, which already
+            # declares this version's columns — so a store "at 16" made by
+            # running the steps has them anyway, and an upgrade test written
+            # against it asserts nothing about the ALTER it is for. Dropped
+            # here so this really is a store the new columns are missing
+            # from, which is what an installation being upgraded actually is.
+            for table, column in (("wdash_monitors", "tls"),
+                                  ("wdash_monitor_results",
+                                   "handshake_verified")):
+                connection.execute(text(
+                    f"ALTER TABLE {table} DROP COLUMN {column}"))
+            connection.execute(text(
+                "INSERT INTO wdash_monitors (id, name, kind, target, "
+                "interval_seconds, timeout_seconds, enabled, created_at, "
+                "updated_at) VALUES ('m1', 'API', 'http', "
+                "'https://payments.internal/health', 60, 10, true, "
+                f"'{now}', '{now}')"))
+            connection.execute(text(
+                "INSERT INTO wdash_monitor_results (monitor_id, agent_id, "
+                "started_at, received_at, status, duration_us) VALUES "
+                f"('m1', 'a1', '{now}', '{now}', 'up', 1000)"))
+        return engine
+
+    def test_the_columns_are_added_and_every_check_still_verifies(self):
+        from wdash.store import migrations
+        engine = self._at_sixteen()
+        self.assertEqual(migrations.migrate(engine), 17)
+
+        store = Store(engine)
+        monitor = store.monitors.get("m1")
+        self.assertEqual(monitor["tls"], {})
+        from wdash.store.monitoring import tls_mode
+        self.assertEqual(tls_mode(monitor["tls"]), "verify")
+        self.assertEqual(monitor["target"], "https://payments.internal/health")
+
+    def test_a_result_written_before_the_upgrade_reports_no_verdict(self):
+        from wdash.store import migrations
+        engine = self._at_sixteen()
+        migrations.migrate(engine)
+        rows = Store(engine).results.latest()
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["handshake_verified"])
+
+    def test_the_upgrade_is_safe_to_run_again(self):
+        from wdash.store import migrations
+        engine = self._at_sixteen()
+        self.assertEqual(migrations.migrate(engine), migrations.migrate(engine))

@@ -342,6 +342,31 @@ def _report_source_name_collisions(connection):
                     }))
 
 
+def _add_monitor_tls(connection):
+    """Version 17: a check's own TLS decision, and what its handshake did.
+
+    Two columns, added NULL, on the guarded ALTER shape migration 14 uses.
+    NULL on `wdash_monitors.tls` reads as "verify against the public roots",
+    which is what every existing check already does, so no check changes its
+    behaviour, its result or its alerts on upgrade. NULL on
+    `wdash_monitor_results.handshake_verified` reads as "this run does not
+    say", which is true of every result written before this change — it must
+    not read as "verified", and it must not read as a finding either.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(connection)
+    json_type = "JSONB" if connection.dialect.name == "postgresql" else "TEXT"
+
+    for table, column, kind in (
+            ("wdash_monitors", "tls", json_type),
+            ("wdash_monitor_results", "handshake_verified", "BOOLEAN")):
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        if column not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN {column} {kind}"))
+
+
 def _signals_of(row):
     """What a source row serves, as a set.
 
@@ -381,6 +406,8 @@ MIGRATIONS = [
      _index_alert_history_latest),
     (16, "report sources that shadow each other by name",
      _report_source_name_collisions),
+    (17, "a check's own TLS decision, and whether its handshake was verified",
+     _add_monitor_tls),
 ]
 
 

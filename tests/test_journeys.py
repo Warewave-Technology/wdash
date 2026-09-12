@@ -23,6 +23,7 @@ import base64
 import json
 import os
 import sys
+import tempfile
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -202,10 +203,19 @@ class _FakeLocator:
 
 
 class _Launcher:
+    """The browser a journey opens, and what it was asked to open it with.
+
+    `options` is the contract change this fake exists to pin: a launcher that
+    ignored them would make "expiry only" and a pinned certificate settings
+    that are stored, sent to the agent, and never reach the browser.
+    """
+
     def __init__(self, page):
         self.page = page
+        self.options = None
 
-    def __call__(self):
+    def __call__(self, **options):
+        self.options = options
         return self
 
     def __enter__(self):
@@ -333,7 +343,7 @@ class StepBlameTest(unittest.TestCase):
     def test_an_agent_without_a_browser_says_so(self):
         """Not "step 1 failed", which sends somebody to check a website that
         is fine."""
-        def missing():
+        def missing(**options):
             raise ImportError("No module named 'playwright'")
         result = run_journey({"id": "m1", "timeout_seconds": 30,
                               "steps": SIGN_IN}, launcher=missing)
@@ -343,7 +353,7 @@ class StepBlameTest(unittest.TestCase):
                          [STEP_SKIPPED] * 5)
 
     def test_a_browser_that_will_not_start_is_named_as_such(self):
-        def broken():
+        def broken(**options):
             raise OSError("Failed to launch: /dev/shm too small")
         result = run_journey({"id": "m1", "timeout_seconds": 30,
                               "steps": SIGN_IN}, launcher=broken)
@@ -359,7 +369,7 @@ class StepBlameTest(unittest.TestCase):
     def test_a_journey_is_never_raised_out_of(self):
         """Same contract as run_check: a journey that could not run is a
         journey that failed, and that IS the measurement."""
-        def exploding():
+        def exploding(**options):
             raise KeyboardInterrupt  # noqa: not caught by `except Exception`
         with self.assertRaises(KeyboardInterrupt):
             run_journey({"id": "m1", "steps": SIGN_IN}, launcher=exploding)
@@ -367,7 +377,7 @@ class StepBlameTest(unittest.TestCase):
         for error in (ValueError("x"), OSError("y"), RuntimeError("z")):
             result = run_journey(
                 {"id": "m1", "steps": SIGN_IN},
-                launcher=lambda e=error: (_ for _ in ()).throw(e))
+                launcher=lambda e=error, **options: (_ for _ in ()).throw(e))
             self.assertEqual(result["status"], "down")
 
 
@@ -1237,3 +1247,277 @@ class JourneyDeletionTest(unittest.TestCase):
         self.assertEqual(self.store.results.count(journey["id"]), 1)
         self.store.monitors.delete(journey["id"])
         self.assertEqual(self.store.results.count(journey["id"]), 0)
+
+
+# ---------------------------------------------------------------------------
+# What a journey does about the certificate
+# ---------------------------------------------------------------------------
+
+def _private_chain(scratch):
+    """A CA, a leaf it signed for 127.0.0.1, and the files a server needs."""
+    import datetime as dt
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    now = dt.datetime.now(dt.timezone.utc)
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,
+                                            "Warewave Internal CA")])
+    ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name)
+          .public_key(ca_key.public_key())
+          .serial_number(x509.random_serial_number())
+          .not_valid_before(now - dt.timedelta(days=1))
+          .not_valid_after(now + dt.timedelta(days=365))
+          .add_extension(x509.BasicConstraints(ca=True, path_length=None),
+                         critical=True)
+          .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+              ca_key.public_key()), critical=False)
+          .add_extension(x509.KeyUsage(
+              digital_signature=True, content_commitment=False,
+              key_encipherment=False, data_encipherment=False,
+              key_agreement=False, key_cert_sign=True, crl_sign=True,
+              encipher_only=False, decipher_only=False), critical=True)
+          .sign(ca_key, hashes.SHA256()))
+
+    leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf = (x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(
+                NameOID.COMMON_NAME, "payments.internal")]))
+            .issuer_name(ca_name).public_key(leaf_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(days=1))
+            .not_valid_after(now + dt.timedelta(days=90))
+            .add_extension(x509.SubjectAlternativeName([
+                x509.DNSName("payments.internal"),
+                x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                critical=False)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None),
+                           critical=True)
+            .add_extension(x509.AuthorityKeyIdentifier
+                           .from_issuer_public_key(ca_key.public_key()),
+                           critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+                leaf_key.public_key()), critical=False)
+            .sign(ca_key, hashes.SHA256()))
+
+    cert_path = os.path.join(scratch, "leaf.crt")
+    key_path = os.path.join(scratch, "leaf.key")
+    with open(cert_path, "wb") as handle:
+        handle.write(leaf.public_bytes(serialization.Encoding.PEM))
+    with open(key_path, "wb") as handle:
+        handle.write(leaf_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+    return {
+        "ca_pem": ca.public_bytes(serialization.Encoding.PEM).decode(),
+        "leaf_pem": leaf.public_bytes(serialization.Encoding.PEM).decode(),
+        "cert_path": cert_path, "key_path": key_path,
+    }
+
+
+def _https_server(cert_path, key_path, body=b"<html><body>hello</body></html>"):
+    import ssl
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from tests.support import serve_in_background
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_path, key_path)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    return serve_in_background(server)
+
+
+class JourneyTlsOptionsTest(unittest.TestCase):
+    """What the journey asks its browser for.
+
+    Read off the launcher, because that is the contract: a setting the store
+    holds, the endpoint sends and the browser never receives is a setting
+    stored and ignored — the shape this whole package exists to remove.
+    """
+
+    STEPS = [{"kind": "goto", "value": "https://payments.internal/login"},
+             {"kind": "expect_text", "value": "hello"}]
+
+    def _run(self, tls=None, target="https://payments.internal/login"):
+        page = _FakePage()
+        launcher = _Launcher(page)
+        result = run_journey({"id": "m1", "timeout_seconds": 30,
+                              "target": target, "steps": self.STEPS,
+                              "tls": tls or {}}, launcher=launcher)
+        return result, launcher
+
+    def test_a_journey_verifies_by_default(self):
+        _, launcher = self._run()
+        self.assertEqual(launcher.options["ignore_https_errors"], False)
+        self.assertEqual(launcher.options["certificate_pins"], ())
+
+    def test_expiry_only_waives_verification_in_the_browser(self):
+        _, launcher = self._run({"mode": "expiry_only"})
+        self.assertEqual(launcher.options["ignore_https_errors"], True)
+
+    def test_a_pasted_certificate_becomes_a_pinned_key(self):
+        """Not a blanket. Measured against Chromium 151: the error is ignored
+        only for a chain carrying this exact public key."""
+        import base64
+        import hashlib
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, PublicFormat,
+        )
+        scratch = tempfile.mkdtemp()
+        try:
+            chain = _private_chain(scratch)
+        finally:
+            import shutil
+            shutil.rmtree(scratch, ignore_errors=True)
+        _, launcher = self._run({"certificate": chain["leaf_pem"]})
+        der = x509.load_pem_x509_certificate(
+            chain["leaf_pem"].encode()).public_key().public_bytes(
+                Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+        expected = base64.b64encode(hashlib.sha256(der).digest()).decode()
+        self.assertEqual(launcher.options["certificate_pins"], (expected,))
+        self.assertEqual(launcher.options["ignore_https_errors"], False)
+
+    def test_a_journey_reports_the_certificate_it_reached(self):
+        """Otherwise "expiry only" promises a journey a clock it never
+        produced: every https journey was invisible on the certificate screen
+        while every http check beside it reported one."""
+        scratch = tempfile.mkdtemp()
+        try:
+            chain = _private_chain(scratch)
+            server = _https_server(chain["cert_path"], chain["key_path"])
+            port = server.server_address[1]
+            try:
+                result, _ = self._run({"mode": "expiry_only"},
+                                      target=f"https://127.0.0.1:{port}/")
+            finally:
+                server.shutdown()
+                server.server_close()
+        finally:
+            import shutil
+            shutil.rmtree(scratch, ignore_errors=True)
+        self.assertEqual(result["tls"]["common_name"], "payments.internal")
+        self.assertTrue(result["tls"]["not_after"])
+        self.assertIs(result["handshake_verified"], False)
+
+    def test_an_http_journey_says_nothing_about_a_handshake(self):
+        result, _ = self._run(target="http://payments.internal/login")
+        self.assertIsNone(result["handshake_verified"])
+        self.assertIsNone(result["tls"])
+
+    def test_a_refused_certificate_names_what_to_paste(self):
+        """Chromium's own words are ERR_CERT_AUTHORITY_INVALID, which says
+        nothing about where the answer lives."""
+        page = _FakePage(fail_at=1,
+                         error=RuntimeError("net::ERR_CERT_AUTHORITY_INVALID "
+                                            "at https://payments.internal/"))
+        result = run_journey({"id": "m1", "timeout_seconds": 30,
+                              "target": "https://payments.internal/login",
+                              "steps": self.STEPS, "tls": {}},
+                             launcher=_Launcher(page))
+        self.assertEqual(result["status"], "down")
+        self.assertIn("Paste the certificate this endpoint presents",
+                      result["error"])
+        self.assertIs(result["handshake_verified"], False)
+
+    def test_a_journey_that_already_pins_is_told_the_key_is_wrong(self):
+        scratch = tempfile.mkdtemp()
+        try:
+            chain = _private_chain(scratch)
+        finally:
+            import shutil
+            shutil.rmtree(scratch, ignore_errors=True)
+        page = _FakePage(fail_at=1,
+                         error=RuntimeError("net::ERR_CERT_AUTHORITY_INVALID"))
+        result = run_journey({"id": "m1", "timeout_seconds": 30,
+                              "target": "https://payments.internal/login",
+                              "steps": self.STEPS,
+                              "tls": {"certificate": chain["ca_pem"]}},
+                             launcher=_Launcher(page))
+        self.assertIn("endpoint's own public key", result["error"])
+
+    def test_an_ordinary_failure_is_not_dressed_up_as_a_certificate(self):
+        page = _FakePage(fail_at=1, error=RuntimeError("boom"))
+        result = run_journey({"id": "m1", "timeout_seconds": 30,
+                              "target": "https://payments.internal/login",
+                              "steps": self.STEPS, "tls": {}},
+                             launcher=_Launcher(page))
+        self.assertNotIn("Paste the certificate", result["error"])
+        self.assertIs(result["handshake_verified"], True)
+
+
+@unittest.skipUnless(HAVE_BROWSER,
+                     "no Chromium — run `playwright install chromium`")
+class PinnedCertificateTest(unittest.TestCase):
+    """The measurement the journey half of this package rests on.
+
+    A journey that signs in cannot exist without a stored secret, so if the
+    only answer for a private certificate were "do not verify", every
+    internal sign-in journey would have no configuration at all. The pin is
+    the answer, and it is worth a real browser: `--ignore-certificate-errors-
+    spki-list` is a Chromium flag whose behaviour no fake can assert.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.mkdtemp()
+        cls.chain = _private_chain(cls.scratch)
+        cls.server = _https_server(cls.chain["cert_path"],
+                                   cls.chain["key_path"])
+        cls.url = f"https://127.0.0.1:{cls.server.server_address[1]}/"
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        cls.server.shutdown()
+        cls.server.server_close()
+        shutil.rmtree(cls.scratch, ignore_errors=True)
+
+    def _journey(self, tls):
+        return run_journey({"id": "m1", "timeout_seconds": 45,
+                            "target": self.url, "tls": tls,
+                            "steps": [{"kind": "goto", "value": self.url},
+                                      {"kind": "expect_text",
+                                       "value": "hello"}]})
+
+    def test_a_private_certificate_is_refused_by_default(self):
+        result = self._journey({})
+        self.assertEqual(result["status"], "down")
+        self.assertIn("ERR_CERT", result["error"])
+
+    def test_the_endpoint_s_own_certificate_pinned_makes_it_pass(self):
+        result = self._journey({"certificate": self.chain["leaf_pem"]})
+        self.assertEqual(result["status"], "up", result["error"])
+        self.assertIs(result["handshake_verified"], True)
+
+    def test_the_authority_that_signed_it_does_not(self):
+        """Measured, and the reason the form says to paste the endpoint's
+        own: Chromium matches the public key it is shown, not the authority
+        behind it. A CA pasted here would be stored and ignored, which is
+        exactly the shape this package removes — so it is a failure with a
+        sentence, not a silent pass."""
+        result = self._journey({"certificate": self.chain["ca_pem"]})
+        self.assertEqual(result["status"], "down")
+        self.assertIn("endpoint's own public key", result["error"])
+
+    def test_expiry_only_gets_through_without_a_certificate(self):
+        result = self._journey({"mode": "expiry_only"})
+        self.assertEqual(result["status"], "up", result["error"])
+        self.assertIs(result["handshake_verified"], False)

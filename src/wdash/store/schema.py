@@ -281,6 +281,16 @@ monitors = Table(
     #: journey is the only check whose definition is a sequence, and giving
     #: http checks an empty steps column would invite somebody to fill it in.
     Column("steps", JSON),
+    #: This check's own TLS decision:
+    #: {"mode": "verify" | "expiry_only", "certificate": "<PEM>",
+    #:  "expected_name": "<name>"}.
+    #:
+    #: NULL means "verify against the public roots", which is what every row
+    #: written before this column did and what every row without a setting
+    #: still does. Beside `request` rather than in `secrets` on purpose: a
+    #: certificate is public, and this one is shown back on the form so
+    #: somebody can see WHICH certificate a check was told to trust.
+    Column("tls", JSON),
     Column("labels", JSON),
     Column("enabled", Boolean, nullable=False, default=True),
     Column("created_by", String(255)),
@@ -331,6 +341,19 @@ monitor_results = Table(
     #: The certificate, when the check saw one. Shaped like the neutral
     #: Certificate model so the source adapter has nothing to translate.
     Column("tls", JSON),
+    #: Whether the CHECK'S OWN request completed a verified handshake. True,
+    #: False, or NULL for "this run does not say" — every result written
+    #: before this column, every http:// target and every kind with no
+    #: handshake to make.
+    #:
+    #: A column of its own rather than a key inside `tls`, because `tls` is
+    #: NULL exactly when the certificate could not be read — an http target,
+    #: an agent behind a proxy, an endpoint that closed the second connection
+    #: — and that is precisely when the verdict still has to be recorded. It
+    #: is named for what it measures: the handshake the check itself made,
+    #: not the certificate beside it, which is read on a second and
+    #: deliberately unverified connection.
+    Column("handshake_verified", Boolean),
     #: For the detail page: one monitor's history, in order.
     Index("ix_wdash_monitor_results_lookup", "monitor_id", "started_at"),
     #: For the LISTING, which filters on time alone. Without it the sparkline
