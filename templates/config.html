@@ -75,7 +75,7 @@
     </div>
     <div class="card-body p-0">
       {% if sources %}
-      <table class="table table-sm mb-0 align-middle">
+      <table class="table table-hover mb-0">
         <thead><tr>
           <th>Name</th><th>Signal</th><th>Type</th><th>URL</th>
           <th>Credential</th><th></th>
@@ -132,7 +132,7 @@
                 <span class="text-muted">none</span>
               {% endif %}
             </td>
-            <td class="text-end text-nowrap">
+            <td class="text-end">
               <button class="btn btn-sm btn-outline-secondary edit-source"
                       data-source='{{ source|tojson }}'
                       data-bs-toggle="modal" data-bs-target="#sourceModal">Edit</button>
@@ -334,7 +334,7 @@
       </button>
     </div>
     <div class="card-body p-0">
-      <table class="table table-sm mb-0 align-middle">
+      <table class="table table-hover mb-0">
         <thead><tr>
           <th>Username</th><th>Email</th><th>Role</th><th>Authenticator</th>
           <th>Created</th><th>Last sign-in</th><th></th>
@@ -351,7 +351,7 @@
                 <span class="badge bg-primary-subtle text-primary ms-1">you</span>
               {% endif %}
             </td>
-            <td class="text-muted" style="font-size:.8rem">
+            <td class="text-muted">
               {{ account.email or '—' }}</td>
             <td>
               {# The role, and ONLY the role. The enabled switch used to ride
@@ -389,7 +389,7 @@
               </div>
               {% endif %}
             </td>
-            <td style="font-size:.8rem">
+            <td>
               {# What the column can say, and no more. WDash cannot read the
                  secret back to a screen — it is sealed, and sealed secrets
                  are replaced, never shown. #}
@@ -406,12 +406,12 @@
                 </div>
               {% endif %}
             </td>
-            <td class="text-muted" style="font-size:.8rem">
+            <td class="text-muted">
               {{ account.created_at.strftime('%Y-%m-%d %H:%M') if account.created_at else '—' }}</td>
-            <td class="text-muted" style="font-size:.8rem">
+            <td class="text-muted">
               {{ account.last_login_at.strftime('%Y-%m-%d %H:%M')
                  if account.last_login_at else 'never' }}</td>
-            <td class="text-end text-nowrap">
+            <td class="text-end">
               {# Its own act, and it says which one it is. Disabling ends a
                  session the person is using, which is a different kind of
                  thing from moving them to another role. #}
@@ -537,8 +537,7 @@
     </div>
     {% else %}
     <div class="table-responsive">
-      <table class="table table-hover mb-0" id="agentsTable"
-             style="font-size:.85rem">
+      <table class="table table-hover mb-0" id="agentsTable">
         <thead><tr>
           <th>Agent</th><th style="width:9rem">Last seen</th>
           <th style="width:6rem">Version</th><th style="width:12rem"></th>
@@ -561,7 +560,7 @@
             {% endif %}
           </td>
           <td><small class="text-muted">{{ agent.version or '—' }}</small></td>
-          <td class="text-end text-nowrap">
+          <td class="text-end">
             <form method="post" class="d-inline"
                   action="{{ url_for('config.rotate_agent', agent_id=agent.id) }}">
               <button class="btn btn-sm btn-outline-secondary"
@@ -600,7 +599,7 @@
     </div>
     {% else %}
     <div class="table-responsive">
-      <table class="table table-hover mb-0" style="font-size:.85rem">
+      <table class="table table-hover mb-0">
         <thead><tr>
           <th>Check</th><th style="width:5rem">Type</th>
           <th>Target</th><th style="width:7rem">Every</th>
@@ -695,7 +694,7 @@
     </div>
     {% else %}
     <div class="table-responsive">
-      <table class="table table-hover mb-0" style="font-size:.85rem">
+      <table class="table table-hover mb-0">
         <thead><tr><th>Channel</th><th>Type</th><th>Host</th><th></th></tr></thead>
         <tbody>
         {% for channel in channels %}
@@ -762,7 +761,7 @@
     </div>
     {% else %}
     <div class="table-responsive">
-      <table class="table table-hover mb-0" style="font-size:.85rem">
+      <table class="table table-hover mb-0">
         <thead><tr>
           <th style="width:16rem">Rule</th>
           <th>What it does</th>
@@ -817,7 +816,7 @@
     </div>
     {% if silences %}
     <div class="table-responsive">
-      <table class="table table-hover mb-0" style="font-size:.85rem">
+      <table class="table table-hover mb-0">
         <thead><tr><th>Subject</th><th>Until</th><th>Reason</th>
           <th>By</th><th></th></tr></thead>
         <tbody>
@@ -866,7 +865,7 @@
           </button>
         </div>
         <div class="card-body p-0">
-          <table class="table table-sm mb-0 align-middle">
+          <table class="table table-hover mb-0">
             <thead><tr><th>Role</th><th>Permissions</th><th>Log access</th><th></th></tr></thead>
             <tbody>
             {% for role in roles %}
@@ -883,8 +882,8 @@
                   {% endif %}
                 </td>
                 <td><small class="text-muted">{{ role.permissions|length }} permissions</small></td>
-                <td><code class="text-muted" style="font-size:.75rem">{{ (role.containers or ['none'])|join(', ') }}</code></td>
-                <td class="text-end text-nowrap">
+                <td><code class="text-muted">{{ (role.containers or ['none'])|join(', ') }}</code></td>
+                <td class="text-end">
                   <button class="btn btn-sm btn-outline-secondary edit-role"
                           data-role='{{ role|tojson }}'
                           data-bs-toggle="modal" data-bs-target="#roleModal">Edit</button>

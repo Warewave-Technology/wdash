@@ -210,7 +210,7 @@
             {{ "{:,}".format(newest.of) }} checks{% endif %}</small>
     </div>
     <div class="table-responsive">
-        <table class="table table-hover mb-0" style="font-size:.85rem">
+        <table class="table table-hover mb-0">
             <thead><tr>
                 <th style="width:6rem">Status</th>
                 <th>From</th>
@@ -272,7 +272,7 @@
             {{ "{:,}".format(newest.of) }} checks{% endif %}</small>
     </div>
     <div class="table-responsive">
-        <table class="table table-hover mb-0" style="font-size:.85rem">
+        <table class="table table-hover mb-0">
             <thead><tr>
                 <th style="width:2.5rem"></th>
                 <th>Step</th>
@@ -289,7 +289,7 @@
             {% for step in steps %}
             <tr>
                 <td class="text-muted">{{ step.index }}</td>
-                <td><code style="font-size:.75rem">{{ step.description }}</code>
+                <td><code>{{ step.description }}</code>
                     <div class="text-muted" style="font-size:.7rem">
                         {{ step.runs }} run(s){% if step.skipped %},
                         {{ step.skipped }} never reached{% endif %}</div>
@@ -389,7 +389,7 @@
     </div>
     {% else %}
     <div class="table-responsive">
-        <table class="table table-hover mb-0" style="font-size:.85rem">
+        <table class="table table-hover mb-0">
             <thead><tr>
                 <th style="width:6rem">Status</th>
                 <th style="width:13rem">When</th>
@@ -451,7 +451,7 @@
                 <td colspan="{{ 5 if locations else 4 }}"
                     class="bg-body-tertiary">
                     <div class="d-flex gap-3 flex-wrap align-items-start">
-                        <table class="table table-sm mb-0 flex-grow-1"
+                        <table class="table table-dense mb-0 flex-grow-1"
                                style="max-width:44rem">
                             <tbody>
                             {% for step in check.steps %}
@@ -467,7 +467,7 @@
                                     <span class="journey-step {{ step.status if step.status in ('passed', 'failed', 'skipped') else 'other' }}"
                                     >{{ step.status }}</span>
                                 </td>
-                                <td><code style="font-size:.75rem"
+                                <td><code
                                     >{{ step.description }}</code>
                                     {% if step.screenshot_id %}
                                     {# Elastic keeps one per STEP, in tiles.
@@ -488,8 +488,7 @@
                                     >{{ step.error }}</div>
                                     {% endif %}
                                 </td>
-                                <td class="text-end text-muted"
-                                    style="width:6rem; font-size:.75rem">
+                                <td class="text-end text-muted" style="width:6rem">
                                     {% if step.duration_ms is not none
                                     %}{{ step.duration_ms }} ms{% endif %}
                                 </td>

@@ -650,7 +650,7 @@ document.querySelectorAll('.pick-target').forEach(button => {
                                 title="Survives rotation">${escapeHtml(stripped + '*')}</button>`
                         : '';
                     return `<tr>
-                      <td><code style="font-size:.78rem">${escapeHtml(name)}</code></td>
+                      <td><code>${escapeHtml(name)}</code></td>
                       <td class="text-end text-nowrap">
                         ${suggested}
                         <button type="button" class="btn btn-sm btn-outline-secondary insert-target"
@@ -659,7 +659,7 @@ document.querySelectorAll('.pick-target').forEach(button => {
                       </td></tr>`;
                 }).join('');
                 return `<div class="mb-3"><strong>${escapeHtml(entry.source)}</strong>
-                        <table class="table table-sm mb-0">${rows}</table></div>`;
+                        <table class="table table-hover table-dense mb-0">${rows}</table></div>`;
             }).join('') || '<div class="text-muted">No sources configured.</div>';
         }
 

@@ -1476,7 +1476,7 @@ class LogSearch {
         WDash.recordFields(record).forEach(([key, value]) => {
             rows.push(this._fieldRow(key, value, false));
         });
-        return '<table class="table table-sm field-table mb-0">' +
+        return '<table class="table table-hover field-table table-dense mb-0">' +
             '<thead><tr><th style="width:180px">Field</th><th>Value</th><th style="width:70px">Actions</th></tr></thead>' +
             '<tbody>' + rows.join('') + '</tbody></table>';
     }

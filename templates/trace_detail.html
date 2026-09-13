@@ -152,7 +152,7 @@
             return;
         }
         el('breakdown').innerHTML =
-            '<table class="table table-sm mb-0"><tbody>' +
+            '<table class="table table-dense mb-0"><tbody>' +
             rows.map(r =>
                 '<tr>' +
                     '<td style="width:42%">' +
@@ -216,7 +216,7 @@
                     '<small><code>' + esc(s.service) + '</code></small>' +
                     (failed ? ' <i class="fas fa-exclamation-circle text-danger"></i>' : '') +
                 '</td>' +
-                '<td style="width:13%"><code class="text-muted" style="font-size:0.68rem">' +
+                '<td style="width:13%"><code class="text-muted">' +
                     esc(s.span_id) + '</code></td>' +
                 '<td><small class="text-muted">' + esc(s.name) + '</small></td>' +
                 '<td style="width:32%"><div class="position-relative" style="height:16px">' +
@@ -237,7 +237,7 @@
         }).join('');
 
         el('waterfall').innerHTML =
-            '<div class="table-responsive"><table class="table table-sm table-hover mb-0">' +
+            '<div class="table-responsive"><table class="table table-hover table-dense mb-0">' +
             '<thead><tr class="text-muted" style="font-size:0.68rem">' +
                 '<th style="width:28%">Service</th><th style="width:13%">Span ID</th>' +
                 '<th>Operation</th><th style="width:32%">' + axis + '</th>' +
@@ -257,7 +257,7 @@
         const rows = [];
         const push = (k, v) => {
             if (v === null || v === undefined || v === '') return;
-            rows.push('<tr><td style="width:45%"><code class="hl-key" style="font-size:0.7rem">' +
+            rows.push('<tr><td style="width:45%"><code class="hl-key">' +
                 esc(k) + '</code></td><td class="text-break"><small>' +
                 esc(typeof v === 'object' ? JSON.stringify(v) : v) + '</small></td></tr>');
         };
@@ -278,7 +278,7 @@
                     serviceColour(span.service) + ';margin-right:6px"></span>' +
                 esc(span.service) + '</strong></div>' +
             '<div style="max-height:320px;overflow-y:auto">' +
-            '<table class="table table-sm mb-0">' + rows.join('') + '</table></div>';
+            '<table class="table table-dense mb-0">' + rows.join('') + '</table></div>';
     }
 
     /** Why the logs of this trace could not be looked up, as markup. */
@@ -336,13 +336,13 @@
                   (data.warnings || []).map(esc).join('<br>') + '</div>'
                 : '';
             el('logCount').textContent = data.records.length + ' of ' + data.total;
-            box.innerHTML = short + '<table class="table table-sm mb-0"><tbody>' +
+            box.innerHTML = short + '<table class="table table-dense mb-0"><tbody>' +
                 data.records.map(r =>
                     '<tr>' +
                         '<td class="text-nowrap" style="width:16%"><small class="text-muted">' +
                             esc(new Date(r.timestamp).toLocaleTimeString()) + '</small></td>' +
-                        '<td style="width:9%"><span class="log-level ' +
-                            esc(r.severity) + '" style="font-size:0.6rem;padding:1px 5px">' +
+                        '<td style="width:9%"><span class="log-level compact ' +
+                            esc(r.severity) + '">' +
                             esc(r.severity_text || r.severity) + '</span></td>' +
                         '<td style="width:16%"><small><code>' + esc(r.service) + '</code></small></td>' +
                         '<td><small class="text-break">' +

@@ -735,6 +735,16 @@ a:not([class]):hover {
     box-shadow: 0 2px 4px color-mix(in srgb, var(--shadow) 30%, transparent);
 }
 
+/* The same badge in a dense table. The trace page's record list shrank it
+   inline — `font-size:0.6rem;padding:1px 5px` typed into a string in
+   trace_detail.html — which is the tables' fault one level down: a size no
+   stylesheet could reach, on the one element whose job is to be recognised
+   at a glance across pages. */
+.log-level.compact {
+    font-size: 0.6rem;
+    padding: 1px 5px;
+}
+
 .log-level.ERROR,
 .log-level.FATAL {
     background: linear-gradient(135deg, var(--fill-red) 0%, var(--fill-red-vivid) 100%);
@@ -834,12 +844,72 @@ a:not([class]):hover {
     font-family: 'SF Mono', monospace;
 }
 
-/* Tables */
+/* ---------------------------------------------------------------------------
+   Tables
+   ---------------------------------------------------------------------------
+   One table. There were thirty declarations of one and no style: four type
+   sizes, each typed into a template as `style="font-size:…"`; two densities,
+   decided by whether somebody had remembered `.table-sm`; and a vertical
+   alignment that changed table to table. Nothing computed a wrong number,
+   and it was the first thing anybody saw — a row of Local accounts held
+   three type sizes at once, the username at 16px, the email and both dates
+   at 12.8px, the role's select back at 16px.
+
+   0.85rem because that is what most of the product already painted. The
+   padding is the one `.field-table` already used. A table that genuinely is
+   denser says `.table-dense`, which is a NAME: the audit trail is denser
+   because somebody decided the audit trail should be denser, not because a
+   number got typed into audit.html. */
 .table {
     --bs-table-bg: var(--surface-card);
     --bs-table-striped-bg: var(--surface-sunken);
     --bs-table-hover-bg: var(--surface-hover);
     --bs-table-border-color: var(--border);
+    font-size: 0.85rem;
+}
+
+/* Bootstrap's own cell selector, so this reaches `th` and `td` in every
+   section and lands on the rule it is replacing rather than beside it. */
+.table > :not(caption) > * > * {
+    padding: 0.5rem 0.75rem;
+    vertical-align: middle;
+}
+
+.table-dense > :not(caption) > * > * {
+    padding: 0.25rem 0.5rem;
+}
+
+/* The header. This treatment already existed and exactly one table wore it
+   — the log page's field list. Everywhere else a header was body-coloured
+   bold text at body size, which is a row of data with more weight on it. */
+.table thead th {
+    background: var(--surface-raised);
+    border-bottom: 2px solid var(--border);
+    color: var(--accent);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+/* A cell whose content is controls.
+ *
+ * Its buttons wrapped: the delete one dropped onto a line of its own under a
+ * wider one, which is the single control on a row nobody wants to reach by
+ * accident. Three cells in `config.html` said `text-nowrap` to stop it, one
+ * of them only after the bug had shipped (f33f11f), and every other action
+ * cell in the product was one narrow column away from the same thing.
+ *
+ * Decided from what the cell HOLDS rather than from a class somebody has to
+ * remember, because the cell a later page adds is the one that will not have
+ * it. A cell whose button is wrapped in something else — the role select's
+ * `d-flex` form, which lays its own controls out and carries a paragraph of
+ * explanation underneath — is deliberately not matched: that text has to
+ * wrap. */
+.table td:has(> .btn),
+.table td:has(> form.d-inline) {
+    white-space: nowrap;
 }
 
 /* Pagination - Terminal Style */
@@ -1593,30 +1663,19 @@ code {
     font-size: 0.75rem;
 }
 
-/* Field Exploration Table */
+/* Field Exploration Table
+ *
+ * What is left of it. Its header, its cell padding and its alignment were
+ * the house style this product had and nothing else used; they are `.table`
+ * now, above, so every table wears them. The face is what is actually
+ * particular to this one: a list of field NAMES, read by eye against each
+ * other, which is what monospace is for.
+ *
+ * Its hover went too. It painted a 5% wash of the accent while every other
+ * table used `--surface-hover`, so the product had two hovers; the markup
+ * says `table-hover` now and there is one. */
 .field-table {
     font-family: 'SF Mono', monospace;
-    font-size: 0.82rem;
-}
-
-.field-table thead th {
-    background: var(--surface-raised);
-    border-bottom: 2px solid var(--border);
-    color: var(--accent);
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    padding: 8px 12px;
-}
-
-.field-table td {
-    padding: 6px 12px;
-    vertical-align: middle;
-    border-color: var(--border);
-}
-
-.field-table tr:hover {
-    background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
 
 .field-table-container {

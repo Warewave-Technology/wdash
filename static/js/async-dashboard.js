@@ -1491,7 +1491,7 @@ class AsyncDashboard {
         const escape = escapeHtml;
 
         container.innerHTML =
-            '<table class="table table-sm mb-0" style="font-size:.8rem">' +
+            '<table class="table table-hover table-dense mb-0">' +
             '<thead><tr><th>Service</th><th class="text-end">Spans</th>' +
             '<th class="text-end">Errors</th><th class="text-end">Error rate</th>' +
             '</tr></thead><tbody>' +
@@ -1564,7 +1564,7 @@ class AsyncDashboard {
                 ? `<div class="text-warning mb-1" style="font-size:.7rem">${
                     escape(notes.join(' '))}</div>`
                 : '') +
-            '<table class="table table-sm mb-0" style="font-size:.75rem">' +
+            '<table class="table table-hover table-dense mb-0">' +
             '<thead><tr><th>Time</th><th>Severity</th><th>Service</th>' +
             '<th>Message</th></tr></thead><tbody>' +
             rows.map(row => {
@@ -1628,7 +1628,7 @@ class AsyncDashboard {
             || document.getElementById('timeRange')?.value || '1h';
 
         container.innerHTML =
-            '<table class="table table-sm mb-0" style="font-size:.75rem">' +
+            '<table class="table table-hover table-dense mb-0">' +
             '<thead><tr><th>Trace</th><th>Service</th><th>Operation</th>' +
             '<th class="text-end">Duration</th></tr></thead><tbody>' +
             rows.map(row => {
@@ -1763,7 +1763,7 @@ class AsyncDashboard {
         container.innerHTML =
             `<div class="text-muted mb-1" style="font-size:.7rem">${
                 escape(caption)}</div>` +
-            '<table class="table table-sm mb-0" style="font-size:.75rem">' +
+            '<table class="table table-hover table-dense mb-0">' +
             '<thead><tr><th>Time</th><th>Rule</th><th>About</th>' +
             '<th>What</th><th>Delivered</th></tr></thead><tbody>' +
             rows.map(row => {
@@ -1897,7 +1897,7 @@ class AsyncDashboard {
 
         const container = this.panelBody(slot);
         container.innerHTML =
-            '<table class="table table-sm mb-0" style="font-size:.8rem">' +
+            '<table class="table table-hover table-dense mb-0">' +
             '<thead><tr><th style="width:6rem">Expires in</th>' +
             '<th>Common name</th><th>Endpoint</th></tr></thead><tbody>' +
             rows.map(row => {
