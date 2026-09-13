@@ -38,6 +38,28 @@ class User(UserMixin):
         return permission in self.permissions
     
 
+#: The name the search API gives "every source". A board never stores it:
+#: see `pinned_source`.
+EVERY_SOURCE = "*"
+
+
+def pinned_source(value):
+    """The one stored spelling of a board's source.
+
+    A name pins the board to that source. Nothing — None, the empty string
+    the form sends for "All sources", or `*`, which is how the search API
+    spells the same choice — is stored as None, so "every source" has ONE
+    value in every store and every reader of a row asks one question of it.
+    A board that held `*` beside boards that held nothing would be two
+    spellings of one meaning, and the day one reader learns only one of them
+    is the day a board quietly reads a different set of sources.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return None if text in ("", EVERY_SOURCE) else text
+
+
 class Dashboard:
     def __init__(self, dashboard_id, name, description, query, created_by,
                  created_at=None, index_patterns=None, panels=None,
@@ -56,14 +78,14 @@ class Dashboard:
         #: What "normal" looks like for this dashboard. Empty means it is
         #: never alarming, which is different from "everything is fine".
         self.thresholds = thresholds or {}
-        #: Which configured log source this dashboard reads from. None means
-        #: the default, which is what every dashboard written before there
-        #: was more than one source means. It lives on the model rather than
-        #: only on the database row because the FILE store had nowhere to put
-        #: it: the README said a dashboard may name its source, the forms had
-        #: no field for it, and the default store could not have held one if
-        #: they had.
-        self.source = source or None
+        #: Which configured source this dashboard reads from, for every
+        #: signal that source serves. None means every source, which is what
+        #: every dashboard written before there was a choice means. It lives
+        #: on the model rather than only on the database row because the
+        #: FILE store had nowhere to put it: the README said a dashboard may
+        #: name its source, the forms had no field for it, and the default
+        #: store could not have held one if they had.
+        self.source = pinned_source(source)
         #: Who may see that this dashboard exists. See dashboard/visibility.py;
         #: the data boundary applies regardless.
         from .dashboard.visibility import normalise as _normalise_visibility
@@ -92,8 +114,8 @@ class Dashboard:
             data['panels'] = self.panels
         if self.thresholds:
             data['thresholds'] = self.thresholds
-        # Written only when one was chosen, so a dashboard on the default
-        # source keeps following the default rather than pinning today's.
+        # Written only when one was chosen: a board over every source holds
+        # nothing, and stays over every source however the set changes.
         if self.source:
             data['source'] = self.source
         data['visibility'] = self.visibility

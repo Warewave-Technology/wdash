@@ -19,7 +19,7 @@ from sqlalchemy import func, select
 
 from ..dashboard.dashboard_manager import DashboardStorageError
 from ..dashboard.visibility import normalise as _visibility
-from ..models import Dashboard, SavedSearch
+from ..models import Dashboard, SavedSearch, pinned_source
 from .schema import dashboards, saved_searches
 
 
@@ -139,7 +139,7 @@ class DashboardRepository:
             "updated_at": _now(),
             "containers": list(index_patterns or ["*"]),
             "panels": panels, "thresholds": thresholds or {},
-            "source": source or None, "visibility": _visibility(visibility),
+            "source": pinned_source(source), "visibility": _visibility(visibility),
             "revision": 1,
         }
         try:
@@ -174,9 +174,10 @@ class DashboardRepository:
         if visibility is not None:
             changes["visibility"] = _visibility(visibility)
         if source is not None:
-            # "" is the form saying "the default source", which is a choice
-            # and not an absence; None means "leave it as it is".
-            changes["source"] = source or None
+            # "" is the form saying "all sources", which is a choice and not
+            # an absence; None means "leave it as it is". Stored as
+            # `pinned_source` spells it, so `*` and "" are one value.
+            changes["source"] = pinned_source(source)
         for column, value in (("name", name), ("description", description),
                               ("query", query), ("panels", panels),
                               ("thresholds", thresholds)):

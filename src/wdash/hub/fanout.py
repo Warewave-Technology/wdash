@@ -408,11 +408,17 @@ class FanOutLogSource(LogSource):
         """One request's answers from every member, as one result."""
         merged, warnings, notes = {}, [], {}
         total, failed = 0, False
+        contributions = []
 
         for source, result, error in results:
             if error is not None or result is None:
                 failed = True
                 warnings.append(f"{source.name} failed: {error}")
+                # In the breakdown as well as in the warnings: "0 from
+                # loki" and "loki did not answer" are different facts, and
+                # a row missing from the breakdown reads as the first one.
+                contributions.append({"name": source.name, "total": 0,
+                                      "failed": True})
                 # A member that died outright is the one partial answer that
                 # showed a wrong number as a right one: the survivors' counts
                 # were drawn with no mark on the panel at all, so a chart
@@ -429,6 +435,8 @@ class FanOutLogSource(LogSource):
                 continue
             if result.failed:
                 failed = True
+            contributions.append({"name": source.name, "total": result.total,
+                                  "failed": bool(result.failed)})
             warnings.extend(f"{source.name}: {warning}"
                             for warning in result.warnings or ())
             # A reason stays attached to the aggregation it is about, and
@@ -455,7 +463,8 @@ class FanOutLogSource(LogSource):
                      for name, buckets in merged.items()},
             warnings=tuple(warnings),
             notes=notes,
-            failed=failed)
+            failed=failed,
+            sources=tuple(contributions))
 
     def histogram(self, query, scope):
         if Capability.HISTOGRAM not in self.capabilities:
@@ -639,17 +648,19 @@ class FanOutTraceSource(TraceSource):
                      hidden=hidden, warnings=tuple(warnings))
 
     def _gather(self, work, what):
-        """Every member's answer to `work`, as (rows, partial, warnings).
+        """Every member's answer to `work`, as (rows, partial, warnings,
+        missing).
 
-        A member that failed is named in the warnings and its rows are
-        missing; a member's own partial answer carries through. When every
-        member failed there is no answer to give, and that is raised.
+        A member that failed is named in the warnings, named again in
+        `missing`, and its rows are missing; a member's own partial answer
+        carries through. When every member failed there is no answer to
+        give, and that is raised.
         """
         results = self._parallel(work)
-        rows, warnings, failed, partial = [], [], 0, False
+        rows, warnings, missing, partial = [], [], [], False
         for source, found, error in results:
             if error is not None:
-                failed += 1
+                missing.append(source.name)
                 warnings.append(f"{source.name} failed: {error}")
                 logger.warning(f"{source.name} failed on {what}: {error}")
                 continue
@@ -657,26 +668,39 @@ class FanOutTraceSource(TraceSource):
             warnings.extend(f"{source.name}: {warning}"
                             for warning in getattr(found, "warnings", ()) or ())
             rows.append((source, found or ()))
-        if failed and failed == len(results):
+        if missing and len(missing) == len(results):
             raise RuntimeError(f"no trace source could answer the {what}: "
                                + "; ".join(warnings))
-        return rows, partial or bool(failed), warnings
+        return rows, partial or bool(missing), warnings, missing
+
+    @staticmethod
+    def _attributed(rows, partial, warnings, missing):
+        """A PartialList that also says which members did not answer.
+
+        By NAME, beside the sentence: a page that lists which sources a
+        panel's rows came from has to be able to leave the silent one out of
+        that list and name it apart, and a warning is a sentence about a
+        source, not the source.
+        """
+        found = PartialList(rows, partial=partial, warnings=warnings)
+        found.missing_sources = tuple(missing)
+        return found
 
     def services(self, window, scope):
         totals, errors = {}, {}
-        answered, partial, warnings = self._gather(
+        answered, partial, warnings, missing = self._gather(
             lambda source: source.services(window, scope), "service list")
         for _, services in answered:
             for service in services:
                 totals[service.name] = totals.get(service.name, 0) + service.span_count
                 errors[service.name] = (errors.get(service.name, 0)
                                         + service.error_count)
-        return PartialList(sorted(
+        return self._attributed(sorted(
             (Service(name=name, span_count=count,
                      error_count=errors.get(name, 0))
              for name, count in totals.items()),
             key=lambda service: service.span_count, reverse=True),
-            partial=partial, warnings=warnings)
+            partial, warnings, missing)
 
     def search(self, query, scope):
         """Trace summaries from every backend, in the order asked for.
@@ -694,7 +718,7 @@ class FanOutTraceSource(TraceSource):
         """
         from .query import SORT_SLOWEST
         summaries = []
-        answered, partial, warnings = self._gather(
+        answered, partial, warnings, missing = self._gather(
             lambda source: source.search(query, scope), "trace search")
         for source, found in answered:
             for summary in found:
@@ -707,8 +731,8 @@ class FanOutTraceSource(TraceSource):
         else:
             summaries.sort(key=lambda summary: summary.start or _EPOCH, reverse=True)
         limit = getattr(query, "limit", None)
-        return PartialList(summaries[:limit] if limit else summaries,
-                           partial=partial, warnings=warnings)
+        return self._attributed(summaries[:limit] if limit else summaries,
+                                partial, warnings, missing)
 
 
 class FanOutMonitorSource(MonitorSource):

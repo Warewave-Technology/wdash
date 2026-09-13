@@ -47,6 +47,7 @@ function makeDashboard(responder) {
         <div id="totalHitsDelta"></div><div id="errorCountDelta"></div>
         <div id="warnCountDelta"></div><div id="infoCountDelta"></div>
         <div id="baselineNote"></div>
+        <div id="sourcesNote"></div>
         <span id="lastUpdated"></span>
         <select id="timeRange">
             <option value="1h" selected>1h</option>
@@ -1898,6 +1899,88 @@ async function main() {
                `the card read "${card.textContent}"`);
         assert(!card.querySelector('[data-number]'),
                'it drew a number for a question nobody could ask');
+    });
+
+    // ---- which sources answered -------------------------------------
+    //
+    // A board that names no source reads every source and adds them up. A
+    // sum with no breakdown is a number nobody can check — two stored rows
+    // over one cluster count every record twice — so the board prints the
+    // Logs page's own breakdown under the stat cards, and every trace and
+    // monitor panel says which stores its rows came from. Nothing is
+    // printed for a board one source answered whole: the header names it.
+    const merged = await loadWith({
+        total_hits: 15588, error_count: 1528, warn_count: 1995, info_count: 10971,
+        sources: [{ name: 'lab-elasticsearch', total: 13355, failed: false },
+                  { name: 'lab-loki', total: 1095, failed: false },
+                  { name: 'lab-victorialogs', total: 1138, failed: false }],
+        panels: [{ id: 's1', type: 'trace_services', title: 'Services', width: 6,
+                   sources: ['lab-elasticsearch', 'lab-jaeger', 'lab-tempo'],
+                   missing_sources: [],
+                   rows: [{ name: 'api', span_count: 30, error_count: 1,
+                            error_rate: 0.033 }] },
+                 { id: 't1', type: 'trace_list', title: 'api', width: 6,
+                   service: 'api', view: 'recent',
+                   sources: ['lab-elasticsearch'], missing_sources: ['lab-tempo'],
+                   partial: true, warnings: ['lab-tempo failed: refused'],
+                   rows: [{ trace_id: 'abc123def456789', service: 'api',
+                            name: 'GET /', start: '2026-09-13T10:00:00.000Z',
+                            duration_us: 9000, has_error: false,
+                            source: 'lab-elasticsearch' }] },
+                 { ...MONITOR, view: 'status', sources: ['lab-elasticsearch'],
+                   missing_sources: [], counts: { up: 1, down: 0, unknown: 0 },
+                   rows: [{ id: 'up-1', name: 'Lab endpoint', status: 'up',
+                            duration_ms: 1.6, checked_at: '2026-09-12T11:25:42Z',
+                            error: '', location: 'lab:8080',
+                            source: 'lab-elasticsearch' }] }],
+    });
+    check('a board over several sources says how much each gave', () => {
+        const note = merged.document.getElementById('sourcesNote').textContent;
+        assert(/lab-elasticsearch 13,355/.test(note), `the note read "${note}"`);
+        assert(/lab-loki 1,095/.test(note), `the note read "${note}"`);
+        assert(/lab-victorialogs 1,138/.test(note), `the note read "${note}"`);
+    });
+    check('a trace panel over several stores names them', () => {
+        const footer = merged.document.querySelector(
+            '[data-panel-id="s1"] [data-sources]');
+        assert(footer, 'no footer under the panel');
+        assert(/From lab-elasticsearch, lab-jaeger, lab-tempo/.test(footer.textContent),
+               `the footer read "${footer.textContent}"`);
+    });
+    check('a store that did not answer is named apart', () => {
+        const footer = merged.document.querySelector(
+            '[data-panel-id="t1"] [data-sources]');
+        assert(footer, 'no footer under the panel');
+        assert(/From lab-elasticsearch/.test(footer.textContent),
+               `the footer read "${footer.textContent}"`);
+        assert(/lab-tempo did not answer/.test(footer.textContent),
+               `the footer read "${footer.textContent}"`);
+    });
+    check('a panel one store answered whole prints no footer', () => {
+        assert(!merged.document.querySelector('[data-panel-id="m1"] [data-sources]'),
+               'a footer was printed for a single source that answered');
+    });
+
+    const single = await loadWith({
+        total_hits: 3, error_count: 3, warn_count: 0, info_count: 0,
+        sources: [{ name: 'lab-elasticsearch', total: 3, failed: false }],
+        panels: [{ ...PANEL, buckets: [{ key: 'ERROR', count: 3 }] }],
+    });
+    check('a board one source answered whole prints no breakdown', () => {
+        const note = single.document.getElementById('sourcesNote').textContent;
+        assert(note === '', `the note read "${note}"`);
+    });
+
+    const silent = await loadWith({
+        total_hits: 3, error_count: 3, warn_count: 0, info_count: 0,
+        sources: [{ name: 'lab-elasticsearch', total: 3, failed: false },
+                  { name: 'lab-loki', total: 0, failed: true }],
+        panels: [{ ...PANEL, buckets: [{ key: 'ERROR', count: 3 }] }],
+    });
+    check('a log source that did not answer is named, not counted as zero', () => {
+        const note = silent.document.getElementById('sourcesNote').textContent;
+        assert(/lab-loki did not answer/.test(note), `the note read "${note}"`);
+        assert(!/lab-loki 0/.test(note), `the note read "${note}"`);
     });
 
     console.log('');

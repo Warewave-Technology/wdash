@@ -661,23 +661,44 @@ the Logs screen shows it as a badge — but only when more than one source is
 configured. A badge repeated on every row that always says the same thing is
 noise, and noise is how people stop reading the row footer at all.
 
-A dashboard reads **every log source** unless it names one — the same
-question the Logs screen asks on its first search. There is no default
-source: a search or a board that names none asks all of them. A board may
-name the source its log panels read — a **Log source** field on the create
-and edit forms, shown once more than one is configured, and stored in
-whichever dashboard store is in use. One naming a source that is no longer
-configured reports that plainly instead of falling back to the rest:
-quietly answering from a different store is how somebody concludes their
-data has disappeared. An edit that does not carry the field leaves the
-stored source alone, for the same reason — on an installation with one
-source the field is not even drawn.
+A dashboard reads **every source** unless it is pinned to one — the same
+question the Logs screen asks on its first search — and says which sources
+answered: the four stat cards print how much each log source gave, and every
+trace and monitor panel names the stores its rows came from, so two stored
+rows over one cluster are two names under one number rather than a number
+that is quietly double. There is no default source: a search or a board that
+names none asks all of them.
+
+A board may be pinned — a **Source** field on the create and edit forms,
+offered when there is something to choose, with **All sources** first and
+what a new board gets. A pin is the source for *every signal it serves*:
+pinned to a cluster that serves logs, traces and monitors, a board reads all
+three from that cluster; pinned to a Loki, its logs from the Loki and its
+traces and monitors from every source, because the Loki serves neither. The
+board's header says which. The pin is stored as the name, and "All sources"
+as nothing (the form's empty value; `*`, the search API's spelling of the
+same choice, is stored the same way), so a board has one value for it.
+
+One pinned to a source that is no longer configured reports that plainly, on
+every panel, instead of falling back to the rest: quietly answering from a
+different store is how somebody concludes their data has disappeared. An
+edit that does not carry the field leaves the stored source alone, for the
+same reason — on an installation with nothing to choose the field is not
+even drawn.
+
+What a refresh costs depends on the sources it reads, and the forms say so
+where the source is chosen: Elasticsearch answers a whole board in one
+request whatever the panel count; Loki and VictoriaLogs are asked once per
+log panel plus twice for the stat cards. Measured on the lab, an eight-panel
+board over 24 hours is 1 request to Elasticsearch, 10 to Loki and 10 to
+VictoriaLogs — 21 per refresh over all three, and only its own source's
+share when pinned.
 
 A drill-down from a dashboard is answered from the dashboard's source — the
-one it names, or every source — and the Logs screen names it in the scope
-badge and moves its own source picker to match. The picker was left on its
-first option while the server answered from the dashboard's, so the control
-on screen and the records under it disagreed.
+one it is pinned to, or every source — and the Logs screen names it in the
+scope badge and moves its own source picker to match. The picker was left
+on its first option while the server answered from the dashboard's, so the
+control on screen and the records under it disagreed.
 
 ### OpenTelemetry
 
@@ -990,11 +1011,14 @@ as a break, because `>=3.8` was never installable: `psycopg` has required
   later); its trace list for `api-gateway` was empty, because the oldest
   trace source was a Tempo with no such service, and lists ten traces from
   the cluster now; a bare `/api/search` answered 5 records from the Loki
-  and answers 14,353 across all three, with the breakdown. A board that
-  names a log source keeps reading it. The cost moves with the rule — an
+  and answers 14,353 across all three, with the breakdown. A board
+  pinned to a source keeps reading that source, for every signal it serves:
+  the demo's board pinned to its cluster drew its trace list from the Tempo
+  before and draws it from the cluster now. The cost moves with it — an
   unpinned eight-panel board was 10 requests to the Loki per refresh and is
-  1 to the cluster, 10 to the Loki and 10 to VictoriaLogs. Name the source
-  on the boards that should read one.
+  1 to the cluster, 10 to the Loki and 10 to VictoriaLogs — and the refresh
+  interval and the Source field say so. Pin the boards that should read one
+  source; the rest say on screen which sources answered.
 - **Upgrading a deployment that declared its cluster in the environment.**
   2.5 and earlier registered an Elasticsearch from `ELASTICSEARCH_URL` and the
   seven variables around it (the credentials, timeout, certificate switch and

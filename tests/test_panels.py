@@ -559,6 +559,13 @@ class SourceFormTest(unittest.TestCase):
         self.create()
         self.assertIsNone(self.stored().source)
 
+    def test_the_first_choice_is_every_source(self):
+        """Not "Default (primary)": there is no default, and a board that
+        names nothing reads both."""
+        page = self.client.get("/dashboard/create").data.decode()
+        self.assertIn('<option value="" selected>All sources</option>', page)
+        self.assertNotIn("Default (", page)
+
     def test_a_source_that_is_not_configured_is_refused_where_it_was_typed(self):
         """Stored, it would be reported to every reader for ever."""
         response = self.create(source="nowhere")
@@ -635,6 +642,20 @@ class SourceFormTest(unittest.TestCase):
                                "index_patterns": ["*"], "source": ""},
                          follow_redirects=True)
         self.assertIsNone(self.stored().source)
+
+    def test_the_star_puts_it_on_every_source_the_same_way(self):
+        """The search API spells "every source" `*`; a board stores that
+        choice as nothing, so there is one spelling in the store."""
+        self.create(source="secondary")
+        board = self.stored()
+        self.client.post(f"/dashboard/{board.id}/edit",
+                         data={"name": "Board", "query": "*", "description": "",
+                               "index_patterns": ["*"], "source": "*"},
+                         follow_redirects=True)
+        self.assertIsNone(self.stored().source)
+        self.client.get(f"/api/dashboard/{board.id}/data")
+        self.assertGreater(self.primary.round_trips, 0)
+        self.assertGreater(self.secondary.round_trips, 0)
 
     def test_it_survives_a_round_trip_through_the_store(self):
         self.create(source="secondary")

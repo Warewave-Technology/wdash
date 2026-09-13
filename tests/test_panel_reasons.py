@@ -508,10 +508,13 @@ class LogOutageTest(_Board):
             {"id": "logs-1", "type": "terms", "field": "service"}])
         self.assertEqual(response.status_code, 503)
 
-    def test_a_source_that_is_gone_costs_the_log_panels_only(self):
-        """A dashboard naming a source that is not configured is a
-        configuration error for the panels that read it, not for the trace
-        panel beside them."""
+    def test_a_source_that_is_gone_costs_every_panel_pinned_to_it(self):
+        """A dashboard pinned to a source that is not configured is a
+        configuration error for every panel on it, said on each. The pin is
+        the source for every signal it served, and nobody can say what a
+        source that is gone served: the trace panel used to read whichever
+        trace store was first instead, which is the rest of the stores
+        answering quietly for one the board was pinned to."""
         from tests.support import change_dashboard
 
         self.with_traces()
@@ -524,7 +527,8 @@ class LogOutageTest(_Board):
         self.assertEqual(payload["error_type"], "source_missing")
         panels = self.panels_by_id(payload)
         self.assertIn("retired", panels["logs-1"]["error"])
-        self.assertEqual(len(panels["traces-1"]["rows"]), 1)
+        self.assertIn("retired", panels["traces-1"]["error"])
+        self.assertNotIn("rows", panels["traces-1"])
 
     def test_a_scope_reaching_no_container_still_draws_the_trace_panel(self):
         """es_monitors and the trace source decide their own visibility; the

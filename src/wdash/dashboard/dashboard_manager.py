@@ -3,7 +3,7 @@ import logging
 import os
 import uuid
 import threading
-from ..models import Dashboard
+from ..models import Dashboard, pinned_source
 
 logger = logging.getLogger(__name__)
 
@@ -216,9 +216,10 @@ class DashboardManager:
             if visibility is not None:
                 dashboard.visibility = visibility
             if source is not None:
-                # "" is how the form says "the default source", which is a
-                # choice and not an absence: `None` means "leave it alone".
-                dashboard.source = source or None
+                # "" is how the form says "all sources", which is a choice
+                # and not an absence: `None` means "leave it alone". Stored
+                # as `pinned_source` spells it, so `*` and "" are one value.
+                dashboard.source = pinned_source(source)
 
             self._save_or_restore(snapshot)
             return dashboard

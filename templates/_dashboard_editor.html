@@ -81,15 +81,19 @@
        would only mean reassembling it there. #}
     <input type="hidden" name="panels" id="panelsField">
     <div class="form-text">
-        Every log panel that counts something is answered by the same request,
-        so adding one costs an aggregation rather than a round trip. A records
-        panel lists rows rather than counting them, which is a search: the
-        board's records panels share one extra request between them. Traces
-        and monitors are other sources: the first panel from each costs one
-        more request, and every further panel from it costs nothing &mdash;
-        except a trace list, which asks per service, view and row count.
-        The alert panels read WDash&rsquo;s own store, so they cost no
-        backend request at all and answer even when the log source does not.
+        On Elasticsearch every log panel that counts something is answered by
+        the same request, so adding one costs an aggregation rather than a
+        round trip; on Loki and VictoriaLogs each log panel is a request of
+        its own, and a board over all sources pays each source (the Source
+        field above says what was measured). A records panel lists rows
+        rather than counting them, which is a search: the board's records
+        panels share one extra request between them. Traces and monitors are
+        other sources: the first panel from each costs one more request per
+        source it reads, and every further panel from it costs nothing
+        &mdash; except a trace list, which asks per service, view and row
+        count. The alert panels read WDash&rsquo;s own store, so they cost
+        no backend request at all and answer even when the log source does
+        not.
     </div>
 </div>
 

@@ -14,7 +14,12 @@
         <p class="text-muted mb-0">{{ dashboard.description or 'No description' }}</p>
         <small class="text-muted">
             Query: <code class="text-info">{{ dashboard.query }}</code><br>
-            Index Patterns: <code class="text-warning">{{ dashboard.index_patterns | join(', ') }}</code>
+            Index Patterns: <code class="text-warning">{{ dashboard.index_patterns | join(', ') }}</code><br>
+            {# The third thing about this board's question, and the one that
+               decides whether its trace list reads the cluster it is pinned
+               to or every trace store there is. It was the one thing the
+               header did not say. #}
+            Source: <span id="sourceNote">{{ source_note }}</span>
         </small>
     </div>
     <div>
@@ -127,22 +132,28 @@
                      panel count plus two, which is why eight panels cost ten
                      requests and not eight.
 
-                     Counted at the transport against the lab on a warm tab
-                     (a recording session for the two HTTP backends, and every
-                     callable on the Elasticsearch client), eight panels over
-                     24 hours, with two different mixes of panel type:
-                     1 / 10 / 10 both times. The figures this replaces —
-                     2 / 9 / 10 — did not reproduce, and the one that was
-                     wrong was Loki's, the backend the control exists to
-                     protect. tests.test_dashboard_controls.RefreshCostTest
-                     holds this sentence to what the route actually asks. -->
+                     And a board over all sources pays every one of them: the
+                     fan-out hands each member the whole batch, so the cluster
+                     still answers in one request and each Loki and each
+                     VictoriaLogs in ten. Counted at the transport against the
+                     lab on a warm tab (a recording session for the two HTTP
+                     backends, and the Elasticsearch client's transport), an
+                     eight-panel board over 24 hours: unpinned 1 / 10 / 10 =
+                     21, pinned to the cluster 1 / 0 / 0, pinned to the Loki
+                     0 / 10 / 0. Before this an unpinned board read one source
+                     — the oldest stored, the Loki — for 0 / 10 / 0.
+                     tests.test_dashboard_controls.RefreshCostTest holds this
+                     sentence to what the route actually asks. -->
                 <small class="text-muted" id="refreshCost">
                     Elasticsearch answers a whole board in one request whatever
                     the panel count; Loki and VictoriaLogs are asked once per
                     panel, plus once for the summary and once for its
-                    comparison. Measured on an eight-panel board over 24 hours:
+                    comparison. A board over all sources asks every source.
+                    Measured on an eight-panel board over 24 hours:
                     1 request to Elasticsearch, 10 to Loki, 10 to VictoriaLogs
-                    &mdash; per open tab, every interval.
+                    &mdash; 21 per refresh over all three, per open tab, every
+                    interval; a board pinned to one source pays that source
+                    alone.
                 </small>
                 <!-- Filled by the client, and empty when there is nothing to
                      say: a fixed window cannot produce a different answer, so
@@ -211,7 +222,14 @@
         </div>
     </div>
 </div>
-<div class="text-muted mb-4" style="font-size:.75rem" id="baselineNote"></div>
+<div class="text-muted mb-1" style="font-size:.75rem" id="baselineNote"></div>
+<!-- Which log sources the four numbers were added up from, and how much
+     each gave — the Logs page's own breakdown, on the board. Filled by the
+     client from the response's `sources`; empty for a board that one
+     source answered whole, because a line that always says the same thing
+     is a line nobody reads. Two stored rows over one cluster are two rows
+     here of one number each, which is how a doubled total is seen. -->
+<div class="text-muted mb-4" style="font-size:.75rem" id="sourcesNote"></div>
 
 <!-- Whatever the server could not do, above the panels it is about: a query
      the backend refused, a source that did not answer, a count it could not

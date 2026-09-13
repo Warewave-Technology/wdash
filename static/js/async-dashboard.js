@@ -116,7 +116,9 @@ const PANEL_HINTS = Object.assign(Object.create(null), {
  * where a refresh is cheap. One refresh of a board is ONE request on
  * Elasticsearch however many panels it has, because every log panel rides a
  * single msearch; on Loki and VictoriaLogs the adapter issues one request per
- * panel, so an eight-panel board is eight — per open tab, every interval.
+ * panel plus two for the stat cards, so an eight-panel board is ten — per
+ * source it reads, per open tab, every interval. A board over all sources
+ * reads every one: measured against the lab, 1 + 10 + 10.
  */
 const DEFAULT_REFRESH_SECONDS = 30;
 
@@ -1024,6 +1026,78 @@ class AsyncDashboard {
 
         this.renderDeltas(data.previous_period);
         this.renderStatus(data.status);
+        this.renderSources(data.sources);
+    }
+
+    /**
+     * Which log sources the four numbers were added up from, and how much
+     * each gave — the Logs page's own breakdown, under the stat cards.
+     *
+     * A board over all sources is a sum, and a sum with no breakdown is a
+     * number nobody can check: two stored rows over one cluster count every
+     * record twice, and the only way to see that is two names under one
+     * total. Nothing is printed for a board one source answered whole — the
+     * header already names it, and a line that always says the same thing
+     * is a line nobody reads — but a source that did not answer is named
+     * even when it is the only one, because its zero is not a zero.
+     *
+     * textContent throughout: the names are whatever somebody typed on the
+     * configuration page.
+     */
+    renderSources(sources) {
+        const note = document.getElementById('sourcesNote');
+        if (!note) return;
+        note.textContent = '';
+        const rows = Array.isArray(sources) ? sources : [];
+        if (!rows.length || (rows.length === 1 && !rows[0].failed)) return;
+
+        const lead = document.createElement('span');
+        lead.textContent = 'Counted from ';
+        note.appendChild(lead);
+        rows.forEach((row, index) => {
+            const part = document.createElement('span');
+            part.dataset.sourceRow = row.name;
+            if (row.failed) {
+                part.className = 'text-warning';
+                part.textContent = `${row.name} did not answer`;
+            } else {
+                part.textContent =
+                    `${row.name} ${Number(row.total || 0).toLocaleString()}`;
+            }
+            if (index) note.appendChild(document.createTextNode(' · '));
+            note.appendChild(part);
+        });
+    }
+
+    /**
+     * Under a trace or monitor panel: which sources its rows came from.
+     *
+     * Printed when more than one was asked, or when one that was asked did
+     * not answer — the same rule as `renderSources`, for the same reason. A
+     * board pinned to a Loki reads its traces from every trace store, and
+     * this is where that is seen; a panel over one source that answered is
+     * left alone, because the board's header already says which.
+     */
+    sourcesFooter(container, panel) {
+        const asked = Array.isArray(panel.sources) ? panel.sources : [];
+        const missing = Array.isArray(panel.missing_sources)
+            ? panel.missing_sources : [];
+        if (asked.length + missing.length < 2 && !missing.length) return;
+
+        const footer = document.createElement('div');
+        footer.className = 'text-muted mt-1';
+        footer.style.fontSize = '.7rem';
+        footer.dataset.sources = asked.join(',');
+        footer.textContent = asked.length
+            ? `From ${asked.join(', ')}`
+            : 'From no source that answered';
+        if (missing.length) {
+            const silent = document.createElement('span');
+            silent.className = 'text-warning';
+            silent.textContent = `; ${missing.join(', ')} did not answer`;
+            footer.appendChild(silent);
+        }
+        container.appendChild(footer);
     }
 
     /**
@@ -1507,6 +1581,7 @@ class AsyncDashboard {
                     <td class="text-end">${row.error_count.toLocaleString()}</td>
                     <td class="text-end ${tone}">${rate}%</td></tr>`;
             }).join('') + '</tbody></table>';
+        this.sourcesFooter(container, panel);
 
         container.querySelectorAll('[data-service]').forEach(row => {
             row.addEventListener('click', () => {
@@ -1656,6 +1731,7 @@ class AsyncDashboard {
                     <td class="text-end text-nowrap">${
                         AsyncDashboard.duration(row.duration_us)}</td></tr>`;
             }).join('') + '</tbody></table>';
+        this.sourcesFooter(container, panel);
 
         container.querySelectorAll('[data-trace]').forEach(row => {
             row.addEventListener('click', () => {
@@ -1864,6 +1940,7 @@ class AsyncDashboard {
                 escapeHtml(caption)}</div>` +
             '<div class="d-flex flex-wrap gap-2">' + rows.map(cell).join('') +
             '</div>';
+        this.sourcesFooter(container, panel);
 
         container.querySelectorAll('[data-monitor]').forEach(element => {
             element.addEventListener('click', () => {
@@ -1936,6 +2013,7 @@ class AsyncDashboard {
                                + 'be missing from this list: '
                                + short.join('; '))}</div>`
                 : '');
+        this.sourcesFooter(container, panel);
 
         container.querySelectorAll('[data-monitor]').forEach(element => {
             element.addEventListener('click', () => {

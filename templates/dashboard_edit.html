@@ -42,22 +42,34 @@
                     </div>
 
                     {# See dashboard_create.html: the source a dashboard reads
-                       from could be stored and never chosen. #}
-                    {% if sources | length > 1 %}
+                       from, for every signal it serves, and what each choice
+                       costs. Drawn only when there is something to choose. #}
+                    {% if sources %}
                     <div class="mb-3">
-                        <label for="source" class="form-label">Log source</label>
+                        <label for="source" class="form-label">Source</label>
                         <select class="form-select" id="source" name="source">
                             <option value="" {% if not dashboard.source %}selected{% endif %}>
-                                Default ({{ sources[0] }})</option>
+                                All sources</option>
                             {% for name in sources %}
                                 <option value="{{ name }}"
                                     {% if dashboard.source == name %}selected{% endif %}>
                                     {{ name }}</option>
                             {% endfor %}
                         </select>
-                        <div class="form-text">
-                            Which store this dashboard's panels are answered
-                            from.
+                        <div class="form-text" id="sourceCost">
+                            All sources asks every source for every panel and
+                            merges the answers, and says on the board which
+                            source gave what. Elasticsearch answers a whole
+                            board in one request whatever the panel count;
+                            Loki and VictoriaLogs are asked once per log
+                            panel, plus twice for the stat cards &mdash;
+                            measured on an eight-panel board over 24 hours:
+                            1 request to Elasticsearch, 10 to Loki and 10 to
+                            VictoriaLogs, 21 per refresh with one of each.
+                            A named source answers the log panels from that
+                            source alone, and the trace and monitor panels
+                            from it too where it serves them; where it does
+                            not, they read every source of that signal.
                         </div>
                     </div>
                     {% endif %}
@@ -162,11 +174,12 @@ document.getElementById('testQuery').addEventListener('click', function() {
         start_time: start.toISOString(), end_time: end.toISOString()
     });
     // The source this form has selected, which /api/search honours and this
-    // never sent: the test always ran against the DEFAULT source, so an
-    // author editing a VictoriaLogs dashboard was told their query matched
-    // 30,647 records — from Elasticsearch, where VictoriaLogs holds 1,742.
-    // The select is absent when only one source is configured, and then the
-    // default is the only answer there is.
+    // never sent: the test always ran against one source whatever the form
+    // said, so an author editing a VictoriaLogs dashboard was told their
+    // query matched 30,647 records — from Elasticsearch, where VictoriaLogs
+    // holds 1,742. An empty value is "All sources", which is also what the
+    // search API answers when nothing is named, so nothing is sent for it;
+    // the select is absent when there is nothing to choose.
     const source = document.getElementById('source');
     if (source && source.value) params.set('source', source.value);
 
@@ -183,18 +196,21 @@ document.getElementById('testQuery').addEventListener('click', function() {
             }
             const records = data.records || [];
             const total = Number(data.total);
-            // Which store answered, and whether its number is a count. Loki
+            // Which stores answered, and whether the number is a count. Loki
             // cannot count: it reports the page it returned, so "5 matching
-            // records" would be a floor presented as a total.
-            const answered = (data.sources || [])[0] || {};
+            // records" would be a floor presented as a total. Over all
+            // sources the breakdown has a row per source, and the sentence
+            // names every one that answered rather than the first.
+            const answered = data.sources || [];
+            const names = answered.filter(s => !s.failed).map(s => s.name);
             // And whether it answered the WHOLE query. A store that lost
             // shards still returns a number, and this rendered it as a clean
-            // success: on the demo the default source answers `failed` with
-            // "5 of 9 shards failed: Fielddata is disabled on [level] in
+            // success: on the demo the cluster answers `failed` with "5 of
+            // 9 shards failed: Fielddata is disabled on [level] in
             // [bad-logs-000001] ...", and 1,831 was printed as an exact
             // total with the reason nowhere on the page.
-            const incomplete = answered.failed === true || data.partial === true;
-            const counted = answered.exact !== false && !incomplete;
+            const incomplete = answered.some(s => s.failed === true) || data.partial === true;
+            const counted = data.counted !== false && !answered.some(s => s.exact === false) && !incomplete;
             const reasons = (data.warnings || []).filter(Boolean).join('; ');
             // "At least", capitalised: the line break above ends the
             // heading, so the floor phrasing begins a sentence rather than
@@ -205,7 +221,7 @@ document.getElementById('testQuery').addEventListener('click', function() {
                     <strong>${incomplete ? 'The store answered only part of this query.'
                                          : 'Query test successful!'}</strong><br>
                     ${counted ? '' : 'At least '}${Number.isFinite(total) ? total.toLocaleString() : 0} matching
-                    records in the last 24 hours${answered.name ? ', from ' + escapeHtml(answered.name) : ''},
+                    records in the last 24 hours${names.length ? ', from ' + escapeHtml(names.join(', ')) : ''},
                     across the indices your role
                     can read. The dashboard's index patterns narrow this further.
                     ${incomplete && reasons ? '<br>' + escapeHtml(reasons) : ''}

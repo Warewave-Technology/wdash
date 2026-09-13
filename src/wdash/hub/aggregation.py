@@ -78,6 +78,13 @@ class AggregationResult:
     #: list is where a shard failure and a scope message belong, and those name
     #: no aggregation.
     notes: dict = field(default_factory=dict)
+    #: Which sources `total` was added up from, and how much each gave:
+    #: ({name, total, failed}, ...). Filled by the fan-out, because only it
+    #: has more than one answer to attribute; a single source leaves it empty
+    #: and the caller names itself. Two stored rows over one cluster count
+    #: every record twice, and this is what lets a page show that as two
+    #: rows of one number rather than as one number that is quietly double.
+    sources: tuple = ()
 
     def get(self, name):
         return self.buckets.get(name, [])
@@ -92,4 +99,5 @@ class AggregationResult:
                 "buckets": {k: [b.to_dict() for b in v] for k, v in self.buckets.items()},
                 "warnings": list(self.warnings),
                 "notes": {k: list(v) for k, v in self.notes.items()},
-                "failed": self.failed}
+                "failed": self.failed,
+                "sources": [dict(entry) for entry in self.sources]}

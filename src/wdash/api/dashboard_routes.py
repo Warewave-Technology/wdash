@@ -22,7 +22,8 @@ from datetime import timedelta
 
 from .access import request_scope
 from ..hub import (
-    Capability, DateHistogram, LogQuery, Scope, Terms, TimeWindow, TraceQuery,
+    Capability, DateHistogram, Hub, LogQuery, Scope, Terms, TimeWindow,
+    TraceQuery,
 )
 from ..hub.models import DOWN, UNKNOWN, UP
 from ..hub.query import DEFAULT_LOG_FIELDS, SORT_RECENT, SORT_SLOWEST
@@ -93,19 +94,26 @@ _HEATMAP_BARS = 24
 FILLED_SIGNALS = frozenset({"logs", "traces", "monitors", "alerts"})
 
 
+def _pinned_name(dashboard):
+    """The source a dashboard is pinned to, or None for every source."""
+    if dashboard is None:
+        return None
+    return getattr(dashboard, "source", None) or None
+
+
 def _logs(dashboard=None):
     """The log source a dashboard reads from.
 
-    A dashboard may name one. Without a name it reads every log source at
-    once — the same question the Logs page asks on its first search —
-    which is what every dashboard stored before there was a choice now
-    means. It used to mean one source, whichever was registered first: the
+    A dashboard may be pinned to one. Unpinned, it reads every log source at
+    once — the same question the Logs page asks on its first search — which
+    is what every dashboard stored before there was a choice now means.
+    It used to mean one source, whichever was registered first: the
     environment's cluster while there was one, the oldest stored row after
     that. Measured on the demo the day the environment path went, the board
     fell from 18,169 records to 1,213 because its oldest stored source was a
     Loki, with nothing on screen to say so.
 
-    A dashboard naming a source that no longer exists is an error rather
+    A dashboard pinned to a source that no longer exists is an error rather
     than a silent fall back to the rest: quietly answering from a different
     store is how somebody concludes their data has disappeared.
     """
@@ -113,15 +121,98 @@ def _logs(dashboard=None):
     if hub is None:
         return None
 
-    name = getattr(dashboard, "source", None) if dashboard is not None else None
+    name = _pinned_name(dashboard)
     if not name:
         return hub.logs()
     try:
         return hub.logs(name)
     except KeyError:
-        raise SourceMissing(
-            f"This dashboard reads from the source '{name}', which is not "
+        raise SourceMissing(_not_configured(name))
+
+
+def _signal_source(dashboard, signal):
+    """The trace or monitor source a dashboard's panels of that signal read.
+
+    A pin is the SOURCE, not the log side of it. Pinned to a cluster that
+    serves logs, traces and monitors, a board reads all three from that
+    cluster; its trace panels used to read whichever trace source was
+    registered first whatever the board was pinned to — measured on the
+    demo, a trace list for api-gateway went empty on a board pinned to the
+    cluster holding three of its traces, because the oldest trace source was
+    a Tempo with no such service.
+
+    Where the pinned source does not serve the signal — a Loki serves no
+    traces — the panels read every source of it, because there is nowhere
+    else they could come from, and each panel says which answered. A pin
+    naming a source nothing serves any more is refused for these panels as
+    it is for the log ones.
+    """
+    hub = getattr(current_app, "hub", None)
+    if hub is None:
+        return None
+    lookup = getattr(hub, signal)
+    name = _pinned_name(dashboard)
+    if not name:
+        return lookup()
+    try:
+        return lookup(name)
+    except KeyError:
+        if hub.signals_of(name):
+            return lookup()
+        raise SourceMissing(_not_configured(name))
+
+
+def _not_configured(name):
+    return (f"This dashboard reads from the source '{name}', which is not "
             f"configured. Check the configuration page.")
+
+
+def _fanned_out(source):
+    """The members of a fan-out, or None for a source that is one thing.
+
+    By the SHAPE of `sources` and not its presence: a source that answers
+    every attribute — a test's dead stand-in does — must read as one source
+    that is down, not as a fan-out over a function.
+    """
+    members = getattr(source, "sources", None)
+    return list(members) if isinstance(members, (list, tuple)) else None
+
+
+def _members(source):
+    """The names behind a source: a fan-out's members, or the source itself."""
+    return [member.name for member in (_fanned_out(source) or [source])]
+
+
+def _attribution(source, answer=None):
+    """Which sources a panel's rows came from, and which were asked and did
+    not answer, as {"sources": [...], "missing_sources": [...]}.
+
+    On every trace and monitor panel, so that a doubled count — two stored
+    rows over one cluster, each answering the same spans — is two names
+    under one number rather than one number that is quietly double, and a
+    board pinned to a source that serves no traces says whose traces these
+    are. The log side carries the same thing as the page's `sources`.
+    """
+    members = _members(source)
+    answered = [str(name) for name in (getattr(answer, "sources", ()) or ())]
+    if not answered:
+        missing = {str(name)
+                   for name in (getattr(answer, "missing_sources", ()) or ())}
+        answered = [name for name in members if name not in missing]
+    return {"sources": answered,
+            "missing_sources": [name for name in members
+                                if name not in answered]}
+
+
+def _log_attribution(source, result):
+    """Which log sources the board's counts were added up from, and how
+    much each gave: [{name, total, failed}]. The fan-out fills it in; a
+    single source names itself, so the page has one shape to draw."""
+    rows = [dict(entry) for entry in (getattr(result, "sources", ()) or ())]
+    if rows:
+        return rows
+    return [{"name": source.name, "total": result.total,
+             "failed": bool(result.failed)}]
 
 
 class SourceMissing(RuntimeError):
@@ -370,19 +461,24 @@ def _heatmap_interval(window):
     return "1d"
 
 
-def _trace_panels(panels, window, scope):
+def _trace_panels(panels, window, scope, dashboard=None):
     """Fill in the trace-backed panels.
 
     Traces are a different source, so they cannot ride the log batch — one
     extra round trip, taken once no matter how many trace panels there are.
     A missing or failing trace backend costs those panels, never the page.
+
+    Read from the board's own source where it serves traces, and from every
+    trace source otherwise (`_signal_source`).
     """
     wanted = [p for p in panels if p["type"] == "trace_services"]
     if not wanted:
         return {}
 
-    hub = getattr(current_app, "hub", None)
-    traces = hub.traces() if hub else None
+    try:
+        traces = _signal_source(dashboard, "traces")
+    except SourceMissing as exc:
+        return {p["id"]: {"error": str(exc)} for p in wanted}
     if traces is None or not traces.supports(Capability.SERVICE_LIST):
         return {p["id"]: {"error": "No trace backend is configured."}
                 for p in wanted}
@@ -409,9 +505,11 @@ def _trace_panels(panels, window, scope):
     }
 
     out = {}
+    answered = _attribution(traces, services)
     for panel in wanted:
         ranked = sorted(services, key=orders[panel["sort"]], reverse=True)
-        rendered = {"rows": [s.to_dict() for s in ranked[:panel["size"]]]}
+        rendered = {"rows": [s.to_dict() for s in ranked[:panel["size"]]],
+                    **answered}
         if partial:
             rendered["partial"] = True
             rendered["warnings"] = notes
@@ -491,7 +589,7 @@ def _empty_trace_list_reason(traces, scope, service, window, listed):
             f"than a quiet window.")
 
 
-def _trace_list_panels(panels, window, scope):
+def _trace_list_panels(panels, window, scope, dashboard=None):
     """Fill in the trace-LIST panels: individual traces, one service each.
 
     A different question from `_trace_panels` and a different request. That
@@ -526,8 +624,10 @@ def _trace_list_panels(panels, window, scope):
                       "role does not have. The rest of this dashboard is "
                       "unaffected.")
 
-    hub = getattr(current_app, "hub", None)
-    traces = hub.traces() if hub else None
+    try:
+        traces = _signal_source(dashboard, "traces")
+    except SourceMissing as exc:
+        return refuse(str(exc))
     if traces is None or not traces.supports(Capability.TRACE_SEARCH):
         return refuse("No trace backend that can list traces is configured.")
 
@@ -586,8 +686,9 @@ def _trace_list_panels(panels, window, scope):
             rows.append(summary.to_dict())
 
         completeness = trace_routes._completeness(found)
+        answered = _attribution(traces, found)
         for panel in members:
-            rendered = {"rows": rows}
+            rendered = {"rows": rows, **answered}
             if completeness["partial"]:
                 # Tempo and Jaeger sort the rows they fetched rather than the
                 # window, and a store that did not answer is not a quieter
@@ -801,13 +902,18 @@ def _certificate_row(monitor):
     }
 
 
-def _monitor_panels(panels, scope, window):
+def _monitor_panels(panels, scope, window, dashboard=None):
     """Fill in the monitor-backed panels.
 
     Monitors are a third source, so like traces they cannot ride the log
     batch: one extra round trip for the listing however many status panels
     the board holds, and a second only when a certificate panel is on it.
     A missing or failing monitor backend costs those panels, never the page.
+
+    Read from the board's own source where it serves monitors, and from
+    every monitor source otherwise (`_signal_source`) — the merged view
+    these panels have always read, because asking one region at a time is
+    how an outage in the other one is missed.
 
     `monitors:read` is checked HERE, on the scope, at the moment the panel is
     filled — not on the route, which asks only about `dashboard:*`. Both
@@ -836,8 +942,10 @@ def _monitor_panels(panels, scope, window):
                       "this role does not have. The rest of this dashboard "
                       "is unaffected.")
 
-    hub = getattr(current_app, "hub", None)
-    source = hub.monitors(hub.ALL_SOURCES) if hub else None
+    try:
+        source = _signal_source(dashboard, "monitors")
+    except SourceMissing as exc:
+        return refuse(str(exc))
     if source is None or not source.supports(Capability.MONITOR_LIST):
         return refuse("No monitor backend is configured.")
 
@@ -859,6 +967,7 @@ def _monitor_panels(panels, scope, window):
                 key=lambda m: (_STATUS_ORDER.get(m.status, _STATUS_ORDER[UNKNOWN]),
                                (m.name or m.id).lower()))
             notes = [str(note) for note in (page.warnings or ()) if note]
+            answered = _attribution(source, page)
             for panel in listings:
                 # The view reaches the client on the panel DEFINITION, which
                 # every filled panel is built from — repeating it here was a
@@ -881,7 +990,8 @@ def _monitor_panels(panels, scope, window):
                         f"panel still works.")}
                     continue
                 rendered = {"counts": page.counts,
-                            "rows": [_monitor_row(m, view) for m in ordered]}
+                            "rows": [_monitor_row(m, view) for m in ordered],
+                            **answered}
                 if page.partial:
                     # One source of several not answering is not "those
                     # checks are all passing": it is a shorter list nobody
@@ -920,11 +1030,13 @@ def _monitor_panels(panels, scope, window):
                 short = [str(note)
                          for note in (getattr(seen, "warnings", ()) or ())
                          if note]
+                answered = _attribution(source, seen)
                 for panel in certificates:
                     rendered = {
                         "rows": rows,
                         "warning_days": monitor_routes.EXPIRY_WARNING_DAYS,
                         "critical_days": monitor_routes.EXPIRY_CRITICAL_DAYS,
+                        **answered,
                     }
                     if getattr(seen, "missing_sources", ()) or short:
                         rendered["partial"] = True
@@ -1126,9 +1238,9 @@ def _without_log_containers(dashboard, scope, window, time_range, failure, statu
     # One line per signal this route can answer, over the panels the log
     # source is not needed for. `standalone` rather than `panels`, so a
     # filler is never handed a panel that belongs to another source.
-    filled = _trace_panels(standalone, window, scope)
-    filled.update(_trace_list_panels(standalone, window, scope))
-    filled.update(_monitor_panels(standalone, scope, window))
+    filled = _trace_panels(standalone, window, scope, dashboard)
+    filled.update(_trace_list_panels(standalone, window, scope, dashboard))
+    filled.update(_monitor_panels(standalone, scope, window, dashboard))
     filled.update(_alert_panels(standalone, window, scope))
     for panel in panels:
         if needs_logs(panel):
@@ -1650,7 +1762,7 @@ def _source_name(dashboard):
     to lab-elasticsearch, lab-loki and lab-victorialogs" is the true
     sentence, and "all-sources" is a name nobody configured.
     """
-    name = getattr(dashboard, "source", None)
+    name = _pinned_name(dashboard)
     if name:
         return str(name)
     hub = getattr(current_app, "hub", None)
@@ -1661,22 +1773,6 @@ def _source_name(dashboard):
     if source is None:
         return "the log source"
     return _listed(_members(source))
-
-
-def _fanned_out(source):
-    """The members of a fan-out, or None for a source that is one thing.
-
-    By the SHAPE of `sources` and not its presence: a source that answers
-    every attribute — a test's dead stand-in does — must read as one source
-    that is down, not as a fan-out over a function.
-    """
-    members = getattr(source, "sources", None)
-    return list(members) if isinstance(members, (list, tuple)) else None
-
-
-def _members(source):
-    """The names behind a source: a fan-out's members, or the source itself."""
-    return [member.name for member in (_fanned_out(source) or [source])]
 
 
 def _listed(names):
@@ -1837,7 +1933,36 @@ def view_dashboard(dashboard_id):
         flash("Dashboard not found. It may have been deleted or there may be a "
               "synchronization issue.", "error")
         return redirect(url_for("dashboards.dashboards_page"))
-    return render_template("dashboard_view.html", dashboard=dashboard)
+    return render_template("dashboard_view.html", dashboard=dashboard,
+                           source_note=_pin_description(dashboard))
+
+
+def _pin_description(dashboard):
+    """What the board's source setting means, in words, for its header.
+
+    Beside the query and the index patterns, which the page has always
+    printed: the source was the one thing about a board's question it did
+    not say, and it is the one that decides whether the trace list on it
+    reads the cluster the board is pinned to or every trace store there is.
+    """
+    hub = getattr(current_app, "hub", None)
+    name = _pinned_name(dashboard)
+    if not name:
+        return ("all sources — every log, trace and monitor source, and the "
+                "board says which answered")
+    signals = hub.signals_of(name) if hub is not None else frozenset()
+    if not signals:
+        return (f"{name}, which is not configured, so nothing answers this "
+                f"board — check the configuration page")
+    served = [signal for signal in ("logs", "traces", "monitors")
+              if signal in signals]
+    elsewhere = [signal for signal in ("traces", "monitors")
+                 if signal not in signals]
+    text = f"{name} for {_listed(served)}"
+    if elsewhere:
+        text += (f"; {_listed(elsewhere)} from every source, because "
+                 f"{name} serves {'neither' if len(elsewhere) == 2 else 'none'}")
+    return text
 
 
 def _form_indices():
@@ -1903,7 +2028,14 @@ def _dashboard_form():
     # hub actually has: a stored name that is not configured is reported to
     # every reader for ever ("reads from 'loki', which is not configured"),
     # and the place to catch that is here, once, where it was typed.
+    #
+    # "All sources" is the empty string, and `*` — the search API's spelling
+    # of the same choice — is read as the empty string too, so a board holds
+    # ONE value for it: none. Two stored spellings of one meaning is a
+    # question every reader of the row would have to answer again.
     source = (request.form.get("source") or "").strip()
+    if source == Hub.ALL_SOURCES:
+        source = ""
     if source and source not in _source_names():
         return None, (f"There is no log source called '{source}'. "
                       f"Configured: {', '.join(_source_names()) or 'none'}.")
@@ -1918,24 +2050,49 @@ def _dashboard_form():
         "visibility": request.form.get("visibility"),
     }
     # Present-and-empty and absent are DIFFERENT, and the key travels only for
-    # the first. Both stores read "" as the deliberate choice "the default
-    # source" and `None`/absent as "leave it alone", so returning "" whenever
-    # the field had not been rendered wiped the stored source on every edit:
-    # `dashboard_edit.html` hides the select inside `{% if sources|length > 1 %}`,
-    # so on a single-source installation the browser cannot send it and every
-    # edit through the UI repointed the dashboard at whatever the default
-    # source happens to be — quietly, which is the one thing `_logs()` and
-    # README's "reads from a source that is not configured" both exist to
-    # prevent. `visibility` above has always used this convention.
+    # the first. Both stores read "" as the deliberate choice "all sources"
+    # and `None`/absent as "leave it alone", so returning "" whenever the
+    # field had not been rendered wiped the stored source on every edit:
+    # `dashboard_edit.html` hides the select when there is nothing to
+    # choose, so on a single-source installation the browser cannot send it
+    # and every edit through the UI repointed the dashboard at every source
+    # — quietly, which is the one thing `_logs()` and README's "reads from a
+    # source that is not configured" both exist to prevent. `visibility`
+    # above has always used this convention.
     if "source" in request.form:
         fields["source"] = source
     return fields, None
 
 
 def _source_names():
-    """The configured log sources, in the order the hub holds them."""
+    """The configured log sources — the names a board may be pinned to — in
+    the order the hub holds them, which is by name."""
     hub = getattr(current_app, "hub", None)
     return [source.name for source in (hub.log_sources if hub else [])]
+
+
+def _pins_on_offer():
+    """The sources the form offers to pin a board to, or [] when there is
+    nothing to choose.
+
+    A control is worth drawing only where the choice changes what a panel
+    reads: more than one log source, or a lone log source whose other
+    signals have company — a cluster serving logs, traces and monitors
+    beside a Tempo is one log source and a real choice for the trace panels
+    (that cluster's traces, or every trace store's). One log source and
+    nothing else: hidden, so an edit through the form cannot repoint
+    anything, which is the installation `_dashboard_form`'s present-and-
+    empty rule was written for.
+    """
+    hub = getattr(current_app, "hub", None)
+    names = _source_names()
+    if len(names) != 1 or hub is None:
+        return names
+    company = {"traces": hub.trace_sources, "monitors": hub.monitor_sources}
+    for signal in hub.signals_of(names[0]) - {"logs"}:
+        if len(company[signal]) > 1:
+            return names
+    return []
 
 
 def _group_by_fields(name):
@@ -2153,7 +2310,7 @@ def create_dashboard():
             # With what was typed, not with the defaults this page was
             # rendered from: the board was built in that editor.
             return render_template("dashboard_create.html", indices=indices,
-                                   sources=_source_names(),
+                                   sources=_pins_on_offer(),
                                    visibilities=VISIBILITIES,
                                    **_resubmitted(default_panels(), True))
 
@@ -2165,7 +2322,7 @@ def create_dashboard():
             flash("The dashboard could not be saved and has NOT been created. "
                   "Check the server logs and try again.", "error")
             return render_template("dashboard_create.html", indices=indices,
-                                   sources=_source_names(),
+                                   sources=_pins_on_offer(),
                                    visibilities=VISIBILITIES,
                                    **_resubmitted(default_panels(), True))
 
@@ -2173,7 +2330,7 @@ def create_dashboard():
         return redirect(url_for("dashboards.view_dashboard", dashboard_id=dashboard.id))
 
     return render_template("dashboard_create.html", indices=indices,
-                           sources=_source_names(),
+                           sources=_pins_on_offer(),
                            visibilities=VISIBILITIES, **editor)
 
 
@@ -2220,7 +2377,7 @@ def edit_dashboard(dashboard_id):
             flash(error, "error")
             return render_template("dashboard_edit.html", dashboard=dashboard,
                                    indices=_form_indices(),
-                                   sources=_source_names(),
+                                   sources=_pins_on_offer(),
                                    visibilities=VISIBILITIES,
                                    **_resubmitted(dashboard.get_panels(),
                                                   not dashboard.panels,
@@ -2260,7 +2417,7 @@ def edit_dashboard(dashboard_id):
 
     return render_template("dashboard_edit.html", dashboard=dashboard,
                            indices=_form_indices(),
-                           sources=_source_names(),
+                           sources=_pins_on_offer(),
                            visibilities=VISIBILITIES, **editor)
 
 
@@ -2482,8 +2639,9 @@ def api_dashboard_data(dashboard_id):
     # no `panels` key at all, and the client's `showLoadError` wiped the grid
     # — the trace panel with it. Only a worker that has never read the index
     # list reaches the earlier door.
+    source = _logs(dashboard)
     try:
-        results = _logs(dashboard).multi_aggregate(batch, scope)
+        results = source.multi_aggregate(batch, scope)
     except Exception as exc:
         # And a search that RAISES rather than answering `failed` reached no
         # handler at all: Flask answered an HTML 500, so the browser got no
@@ -2522,11 +2680,16 @@ def api_dashboard_data(dashboard_id):
             "error_count": counts["error"],
         }),
         "thresholds": dashboard.thresholds,
+        # Which log sources the four numbers above were added up from, and
+        # how much each gave — the same breakdown the Logs page prints. A
+        # board over three sources is three rows here; a board pinned to
+        # one is one row naming it.
+        "sources": _log_attribution(source, result),
         "panels": _panel_results(
             panels, result,
-            {**_trace_panels(panels, query.window, scope),
-             **_trace_list_panels(panels, query.window, scope),
-             **_monitor_panels(panels, scope, query.window),
+            {**_trace_panels(panels, query.window, scope, dashboard),
+             **_trace_list_panels(panels, query.window, scope, dashboard),
+             **_monitor_panels(panels, scope, query.window, dashboard),
              **_alert_panels(panels, query.window, scope),
              # A log panel with no chart: the number is read out of the
              # batch above rather than fetched, so it costs one aggregation

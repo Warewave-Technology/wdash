@@ -461,6 +461,52 @@ class RefreshCostTest(_Board):
                 f"the sentence does not print the {per_aggregation} requests "
                 f"an eight-panel refresh makes on {name}")
 
+    def test_every_sentence_says_what_all_sources_costs(self):
+        """A board that names no source reads every source, and pays every
+        source: measured against the lab, 1 + 10 + 10 = 21 for one of each.
+        Said where the interval is chosen and where the source is chosen —
+        the create and edit forms — and held to the same arithmetic in all
+        three places, so one of them cannot drift into a number that does
+        not reproduce."""
+        import re
+
+        self.data(time_range="24h")
+        per_aggregation = self.aggregations()
+        every = 1 + 2 * per_aggregation
+
+        templates = os.path.join(os.path.dirname(__file__), "..", "templates")
+        for template, element in (("dashboard_view.html", "refreshCost"),
+                                  ("dashboard_create.html", "sourceCost"),
+                                  ("dashboard_edit.html", "sourceCost")):
+            with open(os.path.join(templates, template), encoding="utf-8") as handle:
+                markup = handle.read()
+            sentence = re.search(rf'id="{element}".*?</(small|div)>', markup, re.S)
+            with self.subTest(template=template):
+                self.assertIsNotNone(sentence, f"{element} is gone")
+                said = " ".join(sentence.group(0).split())
+                self.assertRegex(said, r"\b1 request to Elasticsearch\b")
+                self.assertRegex(said, rf"\b{per_aggregation} to Loki\b")
+                self.assertRegex(said, rf"\b{per_aggregation} to VictoriaLogs\b")
+                self.assertRegex(said, rf"\b{every} per refresh\b",
+                                 f"the sum of one refresh over all three is "
+                                 f"{every}")
+
+    def test_a_board_over_two_clusters_pays_each_one_request(self):
+        """The measurement behind "1 request to Elasticsearch" for a board
+        over all sources: the fan-out hands each member the whole batch, so
+        the current window and its baseline are one msearch per cluster."""
+        from wdash.hub.adapters import ElasticsearchLogSource
+
+        second = ModelledES({"app-logs-000002": (MAPPING, _records(3))})
+        self.app.hub.add_logs(ElasticsearchLogSource(second, name="second"))
+        calls = []
+        for name, cluster in (("first", self.es), ("second", second)):
+            real = cluster.msearch
+            cluster.msearch = (lambda real=real, name=name, **kw:
+                               (calls.append(name), real(**kw))[1])
+        self.data(time_range="24h")
+        self.assertEqual(sorted(calls), ["first", "second"])
+
 
 class PanelHeightTest(unittest.TestCase):
     """One clamped int beside width. No migration: the record is JSON."""
