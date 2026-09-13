@@ -102,7 +102,15 @@
             <div class="col-md-6 d-none" data-kind="elasticsearch" data-needs="logs">
               <label class="form-label small">Exclude patterns</label>
               <input class="form-control form-control-sm" name="logs_exclude_patterns"
-                     id="sourceExcludes" placeholder="*traces*, *apm*">
+                     id="sourceExcludes"
+                     placeholder="*traces*, *apm*, heartbeat-*, synthetics-*, wdash-dashboards">
+              <div class="form-text" style="font-size:.7rem">
+                Indices a log search reads past. Left empty this defaults to
+                the trace indices, Heartbeat's data streams and the index the
+                removed dashboard store wrote &mdash; documents that match
+                <code>*</code> and are not logs, and would come back as records
+                with no body.
+              </div>
             </div>
             <div class="col-md-3 d-none" data-kind="loki victorialogs jaeger tempo">
               <label class="form-label small">Tenant

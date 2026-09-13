@@ -157,8 +157,9 @@ jobs:
           --health-retries 20
 
     env:
-      # Not ELASTICSEARCH_URL. The suite forces that one empty so no test can
-      # reach a cluster nobody declared; these tests get their own name.
+      # The lab's address under a name of its own. The application reads no
+      # cluster address from the environment — sources are stored — and the
+      # integration tests in tests/test_hub.py, and the seeder, read this.
       WDASH_LAB_URL: http://localhost:9200
       WDASH_REQUIRE_LAB: "1"
 

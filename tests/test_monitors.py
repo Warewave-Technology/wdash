@@ -1338,7 +1338,6 @@ class TheDetailPageAsksForWhatItDrawsTest(unittest.TestCase):
             SECRET_KEY = "detail-page"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         self.app = create_app(TestConfig)
@@ -1911,7 +1910,6 @@ class StepScreenshotRouteTest(unittest.TestCase):
             SECRET_KEY = "shots"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         self.app = create_app(TestConfig)
@@ -2122,7 +2120,6 @@ class TheDetailPageSaysWhereTest(unittest.TestCase):
             SECRET_KEY = "locations"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         self.app = create_app(TestConfig)

@@ -60,15 +60,25 @@ five minutes; `?refresh=1` regenerates it.
 # Live cluster
 PYTHONPATH=src python -m wdash.advisor --url http://localhost:9200
 
+# A secured cluster behind a private authority
+PYTHONPATH=src python -m wdash.advisor --url https://es.example:9200 \
+    --username wdash --password-file /run/secrets/es --ca-certs /etc/ssl/ca.pem
+
 # Save a snapshot (to produce a fixture)
-PYTHONPATH=src python -m wdash.advisor --save-snapshot tests/fixtures/prod.json
+PYTHONPATH=src python -m wdash.advisor --url http://localhost:9200 \
+    --save-snapshot tests/fixtures/prod.json
 
 # Run against a saved snapshot — no cluster needed
 PYTHONPATH=src python -m wdash.advisor --from-snapshot tests/fixtures/prod.json
 
 # CI: exit 1 when a critical finding exists
-PYTHONPATH=src python -m wdash.advisor --fail-on critical
+PYTHONPATH=src python -m wdash.advisor --url http://localhost:9200 --fail-on critical
 ```
+
+Everything the command needs is on the command line, and nothing is read
+from the environment: the web process takes its clusters from the
+configuration page, and this takes its one from `--url`, which is required
+unless `--from-snapshot` is given.
 
 `--from-snapshot` is the fastest loop while writing rules: capture once, then
 run the rule as often as you like.
@@ -85,18 +95,15 @@ A finding at the level still exits 1 from a partial report, because what was
 found is found. Nothing found in a partial report is not the same as nothing
 there, so that exits 2.
 
-The client checks the cluster's certificate. Set `ELASTICSEARCH_CA_CERTS` to
-the CA that signed it; it is sent to the client only for an `https://` URL,
-because TLS options with a plain-http host are refused by the transport.
-`ELASTICSEARCH_VERIFY_CERTS=false` (the web process's own switch) or
-`--insecure` turns the check off. The switch is read as a tri-state:
-`true`, `1`, `yes` and `on` check the certificate, `false`, `0`, `no` and
-`off` do not, and any other value checks it and says on stderr that the
-word was not understood — `=1` meaning "on" used to turn the check off. `ELASTICSEARCH_USERNAME` and
-`ELASTICSEARCH_PASSWORD` are sent with every request, and without the check
-they go to whoever answers. The web process defaults to no check, so that an
-upgrade does not cut a deployment off from its cluster. The command line is
-run by hand or in CI, where a refused certificate is only a message.
+The client checks the cluster's certificate. `--ca-certs` names the CA that
+signed it; it is sent to the client only for an `https://` URL, because TLS
+options with a plain-http host are refused by the transport. `--insecure`
+turns the check off. `--username` and `--password-file` are sent with every
+request, and without the check they go to whoever answers — which is why
+the check is on by default here, where a refused certificate is only a
+message. The password comes from a file (or standard input, as `-`) rather
+than an argument, because an argument is visible to anything that can list
+processes.
 
 ## Rules
 

@@ -260,7 +260,6 @@ class _PageCase(unittest.TestCase):
             SECRET_KEY = "monitor-data"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         self.app = create_app(TestConfig)

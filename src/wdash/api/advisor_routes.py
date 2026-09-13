@@ -40,37 +40,34 @@ class NoCluster(RuntimeError):
     """
 
 
-#: The environment-configured Elasticsearch, which has no entry in the source
-#: table and is what the Advisor has always meant by "the cluster".
-ENVIRONMENT_SOURCE = "elasticsearch"
-
-
 def _advisable_sources():
-    """Every source the Advisor can say something about.
+    """Every source the Advisor can say something about, oldest first.
 
     A source it cannot inspect is left OUT rather than listed and skipped: an
     entry that produces nothing reads as a clean bill of health for a backend
     that was never looked at.
+
+    In the order they were created, which is the hub's own order for a query
+    that names no source — so a bare `/advisor` reads the same cluster a
+    bare search does. The repository lists by name, and by name the source
+    somebody added last week can sort ahead of the one the installation has
+    always run on.
     """
     from ..advisor.backends import COLLECTORS
-
-    out = []
-    if getattr(current_app, "es_client", None) is not None:
-        out.append({"value": ENVIRONMENT_SOURCE,
-                    "label": "Elasticsearch (environment)",
-                    "backend": "elasticsearch"})
+    from ..hub.factory import oldest_first
 
     store = getattr(current_app, "store", None)
     if store is None:
-        return out
+        return []
 
     try:
         rows = store.sources.all(enabled_only=True)
     except Exception as exc:
         current_app.logger.error(f"Could not list sources: {exc}")
-        return out
+        return []
 
-    for row in rows:
+    out = []
+    for row in oldest_first(rows):
         kind = row["kind"]
         if kind == "elasticsearch" or kind in COLLECTORS:
             out.append({"value": row["name"], "label": row["name"],
@@ -97,18 +94,14 @@ def _named(report, source):
 
 
 def _default_source():
-    """Which source a bare `/advisor` means.
+    """Which source a bare `/advisor` means: the oldest one it can inspect.
 
-    It used to mean the environment cluster unconditionally, from when that
-    was the only cluster there could be. Once ELASTICSEARCH_URL is unset and
-    every source is declared on the configuration page, that default turns
-    into "no Elasticsearch is configured" on a screen that is simultaneously
-    listing five sources it can analyse — and picking any of them makes it
-    work, so the fault reads as intermittent rather than as a wrong default.
-
-    The environment cluster still wins when it exists, because
-    `_advisable_sources` already lists it first — checking for it again here
-    would be a second place deciding the same order, and the two would drift.
+    It used to mean a cluster declared in the environment, from when that was
+    the only cluster there could be, and with every source on the
+    configuration page that default turned into "no Elasticsearch is
+    configured" on a screen that was simultaneously listing five sources it
+    could analyse. The order is `_advisable_sources`'s and is not decided
+    again here: two places deciding the same order would drift.
 
     Returns None only when there is genuinely nothing to analyse.
     """
@@ -124,15 +117,7 @@ def _build_report(source):
     if source in (None, ""):
         raise NoCluster(
             "The Advisor has no source to analyse. Add one on the "
-            "configuration page, or set ELASTICSEARCH_URL.")
-
-    if source == ENVIRONMENT_SOURCE:
-        client = getattr(current_app, "es_client", None)
-        if client is None:
-            raise NoCluster(
-                "The Cluster Advisor reads Elasticsearch settings, and no "
-                "Elasticsearch is configured.")
-        return _named(analyze(client.es), ENVIRONMENT_SOURCE)
+            "configuration page.")
 
     store = getattr(current_app, "store", None)
     row = None
@@ -175,9 +160,10 @@ def _get_report(force=False, source=None):
     """
     # Resolved once, then used for BOTH the cache key and the build. Keying on
     # the unresolved value would file every bare request under one name while
-    # the report underneath it changed with the configuration.
+    # the report underneath it changed with the configuration. With nothing
+    # to resolve to, the build below refuses before anything is cached.
     source = source or _default_source()
-    key = source or ENVIRONMENT_SOURCE
+    key = source
     with _lock:
         entry = _cache.get(key)
         age = time.time() - entry["at"] if entry else _CACHE_TTL

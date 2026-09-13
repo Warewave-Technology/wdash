@@ -12,7 +12,7 @@ to another language.
 
 Usage:
     from wdash.advisor import analyze
-    report = analyze(es_client.es)
+    report = analyze(es)              # an elasticsearch.Elasticsearch
     print(report.to_dict())
 """
 

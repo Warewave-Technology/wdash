@@ -340,7 +340,6 @@ class PublishedSessionKeyTest(unittest.TestCase):
         environment = dict(environment,
                            SESSION_COOKIE_SECURE="true",
                            DATABASE_URL="sqlite:///:memory:",
-                           ELASTICSEARCH_URL="",
                            WDASH_NO_DOTENV="1")
         result = subprocess.run(
             [sys.executable, "-c", source, json.dumps(environment)],

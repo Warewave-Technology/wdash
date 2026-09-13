@@ -40,19 +40,9 @@ source venv/bin/activate
 echo "📦 Installing dependencies..."
 pip install -r requirements.txt
 
-# Check if Elasticsearch is accessible
-echo "🔍 Checking Elasticsearch connection..."
+# The process's own settings. No data source is among them: sources are
+# declared on the configuration page once the application is up.
 source .env
-if command -v curl &> /dev/null; then
-    if curl -s "$ELASTICSEARCH_URL" > /dev/null; then
-        echo "✅ Elasticsearch is accessible at $ELASTICSEARCH_URL"
-    else
-        echo "⚠️  Warning: Cannot connect to Elasticsearch at $ELASTICSEARCH_URL"
-        echo "   Make sure Elasticsearch is running or update ELASTICSEARCH_URL in .env"
-    fi
-else
-    echo "⚠️  curl not found, skipping Elasticsearch connectivity check"
-fi
 
 # Create dashboards.json if it doesn't exist — only for a deployment that
 # asked for the file store. Dashboards live in the metadata database by
@@ -67,7 +57,7 @@ fi
 # Display configuration summary
 echo ""
 echo "📋 Configuration Summary:"
-echo "   Elasticsearch: $ELASTICSEARCH_URL"
+echo "   Sources: declared on the configuration page after sign-in"
 echo "   OIDC Configured: $([ ! -z "$OIDC_CLIENT_ID" ] && echo "Yes" || echo "No")"
 echo ""
 

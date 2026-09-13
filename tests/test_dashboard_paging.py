@@ -51,7 +51,6 @@ class PagingTestCase(unittest.TestCase):
             DASHBOARD_STORAGE = backend
             ENCRYPTION_KEY = SecretBox.generate_key()
             OIDC_CLIENT_ID = None
-            ELASTICSEARCH_URL = ""
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()

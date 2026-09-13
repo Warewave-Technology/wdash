@@ -442,9 +442,17 @@ class HeartbeatStreamsAreNotLogsTest(unittest.TestCase):
     Heartbeat: its streams, which WDash already reads as monitors, would have
     become log containers the moment streams were listed."""
 
-    def test_the_environment_log_source_leaves_monitor_data_to_monitors(self):
+    def test_a_stored_log_source_leaves_monitor_data_to_monitors(self):
+        """A source added with the exclude box blank — which is how one is
+        added — reads past Heartbeat's streams, as the source once declared
+        in the environment did."""
         from wdash.hub.adapters.es_monitors import DEFAULT_PATTERNS
         app = create_app(TestConfig)
+        app.store.sources.create(
+            name="lab-es", signal=["logs"], kind="elasticsearch",
+            config={"url": "http://elasticsearch.invalid:9200",
+                    "verify_certs": False})
+        app.hub.reload()
         log_source = app.hub.logs()
         for pattern in DEFAULT_PATTERNS:
             self.assertIn(pattern, log_source._exclude)

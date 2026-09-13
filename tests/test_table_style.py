@@ -178,7 +178,6 @@ class EveryTableIsTheSameTableTest(unittest.TestCase):
             SECRET_KEY = "table-style"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         cls.app = create_app(TableConfig)

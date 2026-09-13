@@ -10,9 +10,9 @@
 #   * with `WDASH_ENCRYPTION_KEY` exported, four tests covering "no key is
 #     configured, so secrets are refused rather than written as plaintext"
 #     quietly got a key and failed
-#   * with `TRACE_INDEX_PATTERNS` exported empty — which is how the lab now
-#     says "no environment trace source" — 127 tests failed, because the
-#     application under test had no trace source at all
+#   * with the trace-index variable of the day exported empty — which is how
+#     the lab then said "no environment trace source" — 127 tests failed,
+#     because the application under test had no trace source at all
 #
 # The pattern is the same both times, and so is the fix: a variable whose
 # value changes what a test MEANS does not get to arrive by accident.
@@ -24,30 +24,35 @@ import os
 #: rather than tuning it.
 #:
 #: Removing the name is only enough when the DEFAULT is inert. That is the
-#: whole of the distinction, and getting it wrong is invisible:
-#: `ELASTICSEARCH_URL` was on this list, was faithfully removed, and
-#: `Config` then fell back to `http://localhost:9200` — which is the lab's own
-#: address. Fourteen tests had been talking to a real cluster for as long as
-#: anybody had one running, and said so only by failing on the day it was
-#: switched off. The guard for this list checked that the NAME was absent,
-#: which was true and meant nothing.
+#: whole of the distinction, and getting it wrong is invisible: the cluster
+#: address was once on this list, was faithfully removed, and `Config` then
+#: fell back to `http://localhost:9200` — which is the lab's own address.
+#: Fourteen tests had been talking to a real cluster for as long as anybody
+#: had one running, and said so only by failing on the day it was switched
+#: off. The guard for this list checked that the NAME was absent, which was
+#: true and meant nothing.
 NEUTRALISED = (
     "WDASH_ENCRYPTION_KEY",     # set: secrets can be stored. Default: unset.
-    "TRACE_INDEX_PATTERNS",     # empty: no environment trace source. Default:
-                                # a list of index names, inert without a
-                                # cluster to look them up in.
     "DASHBOARD_STORAGE",        # database vs file: a different store entirely
     "DASHBOARD_STORAGE_FILE",   # see PROTECTED_BY_THE_APP
+)
+
+#: Cleared too, for the opposite reason: nothing reads them. The application
+#: looks at these only to say, as an ERROR at start-up, that they are set and
+#: no longer configure anything (`RETIRED_VARIABLES` in wdash/app.py, which
+#: tests/test_retired_variables.py holds to this list). Removing the name IS
+#: enough here — there is no default to land on — and without it a developer
+#: whose shell still exports a deployment's variables would get that ERROR
+#: from every app the suite builds.
+RETIRED = (
+    "ELASTICSEARCH_URL", "ELASTICSEARCH_USERNAME", "ELASTICSEARCH_PASSWORD",
+    "ELASTICSEARCH_TIMEOUT", "ELASTICSEARCH_VERIFY_CERTS",
+    "ELASTICSEARCH_CA_CERTS", "TRACE_INDEX_PATTERNS", "MONITOR_INDEX_PATTERNS",
 )
 
 #: Forced to a value, because removing them lands on a default that points at
 #: something REAL — a cluster, a database — rather than at nothing.
 FORCED = {
-    # No Elasticsearch. A test that needs one registers a source on its own
-    # app, where the dependency is visible and does not vary by what happens
-    # to be listening on 9200.
-    "ELASTICSEARCH_URL": "",
-
     # No developer database. The default is `sqlite:///data/wdash.db` — local
     # accounts, their password hashes, and every source credential the
     # encryption key protects.
@@ -111,7 +116,7 @@ def points_at_something_real(value):
     return "://" in value or os.path.exists(value)
 
 
-for _variable in NEUTRALISED:
+for _variable in NEUTRALISED + RETIRED:
     os.environ.pop(_variable, None)
 
 for _variable, _value in FORCED.items():

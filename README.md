@@ -37,8 +37,9 @@ issues carries an explicit authorization scope.
   A dashboard link carries its time range and filter, so what you share is the
   view rather than the page.
 - **More than one source** — Elasticsearch, Grafana Loki and VictoriaLogs for
-  logs; Elasticsearch, Jaeger and Grafana Tempo for traces. **None of them is required**: set
-  `ELASTICSEARCH_URL` to nothing and WDash runs on the others. Search one or
+  logs; Elasticsearch, Jaeger and Grafana Tempo for traces. **None of them is
+  required**: declare the ones you have on the configuration page, and only
+  those. Search one or
   all of them; a merged page says which source answered each record, and says
   so when a backend is down rather than quietly returning less. A trace split
   across two backends — a request crossing services that export to different
@@ -124,12 +125,19 @@ cd lab
 # 2. Run the application
 cd ..
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
-cp .env.example .env   # defaults already point at the lab
+cp .env.example .env   # then set WDASH_ENCRYPTION_KEY in it
 ./venv/bin/python main.py
 ```
 
 Open <http://127.0.0.1:5001>. The installation has no accounts yet, so every
 route leads to `/setup`, where you create the administrator.
+
+Then give it the lab: **Configuration → Sources → Add source**, an
+Elasticsearch at `http://localhost:9200` serving logs, traces and monitors.
+The lab's traces are in `*traces*` and `*apm*` and its synthetic checks in
+`heartbeat-*` and `synthetics-*`, which are the defaults the form offers. It
+is in use the moment it is saved; nothing about a source is read from the
+environment or from `.env`.
 
 > ### ⚠️ The first account is a local one
 >
@@ -212,17 +220,16 @@ opens.
 
 ## Configuration
 
+Data sources are not environment variables. Every source — Elasticsearch,
+Loki, VictoriaLogs, Jaeger, Tempo — is declared on the configuration page
+and stored in the metadata database, with its own credentials, index
+patterns and certificate authority, and is in use the moment it is saved.
+The variables below configure the process itself.
+
 | Variable | Description | Default |
 |---|---|---|
 | `SECRET_KEY` | Flask session signing key | `dev-secret-key-change-in-production` |
 | `FLASK_DEBUG` | `true` turns on Flask's debugger and reloader | `False` |
-| `TRACE_INDEX_PATTERNS` | Indices holding traces; excluded from log search | `*traces*,*apm*` |
-| `ELASTICSEARCH_URL` | Cluster endpoint. **Set it to nothing to run without Elasticsearch at all** — unset still means the local default | `http://localhost:9200` |
-| `ELASTICSEARCH_USERNAME` | Optional basic auth user | — |
-| `ELASTICSEARCH_PASSWORD` | Optional basic auth password | — |
-| `ELASTICSEARCH_TIMEOUT` | Request timeout, seconds | `30` |
-| `ELASTICSEARCH_VERIFY_CERTS` | Verify the cluster's TLS certificate. **Off by default so no existing deployment loses its cluster on upgrade — turn it on for anything but a loopback address** | `False` |
-| `ELASTICSEARCH_CA_CERTS` | CA bundle for a cluster behind a private authority | — |
 | `OIDC_CLIENT_ID` | OIDC client id | — |
 | `OIDC_CLIENT_SECRET` | OIDC client secret | — |
 | `OIDC_DISCOVERY_URL` | Provider discovery document | — |
@@ -237,7 +244,6 @@ opens.
 | `DATABASE_URL` | Metadata store: `postgresql://…` or `sqlite:///…` | `sqlite:///data/wdash.db` |
 | `WDASH_ENCRYPTION_KEY` | Encrypts secrets held in the metadata store, including every local account's authenticator. Without it, secrets cannot be saved at all and no local account can sign in | — |
 | `DASHBOARD_STORAGE` | Where dashboards **and saved searches** live: `database` (default) or `file`. An installation with JSON files it has not migrated is told at start-up and on the pages themselves, naming both files and the command &mdash; rather than being shown an empty list as though nothing had ever been saved | `database` |
-| `DASHBOARD_INDEX` | Kept out of log search. The Elasticsearch dashboard store has been removed, but an installation that used it still has the index sitting in the cluster, and without this a search over `*` returns dashboards as bodyless records | `wdash-dashboards` |
 | `MAX_SEARCH_RESULTS` | Upper bound on page size | `1000` |
 
 ### Identity providers
@@ -695,15 +701,19 @@ It can also run headless, which makes it usable in CI:
 
 ```bash
 PYTHONPATH=src python -m wdash.advisor --url http://localhost:9200
-PYTHONPATH=src python -m wdash.advisor --fail-on critical   # exit 1 on findings
+PYTHONPATH=src python -m wdash.advisor --url https://es.example:9200 \
+    --username wdash --password-file /run/secrets/es --ca-certs /etc/ssl/ca.pem \
+    --fail-on critical                                   # exit 1 on findings
 ```
 
+Everything it needs is on the command line and nothing is read from the
+environment: `--url` names the cluster, `--username` with `--password-file`
+(a path, or `-` for standard input — never an argument, which `ps` shows)
+the credentials, and `--ca-certs` the authority for an `https://` cluster.
 With `--fail-on` it exits 2 when it could not look at everything, and it
 exits 2 in any case when nothing could be evaluated. The cluster's
-certificate is checked, against `ELASTICSEARCH_CA_CERTS` when that is set
-and the URL is `https://`; `ELASTICSEARCH_VERIFY_CERTS=false` (or `0`, `no`,
-`off`) or `--insecure` turns the check off. Any other spelling keeps the
-check and says so.
+certificate is always checked; `--insecure` turns the check off, and the
+credentials then go to whoever answers.
 
 Two checks are specific to how WDash queries data:
 
@@ -972,6 +982,16 @@ as a break, because `>=3.8` was never installable: `psycopg` has required
 - **Protect the local administrator account.** It is a permanent credential
   that keeps working when the identity provider does not, which is exactly what
   makes it worth stealing.
+- **Upgrading a deployment that declared its cluster in the environment.**
+  2.5 and earlier registered an Elasticsearch from `ELASTICSEARCH_URL` and the
+  seven variables around it (the credentials, timeout, certificate switch and
+  bundle, and the trace and monitor index patterns). Nothing reads them now.
+  Before upgrading, add that cluster under **Configuration → Sources** with
+  the same index patterns, or the logs, traces and monitors pages come up
+  saying they have no source. A process that still has any of the variables
+  set says so at start-up, as an ERROR naming them and the page, and reads
+  nothing from them — it does not import them, because a one-shot import at
+  start-up is the mechanism that was removed.
 - Put WDash on the only network path to Elasticsearch. Application-level
   authorization is worthless if the cluster is directly reachable — the
   Advisor's `SEC001` check exists to remind you.
@@ -1098,9 +1118,9 @@ Stated plainly, because they affect whether this fits your deployment:
   The JSON files are left untouched, so the move is reversible.
 - **A source saved in the UI is used within a few seconds.** The worker that
   handled the save uses it immediately; the others notice on their next check,
-  which is at most five seconds later. Sources from `ELASTICSEARCH_URL` are
-  built once and never rebuilt, so a configuration edit never disturbs the
-  connections a running query is using.
+  which is at most five seconds later. The stored sources are swapped as a
+  unit and the adapters a running query holds are not closed under it, so a
+  configuration edit never disturbs the connections that query is using.
 - **A merged search is first-page only.** Paging a time-ordered merge needs
   every source's cursor advanced together, and each backend's cursor means
   something different — a cursor that silently skips records is worse than no

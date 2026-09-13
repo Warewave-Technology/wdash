@@ -593,7 +593,9 @@ def bulk_load(es, pairs, label):
 
 def main():
     parser = argparse.ArgumentParser(description="WDash lab data generator")
-    parser.add_argument("--url", default=os.environ.get("ELASTICSEARCH_URL", "http://localhost:9200"))
+    # The lab's own name for its cluster, shared with tests/test_hub.py and
+    # CI. The application reads no cluster address from the environment.
+    parser.add_argument("--url", default=os.environ.get("WDASH_LAB_URL") or "http://localhost:9200")
     parser.add_argument("--logs", type=int, default=50_000, help="number of log documents")
     parser.add_argument("--traces", type=int, default=2_000, help="number of traces")
     parser.add_argument("--days", type=int, default=7, help="number of days to spread the data over")

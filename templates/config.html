@@ -7,17 +7,6 @@
   <span class="badge bg-secondary">signed in as {{ current_user.username }}</span>
 </div>
 
-{% for warning in duplicate_sources %}
-{# Two registrations of one system. Detected at startup and shown here,
-   because a warning in a log file is a warning nobody reads — and the
-   symptom, a merged total that is quietly too big, never points at its
-   cause. #}
-<div class="alert alert-warning py-2" style="font-size:.85rem">
-  <i class="fas fa-triangle-exclamation"></i>
-  <strong>Two sources, one system.</strong> {{ warning }}
-</div>
-{% endfor %}
-
 {% if directory_conflict %}
 {# One directory at a time. Shown here because the people it affects cannot
    see the sign-in page's notice from inside an authenticated session, and
@@ -89,7 +78,7 @@
                 <span class="badge bg-secondary ms-1">disabled</span>
               {% endif %}
               {# Stored is not the same as in use. A row whose credential will
-                 not decrypt, or whose name the environment's own source
+                 not decrypt, or whose name WDash's own monitor source
                  already holds, sat here looking exactly like one that works
                  while every query naming it failed. #}
               {% if source.enabled and source_failures.get(source.name) %}
@@ -148,9 +137,10 @@
       </table>
       {% else %}
       <div class="p-4 text-center text-muted">
-        <p class="mb-1">No sources configured here yet.</p>
-        <small>WDash is using the source from its environment configuration.
-        Adding one here does not remove that.</small>
+        <p class="mb-1">No sources configured yet.</p>
+        <small>This is the only place a source is declared. Until one is
+        added here, the logs, traces and monitors pages have nothing to
+        read.</small>
       </div>
       {% endif %}
     </div>

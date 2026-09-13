@@ -358,11 +358,17 @@ class TheTilesDrawTest(unittest.TestCase):
             SECRET_KEY = "tiles"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = lab_url
-            MONITOR_INDEX_PATTERNS = ("heartbeat-*", "synthetics-*")
             DASHBOARD_STORAGE = "database"
 
         cls.app = create_app(LabConfig)
+        # The lab's cluster as a stored monitors source, which is the only
+        # way a cluster reaches WDash.
+        cls.app.store.sources.create(
+            name="lab-es", signal=["monitors"], kind="elasticsearch",
+            config={"url": lab_url, "verify_certs": False,
+                    "monitors": {"index_patterns": ["heartbeat-*",
+                                                    "synthetics-*"]}})
+        cls.app.hub.reload()
         # Enrolled once, through a test client: a local account needs an
         # authenticator, and the browser sign-in below uses this secret.
         cls.secret = support.set_up(cls.app.test_client(), username="admin",

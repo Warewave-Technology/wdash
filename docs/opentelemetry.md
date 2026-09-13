@@ -52,11 +52,11 @@ processors:
 | `otel` | OpenTelemetry's own field names | `OtelLogSchema`, `OtelSpanSchema` |
 | `ecs` | Elastic Common Schema | `FlatLogSchema`, `ApmSpanSchema` |
 
-Tell WDash which indices hold traces so log searches do not scan them:
-
-```bash
-TRACE_INDEX_PATTERNS='*traces*,*apm*'
-```
+Tell WDash which indices hold traces so log searches do not scan them: on
+the source's card under **Configuration → Sources**, the traces signal's
+index patterns (`*traces*` and `*apm*` by default) and the logs signal's
+exclude patterns. A source that serves both signals is one row, so the two
+lists sit side by side.
 
 ## Running it in the lab
 

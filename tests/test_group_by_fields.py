@@ -311,7 +311,6 @@ class TestConfig(Config):
     TESTING = True
     SECRET_KEY = "group-by-fields"
     DATABASE_URL = "sqlite:///:memory:"
-    ELASTICSEARCH_URL = ""
     DASHBOARD_STORAGE = "database"
 
 

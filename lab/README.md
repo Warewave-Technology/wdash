@@ -18,11 +18,12 @@ cd lab
 ./lab.sh status      # health check
 ```
 
-To point the application at the lab, use this in the project root `.env`:
-
-```
-ELASTICSEARCH_URL=http://localhost:9200
-```
+To point the application at the lab, add it on the configuration page —
+**Configuration → Sources → Add source**: an Elasticsearch at
+`http://localhost:9200` serving logs, traces and monitors. The traces are in
+`*traces*` and `*apm*` and Heartbeat's checks in `heartbeat-*` and
+`synthetics-*`, which are the defaults the form offers. Nothing about a
+source is read from `.env`.
 
 ## Commands
 

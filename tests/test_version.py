@@ -145,7 +145,6 @@ class EverythingElseReadsItTest(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "version"
             DATABASE_URL = "sqlite:///:memory:"
-            ELASTICSEARCH_URL = ""
             OIDC_CLIENT_ID = None
             ENCRYPTION_KEY = SecretBox.generate_key()
 

@@ -136,7 +136,7 @@ cmd_seed() {
         exit 1
     fi
 
-    ELASTICSEARCH_URL="$ES_URL" "$(seed_python)" "$LAB_DIR/seed/seed.py" "$@"
+    "$(seed_python)" "$LAB_DIR/seed/seed.py" --url "$ES_URL" "$@"
 
     # The other backends, when they happen to be running. Skipped quietly
     # rather than failing: `./lab.sh up` without a profile starts neither, and

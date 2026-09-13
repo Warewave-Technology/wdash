@@ -272,7 +272,6 @@ class TheJourneyReadsAsUnknownTest(unittest.TestCase):
             SECRET_KEY = "agent-robustness"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         self.app = create_app(TestConfig)

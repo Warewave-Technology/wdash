@@ -62,10 +62,11 @@ class Hub:
     Sources come from two places, and the difference is why this class has a
     reload at all:
 
-      * the ENVIRONMENT — `ELASTICSEARCH_URL`, and the store's own agents.
-        These cannot change while the process runs, so they are registered
-        once and never rebuilt. Rebuilding them would throw away live
-        connection pools to answer a question whose answer never changes.
+      * the BASE set — what WDash registers itself: the store's own agents,
+        as `wdash-agents`. It cannot change while the process runs, so it is
+        registered once and never rebuilt. (An Elasticsearch declared in the
+        environment used to be registered here too, ahead of everything
+        stored; a cluster is a stored source now.)
       * the CONFIGURATION PAGE. These change whenever an administrator saves
         the form, in a worker that may not be this one, and until this existed
         the page said "restart WDash for it to be used for queries" — the
@@ -215,9 +216,9 @@ class Hub:
 
         Two ways to be on this list: the row could not be built at all (a
         credential that will not decrypt, a URL the adapter refuses), or its
-        name is one the environment already registered, so the base source
-        keeps it and this one is unreachable. Both used to be a line in the
-        log, under a screen that said the source was in use.
+        name is one WDash registers itself, so the base source keeps it and
+        this one is unreachable. Both used to be a line in the log, under a
+        screen that said the source was in use.
         """
         # Asked the store first, like every other liveness read on this class.
         # The configuration page touches the hub through this property and
@@ -260,21 +261,21 @@ class Hub:
             self.reload()
 
     def _registry(self, kind):
-        """One signal's sources: the environment's first, then the configured.
+        """One signal's sources: the base ones first, then the configured.
 
-        Order is the interface. `logs()` with no name returns the first, so a
-        deployment that has always used `ELASTICSEARCH_URL` keeps answering
-        from it, and an operator adding a source on the configuration page
-        does not silently take over every query that names no source.
+        Order is the interface. `logs()` with no name returns the first, so
+        the configured sources keep the order they were created in, and an
+        operator adding a source on the configuration page does not silently
+        take over every query that names no source.
 
         A configured source whose NAME is a base one does not replace it.
         `{**base, **configured}` kept the key's position and swapped the
-        value, so a Loki source called `elasticsearch-logs` took the
-        environment's cluster out of the registry entirely and answered every
-        query that named it — the guarantee this method's first paragraph
-        makes, broken by the one thing it does not look at. The base source
-        stays; the configured one is recorded as shadowed, which is how the
-        configuration page comes to say so.
+        value, so a stored source called by a base name took the base source
+        out of the registry entirely and answered every query that named it
+        — the guarantee this method's first paragraph makes, broken by the
+        one thing it does not look at. The base source stays; the configured
+        one is recorded as shadowed, which is how the configuration page
+        comes to say so.
         """
         with self._lock:
             configured = self._configured[kind]
@@ -295,24 +296,23 @@ class Hub:
                 if name not in self._shadowed:
                     self._shadowed[name] = (
                         f"'{name}' is the name of the {kind} source WDash "
-                        f"registers from its environment configuration. That "
-                        f"one is still answering; this row is not. Rename it.")
+                        f"registers itself. That one is still answering; "
+                        f"this row is not. Rename it.")
                     fresh.append(name)
         for name in fresh:
             logger.warning(
                 "Configured source '%s' is shadowed by the %s source of the "
-                "same name from the environment, and is not in use.",
+                "same name WDash registers itself, and is not in use.",
                 name, kind)
 
     def replace_all(self, logs=(), traces=(), monitors=()):
         """Swap every registered source out.
 
-        For tests that assert on what a scope reaches. The app factory always
-        registers an environment-configured Elasticsearch source, so a test
-        machine with a cluster running on the default port sees that cluster's
-        real indices and one without sees none — the same assertion passes,
-        fails or passes for the wrong reason depending on what happens to be
-        listening.
+        For tests that assert on what a scope reaches. The app factory
+        registers the store's own monitor source and whatever is stored, and
+        a test that asks what a scope reaches must not inherit either: it
+        declares the sources it depends on, and the assertion is about the
+        scope again.
         """
         self._logs = {source.name: source for source in logs}
         self._traces = {source.name: source for source in traces}
@@ -333,7 +333,8 @@ class Hub:
     ALL_SOURCES = "*"
 
     def base_source_names(self):
-        """Names the environment and the store's own agents already hold.
+        """Names WDash registers itself — the store's own agents, and
+        nothing else now that no source comes from the environment.
 
         For the repository, which refuses them: a configured source called
         one of these is stored, shown on the page and reachable by nothing,

@@ -898,8 +898,8 @@ class ChangePreviewTest(ConfigTestCase):
     def setUp(self):
         super().setUp()
         from tests.test_fanout import StubSource
-        # Replace, not add: the factory registers a source pointing at
-        # ELASTICSEARCH_URL, and on a machine with a lab running it answers.
+        # Replace, not add: a test declares the sources it depends on rather
+        # than inheriting whatever the app registered.
         self.app.hub.replace_all(logs=[StubSource(
             "lab", "elasticsearch",
             ["app-logs", "infra-logs", "bad-logs"], [])])
@@ -1272,91 +1272,16 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 
 
-class DuplicateSourceTest(ConfigTestCase):
-    """The environment Elasticsearch and a configured one, on one cluster.
-
-    Both register. Every matching log line is then counted twice in a merged
-    search, and nothing says so — the totals simply look bigger, which is the
-    hardest kind of wrong to notice.
-    """
-
-    def setUp(self):
-        super().setUp()
-        self.app.config["ELASTICSEARCH_URL"] = "http://cluster:9200"
-
-    def _detect(self):
-        from wdash.app import _same_backend_twice
-        return _same_backend_twice(self.app, self.app.store)
-
-    def _add(self, url, kind="elasticsearch", name="mirror"):
-        return self.app.store.sources.create(
-            name=name, signal=["logs"], kind=kind,
-            config={"url": url, "verify_certs": False})
-
-    def test_the_same_cluster_twice_is_reported(self):
-        self._add("http://cluster:9200")
-        warnings = self._detect()
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("mirror", warnings[0])
-        self.assertIn("twice", warnings[0])
-
-    def test_a_trailing_slash_on_the_source_is_still_the_same_cluster(self):
-        """`http://cluster:9200/` and `http://cluster:9200` are one system,
-        and a check that misses that reports nothing on the commonest way of
-        typing it."""
-        self._add("http://cluster:9200/")
-        self.assertEqual(len(self._detect()), 1)
-
-    def test_a_trailing_slash_on_the_environment_url_is_too(self):
-        """The other side of the same comparison. Normalising only the stored
-        url passes the test above and still misses this, which is the half an
-        operator is more likely to type — it is copied out of a browser."""
-        self.app.config["ELASTICSEARCH_URL"] = "http://cluster:9200/"
-        self._add("http://cluster:9200")
-        self.assertEqual(len(self._detect()), 1)
-
-    def test_a_different_cluster_is_not_reported(self):
-        self._add("http://other:9200")
-        self.assertEqual(self._detect(), [])
-
-    def test_another_backend_at_the_same_host_is_not_reported(self):
-        """Loki on the same address is a different system, not a duplicate."""
-        self._add("http://cluster:9200", kind="loki", name="loki")
-        self.assertEqual(self._detect(), [])
-
-    def test_no_environment_cluster_means_nothing_to_clash_with(self):
-        self.app.config["ELASTICSEARCH_URL"] = ""
-        self._add("http://cluster:9200")
-        self.assertEqual(self._detect(), [])
+class AStoredSourceNeedsAnAddressTest(ConfigTestCase):
+    """A source is where a query goes, and a row without an address is a row
+    that answers nothing while looking configured."""
 
     def test_a_stored_source_can_never_have_an_empty_url(self):
-        """Why the empty-url guard above is a short circuit and not a check.
-
-        If a source could be stored without one, an unset ELASTICSEARCH_URL
-        would match it and every such source would be reported as a duplicate
-        of nothing.
-        """
         from wdash.store.sources import SourceError
         with self.assertRaises(SourceError):
-            self._add("", name="empty")
-
-    def test_a_disabled_source_is_not_a_duplicate(self):
-        """It registers nowhere, so it cannot double-count anything."""
-        row = self._add("http://cluster:9200")
-        self.app.store.sources.update(row["id"], enabled=False)
-        self.assertEqual(self._detect(), [])
-
-    def test_the_warning_reaches_the_configuration_page(self):
-        """A warning in a log file is a warning nobody reads, and the symptom
-        never points at its cause."""
-        self._add("http://cluster:9200")
-        self.app.duplicate_sources = self._detect()
-        body = self.client.get("/admin/config").get_data(as_text=True)
-        self.assertIn("Two sources, one system", body)
-        # Not the source name: it is already in the sources table below, so
-        # asserting it here passes even when the warning body is dropped.
-        # This sentence exists nowhere else on the page.
-        self.assertIn("counts every matching record twice", body)
+            self.app.store.sources.create(
+                name="empty", signal=["logs"], kind="elasticsearch",
+                config={"url": "", "verify_certs": False})
 
 
 class SignalFormTest(ConfigTestCase):

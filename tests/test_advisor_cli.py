@@ -10,10 +10,15 @@ time printing "score: 100/100" and "No findings." A gate that passes when it
 cannot see is not a gate.
 
 **The credentials only to the cluster.** It hard-coded `verify_certs=False`
-and sent ELASTICSEARCH_USERNAME/PASSWORD to whatever certificate answered,
-ignoring ELASTICSEARCH_VERIFY_CERTS and ELASTICSEARCH_CA_CERTS, which the web
-process honours. Measured here with a listener holding a certificate nobody
-vouches for, and what reaches it.
+and sent the credentials to whatever certificate answered. Measured here
+with a listener holding a certificate nobody vouches for, and what reaches
+it.
+
+**And nothing from the environment.** The web process takes its clusters
+from the configuration page; this takes its one from `--url`, its
+credentials from `--username` and `--password-file`, and its authority from
+`--ca-certs`. A variable the command once read is a variable somebody sets
+for a process that does not read it.
 """
 
 import base64
@@ -44,21 +49,27 @@ from wdash.advisor.__main__ import _client_config, _exit_status, main  # noqa: E
 FIXTURE = os.path.join(ROOT, "tests", "fixtures", "lab-cluster.json")
 
 
-def run_cli(*argv, env=None):
-    """main() in this process, with no ELASTICSEARCH_* but the ones given.
+def run_cli(*argv, env=None, stdin=None):
+    """main() in this process. Returns (exit code, stdout, stderr).
 
-    Returns (exit code, stdout, stderr)."""
+    `env` is added to the environment for the call — to show it is NOT read,
+    which is the only thing the command does with it."""
     out, err = io.StringIO(), io.StringIO()
-    with mock.patch.dict(os.environ):
-        for name in [n for n in os.environ if n.startswith("ELASTICSEARCH_")]:
-            del os.environ[name]
-        os.environ.update(env or {})
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    with mock.patch.dict(os.environ, env or {}):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch("sys.stdin", io.StringIO(stdin or "")):
             try:
                 code = main(["--no-color", *argv])
             except SystemExit as exc:
                 code = exc.code
     return code, out.getvalue(), err.getvalue()
+
+
+def password_file(directory, password):
+    path = os.path.join(directory, "password")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(password + "\n")
+    return path
 
 
 def closed_port():
@@ -118,14 +129,29 @@ class FailOnTest(unittest.TestCase):
         try:
             code, out, _ = run_cli(
                 "--url", f"http://127.0.0.1:{server.server_address[1]}",
-                "--fail-on", "critical",
-                env={"ELASTICSEARCH_USERNAME": "elastic",
-                     "ELASTICSEARCH_PASSWORD": "expired"})
+                "--fail-on", "critical", "--username", "elastic",
+                "--password-file", password_file(self.scratch, "expired"))
         finally:
             server.shutdown()
             server.server_close()
         self.assertEqual(code, 2)
         self.assertNotIn("100/100", out)
+
+    def test_a_missing_url_is_refused_rather_than_defaulted(self):
+        """There is no cluster address anywhere but this flag: the web
+        process takes its clusters from the configuration page, and a
+        default here would be the one address in the product that came from
+        nowhere anybody configured."""
+        code, _, err = run_cli("--fail-on", "critical")
+        self.assertEqual(code, 2)
+        self.assertIn("--url", err)
+        self.assertIn("--from-snapshot", err)
+
+    def test_a_username_without_a_password_file_is_refused(self):
+        code, _, err = run_cli("--url", "http://127.0.0.1:1",
+                               "--username", "elastic")
+        self.assertEqual(code, 2)
+        self.assertIn("--password-file", err)
 
     def test_a_saved_snapshot_of_nothing_fails_the_gate(self):
         snapshot = failed(ClusterSnapshot(taken_at="x"),
@@ -199,8 +225,7 @@ class FailOnTest(unittest.TestCase):
 
     def test_the_exit_code_reaches_the_shell(self):
         snapshot = failed(ClusterSnapshot(taken_at="x"), "info", "health")
-        environment = {k: v for k, v in os.environ.items()
-                       if not k.startswith("ELASTICSEARCH_")}
+        environment = dict(os.environ)
         environment["PYTHONPATH"] = os.path.join(ROOT, "src")
         finished = subprocess.run(
             [sys.executable, "-m", "wdash.advisor", "--from-snapshot",
@@ -323,10 +348,12 @@ class CertificateTest(unittest.TestCase):
         except Exception:
             self.received.append(b"")
 
-    def advise(self, *argv, **env):
-        return run_cli("--url", f"https://127.0.0.1:{self.port}", *argv,
-                       env={"ELASTICSEARCH_USERNAME": self.USER,
-                            "ELASTICSEARCH_PASSWORD": self.PASSWORD, **env})
+    def advise(self, *argv, credentials=True, **env):
+        flags = (["--username", self.USER,
+                  "--password-file", password_file(self.scratch, self.PASSWORD)]
+                 if credentials else [])
+        return run_cli("--url", f"https://127.0.0.1:{self.port}", *flags,
+                       *argv, env=env)
 
     def credentials_sent(self):
         token = base64.b64encode(f"{self.USER}:{self.PASSWORD}".encode())
@@ -344,118 +371,109 @@ class CertificateTest(unittest.TestCase):
         self.assertFalse(self.credentials_sent(),
                          "the password went to a certificate nobody vouches for")
         self.assertEqual(code, 2)
-        self.assertIn("ELASTICSEARCH_CA_CERTS", err)
+        self.assertIn("--ca-certs", err)
         self.assertIn("--insecure", err)
 
     def test_verification_with_another_ca_gets_nothing(self):
-        self.advise(ELASTICSEARCH_VERIFY_CERTS="true",
-                    ELASTICSEARCH_CA_CERTS=self.other_authority)
+        self.advise("--ca-certs", self.other_authority)
         self.assertTrue(self.dialled())
         self.assertFalse(self.credentials_sent())
 
     def test_the_named_ca_is_what_the_certificate_is_checked_against(self):
         """Given its own CA, the same listener is trusted — which is also
         what shows `credentials_sent` can see a password when one comes."""
-        self.advise(ELASTICSEARCH_VERIFY_CERTS="true",
-                    ELASTICSEARCH_CA_CERTS=self.authority)
-        self.assertTrue(self.credentials_sent())
-
-    def test_the_named_ca_is_used_without_being_asked_twice(self):
-        """ELASTICSEARCH_CA_CERTS alone: verification is already on."""
-        self.advise(ELASTICSEARCH_CA_CERTS=self.authority)
+        self.advise("--ca-certs", self.authority)
         self.assertTrue(self.credentials_sent())
 
     def test_insecure_is_a_choice_and_does_what_it_says(self):
         self.advise("--insecure")
         self.assertTrue(self.credentials_sent())
 
-    def test_insecure_wins_over_the_environment(self):
-        self.advise("--insecure", ELASTICSEARCH_VERIFY_CERTS="true")
+    def test_insecure_wins_over_a_named_ca(self):
+        self.advise("--insecure", "--ca-certs", self.other_authority)
         self.assertTrue(self.credentials_sent())
 
-    def test_the_applications_own_switch_is_honoured(self):
-        """ELASTICSEARCH_VERIFY_CERTS=false is how the web process is told
-        not to check, and the same words mean the same here."""
-        self.advise(ELASTICSEARCH_VERIFY_CERTS="false")
+    def test_the_password_can_come_from_standard_input(self):
+        """`-`, for a pipeline that holds the secret in a variable and has
+        no file to point at. The listener is trusted, so what arrives is
+        what was piped."""
+        code, _, _ = run_cli("--url", f"https://127.0.0.1:{self.port}",
+                             "--username", self.USER, "--password-file", "-",
+                             "--ca-certs", self.authority,
+                             stdin=self.PASSWORD + "\n")
         self.assertTrue(self.credentials_sent())
 
-    def test_a_switch_spelled_1_does_not_turn_the_check_off(self):
-        """`=1` is how most people write "on". It turned verification OFF
-        and sent the password to whatever certificate answered — the exact
-        hole the check exists to close, and worse than setting nothing."""
-        for written in ("1", "yes", "on", "TRUE"):
-            with self.subTest(written=written):
-                self.received.clear()
-                self.advise(ELASTICSEARCH_VERIFY_CERTS=written)
-                self.assertTrue(self.dialled())
-                self.assertFalse(self.credentials_sent(),
-                                 f"ELASTICSEARCH_VERIFY_CERTS={written} sent "
-                                 f"the password to an untrusted certificate")
-
-    def test_a_value_nobody_can_read_keeps_checking(self):
-        self.advise(ELASTICSEARCH_VERIFY_CERTS="banana")
-        self.assertFalse(self.credentials_sent())
+    def test_nothing_is_read_from_the_environment(self):
+        """The variables the command once read, exported, with the listener
+        trusted and no credential flag: nothing arrives. A variable the
+        command reads is a variable somebody sets for the web process too,
+        which reads none of them."""
+        self.advise("--ca-certs", self.authority, credentials=False,
+                    ELASTICSEARCH_USERNAME=self.USER,
+                    ELASTICSEARCH_PASSWORD=self.PASSWORD)
+        self.assertTrue(self.dialled())
+        self.assertFalse(self.credentials_sent(),
+                         "a credential was read from the environment")
 
 
 class _Args:
-    def __init__(self, url="https://es.example:9200", insecure=False):
+    def __init__(self, url="https://es.example:9200", insecure=False,
+                 username=None, password_file=None, ca_certs=None):
         self.url, self.insecure = url, insecure
+        self.username, self.password_file = username, password_file
+        self.ca_certs = ca_certs
 
 
 class ClientConfigTest(unittest.TestCase):
-    """What the command hands the client, read from the environment.
+    """What the command hands the client, from the flags and nothing else.
 
-    Two faults live here. The switch was fail-open on any spelling but
-    "true", so `=1` meaning "on" turned the check off. And the CA bundle
-    went to the client whatever the URL's scheme was, which elastic-transport
-    refuses for a plain-http host — so an environment with
-    ELASTICSEARCH_CA_CERTS exported could not run the command at all.
+    Two faults lived here when the switches were environment variables. The
+    verification switch was fail-open on any spelling but "true", so `=1`
+    meaning "on" turned the check off — a flag cannot be misspelled. And
+    the CA bundle went to the client whatever the URL's scheme was, which
+    elastic-transport refuses for a plain-http host, so a CA in the
+    environment stopped the command running at all.
     """
 
-    def config(self, url="https://es.example:9200", insecure=False, **environ):
-        return _client_config(_Args(url, insecure), environ)
+    def config(self, url="https://es.example:9200", **flags):
+        return _client_config(_Args(url, **flags))
 
-    def test_an_unset_switch_checks_the_certificate(self):
-        self.assertTrue(self.config()["ELASTICSEARCH_VERIFY_CERTS"])
+    def test_the_certificate_is_checked_unless_insecure_says_otherwise(self):
+        self.assertTrue(self.config()["verify_certs"])
+        self.assertFalse(self.config(insecure=True)["verify_certs"])
 
-    def test_every_spelling_of_yes_means_yes(self):
-        for written in ("true", "TRUE", "True", "1", "yes", "on", " true "):
-            with self.subTest(written=written):
-                self.assertTrue(
-                    self.config(ELASTICSEARCH_VERIFY_CERTS=written)
-                    ["ELASTICSEARCH_VERIFY_CERTS"])
-
-    def test_every_spelling_of_no_means_no(self):
-        for written in ("false", "FALSE", "0", "no", "off"):
-            with self.subTest(written=written):
-                self.assertFalse(
-                    self.config(ELASTICSEARCH_VERIFY_CERTS=written)
-                    ["ELASTICSEARCH_VERIFY_CERTS"])
-
-    def test_a_value_nobody_can_read_keeps_the_check(self):
-        """Fail closed, and say the word was not understood."""
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            config = self.config(ELASTICSEARCH_VERIFY_CERTS="banana")
-        self.assertTrue(config["ELASTICSEARCH_VERIFY_CERTS"])
-        self.assertIn("banana", err.getvalue())
-
-    def test_insecure_still_wins(self):
-        self.assertFalse(self.config(insecure=True)
-                         ["ELASTICSEARCH_VERIFY_CERTS"])
+    def test_certificate_warnings_are_only_silenced_when_asked_for(self):
+        """Silencing them while verifying hides the problem being verified."""
+        self.assertTrue(self.config()["ssl_show_warn"])
+        self.assertFalse(self.config(insecure=True)["ssl_show_warn"])
 
     def test_a_ca_bundle_is_not_sent_to_a_plain_http_cluster(self):
         """TLS options with an http host are refused by the transport, and
         the whole command died before it reached the cluster."""
-        self.assertIsNone(
-            self.config(url="http://localhost:9200",
-                        ELASTICSEARCH_CA_CERTS="/etc/ssl/cert.pem")
-            ["ELASTICSEARCH_CA_CERTS"])
+        self.assertNotIn("ca_certs", self.config(url="http://localhost:9200",
+                                                 ca_certs="/etc/ssl/cert.pem"))
 
     def test_a_ca_bundle_reaches_an_https_cluster(self):
-        self.assertEqual(
-            self.config(ELASTICSEARCH_CA_CERTS="/etc/ssl/cert.pem")
-            ["ELASTICSEARCH_CA_CERTS"], "/etc/ssl/cert.pem")
+        self.assertEqual(self.config(ca_certs="/etc/ssl/cert.pem")["ca_certs"],
+                         "/etc/ssl/cert.pem")
+
+    def test_a_ca_bundle_is_not_sent_with_insecure(self):
+        """A CA under `--insecure` is a contradiction; the switch wins."""
+        self.assertNotIn("ca_certs", self.config(insecure=True,
+                                                 ca_certs="/etc/ssl/cert.pem"))
+
+    def test_credentials_come_from_the_flags(self):
+        scratch = tempfile.mkdtemp()
+        built = self.config(username="elastic",
+                            password_file=password_file(scratch, "s3cret"))
+        self.assertEqual(built["basic_auth"], ("elastic", "s3cret"))
+        self.assertNotIn("basic_auth", self.config())
+
+    def test_the_cluster_is_asked_for_thirty_seconds(self):
+        """The searches ask the cluster for thirty; a client that gave up at
+        its own default of ten cut a slow answer off with a timeout the
+        setting said it would not get."""
+        self.assertEqual(self.config()["request_timeout"], 30)
 
 
 class CaBundleWithHttpTest(unittest.TestCase):
@@ -470,7 +488,7 @@ class CaBundleWithHttpTest(unittest.TestCase):
         try:
             code, out, err = run_cli(
                 "--url", f"http://127.0.0.1:{server.server_address[1]}",
-                env={"ELASTICSEARCH_CA_CERTS": bundle})
+                "--ca-certs", bundle)
         finally:
             server.shutdown()
             server.server_close()

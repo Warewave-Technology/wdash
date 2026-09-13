@@ -168,7 +168,6 @@ class EveryScreenTest(unittest.TestCase):
             SECRET_KEY = "rendered-pages"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         cls.app = create_app(RenderConfig)
@@ -310,7 +309,6 @@ class TheAgentRowIsOneRowHighTest(unittest.TestCase):
             SECRET_KEY = "agent-row"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         cls.app = create_app(RowConfig)

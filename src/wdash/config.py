@@ -47,42 +47,22 @@ PUBLISHED_SECRET_KEYS = frozenset({
     'your-super-secret-key-change-in-production',
 })
 
-#: What holds traces when nobody says otherwise. Named so the log
-#: source can keep excluding spans even when the environment trace
-#: source is switched off — those are different statements.
-DEFAULT_TRACE_PATTERNS = ('*traces*', '*apm*')
-
-
 class Config:
     """Application configuration"""
-    
+
     # Flask Configuration
     SECRET_KEY = os.environ.get('SECRET_KEY') or DEV_SECRET_KEY
     DEBUG = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
 
-    # Elasticsearch Configuration
-    #: `or` rather than a default was the whole reason Elasticsearch could not
-    #: be switched off: an explicitly empty value fell straight back to the
-    #: local URL, so "no cluster here" was unsayable. Unset still means the
-    #: local default; set-and-empty now means none.
-    ELASTICSEARCH_URL = os.environ.get('ELASTICSEARCH_URL',
-                                       'http://localhost:9200')
-    ELASTICSEARCH_USERNAME = os.environ.get('ELASTICSEARCH_USERNAME')
-    ELASTICSEARCH_PASSWORD = os.environ.get('ELASTICSEARCH_PASSWORD')
-    ELASTICSEARCH_TIMEOUT = int(os.environ.get('ELASTICSEARCH_TIMEOUT', 30))
-    # Certificate verification for the environment-configured cluster. Sources
-    # added on the config page have carried this switch for a while; the one
-    # every deployment uses had it wired off in code with no way to turn it on.
-    #
-    # The default stays off so no existing deployment loses its cluster on
-    # upgrade. It should be on wherever WDash talks to Elasticsearch over
-    # anything but a loopback address.
-    ELASTICSEARCH_VERIFY_CERTS = (
-        os.environ.get('ELASTICSEARCH_VERIFY_CERTS', 'False').lower() == 'true')
-    #: Path to a CA bundle, for a cluster behind a private authority.
-    #: Verification without this trusts the system store only.
-    ELASTICSEARCH_CA_CERTS = os.environ.get('ELASTICSEARCH_CA_CERTS') or None
-    
+    # No data source is configured here. Sources — Elasticsearch, Loki,
+    # VictoriaLogs, Jaeger, Tempo, one cluster or several, each with its own
+    # credentials, index patterns and certificate authority — are declared on
+    # the configuration page and stored in the metadata database. The
+    # environment used to declare one Elasticsearch beside them, under eight
+    # variables; an installation that still sets any of them is told so at
+    # start-up, as an ERROR naming them (`variables_left_behind` in app.py),
+    # and nothing is read from them.
+
     # OIDC Configuration
     OIDC_CLIENT_ID = os.environ.get('OIDC_CLIENT_ID')
     OIDC_CLIENT_SECRET = os.environ.get('OIDC_CLIENT_SECRET')
@@ -124,22 +104,6 @@ class Config:
     #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     ENCRYPTION_KEY = os.environ.get('WDASH_ENCRYPTION_KEY')
 
-    
-    # Which indices hold which signal. Logs and traces live in the same
-    # cluster, and a log search that also scans the trace store returns spans
-    # as bodyless records — confusing and slow.
-    #: Read with a default rather than `or`, so an explicitly empty value
-    #: means empty. The same mistake as ELASTICSEARCH_URL: `or` turns
-    #: "configured as nothing" back into the default, so "this deployment has
-    #: no environment trace source, the config page declares them" was
-    #: unsayable — and the environment source read the same indices as the
-    #: configured ones, counting every span twice.
-    TRACE_INDEX_PATTERNS = tuple(
-        p.strip() for p in
-        os.environ.get('TRACE_INDEX_PATTERNS',
-                       ','.join(DEFAULT_TRACE_PATTERNS)).split(',')
-        if p.strip())
-
     # Application Settings
     LOGS_PER_PAGE = int(os.environ.get('LOGS_PER_PAGE', 50))
     MAX_SEARCH_RESULTS = int(os.environ.get('MAX_SEARCH_RESULTS', 1000))
@@ -180,8 +144,7 @@ class Config:
     # for, which is how an operator ends up following it into a refusal.
     DASHBOARD_STORAGE = (os.environ.get('DASHBOARD_STORAGE')
                          or 'database').strip().lower()
-    DASHBOARD_INDEX = os.environ.get('DASHBOARD_INDEX') or 'wdash-dashboards'
-    
+
     # Security Settings
     SESSION_COOKIE_SECURE = os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() == 'true'
     SESSION_COOKIE_HTTPONLY = True
@@ -208,11 +171,4 @@ class Config:
     #: lets a client name its own address and step around a per-address rate
     #: limit by changing a header. Set this to the real number, and the
     #: address is counted in from the right.
-    #: Where synthetic monitors are stored. Heartbeat and the Fleet Synthetics
-    #: integration write to these by default; a deployment that renamed them
-    #: says so here.
-    MONITOR_INDEX_PATTERNS = tuple(
-        p.strip() for p in
-        (os.environ.get('MONITOR_INDEX_PATTERNS') or '').split(',') if p.strip())
-
     TRUSTED_PROXY_COUNT = int(os.environ.get('TRUSTED_PROXY_COUNT', 0))

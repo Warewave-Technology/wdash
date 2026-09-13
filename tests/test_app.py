@@ -16,7 +16,6 @@ from wdash.config import Config
 class TestConfig(Config):
     """Test configuration"""
     TESTING = True
-    ELASTICSEARCH_URL = 'http://localhost:9200'
     SECRET_KEY = 'test-secret-key'
 
 
@@ -105,17 +104,32 @@ class HealthTest(unittest.TestCase):
         def containers(self, scope):
             return []
 
-    def _app(self, ping=True, sources=()):
+    class _Cluster:
+        """Enough of an `elasticsearch.Elasticsearch` for the adapters'
+        `health()`: a `ping()` that answers what it is told and counts."""
+
+        def __init__(self, answers=True):
+            self.answers, self.pings = answers, 0
+
+        def ping(self):
+            self.pings += 1
+            return self.answers
+
+    def _app(self, sources=()):
         app = create_app(TestConfig)
-        app.es_client.es.ping = lambda: ping
         app.hub._logs = {source.name: source for source in sources}
         app.hub._traces = {}
         return app
 
     def test_a_cluster_that_answers_false_is_not_connected(self):
-        """`ping()` does not raise; it returns False."""
-        response = self._app(ping=False).test_client().get('/health')
-        self.assertEqual(response.get_json()['elasticsearch'], 'unreachable')
+        """`ping()` does not raise; it returns False. Through the real
+        adapter, as a stored source is built, so the branch that turns a
+        False into "unreachable" is the one measured."""
+        from wdash.hub.adapters import ElasticsearchLogSource
+        app = self._app(sources=[ElasticsearchLogSource(
+            self._Cluster(answers=False), name='lab-es')])
+        response = app.test_client().get('/health')
+        self.assertEqual(response.get_json()['lab-es'], 'unreachable')
         self.assertEqual(response.get_json()['status'], 'degraded')
 
     def test_a_configured_source_being_down_is_degraded_not_out_of_service(self):
@@ -164,88 +178,11 @@ class HealthTest(unittest.TestCase):
     def test_the_body_carries_no_detail_for_an_anonymous_caller(self):
         """/health needs no sign-in, so its body is public."""
         secret = "http://elastic:hunter2@internal-cluster.example:9200"
-        app = self._app(ping=False,
-                        sources=[self._Source('lab-loki', healthy=False,
+        app = self._app(sources=[self._Source('lab-loki', healthy=False,
                                               detail=secret)])
         body = app.test_client().get('/health').get_data(as_text=True)
         self.assertNotIn("hunter2", body)
         self.assertNotIn("internal-cluster", body)
-
-
-class ElasticsearchClientTest(unittest.TestCase):
-    """Certificate verification was wired off in code, not configured off.
-
-    Sources added through the config page have carried a `verify_certs` switch
-    since they existed. The environment-configured cluster — the one every
-    deployment talks to — could not verify anything, and the code said so in a
-    TODO rather than in the settings table.
-    """
-
-    def _built(self, **overrides):
-        from unittest import mock
-        from wdash.logs.elasticsearch_client import ElasticsearchClient
-        config = {"ELASTICSEARCH_URL": "https://cluster:9200",
-                  "ELASTICSEARCH_USERNAME": None, "ELASTICSEARCH_PASSWORD": None}
-        config.update(overrides)
-        with mock.patch("wdash.logs.elasticsearch_client.Elasticsearch") as built:
-            ElasticsearchClient(config)
-        return built.call_args.kwargs
-
-    def test_the_timeout_it_is_given_is_the_one_it_keeps(self):
-        """ELASTICSEARCH_TIMEOUT was read into the config and never passed
-        on: the client kept its default of ten seconds while the searches
-        asked the cluster for thirty. Timed against a cluster that accepts
-        and never answers: with one second configured, a request gives up
-        after one second, not ten."""
-        import socket
-        import threading
-        import time
-        from wdash.logs.elasticsearch_client import ElasticsearchClient
-
-        listener = socket.socket()
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(8)
-        held = []
-        threading.Thread(target=lambda: held.append(listener.accept()),
-                         daemon=True).start()
-        try:
-            client = ElasticsearchClient({
-                "ELASTICSEARCH_URL": f"http://127.0.0.1:{listener.getsockname()[1]}",
-                "ELASTICSEARCH_USERNAME": None, "ELASTICSEARCH_PASSWORD": None,
-                "ELASTICSEARCH_TIMEOUT": 1})
-            started = time.monotonic()
-            self.assertFalse(client.ping())
-            took = time.monotonic() - started
-        finally:
-            listener.close()
-        self.assertLess(took, 4, f"gave up after {took:.1f}s")
-        self.assertGreater(took, 0.8)
-
-    def test_verification_is_off_by_default(self):
-        """Stated, so that turning it on is a decision somebody can make.
-
-        The default stays off because flipping it would take the cluster away
-        from every deployment using a self-signed certificate, on upgrade,
-        with no warning.
-        """
-        self.assertFalse(self._built()["verify_certs"])
-
-    def test_verification_can_be_turned_on(self):
-        self.assertTrue(
-            self._built(ELASTICSEARCH_VERIFY_CERTS=True)["verify_certs"])
-
-    def test_a_private_authority_can_be_trusted(self):
-        """Verification without a bundle trusts the system store only, which
-        is exactly the case an internal cluster is not in."""
-        built = self._built(ELASTICSEARCH_VERIFY_CERTS=True,
-                            ELASTICSEARCH_CA_CERTS="/etc/ssl/internal.pem")
-        self.assertEqual(built["ca_certs"], "/etc/ssl/internal.pem")
-
-    def test_certificate_warnings_are_only_silenced_when_asked_for(self):
-        """Silencing them while verifying hides the problem being verified."""
-        self.assertTrue(
-            self._built(ELASTICSEARCH_VERIFY_CERTS=True)["ssl_show_warn"])
-        self.assertFalse(self._built()["ssl_show_warn"])
 
 
 class ProbeTest(unittest.TestCase):
@@ -270,8 +207,8 @@ class ProbeTest(unittest.TestCase):
             time.sleep(self.seconds)
             return self._healthy, self._detail
 
-    def _app(self, ping=True, sources=(), **config):
-        app = HealthTest._app(self, ping=ping, sources=sources)
+    def _app(self, sources=(), **config):
+        app = HealthTest._app(self, sources=sources)
         app.config.update(config)
         return app
 
@@ -296,7 +233,7 @@ class ProbeTest(unittest.TestCase):
 
     def test_readiness_is_the_store_and_only_the_store(self):
         hanging = self._Slow('lab-loki', 5)
-        app = self._app(ping=False, sources=[hanging])
+        app = self._app(sources=[hanging])
         response, took = self._timed(app, '/readyz')
         self.assertEqual(response.status_code, 200)
         self.assertLess(took, 0.5)
@@ -335,17 +272,20 @@ class ProbeTest(unittest.TestCase):
         app.test_client().get('/health')
         self.assertEqual(source.asked, 2)
 
-    def test_the_environment_cluster_is_asked_once(self):
-        """It is also `elasticsearch-traces`, and was pinged as both."""
-        app = HealthTest._app(self)
-        from wdash.hub.adapters import ElasticsearchTraceSource
-        pings = []
-        app.es_client.es.ping = lambda: pings.append(1) or True
-        app.hub._traces = {'elasticsearch-traces': ElasticsearchTraceSource(
-            app.es_client.es, name='elasticsearch-traces')}
+    def test_one_source_serving_logs_and_traces_is_asked_once(self):
+        """One stored Elasticsearch serving both signals is two adapters over
+        one client, under one name. It used to be pinged as both — once as
+        the log source and once as the trace source."""
+        from wdash.hub.adapters import (ElasticsearchLogSource,
+                                        ElasticsearchTraceSource)
+        cluster = HealthTest._Cluster()
+        app = HealthTest._app(self, sources=[
+            ElasticsearchLogSource(cluster, name='lab-es')])
+        app.hub._traces = {'lab-es': ElasticsearchTraceSource(
+            cluster, name='lab-es')}
         payload = app.test_client().get('/health').get_json()
-        self.assertEqual(len(pings), 1)
-        self.assertNotIn('elasticsearch-traces', payload)
+        self.assertEqual(cluster.pings, 1)
+        self.assertEqual(payload['lab-es'], 'connected')
 
     def test_the_probes_answer_before_setup(self):
         """An unclaimed installation sends everything to /setup, and a probe

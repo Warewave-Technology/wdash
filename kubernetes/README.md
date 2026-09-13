@@ -12,7 +12,7 @@ shipping nothing.
 
 ## Before you apply
 
-Four things, and none of them start without you.
+Three things, and none of them start without you.
 
 **0. The image.** The manifests name
 `yigitbasalma/wdash-elastic-dashboard:2.5.0`, and the published images stop at
@@ -58,9 +58,7 @@ kubectl create namespace wdash
 kubectl -n wdash create secret generic wdash-secrets \
     --from-literal=secret-key="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" \
     --from-literal=encryption-key="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" \
-    --from-literal=oidc-client-secret="" \
-    --from-literal=elasticsearch-username="" \
-    --from-literal=elasticsearch-password=""
+    --from-literal=oidc-client-secret=""
 ```
 
 Back the encryption key up with the database and not separately from it.
@@ -80,37 +78,16 @@ entries in `ingress.yaml`, and `OIDC_REDIRECT_URI` in `configmap.yaml`. A
 mismatch surfaces as the identity provider refusing an unknown redirect URI,
 which names neither file.
 
-**3. `ELASTICSEARCH_URL`** in `configmap.yaml`, unless your cluster really is
-at `http://elasticsearch:9200` in this namespace.
-
-There are two ways to give WDash a backend, and the normal one is no longer
-this. **Sources are declared on the configuration page** and stored in the
-metadata database: Elasticsearch, Loki, VictoriaLogs, Tempo, one cluster or
-several, each with its own credentials and its own certificate authority.
-`ELASTICSEARCH_URL` is the older way, kept because deployments run on it, and
-it declares exactly one Elasticsearch. Prefer the page unless you want the
-cluster fixed by the manifest.
-
-Set it to nothing if this deployment reads from anywhere else — an
-environment source pointing at a cluster that is not there is a source that
-fails on every search.
-
-Doing both to the same cluster is the trap. Both register, and a merged
-search then counts every matching record twice — silently, because the totals
-simply look bigger. WDash says so in the start-up log and again as a banner on
-the configuration page:
-
-```
-Source 'prod-logs' points at the same Elasticsearch as ELASTICSEARCH_URL
-(http://elasticsearch:9200). Both are registered, so a merged search counts
-every matching record twice. Unset ELASTICSEARCH_URL to keep only the
-configured source, or delete the configured one.
-```
-
-The environment's sources are `elasticsearch-logs`, `elasticsearch-traces`
-and `elasticsearch-monitors`. The page refuses to save a source under one of
-those names — the environment's is registered first and keeps it, so the
-stored one would exist and answer nothing.
+Nothing in these files names a data source, and nothing needs to. **Sources
+are declared on the configuration page** after the first sign-in and stored
+in the metadata database: Elasticsearch, Loki, VictoriaLogs, Jaeger, Tempo,
+one cluster or several, each with its own credentials, index patterns and
+certificate authority. An earlier version of these files declared one
+Elasticsearch in the ConfigMap as well, with its credentials in the Secret;
+a pod that still carries those keys is told so at start-up, as an ERROR
+naming them, and reads nothing from them — so add the cluster on the page
+before upgrading such a deployment, or its logs, traces and monitors pages
+come up with no source.
 
 ## Apply
 
@@ -134,6 +111,12 @@ so an installation set up by somebody who then loses the phone needs
 
 Local accounts are managed afterwards on the configuration page, under
 **Authentication → Local accounts**.
+
+**Then add a source**, under **Configuration → Sources**: the cluster's
+address, its credentials, and which indices hold logs, traces and synthetic
+monitors. It is in use the moment it is saved, on every replica, with no
+restart. Until one is saved the logs, traces and monitors pages say they
+have no source, which is the truth rather than an outage.
 
 **Roles are made on the configuration page, not in these files.** A new
 installation starts with three — `admin`, `developer` and `viewer`, mapped
@@ -302,7 +285,7 @@ in the cluster's own namespace; there is a template at the bottom of the file.
 | --- | --- |
 | `namespace.yaml` | the namespace, labelled so a policy elsewhere can name it |
 | `serviceaccount.yaml` | an account with no API token and no permissions |
-| `secrets.yaml` | five empty keys — two of them required — and the commands that fill them |
+| `secrets.yaml` | three empty keys — two of them required — and the commands that fill them |
 | `configmap.yaml` | every setting, and the sidecar's nginx.conf |
 | `wdash-deployment.yaml` | the pod, the Service and the volume claim |
 | `ingress.yaml` | a plain `networking.k8s.io/v1` Ingress, TLS required |

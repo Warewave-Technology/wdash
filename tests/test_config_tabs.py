@@ -225,7 +225,6 @@ class TheHashOpensTheTabItNamesTest(unittest.TestCase):
             SECRET_KEY = "config-tabs-browser"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         cls.app = create_app(TabConfig)

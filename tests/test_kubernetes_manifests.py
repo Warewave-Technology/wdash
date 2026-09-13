@@ -316,14 +316,26 @@ class ConfigMapTest(unittest.TestCase):
         in the database — two things to back up and two to restore in step."""
         self.assertEqual(self.data["DASHBOARD_STORAGE"], "database")
 
-    def test_certificate_verification_matches_the_scheme(self):
-        """`https://` with verification off talks to whatever answers, which
-        is the one thing the scheme was chosen to prevent. Plain http:// with
-        it on is merely meaningless, so only one direction is a fault."""
-        if self.data["ELASTICSEARCH_URL"].startswith("https://"):
-            self.assertEqual(
-                self.data["ELASTICSEARCH_VERIFY_CERTS"].lower(), "true",
-                "an https cluster with ELASTICSEARCH_VERIFY_CERTS off")
+    def test_no_key_is_one_the_application_stopped_reading(self):
+        """The cluster this file used to declare is a stored source now, and
+        a pod that still carries its keys is told so at start-up and reads
+        nothing from them. The check above already fails such a key for
+        being unread; this one says why, and it is what the check below
+        keeps honest."""
+        from tests import RETIRED
+        left = sorted(key for key in self.data if key in RETIRED)
+        self.assertEqual(left, [], f"the application no longer reads: {left}")
+
+    def test_a_retired_variable_is_refused_not_read(self):
+        """`RETIRED_VARIABLES` in app.py is looked at only to say the
+        variable is set and configures nothing. If the source ever looked
+        one up by name — `os.environ.get("ELASTICSEARCH_URL")` — the check
+        that every ConfigMap key is read would PASS on a ConfigMap that
+        still carries it, which is the check that exists to fail then."""
+        from tests import RETIRED
+        read = _environment_names_read_by_the_app()
+        self.assertEqual(sorted(name for name in RETIRED if name in read), [],
+                         "a retired variable is looked up by name in src/")
 
 
 class ThePodsVolumesTest(unittest.TestCase):
@@ -400,6 +412,22 @@ class DeploymentTest(unittest.TestCase):
                     self.assertIn(reference["key"], available,
                                   f"{entry['name']} reads a key that is not "
                                   f"in the Secret")
+
+    def test_every_secret_key_reaches_a_container(self):
+        """The other direction. A key nothing references is a value somebody
+        generates, base64-encodes and fills in for nothing — the cluster
+        credentials sat in this Secret after the application stopped reading
+        them, with a comment saying security should be enabled."""
+        referenced = {
+            entry["valueFrom"]["secretKeyRef"]["key"]
+            for pod_container in self.deployment["spec"]["template"]["spec"]["containers"]
+            for entry in pod_container.get("env", [])
+            if entry.get("valueFrom", {}).get("secretKeyRef", {}).get("name")
+            == "wdash-secrets"}
+        unread = sorted(set(_by_name("secrets.yaml", "Secret",
+                                     "wdash-secrets")["data"]) - referenced)
+        self.assertEqual(unread, [], f"in the Secret, read by no container: "
+                                     f"{unread}")
 
     def test_the_settings_that_fail_quietly_are_all_wired(self):
         """Each of these fails in a way that points somewhere else."""
@@ -713,7 +741,6 @@ class TheSecretsTest(unittest.TestCase):
             SECRET_KEY = ""          # exactly what the empty Secret produces
             SESSION_COOKIE_SECURE = True
             DATABASE_URL = "sqlite:///:memory:"
-            ELASTICSEARCH_URL = ""
 
         with self.assertRaises(RuntimeError) as raised:
             create_app(TLSConfig)
@@ -1014,98 +1041,6 @@ class TheBrowserAgentTest(unittest.TestCase):
                       "an unbounded emptyDir fills the node's disk")
 
 
-def _hub_from_the_configmap():
-    """The hub an application built from THIS ConfigMap would register.
-
-    The point is the names. `ELASTICSEARCH_URL` registers sources of its own,
-    and which names they take depends on two other keys in the same file —
-    `TRACE_INDEX_PATTERNS` decides whether there is a trace source at all.
-    Built from the file rather than from a fixture, so a ConfigMap that
-    empties one of them is answered honestly.
-    """
-    from wdash.app import create_app
-    from wdash.config import Config
-    from wdash.store.secrets import SecretBox
-
-    data = _config_map()
-
-    def patterns(key):
-        return tuple(p for p in (data.get(key) or "").split(",") if p.strip())
-
-    class FromTheConfigMap(Config):
-        TESTING = True
-        SECRET_KEY = "manifests"
-        DATABASE_URL = "sqlite:///:memory:"
-        ELASTICSEARCH_URL = data["ELASTICSEARCH_URL"]
-        TRACE_INDEX_PATTERNS = patterns("TRACE_INDEX_PATTERNS")
-        MONITOR_INDEX_PATTERNS = patterns("MONITOR_INDEX_PATTERNS")
-        OIDC_CLIENT_ID = None
-        ENCRYPTION_KEY = SecretBox.generate_key()
-
-    return create_app(FromTheConfigMap).hub
-
-
-class TheEnvironmentSourcesTest(unittest.TestCase):
-    """What ELASTICSEARCH_URL in this file registers, and under what names.
-
-    Sources are edited in the product now, and the names matter for more than
-    tidiness: a role's rules address a source by name, a saved link names one,
-    and the repository REFUSES a configured source that collides with one of
-    these — with a message quoting the name. A ConfigMap that names them
-    wrongly sends somebody to look for a source that was never registered.
-
-    This file said the key registers "a source of its own, named
-    elasticsearch". No source has ever been called that.
-    """
-
-    def setUp(self):
-        self.hub = _hub_from_the_configmap()
-        self.registered = set(self.hub.base_source_names())
-
-    def test_the_comment_names_sources_that_exist(self):
-        block = re.search(
-            r"((?:^\s*#.*\n)+)\s*ELASTICSEARCH_URL:",
-            _read_manifest("configmap.yaml"), re.M).group(1)
-        # Lowercase and starting with `elasticsearch`, which is what a source
-        # name looks like here. Not `[a-z]+-[a-z]+`, which was the first
-        # attempt and was worse than nothing: the name this comment actually
-        # carried was a bare `elasticsearch`, with no hyphen, so the pattern
-        # skipped the one thing it existed to find and passed on the two
-        # correct names beside it. A mutation put the bare name back and
-        # survived.
-        #
-        # `ELASTICSEARCH_URL` is excluded by case and `'prod-logs'` by the
-        # prefix — it is the example of a CONFIGURED source in the warning
-        # quoted here, and is deliberately not one of these.
-        named = set(re.findall(r"[`\"'](elasticsearch[a-z-]*)[`\"']", block))
-        self.assertTrue(
-            named,
-            "the comment beside ELASTICSEARCH_URL names no source at all, so "
-            "nobody reading it can tell what the key registers")
-        self.assertEqual(
-            named - self.registered, set(),
-            f"the comment names {sorted(named - self.registered)}, which this "
-            f"ConfigMap registers nothing under. Registered: "
-            f"{sorted(self.registered)}")
-
-    def test_a_configured_source_cannot_take_one_of_those_names(self):
-        """Which is the reason the names have to be right here.
-
-        The form refuses the collision and quotes the name back. Somebody
-        who was told the source is called `elasticsearch` types that, is not
-        refused, and ends up with a source nothing can reach.
-        """
-        from wdash.store.sources import SourceError, _check_name
-
-        for name in sorted(self.registered):
-            with self.subTest(source=name):
-                with self.assertRaises(SourceError):
-                    _check_name(name, self.registered)
-        # And the name the comment used to give is not one of them, which is
-        # why it was never refused and never worked.
-        _check_name("elasticsearch", self.registered)
-
-
 class ThePageTest(unittest.TestCase):
     """kubernetes/README.md, held against the manifests and the application.
 
@@ -1190,7 +1125,6 @@ class ThePageTest(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "manifests"
             DATABASE_URL = f"sqlite:///{os.path.join(directory, 'first.db')}"
-            ELASTICSEARCH_URL = ""
             OIDC_CLIENT_ID = None
             WTF_CSRF_ENABLED = False
             ENCRYPTION_KEY = SecretBox.generate_key()
@@ -1239,7 +1173,6 @@ class ThePageTest(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "manifests"
             DATABASE_URL = "sqlite:///:memory:"
-            ELASTICSEARCH_URL = ""
             OIDC_CLIENT_ID = None
             ENCRYPTION_KEY = None
 
@@ -1300,6 +1233,34 @@ class ThePageTest(unittest.TestCase):
             said, int(Hub.RELOAD_TTL),
             f"the page says {said} seconds; Hub.RELOAD_TTL is "
             f"{Hub.RELOAD_TTL}")
+
+    def test_the_number_it_gives_for_the_secrets_keys_is_the_real_one(self):
+        """The files table says how many keys `secrets.yaml` holds. It said
+        five after the cluster credentials left the file, and a count nothing
+        checks is how this directory drifted the first time."""
+        stated = re.search(r"\|\s*`secrets.yaml`\s*\|\s*(\w+) empty keys",
+                           self.page)
+        self.assertIsNotNone(stated, "the files table no longer counts the "
+                                     "Secret's keys")
+        words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                 "six": 6}
+        said = words.get(stated.group(1)) or int(stated.group(1))
+        held = len(_by_name("secrets.yaml", "Secret", "wdash-secrets")["data"])
+        self.assertEqual(said, held, f"the page says {said} keys; "
+                                     f"secrets.yaml holds {held}")
+
+    def test_the_command_it_gives_fills_exactly_the_secrets_keys(self):
+        """`kubectl create secret` on this page is what an operator copies. A
+        key it names that the Secret does not hold is a value typed for
+        nothing; a key it leaves out is a container that never starts."""
+        command = re.search(r"create secret generic wdash-secrets(.*?)```",
+                            self.page, re.S)
+        self.assertIsNotNone(command, "the page no longer creates wdash-secrets")
+        named = set(re.findall(r"--from-literal=([\w-]+)=", command.group(1)))
+        held = set(_by_name("secrets.yaml", "Secret", "wdash-secrets")["data"])
+        self.assertEqual(named, held,
+                         f"the command fills {sorted(named)}; secrets.yaml "
+                         f"holds {sorted(held)}")
 
     def test_the_shell_it_sends_you_to_can_reach_the_store(self):
         """The page says to exec into the `wdash` container and run the

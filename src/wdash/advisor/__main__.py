@@ -14,27 +14,23 @@ cannot say — nothing could be evaluated, or with --fail-on, anything was not
 collected or not evaluated. A gate that passes when it could not look is not
 a gate.
 
-The cluster's certificate is checked, against ELASTICSEARCH_CA_CERTS when it
-is set; ELASTICSEARCH_VERIFY_CERTS=false or --insecure turns that off.
-ELASTICSEARCH_USERNAME and ELASTICSEARCH_PASSWORD go to the cluster, and
-without the check they go to whoever answers.
+Everything the command needs is on the command line, and nothing is read
+from the environment: the web process takes its clusters from the
+configuration page, and this takes its one from --url. Credentials are
+--username with --password-file (a path, or `-` for standard input — a
+password in an argument is visible to anything that can list processes).
+The cluster's certificate is checked, against --ca-certs when it is given;
+--insecure turns the check off, and the credentials then go to whoever
+answers.
 """
 
 import argparse
 import json
-import os
 import sys
 
 from . import run_rules
 from .models import Severity
 from .snapshot import ClusterSnapshot, collect
-
-#: How the certificate switch is spelled, read as a tri-state. Anything
-#: that is neither a yes nor a no keeps the check and says so on stderr:
-#: the cost of misreading the word is a password sent to whoever answered,
-#: and that cannot be taken back.
-VERIFY_YES = frozenset({"true", "1", "yes", "on"})
-VERIFY_NO = frozenset({"false", "0", "no", "off"})
 
 COLORS = {
     Severity.CRITICAL: "\033[91m",
@@ -137,41 +133,48 @@ def print_report(report, use_color=True, show_passed=False):
         print()
 
 
-def _client_config(args, environ):
-    """What `ElasticsearchClient` reads, from the variables the web process
-    reads.
+def _password(args):
+    """The password `--password-file` names, or None without one.
 
-    It hard-coded `verify_certs=False` and ignored ELASTICSEARCH_VERIFY_CERTS
-    and ELASTICSEARCH_CA_CERTS, so ELASTICSEARCH_PASSWORD went to any
-    certificate at all. Verification is on here unless one of them says
-    otherwise: the web process defaults to off so that an upgrade does not
-    cut a deployment off from its cluster, but this is run by hand or in CI,
-    where a refused certificate is a message, and a password sent to whoever
-    answered cannot be taken back.
+    A file rather than an argument: an argument is visible in `ps` to
+    anything sharing the machine, which the agent's own parser says in as
+    many words. `-` reads standard input, for a pipeline that holds the
+    secret in a variable.
     """
-    written = (environ.get("ELASTICSEARCH_VERIFY_CERTS") or "").strip()
-    spelled = written.lower()
-    # Only "true" counted as yes, so `=1`, `=yes` and `=on` — how most
-    # people write "on" — turned the check OFF and sent the password to
-    # whatever certificate answered. An operator who wrote `=1` meaning
-    # "verify" ended up worse off than one who set nothing at all.
-    verify = spelled not in VERIFY_NO
-    if written and spelled not in VERIFY_YES and spelled not in VERIFY_NO:
-        print(f"wdash.advisor: ELASTICSEARCH_VERIFY_CERTS={written!r} is "
-              f"neither a yes nor a no; the certificate is checked",
-              file=sys.stderr)
+    if not args.password_file:
+        return None
+    if args.password_file == "-":
+        return sys.stdin.read().rstrip("\r\n")
+    with open(args.password_file, encoding="utf-8") as handle:
+        return handle.read().rstrip("\r\n")
+
+
+def _client_config(args):
+    """What the `Elasticsearch` client is built from: the flags, and nothing
+    else.
+
+    It used to hard-code `verify_certs=False` and send the credentials to
+    any certificate at all. Verification is on unless `--insecure` says
+    otherwise: this is run by hand or in CI, where a refused certificate is
+    a message, and a password sent to whoever answered cannot be taken back.
+    """
+    verify = not args.insecure
+    config = {
+        "hosts": [args.url],
+        "request_timeout": 30,
+        "verify_certs": verify,
+        # Only silence the warning when the operator asked for no
+        # verification. Otherwise a real certificate problem goes unheard.
+        "ssl_show_warn": verify,
+    }
     # TLS options and a plain-http host are refused by the transport, so a
     # CA named for an https cluster stopped an http one being read at all.
     https = str(args.url or "").strip().lower().startswith("https://")
-    return {
-        "ELASTICSEARCH_URL": args.url,
-        "ELASTICSEARCH_USERNAME": environ.get("ELASTICSEARCH_USERNAME"),
-        "ELASTICSEARCH_PASSWORD": environ.get("ELASTICSEARCH_PASSWORD"),
-        "ELASTICSEARCH_TIMEOUT": 30,
-        "ELASTICSEARCH_VERIFY_CERTS": verify and not args.insecure,
-        "ELASTICSEARCH_CA_CERTS": (
-            environ.get("ELASTICSEARCH_CA_CERTS") or None) if https else None,
-    }
+    if verify and https and args.ca_certs:
+        config["ca_certs"] = args.ca_certs
+    if args.username:
+        config["basic_auth"] = (args.username, _password(args) or "")
+    return config
 
 
 def _explain(report, headline):
@@ -186,10 +189,9 @@ def _explain(report, headline):
         print(f"  {rule_id} failed to run: {error}", file=sys.stderr)
     if any("CERTIFICATE_VERIFY_FAILED" in str(error)
            for error in report.collection_errors.values()):
-        print("  The cluster's certificate is not trusted. Point "
-              "ELASTICSEARCH_CA_CERTS at the CA that signed it, or pass "
-              "--insecure to skip the check; the credentials then go to "
-              "whoever answers.", file=sys.stderr)
+        print("  The cluster's certificate is not trusted. Pass --ca-certs "
+              "with the CA that signed it, or --insecure to skip the check; "
+              "the credentials then go to whoever answers.", file=sys.stderr)
 
 
 def _exit_status(report, fail_on):
@@ -210,8 +212,21 @@ def _exit_status(report, fail_on):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="wdash.advisor",
                                      description="Elasticsearch configuration review")
-    parser.add_argument("--url", default=os.environ.get("ELASTICSEARCH_URL",
-                                                        "http://localhost:9200"))
+    # No default. The web process takes its clusters from the configuration
+    # page and nothing reads a cluster address from the environment, so a
+    # default here would be the one address in the product that came from
+    # nowhere anybody configured.
+    parser.add_argument("--url", help="the cluster to review; required "
+                                      "unless --from-snapshot is given")
+    parser.add_argument("--username", help="basic-auth user, sent with "
+                                           "--password-file")
+    parser.add_argument("--password-file", metavar="PATH",
+                        help="a file holding the password, or - for standard "
+                             "input; never an argument, which `ps` shows")
+    parser.add_argument("--ca-certs", metavar="PATH",
+                        help="the CA that signed the cluster's certificate, "
+                             "for an https:// cluster behind a private "
+                             "authority")
     parser.add_argument("--from-snapshot",
                         help="use a saved snapshot instead of a live cluster")
     parser.add_argument("--save-snapshot", help="write the collected snapshot to this file")
@@ -225,22 +240,27 @@ def main(argv=None):
                         help="do not check the cluster's certificate; the "
                              "credentials then go to whoever answers")
     args = parser.parse_args(argv)
+    if not args.url and not args.from_snapshot:
+        parser.error("--url names the cluster to review, or --from-snapshot "
+                     "a saved snapshot of one")
+    if bool(args.username) != bool(args.password_file):
+        parser.error("--username and --password-file go together")
 
     if args.from_snapshot:
         snapshot = ClusterSnapshot.load(args.from_snapshot)
     else:
         try:
-            from ..logs.elasticsearch_client import ElasticsearchClient
+            from elasticsearch import Elasticsearch
         except ImportError:
             sys.exit("the elasticsearch library is required: "
                      "pip install 'elasticsearch>=8,<9'")
 
-        config = _client_config(args, os.environ)
-        if not config["ELASTICSEARCH_VERIFY_CERTS"]:
+        config = _client_config(args)
+        if not config["verify_certs"]:
             print("wdash.advisor: the cluster's certificate is not checked",
                   file=sys.stderr)
         try:
-            snapshot = collect(ElasticsearchClient(config).es)
+            snapshot = collect(Elasticsearch(**config))
         except Exception as exc:
             # 2, not sys.exit's 1: that is the status for "findings", and a
             # gate reading it would blame the cluster for a wrong URL.

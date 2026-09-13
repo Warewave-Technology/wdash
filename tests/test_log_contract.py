@@ -104,12 +104,10 @@ class FakeES:
 class TestConfig(Config):
     TESTING = True
     SECRET_KEY = "contract"
-    # This module is about WIRING — that the log source is built excluding the
-    # trace patterns. It needs a source to exist, not one that answers, so the
-    # address is deliberately unresolvable: nothing here should be able to
-    # reach a real cluster by accident, which is how these tests spent a year
-    # quietly talking to the development lab on port 9200.
-    ELASTICSEARCH_URL = "http://elasticsearch.invalid:9200"
+    # Every test here builds its own hub over a fake cluster, and the app is
+    # given no source at all: nothing here can reach a real cluster by
+    # accident, which is how these tests once spent a year quietly talking to
+    # the development lab on port 9200.
 
 
 def _session(permissions, indices=("*",)):
@@ -856,9 +854,55 @@ class SignalSeparationTest(unittest.TestCase):
         source = self._source()
         self.assertIn("otel-traces-000001", source.containers(Scope.unrestricted()))
 
-    def test_application_wires_the_exclusion(self):
-        """The default deployment must have signal separation switched on."""
+    def _stored(self, **logs):
+        """The app's log source, built by the factory from a stored row."""
         app = create_app(TestConfig)
-        log_source = app.hub.logs()
-        self.assertTrue(log_source._exclude,
-                        "the log source must exclude the trace patterns")
+        app.store.sources.create(
+            name="lab-es", signal=["logs", "traces"], kind="elasticsearch",
+            config={"url": "http://elasticsearch.invalid:9200",
+                    "verify_certs": False, "logs": logs})
+        app.hub.reload()
+        return app.hub.logs()
+
+    def test_a_source_added_with_the_forms_defaults_has_the_separation(self):
+        """The default deployment must have signal separation switched on.
+
+        It is a stored source with the exclude box left blank now, and blank
+        meant "exclude nothing": the source read its own trace indices and
+        Heartbeat's data streams as logs. Blank means what the placeholder
+        promises, as it does for the other two pattern boxes."""
+        from wdash.hub.factory import default_log_excludes
+        source = self._stored()
+        self.assertEqual(source._exclude, default_log_excludes())
+        for name in ("*traces*", "*apm*", "heartbeat-*", "synthetics-*"):
+            self.assertIn(name, source._exclude)
+
+    def test_the_default_excludes_what_the_other_signals_read_by_default(self):
+        """One rule rather than three lists: the trace and monitor patterns
+        a source reads when those boxes are blank are what its log side
+        reads past when this one is."""
+        from wdash.hub.adapters.elasticsearch import DEFAULT_TRACE_PATTERNS
+        from wdash.hub.adapters.es_monitors import DEFAULT_PATTERNS
+        from wdash.hub.factory import default_log_excludes
+        excluded = set(default_log_excludes())
+        self.assertTrue(set(DEFAULT_TRACE_PATTERNS) <= excluded)
+        self.assertTrue(set(DEFAULT_PATTERNS) <= excluded)
+
+    def test_exclusions_of_the_rows_own_are_used_as_typed(self):
+        source = self._stored(exclude_patterns=["archive-*"])
+        self.assertEqual(source._exclude, ("archive-*",))
+
+    def test_the_forms_placeholder_promises_what_a_blank_box_delivers(self):
+        """The placeholder is the sentence somebody reads before leaving the
+        box blank, and it used to promise two patterns a blank box did not
+        deliver."""
+        import re
+        from wdash.hub.factory import default_log_excludes
+        with open(os.path.join(os.path.dirname(__file__), "..", "templates",
+                               "_config_modals.html")) as handle:
+            modal = handle.read()
+        tag = re.search(r'<input[^>]*id="sourceExcludes"[^>]*>', modal, re.S)
+        self.assertIsNotNone(tag, "the exclude box has moved")
+        promised = re.search(r'placeholder="([^"]*)"', tag.group(0)).group(1)
+        self.assertEqual(tuple(p.strip() for p in promised.split(",")),
+                         default_log_excludes())

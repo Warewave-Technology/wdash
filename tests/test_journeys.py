@@ -758,7 +758,6 @@ class JourneyPageTest(unittest.TestCase):
             SECRET_KEY = "journeys"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         self.app = create_app(TestConfig)

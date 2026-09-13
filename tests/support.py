@@ -377,8 +377,8 @@ class StubLogSource:
     with `logs:read` get a 200, does revoking it take effect without signing
     out. `/api/search` is the probe, and what it searches is beside the point.
 
-    Which is exactly how they came to depend on a live cluster. `Config`
-    defaults `ELASTICSEARCH_URL` to `http://localhost:9200`, so with the
+    Which is exactly how they came to depend on a live cluster. `Config` once
+    defaulted the cluster address to `http://localhost:9200`, so with the
     development lab running they passed against real Elasticsearch and nobody
     could tell — until the lab was switched off and fourteen tests failed at
     once, none of which was about Elasticsearch.

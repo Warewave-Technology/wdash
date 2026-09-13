@@ -9,10 +9,10 @@ source that answered nothing.
 
 The mechanism is a split rather than a rebuild, and the split is the point:
 
-  * sources from the ENVIRONMENT (`ELASTICSEARCH_URL`) and the store's own
-    agents cannot change while the process runs, so they are built once. A
-    reload that replaced them would throw away live connection pools to
-    arrive at exactly the same objects.
+  * the source WDash registers itself — the store's own agents — cannot
+    change while the process runs, so it is built once. A reload that
+    replaced it would throw away a live object to arrive at exactly the same
+    one.
   * sources from the CONFIGURATION PAGE are held apart and swapped as a unit.
 
 The second half is the multi-worker problem: gunicorn runs four of these and
@@ -66,7 +66,7 @@ class LiveSourceTestCase(unittest.TestCase):
             if os.path.exists(self.database + suffix):
                 os.unlink(self.database + suffix)
 
-    def worker(self, elasticsearch=""):
+    def worker(self):
         """Another process's app object, on the same store."""
         database, key = self.database, self.key
 
@@ -75,8 +75,6 @@ class LiveSourceTestCase(unittest.TestCase):
             SECRET_KEY = "live-sources"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = key
-            ELASTICSEARCH_URL = elasticsearch
-            TRACE_INDEX_PATTERNS = ("*traces*",)
             DASHBOARD_STORAGE = "database"
 
         return create_app(TestConfig)
@@ -246,29 +244,8 @@ class EveryWorkerCatchesUpTest(LiveSourceTestCase):
             self.assertIs(other.hub.logs("loki-one"), before)
 
 
-class TheEnvironmENTSourceIsLeftAloneTest(LiveSourceTestCase):
+class TheBaseSourceIsLeftAloneTest(LiveSourceTestCase):
     """The reason this is a split and not a rebuild."""
-
-    def setUp(self):
-        super().setUp()
-        self.app = self.worker(elasticsearch="http://localhost:9200")
-        self.client = self.app.test_client()
-        self.sign_in(self.client)
-
-    def test_it_is_not_rebuilt_when_a_source_is_added(self):
-        with self.app.app_context():
-            before = self.app.hub.logs("elasticsearch-logs")
-        self.save("loki-one")
-        with self.app.app_context():
-            self.assertIs(self.app.hub.logs("elasticsearch-logs"), before)
-
-    def test_it_still_answers_a_query_that_names_no_source(self):
-        """Order is the interface. A source added on the page must not
-        silently take over the queries a deployment has always served from
-        `ELASTICSEARCH_URL`."""
-        self.save("loki-one")
-        with self.app.app_context():
-            self.assertEqual(self.app.hub.logs().name, "elasticsearch-logs")
 
     def test_the_agents_source_survives_a_reload(self):
         """It reads the metadata store this process already holds, so there
@@ -306,31 +283,6 @@ class ABrokenStoreKeepsTheLastGoodPictureTest(LiveSourceTestCase):
             RuntimeError("the store is down"))
         self.age(self.app)
         self.assertEqual(self.names(self.app), ["loki-one"])
-
-
-class TheDuplicateWarningIsCurrentTest(LiveSourceTestCase):
-    """Computed at startup, it described the sources of an hour ago."""
-
-    def setUp(self):
-        super().setUp()
-        self.app = self.worker(elasticsearch="http://localhost:9200")
-        self.client = self.app.test_client()
-        self.sign_in(self.client)
-
-    def _page(self):
-        return self.client.get("/admin/config").get_data(as_text=True)
-
-    def test_adding_a_duplicate_is_reported_without_a_restart(self):
-        self.assertNotIn("counts every matching record twice", self._page())
-        self.save("es-copy", url="http://localhost:9200/",
-                  kind="elasticsearch", signals=("logs",))
-        self.assertIn("counts every matching record twice", self._page())
-
-    def test_and_removing_it_takes_the_warning_away(self):
-        self.save("es-copy", url="http://localhost:9200/",
-                  kind="elasticsearch", signals=("logs",))
-        self.delete("es-copy")
-        self.assertNotIn("counts every matching record twice", self._page())
 
 
 class SwappingIsAtomicTest(unittest.TestCase):

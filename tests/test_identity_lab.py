@@ -181,7 +181,6 @@ class ProviderSignInTest(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "identity-lab"
             DATABASE_URL = f"sqlite:///{database}"
-            ELASTICSEARCH_URL = ""
             ENCRYPTION_KEY = SecretBox.generate_key()
             OIDC_CLIENT_ID = "wdash"
             OIDC_CLIENT_SECRET = "wdash-lab-secret"

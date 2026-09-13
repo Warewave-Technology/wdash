@@ -10,14 +10,13 @@ sentence was false:
     but "in use now" could not fire. A Loki source whose stored password no
     longer decrypts was reported as in use while `hub.logs('loki-a')` raised
     "no log source named loki-a".
-  * the row's NAME was one the environment already registered. The registry
-    merged `{**base, **configured}`, which keeps the key's position and swaps
-    the value, so a Loki source called `elasticsearch-logs` took the
-    environment's cluster out of the registry and answered in its place.
-  * with no environment source at all, the unnamed default was whichever
-    configured name sorted FIRST, because the repository lists by name. Adding
-    `archive-es` to a deployment that had always answered from `loki-prod`
-    moved every unnamed search onto it.
+  * the row's NAME was one WDash registers itself. The registry merged
+    `{**base, **configured}`, which keeps the key's position and swaps the
+    value, so a stored source under a base name took the base source out of
+    the registry and answered in its place.
+  * the unnamed default was whichever configured name sorted FIRST, because
+    the repository lists by name. Adding `archive-es` to a deployment that
+    had always answered from `loki-prod` moved every unnamed search onto it.
 
 And the role editor's service picker dropped a trace store that could not be
 asked — `except Exception: continue` — so a shorter list of services looked
@@ -75,7 +74,7 @@ class _Store(unittest.TestCase):
             if os.path.exists(self.database + suffix):
                 os.unlink(self.database + suffix)
 
-    def worker(self, elasticsearch="", key=None):
+    def worker(self, key=None):
         """Another process's app object, on the same store."""
         database, secret = self.database, key or self.key
 
@@ -84,8 +83,6 @@ class _Store(unittest.TestCase):
             SECRET_KEY = "source-liveness"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = secret
-            ELASTICSEARCH_URL = elasticsearch
-            TRACE_INDEX_PATTERNS = ("*traces*",)
             OIDC_CLIENT_ID = None
             DASHBOARD_STORAGE = "database"
 
@@ -189,36 +186,50 @@ class SavedButNotInUseTest(_Store):
 
 
 class ABaseNameIsNotAvailableTest(_Store):
-    """`elasticsearch-logs` belongs to the environment's source."""
+    """`wdash-agents` belongs to the monitor source WDash registers itself.
 
-    def setUp(self):
-        super().setUp()
-        self.app = self.worker(elasticsearch="http://127.0.0.1:1")
-        self.client = self.app.test_client()
-        self.sign_in(self.client)
+    It is the one base name left. `elasticsearch-logs`, `elasticsearch-traces`
+    and `elasticsearch-monitors` were the others, held by the sources an
+    Elasticsearch declared in the environment registered; no source comes
+    from the environment now, and those are ordinary names.
+    """
+
+    #: How a stored source of the base name is written: the way the form
+    #: writes a monitors source, and the only way a row of that name can be
+    #: reached at all.
+    AGENTS = dict(name="wdash-agents", kind="elasticsearch",
+                  url="http://localhost:9200", signals=["monitors"])
 
     def test_the_form_refuses_the_name(self):
-        response = self.save(name="elasticsearch-logs")
+        response = self.save(**self.AGENTS)
         said = " ".join(flashes(response))
         self.assertIn("reachable by nothing", said)
         self.assertEqual([s["name"] for s in self.app.store.sources.all()], [])
 
-    def test_the_environment_source_is_still_the_default(self):
-        self.save(name="elasticsearch-logs")
+    def test_the_base_source_still_answers_under_its_name(self):
+        self.save(**self.AGENTS)
         with self.app.app_context():
-            source = self.app.hub.logs()
-        self.assertEqual(source.backend, "elasticsearch")
-        self.assertEqual(source.name, "elasticsearch-logs")
+            source = self.app.hub.monitors("wdash-agents")
+        self.assertEqual(type(source).__name__, "StoreMonitorSource")
+        self.assertEqual(set(self.app.hub.base_source_names()),
+                         {"wdash-agents"})
 
     def test_a_source_cannot_be_called_every_source(self):
         response = self.save(name="*")
         self.assertIn("means every source", " ".join(flashes(response)))
         self.assertEqual([s["name"] for s in self.app.store.sources.all()], [])
 
-    def test_the_agents_monitor_source_is_reserved_too(self):
-        response = self.save(name="wdash-agents", kind="elasticsearch",
-                             url="http://localhost:9200", signals=["monitors"])
-        self.assertIn("reachable by nothing", " ".join(flashes(response)))
+    def test_the_names_the_environment_held_are_ordinary_now(self):
+        """A stored source may be called `elasticsearch-logs`, and it is the
+        one answering under that name — nothing is registered ahead of it."""
+        self.save(name="elasticsearch-logs")
+        self.assertEqual([s["name"] for s in self.app.store.sources.all()],
+                         ["elasticsearch-logs"])
+        with self.app.app_context():
+            self.assertEqual(self.app.hub.logs("elasticsearch-logs").backend,
+                             "loki")
+            self.assertEqual(self.app.hub.logs().name, "elasticsearch-logs")
+            self.assertEqual(self.app.hub.source_failures, {})
 
     def test_another_name_is_still_fine(self):
         self.save(name="loki-a")
@@ -228,25 +239,30 @@ class ABaseNameIsNotAvailableTest(_Store):
     def test_a_rename_onto_a_base_name_is_refused(self):
         self.save(name="loki-a")
         row = next(s for s in self.app.store.sources.all())
-        response = self.save(id=row["id"], name="elasticsearch-logs")
+        response = self.save(id=row["id"], **self.AGENTS)
         self.assertIn("reachable by nothing", " ".join(flashes(response)))
         self.assertEqual([s["name"] for s in self.app.store.sources.all()],
                          ["loki-a"])
 
-    def test_a_row_stored_before_the_check_keeps_the_environment_source(self):
-        """Rows written before this existed are still in databases. The base
-        source keeps the name; the stored one is shown as not in use."""
+    def _stored_behind_the_check(self):
+        """A row of the base name, as one written before the check existed
+        is still in databases."""
         self.app.store.sources.reserved_names = None
-        self.app.store.sources.create(
-            name="elasticsearch-logs", signal=["logs"], kind="loki",
-            config={"url": "http://localhost:3100"})
+        row = self.app.store.sources.create(
+            name="wdash-agents", signal=["monitors"], kind="elasticsearch",
+            config={"url": "http://localhost:9200", "verify_certs": False})
         self.app.store.sources.reserved_names = self.app.hub.base_source_names
+        return row
+
+    def test_a_row_stored_before_the_check_keeps_the_base_source(self):
+        """The base source keeps the name; the stored one is shown as not in
+        use."""
+        self._stored_behind_the_check()
         with self.app.app_context():
             self.app.hub.reload()
-            source = self.app.hub.logs("elasticsearch-logs")
-            self.assertEqual(source.backend, "elasticsearch")
-            self.assertEqual(self.app.hub.logs().name, "elasticsearch-logs")
-            self.assertIn("elasticsearch-logs", self.app.hub.source_failures)
+            source = self.app.hub.monitors("wdash-agents")
+            self.assertEqual(type(source).__name__, "StoreMonitorSource")
+            self.assertIn("wdash-agents", self.app.hub.source_failures)
         body = self.client.get("/admin/config").get_data(as_text=True)
         self.assertIn("not in use", body)
 
@@ -254,18 +270,13 @@ class ABaseNameIsNotAvailableTest(_Store):
         """The flash and the table have to be about the same row.
 
         `_not_live` asked whether the saved NAME appears in the hub's
-        registries, and for a shadowed row it does — the ENVIRONMENT's source
-        is holding it. So one response flashed "saved and in use now" in
-        green and drew "not in use" beside the row it was about, and the
-        source answering under that name was somebody else's.
+        registries, and for a shadowed row it does — the BASE source is
+        holding it. So one response flashed "saved and in use now" in green
+        and drew "not in use" beside the row it was about, and the source
+        answering under that name was somebody else's.
         """
-        self.app.store.sources.reserved_names = None
-        row = self.app.store.sources.create(
-            name="elasticsearch-logs", signal=["logs"], kind="loki",
-            config={"url": "http://localhost:3100"})
-        self.app.store.sources.reserved_names = self.app.hub.base_source_names
-
-        response = self.save(id=row["id"], name="elasticsearch-logs")
+        row = self._stored_behind_the_check()
+        response = self.save(id=row["id"], **self.AGENTS)
         said = " ".join(flashes(response))
         self.assertIn("NOT in use", said)
         self.assertIn("still answering; this row is not", said)
@@ -276,17 +287,15 @@ class ABaseNameIsNotAvailableTest(_Store):
     def test_a_row_can_still_be_edited_under_the_name_it_already_has(self):
         """Refusing the name on every save would leave such a row unsavable —
         it could not even be disabled."""
-        self.app.store.sources.reserved_names = None
-        row = self.app.store.sources.create(
-            name="elasticsearch-logs", signal=["logs"], kind="loki",
-            config={"url": "http://localhost:3100"})
-        self.app.store.sources.reserved_names = self.app.hub.base_source_names
-        updated = self.app.store.sources.update(row["id"],
-                                                name="elasticsearch-logs",
+        row = self._stored_behind_the_check()
+        updated = self.app.store.sources.update(row["id"], name="wdash-agents",
                                                 enabled=False)
         self.assertFalse(updated["enabled"])
+        other = self.app.store.sources.create(
+            name="es-two", signal=["monitors"], kind="elasticsearch",
+            config={"url": "http://localhost:9201", "verify_certs": False})
         with self.assertRaises(SourceError):
-            self.app.store.sources.update(row["id"], name="elasticsearch-traces")
+            self.app.store.sources.update(other["id"], name="wdash-agents")
 
 
 class ThePageLooksBeforeItReportsTest(_Store):
@@ -342,7 +351,7 @@ class ThePageLooksBeforeItReportsTest(_Store):
 
 
 class TheDefaultDoesNotMoveTest(_Store):
-    """No environment source: the first source configured stays the default.
+    """The first source configured stays the default.
 
     The repository lists by name, and the hub's order is the interface, so
     `archive-es` added a month later took over every query that names no

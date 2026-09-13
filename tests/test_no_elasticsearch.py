@@ -1,15 +1,15 @@
 """
-Running with no Elasticsearch at all.
+Running with no source at all.
 
 WDash was built in front of Elasticsearch, and the client was constructed
 unconditionally in the app factory. A deployment reading logs from Loki or
-VictoriaLogs still had to run a cluster it never queried — and could not say
-so: `ELASTICSEARCH_URL=""` fell straight back to the local default, because
-the config read it with `or` rather than a default. "No cluster here" was
-literally unsayable.
+VictoriaLogs still had to run a cluster it never queried — and for a while
+could not even say so, because the address read with `or` and an empty
+value fell straight back to the local default. Every source is a stored one
+now, and a fresh installation has none.
 
 What these hold is that it starts, that it signs people in, and that every
-screen needing a cluster says which thing is missing instead of failing in a
+screen needing a source says which thing is missing instead of failing in a
 way that reads as an outage.
 """
 
@@ -44,8 +44,6 @@ class NoElasticsearchTestCase(unittest.TestCase):
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
             OIDC_CLIENT_ID = None
-            #: The point of the whole module.
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = storage
 
         self.config = TestConfig
@@ -58,42 +56,16 @@ class NoElasticsearchTestCase(unittest.TestCase):
 
 
 class StartupTest(NoElasticsearchTestCase):
-    def test_the_application_starts(self):
-        self.assertIsNone(self.app.es_client)
-
-    def test_no_elasticsearch_sources_are_registered(self):
-        """A source pointing at a cluster that is not there would fail every
-        search and report it as an outage."""
+    def test_the_application_starts_with_nothing_but_its_own_source(self):
+        """No log source, no trace source, and for monitors only the checks
+        WDash runs itself. A source pointing at a cluster that is not there
+        would fail every search and report it as an outage."""
         self.assertEqual(self.app.hub.log_sources, [])
         self.assertEqual(self.app.hub.trace_sources, [])
-
-    def test_an_unset_url_still_gets_the_local_default(self):
-        """Set-and-empty means none; unset means the default it always was."""
-        self.assertEqual(self._reread({}), "http://localhost:9200")
-
-    def test_an_explicitly_empty_url_stays_empty(self):
-        """Read through the environment, because that is where the bug was.
-
-        `os.environ.get('ELASTICSEARCH_URL') or default` turns an explicitly
-        empty value straight back into the local URL, so switching
-        Elasticsearch off was unsayable. Asserting on the class attribute
-        alone does not exercise that line at all.
-        """
-        self.assertEqual(self._reread({"ELASTICSEARCH_URL": ""}), "")
-
-    @staticmethod
-    def _reread(environment):
-        """Re-import the config module under a given environment."""
-        import importlib
-        from unittest import mock
-        import wdash.config
-        with mock.patch.dict(os.environ, environment, clear=False):
-            if "ELASTICSEARCH_URL" not in environment:
-                os.environ.pop("ELASTICSEARCH_URL", None)
-            reloaded = importlib.reload(wdash.config)
-            value = reloaded.Config.ELASTICSEARCH_URL
-        importlib.reload(wdash.config)
-        return value
+        self.assertEqual([s.name for s in self.app.hub.monitor_sources],
+                         ["wdash-agents"])
+        self.assertEqual(set(self.app.hub.base_source_names()),
+                         {"wdash-agents"})
 
     def test_signing_in_works(self):
         self.client.get("/auth/logout")
@@ -222,7 +194,6 @@ class DashboardStorageTest(NoElasticsearchTestCase):
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
             OIDC_CLIENT_ID = None
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "elasticsearch"
 
         with self.assertRaises(RuntimeError) as caught:
@@ -260,16 +231,16 @@ class EnvironmentIsolationTest(unittest.TestCase):
 
     A developer with a deployment's variables in their shell ran a different
     suite from CI, and it failed in a way that reads as flakiness rather than
-    as configuration. Twice: `WDASH_ENCRYPTION_KEY` took out four tests,
-    `TRACE_INDEX_PATTERNS` set empty took out 127.
+    as configuration. Twice: `WDASH_ENCRYPTION_KEY` took out four tests, the
+    trace-index variable of the day set empty took out 127.
 
     Checked as a test rather than left to the import: a name added to `Config`
     that flips behaviour needs adding here too, and nothing else would say so.
     """
 
     def test_the_variables_that_flip_behaviour_are_neutralised(self):
-        from tests import NEUTRALISED
-        for name in NEUTRALISED:
+        from tests import NEUTRALISED, RETIRED
+        for name in NEUTRALISED + RETIRED:
             self.assertNotIn(name, os.environ,
                              f"{name} survived into the test process")
 
@@ -277,29 +248,6 @@ class EnvironmentIsolationTest(unittest.TestCase):
         from tests import FORCED
         for name, value in FORCED.items():
             self.assertEqual(os.environ.get(name), value)
-
-    def test_removing_a_name_is_not_the_same_as_switching_it_off(self):
-        """The bug this whole split exists for.
-
-        `ELASTICSEARCH_URL` was on the removal list, was faithfully removed,
-        and `Config` fell back to `http://localhost:9200` — the development
-        lab's own address. Fourteen tests talked to a real cluster for as long
-        as anybody had one running, and said so only by failing on the day it
-        was switched off.
-
-        The old guard asserted the NAME was absent. That was true, and it
-        meant nothing. What matters is the value the application ends up with,
-        so that is what is asserted.
-        """
-        from wdash.config import Config
-
-        class Fresh(Config):
-            pass
-
-        self.assertFalse(
-            Fresh.ELASTICSEARCH_URL,
-            "the suite computes an Elasticsearch URL, so any test that does "
-            "not declare its own source may be talking to a real cluster")
 
     def test_the_developers_own_database_is_not_what_a_test_gets(self):
         """`DATABASE_URL` was the second instance of the same mistake.
@@ -356,8 +304,8 @@ class EnvironmentIsolationTest(unittest.TestCase):
 
         The old one read `config.py` as TEXT, looking for
         `os.environ.get('X', 'default')` where the default contained `://` or
-        began with `/`. It found `ELASTICSEARCH_URL` and could not have found
-        either of the two that were left:
+        began with `/`. It found the cluster address of the day and could not
+        have found either of the two that were left:
 
           * `DATABASE_URL` is written `os.environ.get(...) or CONSTANT`, so
             there was no literal on the line to match;
@@ -445,27 +393,6 @@ class EnvironmentIsolationTest(unittest.TestCase):
                 hasattr(imported, case),
                 f"{name} is protected by {dotted}, which no longer exists")
 
-    def test_every_config_value_that_means_off_when_empty_is_listed(self):
-        """The two that read with a default rather than `or` are exactly the
-        two where empty means "off" — so those are the dangerous ones."""
-        import inspect
-
-        from wdash import config as config_module
-        source = inspect.getsource(config_module)
-        from tests import FORCED, NEUTRALISED
-        handled = set(NEUTRALISED) | set(FORCED)
-
-        missing = []
-        for line in source.splitlines():
-            if "os.environ.get(" not in line or "," not in line:
-                continue
-            # `os.environ.get('X', default)` — a default rather than `or`,
-            # which is the shape that lets an empty value through.
-            for name in ("ELASTICSEARCH_URL", "TRACE_INDEX_PATTERNS"):
-                if f"'{name}'" in line and name not in handled:
-                    missing.append(name)
-        self.assertEqual(missing, [])
-
 
 class HealthProbeTest(NoElasticsearchTestCase):
     """What `/health` says, and what Kubernetes does about it.
@@ -536,10 +463,10 @@ class HealthProbeTest(NoElasticsearchTestCase):
         self.assertNotIn("degraded", payload)
 
     def test_a_fresh_deployment_with_nothing_configured_is_reachable(self):
-        """The deadlock this fixes: the default ELASTICSEARCH_URL points at a
-        localhost that is not there, so on a first deployment the pod never
-        became ready — and the configuration page was the thing behind the
-        readiness gate."""
+        """The deadlock this fixes: a cluster address that defaulted to a
+        localhost not there meant a first deployment's pod never became ready
+        — and the configuration page was the thing behind the readiness
+        gate."""
         self.app.hub.replace_all(logs=[], traces=[])
         status, _ = self._payload()
         self.assertEqual(status, 200)

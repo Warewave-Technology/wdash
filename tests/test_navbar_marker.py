@@ -77,7 +77,6 @@ class NavbarTestCase(unittest.TestCase):
             SECRET_KEY = "navbar-marker"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = key
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
             OIDC_CLIENT_ID = None
 
@@ -296,7 +295,6 @@ class TheMarkerIsPaintedTest(unittest.TestCase):
             SECRET_KEY = "navbar-painted"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         cls.app = create_app(BarConfig)

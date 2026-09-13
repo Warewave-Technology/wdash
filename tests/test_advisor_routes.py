@@ -39,11 +39,20 @@ VIEWER_SESSION = {
 class TestConfig(Config):
     TESTING = True
     SECRET_KEY = "test-secret-key"
-    # The Advisor needs a source to have a report ABOUT; `analyze()` is
-    # replaced below, so it never has to answer. Unresolvable on purpose:
-    # these tests used to inherit `http://localhost:9200` and pass against
-    # whatever cluster a developer happened to be running.
-    ELASTICSEARCH_URL = "http://elasticsearch.invalid:9200"
+
+
+#: The Advisor needs a source to have a report ABOUT; `analyze()` is replaced
+#: below, so it never has to answer. Unresolvable on purpose: these tests
+#: used to inherit `http://localhost:9200` and pass against whatever cluster
+#: a developer happened to be running.
+NOWHERE = "http://elasticsearch.invalid:9200"
+
+
+def store_a_cluster(app, name="lab-es", url=NOWHERE):
+    """A stored Elasticsearch source, which is the only kind there is."""
+    return app.store.sources.create(
+        name=name, signal=["logs"], kind="elasticsearch",
+        config={"url": url, "verify_certs": False})
 
 
 class AdvisorRouteTest(unittest.TestCase):
@@ -53,6 +62,7 @@ class AdvisorRouteTest(unittest.TestCase):
 
     def setUp(self):
         self.app = create_app(TestConfig)
+        store_a_cluster(self.app)
         self.client = self.app.test_client()
 
         # Return the fixture report instead of calling analyze()
@@ -178,12 +188,12 @@ if __name__ == "__main__":
 class DefaultSourceTest(unittest.TestCase):
     """What a bare `/advisor` — the link in the menu — analyses.
 
-    It used to mean the environment cluster unconditionally, from when that
-    was the only cluster there could be. Unset ELASTICSEARCH_URL and manage
-    every source on the configuration page, and the first thing an admin sees
-    is "no Elasticsearch is configured" on a screen that is simultaneously
-    offering five sources it can analyse. Picking any of them fixes it, so the
-    fault reads as intermittent rather than as a wrong default.
+    It used to mean a cluster declared in the environment, unconditionally,
+    from when that was the only cluster there could be. With every source on
+    the configuration page the first thing an admin saw was "no Elasticsearch
+    is configured" on a screen that was simultaneously offering five sources
+    it could analyse. Picking any of them fixed it, so the fault read as
+    intermittent rather than as a wrong default.
     """
 
     # Not a subclass of AdvisorRouteTest: inheriting the harness would also
@@ -195,8 +205,9 @@ class DefaultSourceTest(unittest.TestCase):
 
     def setUp(self):
         AdvisorRouteTest.setUp(self)
-        # The state this class is about: no environment cluster.
-        self.app.es_client = None
+        # The state this class is about: nothing stored yet.
+        for row in self.app.store.sources.all():
+            self.app.store.sources.delete(row["id"])
         self.login(ADMIN_SESSION)
 
     def _add(self, name, kind="loki", url="http://loki:3100"):
@@ -204,20 +215,25 @@ class DefaultSourceTest(unittest.TestCase):
             name=name, signal=["logs"], kind=kind,
             config={"url": url, "verify_certs": False})
 
-    def test_a_bare_request_falls_back_to_a_configured_source(self):
+    def test_a_bare_request_reads_a_configured_source(self):
         self._add("lab-elastic", kind="elasticsearch",
                   url="http://cluster:9200")
         with self.app.test_request_context("/advisor"):
             self.assertEqual(advisor_routes._default_source(), "lab-elastic")
 
-    def test_the_environment_cluster_still_wins_when_it_exists(self):
-        """Not a behaviour change for anyone configured the old way."""
-        self.app.es_client = object()
+    def test_the_default_is_the_oldest_source_not_the_first_by_name(self):
+        """The hub's own rule for a query that names no source, so a bare
+        /advisor and a bare search mean one cluster. The repository lists by
+        name, and by name `aaa-loki` — added last — would have taken the
+        page over from the cluster the installation has always run on."""
         self._add("lab-elastic", kind="elasticsearch",
                   url="http://cluster:9200")
+        self._add("aaa-loki")
         with self.app.test_request_context("/advisor"):
-            self.assertEqual(advisor_routes._default_source(),
-                             advisor_routes.ENVIRONMENT_SOURCE)
+            self.assertEqual(advisor_routes._default_source(), "lab-elastic")
+            self.assertEqual(
+                [entry["value"] for entry in advisor_routes._advisable_sources()],
+                ["lab-elastic", "aaa-loki"])
 
     def test_nothing_at_all_resolves_to_nothing(self):
         with self.app.test_request_context("/advisor"):
@@ -358,10 +374,8 @@ class UnreadableClusterTest(unittest.TestCase):
         advisor_routes._cache.clear()
 
     def client_for(self, url):
-        class Unreadable(TestConfig):
-            ELASTICSEARCH_URL = url
-
-        app = create_app(Unreadable)
+        app = create_app(TestConfig)
+        store_a_cluster(app, name="unreadable", url=url)
         client = app.test_client()
         grant(app, ADMIN_SESSION["username"], ADMIN_SESSION["permissions"])
         with client.session_transaction() as session:

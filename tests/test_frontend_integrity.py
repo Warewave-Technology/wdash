@@ -532,7 +532,6 @@ class AssetsAreVersionedTest(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "assets"
             DATABASE_URL = "sqlite:///:memory:"
-            ELASTICSEARCH_URL = ""
             ENCRYPTION_KEY = SecretBox.generate_key()
 
         client = create_app(RenderConfig).test_client()
@@ -561,7 +560,6 @@ class AssetsAreVersionedTest(unittest.TestCase):
             DEBUG = False
             SECRET_KEY = "assets"
             DATABASE_URL = "sqlite:///:memory:"
-            ELASTICSEARCH_URL = ""
             ENCRYPTION_KEY = SecretBox.generate_key()
 
         body = create_app(RenderConfig).test_client().get(

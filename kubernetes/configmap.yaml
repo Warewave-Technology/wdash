@@ -61,53 +61,17 @@ data:
   #   kubectl -n wdash exec deploy/wdash -c wdash -- <the printed command>
   DASHBOARD_STORAGE_FILE: "/data/dashboards.json"
 
-  # Elasticsearch, declared in the environment.
-  #
-  # This is the OLDER of the two ways to give WDash a backend and it still
-  # works. The other one is the configuration page, which is where Loki,
-  # VictoriaLogs, Tempo and any further Elasticsearch clusters are declared,
-  # and which stores what it is given in the metadata database. A deployment
-  # that has moved to the page leaves this empty.
-  #
-  # Set, it registers sources of its own — `elasticsearch-logs`,
-  # `elasticsearch-traces` (unless TRACE_INDEX_PATTERNS below is empty) and
-  # `elasticsearch-monitors`. Those names are not decoration: a role's rules
-  # address a source by name, and the configuration page REFUSES a source
-  # that would take one of them, because the environment's is registered
-  # first and would keep it.
-  #
-  # If the same cluster is ALSO declared on the page, both register and a
-  # merged search counts every matching record twice — silently, because the
-  # totals simply look bigger. WDash says so twice when it sees it: once in
-  # the start-up log, and once as a banner on the configuration page.
-  #
-  #   Source 'prod-logs' points at the same Elasticsearch as
-  #   ELASTICSEARCH_URL (http://elasticsearch:9200). Both are registered, so
-  #   a merged search counts every matching record twice. Unset
-  #   ELASTICSEARCH_URL to keep only the configured source, or delete the
-  #   configured one.
-  ELASTICSEARCH_URL: "http://elasticsearch:9200"
-  ELASTICSEARCH_TIMEOUT: "30"
-  # Certificate verification, and it is off because the URL above is plain
-  # HTTP inside the cluster, where there is no certificate to verify. Switch
-  # BOTH together: an https:// URL with this left at "false" talks to whatever
-  # answers, which is the failure the scheme was supposed to prevent.
-  ELASTICSEARCH_VERIFY_CERTS: "false"
-  # A CA bundle, for a cluster behind a private authority. Verification
-  # without one trusts the system store only. Mount the bundle and name it
-  # here — /etc/ssl/wdash/ca.crt, say, from a ConfigMap of your own.
-  ELASTICSEARCH_CA_CERTS: ""
-  # Which indices hold traces. Excluded from log search, or spans come back
-  # as records with no body and no severity.
-  TRACE_INDEX_PATTERNS: "*traces*,*apm*"
-  # Where synthetic monitor results are. Empty means WDash's built-in list,
-  # which covers Heartbeat and the Fleet Synthetics integration under their
-  # own default names. A deployment that renamed them says so here.
-  MONITOR_INDEX_PATTERNS: ""
+  # No data source is declared here. Sources — Elasticsearch, Loki,
+  # VictoriaLogs, Jaeger, Tempo; one cluster or several, each with its own
+  # credentials, index patterns and certificate authority — are declared on
+  # the configuration page after the first sign-in, and stored in the
+  # metadata database, where every replica reads them within five seconds
+  # of a save. An earlier version took one Elasticsearch from this file as
+  # well, under eight keys; a pod that still carries any of them is told so
+  # at start-up, as an ERROR naming them, and reads nothing from them.
 
-  # OIDC, declared in the environment — the same older-of-two-ways as
-  # ELASTICSEARCH_URL above. The configuration page declares OIDC and LDAP
-  # too, and stores them.
+  # OIDC, declared in the environment. This is the older of two ways; the
+  # configuration page declares OIDC and LDAP too, and stores them.
   #
   # AT MOST ONE DIRECTORY SIGNS PEOPLE IN. Not one of each: one. Enabling a
   # second is refused on the page, and a directory saved there BEATS one

@@ -17,7 +17,7 @@ from ..hub import Scope
 def source_names():
     """Every name a role's rule can be qualified by.
 
-    What the hub has registered, for every signal, the environment's sources
+    What the hub has registered, for every signal, WDash's own monitor source
     included; and what is configured but switched off. A rule written for a
     source that is switched off is still that source's rule. Read as a plain
     name, it could match something in another source.

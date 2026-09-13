@@ -225,10 +225,11 @@ def _check_name(name, reserved=()):
     source called `eu:prod` could not be named by one — `-eu:prod:secret-*`
     read as a rule for a source called `eu`.
 
-    And not a name the hub has already: the environment's sources are
-    registered first and keep their names, so a configured source called
-    `elasticsearch-logs` is stored, listed on the page, and answers nothing.
-    Refused here because the form is where somebody can still change it.
+    And not a name the hub has already: the source WDash registers itself
+    for its own agents' checks is registered first and keeps its name, so a
+    configured source called `wdash-agents` is stored, listed on the page,
+    and answers nothing. Refused here because the form is where somebody can
+    still change it.
     """
     if not name:
         raise SourceError("A name is required.")
@@ -243,10 +244,10 @@ def _check_name(name, reserved=()):
             f"name this one.")
     if name in reserved:
         raise SourceError(
-            f"'{name}' is the name of a source WDash registers from its own "
-            f"configuration. That one is registered first and keeps the name, "
-            f"so a source called '{name}' here would be stored and reachable "
-            f"by nothing. Choose another name.")
+            f"'{name}' is the name of a source WDash registers itself. That "
+            f"one is registered first and keeps the name, so a source called "
+            f"'{name}' here would be stored and reachable by nothing. Choose "
+            f"another name.")
 
 
 class SourceRepository:

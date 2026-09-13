@@ -150,15 +150,17 @@ class JobsStillDoWhatTheyAreForTest(unittest.TestCase):
         self.assertEqual(
             self.jobs["live-schema"]["env"].get("WDASH_REQUIRE_LAB"), "1")
 
-    def test_the_live_job_does_not_reuse_the_applications_variable(self):
-        """`tests/__init__.py` forces `ELASTICSEARCH_URL` empty so no test
-        reaches a cluster nobody declared. Pointing this job at that name
-        would either undo that or be undone by it — it was the second, and
-        these tests skipped every run for a fortnight while printing "start
-        the lab"."""
+    def test_the_live_job_names_the_lab_under_a_variable_of_its_own(self):
+        """The application reads no cluster address from the environment —
+        sources are stored — and the suite clears the variables an earlier
+        version read. This job once pointed at one of those; the suite undid
+        it, and these tests skipped every run for a fortnight while printing
+        "start the lab". `WDASH_LAB_URL` is read by tests/test_hub.py and
+        the seeder, and by nothing in src/."""
+        from tests import RETIRED
         env = self.jobs["live-schema"]["env"]
         self.assertIn("WDASH_LAB_URL", env)
-        self.assertNotIn("ELASTICSEARCH_URL", env)
+        self.assertEqual(sorted(name for name in env if name in RETIRED), [])
 
     def test_the_live_job_seeds_before_it_measures(self):
         steps = self._steps("live-schema")

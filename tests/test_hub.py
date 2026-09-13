@@ -654,16 +654,14 @@ if __name__ == "__main__":
 
 #: Where the integration tests below look for a cluster.
 #:
-#: NOT `ELASTICSEARCH_URL`, which is what this read until it was noticed.
-#: `tests/__init__.py` forces that one empty on purpose — the suite must not
-#: talk to a cluster nobody declared — so `os.environ.get(name, default)`
-#: returned the empty string rather than the default, the client refused to
-#: build, and these tests skipped every single run. Including the runs with
-#: the lab up, while printing a message telling you to start it.
-#:
-#: A variable of their own means the two statements stop fighting: "the
-#: application has no cluster" and "the integration tests have one over
-#: here".
+#: A name of the lab's own. This once read the variable the application
+#: itself took its cluster from, which `tests/__init__.py` forced empty on
+#: purpose — the suite must not talk to a cluster nobody declared — so
+#: `os.environ.get(name, default)` returned the empty string rather than the
+#: default, the client refused to build, and these tests skipped every
+#: single run. Including the runs with the lab up, while printing a message
+#: telling you to start it. The application reads no cluster address from
+#: the environment at all now; the seeder and CI read this one.
 LAB_URL = os.environ.get("WDASH_LAB_URL") or "http://localhost:9200"
 
 #: Set by CI. A job that exists to run these tests and reports success

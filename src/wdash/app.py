@@ -17,11 +17,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from wdash import __version__
 from wdash.config import (
-    Config, DEFAULT_DASHBOARD_FILE, DEFAULT_TRACE_PATTERNS,
-    PUBLISHED_SECRET_KEYS)
+    Config, DEFAULT_DASHBOARD_FILE, PUBLISHED_SECRET_KEYS)
 from wdash.auth import auth_bp, load_user_from_session
 from wdash.auth.setup import register_setup_gate, setup_bp
-from wdash.logs import ElasticsearchClient
 from wdash.dashboard import DashboardManager
 from wdash.store import SecretBox, Store
 from wdash.models import SavedSearch
@@ -35,8 +33,6 @@ from wdash.api.log_routes import log_bp
 from wdash.api.config_routes import config_bp
 from wdash.api.dashboard_routes import dashboard_bp
 from wdash.hub import Hub
-from wdash.hub.adapters import ElasticsearchLogSource, ElasticsearchTraceSource
-from wdash.hub.adapters.elasticsearch import _IndexCatalogue
 from wdash.hub.factory import build_configured_sources
 from datetime import datetime, timedelta
 import time
@@ -266,6 +262,67 @@ def files_left_behind(store, dashboards_file):
     return left_behind_sentence(left_behind_report(store, dashboards_file))
 
 
+#: Variables an earlier version configured a whole subsystem from, and where
+#: that subsystem is configured now. Each group is (the names, what they
+#: configured, the tab of the configuration page, what an installation
+#: without that configuration is missing).
+#:
+#: NOTHING IS READ FROM THEM. They are looked at only to say so: an
+#: installation upgrading with one of these still set would otherwise come up
+#: with no log source, or no single sign-on, and a page saying "No log source
+#: is configured" over a cluster that was answering yesterday reads as an
+#: outage rather than as a variable. Nor are they imported into the store —
+#: a one-shot import at start-up is exactly the mechanism being removed.
+#:
+#: Spelled as a list read in a loop, never as `os.environ.get("NAME")`:
+#: tests/test_kubernetes_manifests.py reads the source for variables the
+#: application looks up by name, and a ConfigMap that still carries one of
+#: these has to FAIL that check, not pass it because the name was seen here.
+RETIRED_VARIABLES = (
+    (("ELASTICSEARCH_URL", "ELASTICSEARCH_USERNAME", "ELASTICSEARCH_PASSWORD",
+      "ELASTICSEARCH_TIMEOUT", "ELASTICSEARCH_VERIFY_CERTS",
+      "ELASTICSEARCH_CA_CERTS", "TRACE_INDEX_PATTERNS",
+      "MONITOR_INDEX_PATTERNS"),
+     "the Elasticsearch cluster and its index patterns are",
+     "Sources",
+     "until the cluster is added there, the logs, traces and monitors pages "
+     "have no source"),
+)
+
+
+def _listed(names):
+    """`A`, `A and B`, `A, B and C`."""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def variables_left_behind(environ):
+    """What to say at start-up about variables nothing reads any more.
+
+    One sentence per group of `RETIRED_VARIABLES` that has a value in
+    `environ`, naming every variable of the group that is set and the tab of
+    the configuration page where the same thing is configured now; an empty
+    list when none is set. An empty value does not count: it configured
+    nothing before either.
+    """
+    said = []
+    for names, what, tab, cost in RETIRED_VARIABLES:
+        found = [name for name in names if (environ.get(name) or "").strip()]
+        if not found:
+            continue
+        many = len(found) > 1
+        said.append(
+            f"{_listed(found)} {'are' if many else 'is'} set, and WDash no "
+            f"longer reads {'them' if many else 'it'}: {what} configured on "
+            f"the configuration page, under {tab}, and stored in the "
+            f"metadata database. Nothing was read from "
+            f"{'these variables' if many else 'this variable'} — {cost}. "
+            f"Configure it on that page, then unset "
+            f"{'them' if many else 'it'}.")
+    return said
+
+
 def create_app(config_class=Config):
     """Application factory pattern"""
     app = Flask(__name__, 
@@ -369,20 +426,11 @@ def create_app(config_class=Config):
     app.register_blueprint(log_bp)
     app.register_blueprint(dashboard_bp)
     
-    # Elasticsearch, if there is one.
-    #
-    # `ELASTICSEARCH_URL` set to nothing means "no Elasticsearch here" — a
-    # deployment reading logs from Loki or VictoriaLogs should not have to run
-    # a cluster it never queries. The default is still the local URL, so
-    # nothing changes for a deployment that has always had one.
-    #
-    # Every consumer of `app.es_client` has to cope with None. The screens that
-    # genuinely need a cluster say so; the ones that do not carry on.
-    es_url = (app.config.get('ELASTICSEARCH_URL') or '').strip()
-    es_client = ElasticsearchClient(app.config) if es_url else None
-    if es_client is None:
-        app.logger.info(
-            "No ELASTICSEARCH_URL is set: Elasticsearch features are off")
+    # Variables an earlier version configured a source or a provider from.
+    # Said as an ERROR, once per group, naming what is set and the page it
+    # moved to — and read for nothing else. See RETIRED_VARIABLES.
+    for left_behind in variables_left_behind(os.environ):
+        app.logger.error(left_behind)
 
     # WDash's own state, separate from every data source. Always present: roles
     # and local accounts live here regardless of which backends are configured,
@@ -513,7 +561,7 @@ def create_app(config_class=Config):
             "DASHBOARD_STORAGE=elasticsearch has been removed. Move the data "
             "into the metadata database first:\n"
             "  PYTHONPATH=src python -m wdash.store.migrate_cli \\\n"
-            "      --from-elasticsearch $ELASTICSEARCH_URL\n"
+            "      --from-elasticsearch <the cluster's url>\n"
             "then unset DASHBOARD_STORAGE — 'database' is the default.")
     elif storage == 'file':
         # The only branch that writes to the path, so the only one that needs
@@ -544,86 +592,33 @@ def create_app(config_class=Config):
             f"database, and nothing would have said why.")
 
     # Store services in app context
-    app.es_client = es_client
     app.dashboard_manager = dashboard_manager
 
     # The hub is the backend-neutral access layer. Every route works through
     # it; nothing Elasticsearch-specific reaches the HTTP layer.
+    #
+    # Every log and trace source, and every monitor source but one, comes
+    # from the configuration page. There used to be a set registered from the
+    # environment ahead of them — an Elasticsearch declared by variable,
+    # answering as `elasticsearch-logs`, `elasticsearch-traces` and
+    # `elasticsearch-monitors` — so that a deployment older than the page
+    # kept its cluster. Gone: a cluster is a stored source now, and an
+    # installation that still sets the variables is told so above.
     hub = Hub()
-    # One index catalogue shared by both sources: the cluster's index list is
-    # the same for logs and traces, so there is no reason to fetch it twice.
-    catalogue = None
-    trace_patterns = app.config.get("TRACE_INDEX_PATTERNS", ("*traces*", "*apm*"))
-    if es_client is not None:
-        catalogue = _IndexCatalogue(es_client.es)
-
-        # Kept after the Elasticsearch dashboard store was removed: an
-        # installation that used it still has the index sitting in the
-        # cluster, and without this a log search over `*` returns dashboards
-        # as bodyless records.
-        own_indices = (app.config.get('DASHBOARD_INDEX', 'wdash-dashboards'),)
-
-        # The exclusion does NOT follow the trace source being switched off.
-        #
-        # `TRACE_INDEX_PATTERNS` does two jobs: it says which indices hold
-        # traces, and — emptied — it says "do not register an environment
-        # trace source". Emptying it took the log-side exclusion with it, so
-        # a deployment that moved its trace source to the configuration page
-        # found its log search scanning the span indices and returning
-        # bodyless records. Those are different statements, and only one of
-        # them is about the log source.
-        excluded_from_logs = tuple(trace_patterns) or DEFAULT_TRACE_PATTERNS
-        # Heartbeat's too, which the monitor source below reads. Heartbeat 8
-        # writes data streams, and once the catalogue listed streams by name
-        # its checks would have come back from a log search over `*` as
-        # records with no body — the reason the trace indices are left out.
-        from wdash.hub.adapters.es_monitors import DEFAULT_PATTERNS as HEARTBEAT
-        heartbeat = tuple(app.config.get("MONITOR_INDEX_PATTERNS") or HEARTBEAT)
-        hub.add_logs(ElasticsearchLogSource(
-            es_client.es, name="elasticsearch-logs",
-            exclude=excluded_from_logs + own_indices + heartbeat,
-            catalogue=catalogue))
-        # No patterns means no environment trace source. A deployment that
-        # declares its trace backends on the configuration page — APM on one
-        # cluster, OpenTelemetry on another — does not want a third source
-        # reading both of them, which would count every span twice.
-        if trace_patterns:
-            hub.add_traces(ElasticsearchTraceSource(
-                es_client.es, name="elasticsearch-traces",
-                patterns=trace_patterns, catalogue=catalogue))
-        else:
-            app.logger.info(
-                "TRACE_INDEX_PATTERNS is empty: no environment trace source")
-
-        # Synthetic monitors from the same cluster. Registered unconditionally
-        # because the index names are Heartbeat's own — `heartbeat-*` and
-        # `synthetics-*` — and a cluster without them simply reports no
-        # monitors. There is nothing to overlap with the way the trace and log
-        # patterns can overlap with each other.
-        from wdash.hub.adapters.es_monitors import (
-            DEFAULT_PATTERNS as MONITOR_PATTERNS, ElasticsearchMonitorSource,
-        )
-        monitor_patterns = app.config.get("MONITOR_INDEX_PATTERNS") or MONITOR_PATTERNS
-        hub.add_monitors(ElasticsearchMonitorSource(
-            es_client.es, name="elasticsearch-monitors",
-            patterns=monitor_patterns, catalogue=catalogue))
 
     # The checks WDash runs itself. Registered unconditionally and cheap when
     # unused: with no agents and no monitors it reports an empty list, which
     # is the truth rather than an absence the page has to explain.
     #
-    # Part of the BASE set, with the environment's sources: it reads the
-    # metadata store this process already holds, so there is nothing about it
-    # that a configuration edit could change.
+    # The one BASE source: it reads the metadata store this process already
+    # holds, so there is nothing about it that a configuration edit could
+    # change, and it is built once.
     if store is not None:
         from wdash.hub.adapters.store_monitors import StoreMonitorSource
         hub.add_monitors(StoreMonitorSource(store))
 
-    # Sources added through the config page. Loaded AFTER the environment ones
-    # so a deployment that has always worked keeps its default, and an
-    # operator adding a source does not silently take over the queries that
-    # name no source. A broken one is logged and skipped; it must not stop
-    # startup.
+    # Sources added through the config page. A broken one is logged and
+    # skipped; it must not stop startup.
     #
     # Handed to the hub as a recipe rather than a result, so an administrator
     # saving the form does not have to restart WDash to use what they just
@@ -631,13 +626,13 @@ def create_app(config_class=Config):
     # configuration screen the one screen that could not configure anything.
     if store is not None:
         # What the base registry already answers to. Asked at save time, so
-        # `elasticsearch-logs` typed into the form is a sentence about the
-        # name rather than a row that is stored, listed, and reachable by
-        # nothing because the environment's source keeps the name.
+        # `wdash-agents` typed into the form is a sentence about the name
+        # rather than a row that is stored, listed, and reachable by nothing
+        # because the source WDash registers itself keeps the name.
         store.sources.reserved_names = hub.base_source_names
 
         hub.reload_with(
-            build=lambda: build_configured_sources(store, catalogue),
+            build=lambda: build_configured_sources(store),
             # A lambda rather than the bound method: it is looked up on
             # the repository each time, so a store that swaps one in is
             # honoured rather than shadowed by what was captured here.
@@ -645,13 +640,6 @@ def create_app(config_class=Config):
         if hub.configured_count:
             app.logger.info(
                 f"{hub.configured_count} source(s) from configuration")
-
-    # Recomputed on demand rather than at startup, because the sources it
-    # compares are now live: a duplicate added on the configuration page has
-    # to be reported by the configuration page, not by the next restart.
-    app.duplicate_sources = lambda: _same_backend_twice(app, store)
-    for warning in app.duplicate_sources():
-        app.logger.warning(warning)
 
     # Which directory signs people in, and what is being shadowed to make that
     # true. An installation that has had both live loses one door the moment
@@ -971,8 +959,8 @@ def create_app(config_class=Config):
 
           * readiness failed, the pod left the Service, and the one screen
             that could have fixed the problem — the configuration page —
-            became unreachable. On a first deployment, where the default
-            ELASTICSEARCH_URL points at a localhost that is not there, the
+            became unreachable. On a first deployment, where the cluster
+            address then defaulted to a localhost that was not there, the
             pod never became ready at all;
           * liveness failed, so the kubelet RESTARTED the container. A Loki
             outage of thirty seconds put WDash into a restart loop.
@@ -1011,15 +999,10 @@ def create_app(config_class=Config):
             app.logger.warning(f"health: metadata store: {exc}")
             checks['store'] = 'unreachable'
 
+        # Keyed by name, so one stored source serving logs AND traces — two
+        # adapters over one client — is asked once and reported once.
         probes = {}
-        if es_client is not None:
-            probes['elasticsearch'] = lambda: (
-                (True, 'ok') if es_client.es.ping()
-                else (False, 'ping failed: no response from the cluster'))
         for source in list(app.hub.log_sources) + list(app.hub.trace_sources):
-            if es_client is not None and source.name in (
-                    'elasticsearch-logs', 'elasticsearch-traces'):
-                continue          # the same cluster, already reported above
             probes[source.name] = source.health
         checks.update(_ask_at_once(probes,
                                    float(app.config['HEALTH_BUDGET_SECONDS'])))
@@ -1135,52 +1118,3 @@ if __name__ == '__main__':
     app.run(debug=True,
             host=os.environ.get('WDASH_DEV_HOST', '127.0.0.1'),
             port=int(os.environ.get('WDASH_DEV_PORT', 5000)))
-
-def _normalise_url(value):
-    """Compare cluster addresses, not the strings people typed."""
-    return (value or "").strip().rstrip("/")
-
-
-def _same_backend_twice(app, store):
-    """Warn when two registered sources read the same system.
-
-    The environment Elasticsearch predates the configuration page, and both
-    still register. Point a configured source at the same cluster — which is
-    what an operator does when they move to the configuration page and forget
-    to unset `ELASTICSEARCH_URL` — and every matching log line is counted
-    twice in a merged search, silently. The totals simply look bigger.
-
-    Reported rather than resolved: which one to drop is the operator's
-    decision, and picking for them could take away the source their saved
-    links name.
-    """
-    # Both sides normalised: `http://host:9200/` and `http://host:9200` are
-    # one cluster, and a comparison that misses that reports nothing on the
-    # commonest way of typing it.
-    url = _normalise_url(app.config.get("ELASTICSEARCH_URL"))
-    # Short circuit, not a check: `validate` refuses a source without a url,
-    # so an empty environment url cannot match a stored one either way.
-    if not url or store is None:
-        return []
-
-    try:
-        rows = store.sources.all(enabled_only=True)
-    except Exception:
-        # Returning [] here would state "no duplicates", which is not what
-        # "could not look" means. Say which one happened.
-        app.logger.exception("Could not check for duplicate sources")
-        return []
-
-    clashes = []
-    for row in rows:
-        if row["kind"] != "elasticsearch":
-            continue
-        if _normalise_url(row["config"].get("url")) != url:
-            continue
-        clashes.append(
-            f"Source '{row['name']}' points at the same Elasticsearch as "
-            f"ELASTICSEARCH_URL ({url}). Both are registered, so a merged "
-            f"search counts every matching record twice. Unset "
-            f"ELASTICSEARCH_URL to keep only the configured source, or "
-            f"delete the configured one.")
-    return clashes

@@ -86,18 +86,8 @@ spec:
               name: wdash-secrets
               key: oidc-client-secret
               optional: true
-        - name: ELASTICSEARCH_USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: wdash-secrets
-              key: elasticsearch-username
-              optional: true
-        - name: ELASTICSEARCH_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: wdash-secrets
-              key: elasticsearch-password
-              optional: true
+        # No cluster credentials: a source's are typed on the configuration
+        # page and stored sealed with the encryption key above.
         # KUBERNETES_NAMESPACE, KUBERNETES_POD_NAME and KUBERNETES_NODE_NAME
         # used to be here from the downward API. Nothing in src/ reads any of
         # them, and they went out with the cluster RBAC that was their only
@@ -202,18 +192,6 @@ spec:
             secretKeyRef:
               name: wdash-secrets
               key: encryption-key
-        - name: ELASTICSEARCH_USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: wdash-secrets
-              key: elasticsearch-username
-              optional: true
-        - name: ELASTICSEARCH_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: wdash-secrets
-              key: elasticsearch-password
-              optional: true
         volumeMounts:
         - name: dashboard-storage
           mountPath: /data

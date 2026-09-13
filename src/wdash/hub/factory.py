@@ -29,6 +29,26 @@ def _elasticsearch_client(config, password):
     return Elasticsearch(**arguments)
 
 
+#: The index the removed Elasticsearch dashboard store wrote. An installation
+#: that used it still has it sitting in the cluster, and a log search over
+#: `*` would return dashboards as bodyless records.
+DASHBOARD_STORE_INDEX = "wdash-dashboards"
+
+
+def default_log_excludes():
+    """What a log source reads past when its own exclude patterns are blank.
+
+    The other signals' defaults: the trace indices and Heartbeat's data
+    streams — both hold timestamped documents that match `*` and are not
+    logs — and the index the removed dashboard store wrote. Imported here
+    rather than at the top, as the adapters are, so that reading a stored
+    row does not import the elasticsearch library until a source needs it.
+    """
+    from .adapters.elasticsearch import DEFAULT_TRACE_PATTERNS
+    from .adapters.es_monitors import DEFAULT_PATTERNS as HEARTBEAT_PATTERNS
+    return DEFAULT_TRACE_PATTERNS + HEARTBEAT_PATTERNS + (DASHBOARD_STORE_INDEX,)
+
+
 def _signal_config(config, signal, field, default=()):
     """A per-signal setting, falling back to the flat one.
 
@@ -55,9 +75,16 @@ def build_source(record, credential, catalogue=None, signal=None):
         patterns = _signal_config(config, signal, "index_patterns", ("*",))
         excludes = _signal_config(config, signal, "exclude_patterns")
         if signal == "logs":
+            # Blank means the default the form's placeholder promises, as it
+            # does for the trace and monitor patterns below. It meant
+            # "exclude nothing", so a source added with the form's defaults
+            # over `*` scanned its own trace indices and Heartbeat's data
+            # streams, and spans came back from a log search as records with
+            # no body and no severity — the separation the source declared
+            # in the environment always had, missing from the stored one.
             return ElasticsearchLogSource(client, name=record["name"],
                                           patterns=patterns or ("*",),
-                                          exclude=excludes,
+                                          exclude=excludes or default_log_excludes(),
                                           catalogue=catalogue)
         if signal == "monitors":
             from .adapters.es_monitors import (
@@ -137,15 +164,17 @@ def build_source(record, credential, catalogue=None, signal=None):
 SIGNALS = ("logs", "traces", "monitors")
 
 
-def _oldest_first(records):
+def oldest_first(records):
     """Stored sources in the order they were created.
 
     The repository lists by name, for the page that reads them. The HUB's
     order is the interface — `hub.logs()` with no name answers from the first
-    registered source — so with no environment source the alphabetically
-    first row was the default, and adding `archive-es` to a deployment that
-    had always answered from `loki-prod` moved every unnamed query onto it
-    without a word. Creation order does not move when a source is added.
+    registered source — so the alphabetically first row was the default, and
+    adding `archive-es` to a deployment that had always answered from
+    `loki-prod` moved every unnamed query onto it without a word. Creation
+    order does not move when a source is added. The Advisor's default is
+    decided by this same order, so a bare `/advisor` and a bare search mean
+    one source.
 
     `created_at` is compared as text: SQLite hands back a naive datetime and
     Postgres an aware one, and this only ever compares rows from one store.
@@ -175,7 +204,7 @@ def build_configured_sources(store, catalogue=None):
         failures[name] = (f"{failures[name]}; {reason}" if name in failures
                           else reason)
 
-    for record in _oldest_first(store.sources.all(enabled_only=True)):
+    for record in oldest_first(store.sources.all(enabled_only=True)):
         try:
             credential = store.sources.credential(record["id"])
         except Exception as exc:

@@ -93,7 +93,6 @@ class PanelsAuthoredInABrowserTest(unittest.TestCase):
             SECRET_KEY = "panel-editor-browser"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         cls.app = create_app(EditorConfig)

@@ -423,7 +423,6 @@ class EndpointTest(unittest.TestCase):
             SECRET_KEY = "agent-test"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         self.app = create_app(TestConfig)
@@ -594,7 +593,6 @@ class ManagementPageTest(unittest.TestCase):
             SECRET_KEY = "manage"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         self.app = create_app(TestConfig)
@@ -1480,7 +1478,6 @@ class UnreadableCredentialsAgentTest(unittest.TestCase):
             SECRET_KEY = "monitors"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         self.app = create_app(TestConfig)
@@ -1560,7 +1557,6 @@ class UnreadableCredentialsAgentTest(unittest.TestCase):
             SECRET_KEY = "monitors"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = key
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         app = create_app(TestConfig)
@@ -2531,7 +2527,6 @@ class WithheldFromTheAgentTest(unittest.TestCase):
             SECRET_KEY = "withheld"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         self.app = create_app(TestConfig)
@@ -2803,7 +2798,6 @@ class TlsFormTest(unittest.TestCase):
             SECRET_KEY = "tls-form"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            ELASTICSEARCH_URL = ""
             DASHBOARD_STORAGE = "database"
 
         self.app = create_app(TestConfig)

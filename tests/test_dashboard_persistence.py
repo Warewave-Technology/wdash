@@ -476,7 +476,6 @@ class IsolationTest(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "isolation"
             DATABASE_URL = "sqlite:///:memory:"
-            ELASTICSEARCH_URL = ""
             # The isolation being checked belongs to the file store, and
             # the file store is no longer what an app gets by not saying.
             DASHBOARD_STORAGE = "file"
@@ -498,7 +497,6 @@ class IsolationTest(unittest.TestCase):
                 TESTING = True
                 SECRET_KEY = "isolation"
                 DATABASE_URL = "sqlite:///:memory:"
-                ELASTICSEARCH_URL = ""
                 DASHBOARD_STORAGE = "file"
                 DASHBOARD_STORAGE_FILE = chosen
 

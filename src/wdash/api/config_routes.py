@@ -102,8 +102,8 @@ def _not_live(hub, saved):
 
     # The hub's own answer first. A name FOUND in the registry is not proof
     # that this row is the one answering to it: when the name is a base one,
-    # the environment's source is holding it, every signal looks live, and
-    # the save flashed "saved and in use now" in green on the very render
+    # the source WDash registers itself is holding it, every signal looks
+    # live, and the save flashed "saved and in use now" in green on the very render
     # that drew "not in use" beside the row it was about. Two sentences about
     # one row, in one response, disagreeing.
     reasons = getattr(hub, "source_failures", None) or {}
@@ -129,32 +129,13 @@ def _not_live(hub, saved):
     return f"nothing is registered for {', '.join(absent)}. The log says why."
 
 
-def _duplicate_sources():
-    """Two registrations of one backend, as it stands right now.
-
-    A callable on the app rather than a list computed at startup: the sources
-    it compares can change while the process runs, and a warning that only
-    appears after a restart is a warning about a mistake somebody has already
-    walked away from. Tolerates the old list, so an app object built by
-    something that has not caught up still renders.
-    """
-    warnings = getattr(current_app, "duplicate_sources", None)
-    if callable(warnings):
-        try:
-            return list(warnings())
-        except Exception:
-            current_app.logger.exception("Could not check for duplicates")
-            return []
-    return list(warnings or [])
-
-
 def _directory_conflict():
     """Two directories configured here, or one that cannot be read, in words.
 
-    Read from the app the way the duplicate-sources warning is, and tolerant
-    of an app object that has not caught up. It is the same sentence the
-    startup log and the audit row carry, because they read the same function
-    — a banner that can disagree with the log is worse than no banner.
+    Read from the app, and tolerant of an app object that has not caught up.
+    It is the same sentence the startup log and the audit row carry, because
+    they read the same function — a banner that can disagree with the log is
+    worse than no banner.
     """
     conflict = getattr(current_app, "directory_conflict", None)
     if callable(conflict):
@@ -316,11 +297,6 @@ def config_page():
         # all, so a source whose credential would not decrypt sat in the
         # table looking exactly like one that works.
         source_failures=_source_failures(),
-        # Two registrations of one system. Detected at startup; shown here
-        # because a warning in a log file is a warning nobody reads, and the
-        # symptom — a merged total that is quietly too big — never points at
-        # its cause.
-        duplicate_sources=_duplicate_sources(),
         # Two directories configured, or the one in force unreadable. Computed
         # on demand, not at startup: a conflict can be made on this page while
         # the process runs, and a warning that waits for a restart is a

@@ -466,7 +466,6 @@ class OidcScopeTest(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "scope"
             DATABASE_URL = "sqlite:///:memory:"
-            ELASTICSEARCH_URL = ""
 
         if config:
             for name, value in config.items():
