@@ -11,8 +11,11 @@ and the ways they go wrong all look like something else:
     the address read out of `X-Forwarded-For` is the ingress controller's, the
     same one for everybody. The symptom is that a stranger's failed logins
     lock you out.
-  * `WDASH_ENCRYPTION_KEY` unset means the configuration page loads and then
-    refuses to save a credential. The symptom reads as a permissions problem.
+  * `WDASH_ENCRYPTION_KEY` unset means the pod starts and no local account
+    can sign in — the authenticator every one of them needs is sealed with
+    that key. The lesser half of the same fault is the configuration page
+    loading and then refusing to save a credential, which reads as a
+    permissions problem.
   * A key the application never reads is worse than a missing one: somebody
     turns it and reports that it had no effect. A key the application DOES
     read but which never reaches the process is worse still — it reads as
@@ -68,6 +71,17 @@ def _every_document():
             yield name, document
 
 
+def _read_manifest(name):
+    """A manifest exactly as it is on disk, comments and all.
+
+    The opposite of `_directives` below, and needed for the same reason: some
+    of what these files claim is IN the comments, and a claim nothing reads
+    is how this directory drifted.
+    """
+    with open(os.path.join(MANIFESTS, name), encoding="utf-8") as handle:
+        return handle.read()
+
+
 def _directives(name):
     """A manifest with its comments removed.
 
@@ -79,6 +93,20 @@ def _directives(name):
     with open(os.path.join(MANIFESTS, name)) as handle:
         return "\n".join(line for line in handle.read().splitlines()
                           if not line.lstrip().startswith("#"))
+
+
+def _page():
+    """kubernetes/README.md, which nothing checked until it was wrong.
+
+    It is the longest prose in the directory and the only file an operator
+    reads before applying anything, and for two versions no test read it at
+    all. It said the sidecar was on port 80 while every manifest beside it
+    said 8080 — a claim the Deployment, the Service, the NetworkPolicy and
+    the nginx.conf all contradict, and which survived because a comment
+    nothing checks is the reason this directory drifted in the first place.
+    """
+    with open(os.path.join(MANIFESTS, "README.md"), encoding="utf-8") as handle:
+        return handle.read()
 
 
 def _by_name(name, kind, metadata_name):
@@ -336,6 +364,133 @@ class TheRolesFileIsReadableTest(unittest.TestCase):
         # demotes an entire organisation to the default role on upgrade.
         self.assertIn("wdash-admins", roles["admin"]["groups"] or [])
         self.assertEqual(store.settings.get("rbac.default_role"), "viewer")
+
+    def _seed_then_edit(self, second):
+        """Boot on this file, edit it, boot again — what the second start saw.
+
+        Two `Store.open` calls against one database, which is a pod restart
+        after somebody edited the ConfigMap. Nothing here mocks the reader:
+        the question is what the application does with an edited file, and
+        only opening the store twice answers it.
+        """
+        from wdash.store import Store
+
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "rbac.yaml")
+        url = f"sqlite:///{os.path.join(directory, 'seed.db')}"
+
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(self.text)
+        store = Store.open(url, rbac_file=path)
+        before = (sorted(role["name"] for role in store.roles.all()),
+                  store.settings.get("rbac.default_role"),
+                  store.settings.get("rbac.claim_mappings"))
+        store.engine.dispose()
+
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(second)
+        store = Store.open(url, rbac_file=path)
+        after = (sorted(role["name"] for role in store.roles.all()),
+                 store.settings.get("rbac.default_role"),
+                 store.settings.get("rbac.claim_mappings"))
+        store.engine.dispose()
+        return before, after
+
+    def test_an_edit_after_the_first_boot_changes_nothing(self):
+        """Which is what the ConfigMap says about this file, in the comment
+        beside RBAC_CONFIG_FILE and again at the top of the file itself.
+
+        Both halves, because they are imported by different callers under
+        different conditions: `RoleRepository.seed` runs when the roles table
+        is empty, and `import_claims` runs when no claim mapping is stored.
+        A restart that re-read either would silently undo an edit made on the
+        configuration page, which is the one thing the page must be able to
+        promise.
+        """
+        parsed = yaml.safe_load(self.text)
+        parsed["roles"]["intruder"] = {
+            "description": "added after the first boot",
+            "permissions": ["logs:read"], "indices": ["*"]}
+        parsed["default_role"] = "intruder"
+        parsed["claim_mappings"] = {"email_claim": "mail",
+                                    "username_claim": "uid",
+                                    "groups_claim": "memberOf"}
+
+        before, after = self._seed_then_edit(yaml.safe_dump(parsed))
+
+        self.assertNotIn("intruder", after[0],
+                         "a role added to the file after the first boot was "
+                         "imported by the restart")
+        self.assertEqual(before, after,
+                         "editing the file after the first boot changed what "
+                         "the application runs on")
+
+    def test_the_claim_mappings_block_is_what_makes_that_true(self):
+        """The claim above holds for this file only because it carries one.
+
+        `import_claims` runs on every `Store.open` and stops at the first
+        line only when a mapping is already STORED — so a file that shipped
+        without the block stores nothing at the first boot, and every later
+        start reads it again. Adding `claim_mappings:` to this ConfigMap
+        after an installation is running would then take effect on the next
+        restart, which is exactly what the comment beside RBAC_CONFIG_FILE
+        promises cannot happen.
+
+        Measured rather than asserted: the same file with the block removed,
+        through the same two starts.
+        """
+        parsed = yaml.safe_load(self.text)
+        self.assertTrue(
+            parsed.get("claim_mappings"),
+            "this file carries no claim_mappings, so the ConfigMap's "
+            "'an edit made HERE after the first boot changes nothing at all' "
+            "is false: a block added later would be read on the next restart")
+
+        without = dict(parsed)
+        without.pop("claim_mappings")
+        self.text = yaml.safe_dump(without)
+        before, after = self._seed_then_edit(yaml.safe_dump(parsed))
+        self.assertIsNone(before[2])
+        self.assertEqual(
+            after[2], parsed["claim_mappings"],
+            "a file with no claim_mappings was expected to pick them up on a "
+            "later start — if this changed, the comment can be simplified")
+
+    def test_the_configmap_accounts_for_everything_that_reads_this_file(self):
+        """`Store.open` hands the file to TWO importers, not one.
+
+        `roles.seed` gates on an empty roles table; `import_claims` gates on
+        no stored claim mapping. The ConfigMap described one condition —
+        "Read ONCE, when the roles table is empty" — and drew a categorical
+        conclusion from it: "an edit made HERE after the first boot changes
+        nothing at all". That is true of the roles and is not a thing the
+        roles table can decide about `claim_mappings`, whose block is read
+        the first start that finds none stored — not necessarily the first
+        start at all, which is the case `import_claims` was added for.
+
+        Read out of `Store.open` rather than listed here, so a third importer
+        arriving means this fails rather than quietly describing two.
+        """
+        import inspect
+        from wdash.store import Store
+
+        body = inspect.getsource(Store.open)
+        readers = sorted(set(re.findall(
+            r"^\s*(?:\w+\.)*(seed|import_claims)\(", body, re.M)))
+        self.assertEqual(
+            readers, ["import_claims", "seed"],
+            f"Store.open reads rbac.yaml with {readers}; the ConfigMap's "
+            f"comment describes what these do, so it has to be revisited")
+
+        comment = re.search(
+            r"((?:^\s*#.*\n)+)\s*RBAC_CONFIG_FILE:",
+            _read_manifest("configmap.yaml"), re.M).group(1)
+        self.assertTrue(
+            "claim_mappings" in comment,
+            "the comment beside RBAC_CONFIG_FILE describes only `seed`, so "
+            "it states a condition that does not hold for `import_claims` — "
+            "which reads the same file under a different one. It says:\n"
+            + comment)
 
     def test_no_role_asks_for_a_permission_that_was_retired(self):
         """`logs:search` folded into `logs:read` and `user:manage` into
@@ -992,3 +1147,378 @@ class TheBrowserAgentTest(unittest.TestCase):
         self.assertIn("emptyDir", volume)
         self.assertIn("sizeLimit", volume["emptyDir"],
                       "an unbounded emptyDir fills the node's disk")
+
+
+def _hub_from_the_configmap():
+    """The hub an application built from THIS ConfigMap would register.
+
+    The point is the names. `ELASTICSEARCH_URL` registers sources of its own,
+    and which names they take depends on two other keys in the same file —
+    `TRACE_INDEX_PATTERNS` decides whether there is a trace source at all.
+    Built from the file rather than from a fixture, so a ConfigMap that
+    empties one of them is answered honestly.
+    """
+    from wdash.app import create_app
+    from wdash.config import Config
+    from wdash.store.secrets import SecretBox
+
+    data = _config_map()
+
+    def patterns(key):
+        return tuple(p for p in (data.get(key) or "").split(",") if p.strip())
+
+    class FromTheConfigMap(Config):
+        TESTING = True
+        SECRET_KEY = "manifests"
+        DATABASE_URL = "sqlite:///:memory:"
+        ELASTICSEARCH_URL = data["ELASTICSEARCH_URL"]
+        TRACE_INDEX_PATTERNS = patterns("TRACE_INDEX_PATTERNS")
+        MONITOR_INDEX_PATTERNS = patterns("MONITOR_INDEX_PATTERNS")
+        OIDC_CLIENT_ID = None
+        ENCRYPTION_KEY = SecretBox.generate_key()
+
+    return create_app(FromTheConfigMap).hub
+
+
+class TheEnvironmentSourcesTest(unittest.TestCase):
+    """What ELASTICSEARCH_URL in this file registers, and under what names.
+
+    Sources are edited in the product now, and the names matter for more than
+    tidiness: a role's rules address a source by name, a saved link names one,
+    and the repository REFUSES a configured source that collides with one of
+    these — with a message quoting the name. A ConfigMap that names them
+    wrongly sends somebody to look for a source that was never registered.
+
+    This file said the key registers "a source of its own, named
+    elasticsearch". No source has ever been called that.
+    """
+
+    def setUp(self):
+        self.hub = _hub_from_the_configmap()
+        self.registered = set(self.hub.base_source_names())
+
+    def test_the_comment_names_sources_that_exist(self):
+        block = re.search(
+            r"((?:^\s*#.*\n)+)\s*ELASTICSEARCH_URL:",
+            _read_manifest("configmap.yaml"), re.M).group(1)
+        # Lowercase and starting with `elasticsearch`, which is what a source
+        # name looks like here. Not `[a-z]+-[a-z]+`, which was the first
+        # attempt and was worse than nothing: the name this comment actually
+        # carried was a bare `elasticsearch`, with no hyphen, so the pattern
+        # skipped the one thing it existed to find and passed on the two
+        # correct names beside it. A mutation put the bare name back and
+        # survived.
+        #
+        # `ELASTICSEARCH_URL` is excluded by case and `'prod-logs'` by the
+        # prefix — it is the example of a CONFIGURED source in the warning
+        # quoted here, and is deliberately not one of these.
+        named = set(re.findall(r"[`\"'](elasticsearch[a-z-]*)[`\"']", block))
+        self.assertTrue(
+            named,
+            "the comment beside ELASTICSEARCH_URL names no source at all, so "
+            "nobody reading it can tell what the key registers")
+        self.assertEqual(
+            named - self.registered, set(),
+            f"the comment names {sorted(named - self.registered)}, which this "
+            f"ConfigMap registers nothing under. Registered: "
+            f"{sorted(self.registered)}")
+
+    def test_a_configured_source_cannot_take_one_of_those_names(self):
+        """Which is the reason the names have to be right here.
+
+        The form refuses the collision and quotes the name back. Somebody
+        who was told the source is called `elasticsearch` types that, is not
+        refused, and ends up with a source nothing can reach.
+        """
+        from wdash.store.sources import SourceError, _check_name
+
+        for name in sorted(self.registered):
+            with self.subTest(source=name):
+                with self.assertRaises(SourceError):
+                    _check_name(name, self.registered)
+        # And the name the comment used to give is not one of them, which is
+        # why it was never refused and never worked.
+        _check_name("elasticsearch", self.registered)
+
+
+class ThePageTest(unittest.TestCase):
+    """kubernetes/README.md, held against the manifests and the application.
+
+    Nothing read this file until it was wrong in three places at once. It is
+    the only thing in the directory an operator reads end to end before
+    applying anything, so a sentence in here that the code stopped honouring
+    costs more than the same sentence in a comment.
+    """
+
+    def setUp(self):
+        self.page = _page()
+
+    def test_the_ports_it_names_are_the_ports_the_pod_opens(self):
+        """"What is in the pod" is a table of containers and their ports.
+
+        It said the nginx sidecar was on port 80. The sidecar has listened on
+        8080 since it was made to run without privileges — the Deployment,
+        the Service's targetPort, the NetworkPolicy and the nginx.conf all
+        say so, and this table was the only thing left claiming otherwise.
+        An operator debugging with `kubectl port-forward` reads this table.
+        """
+        rows = re.findall(r"^\|\s*`(\w+)`\s*\|([^|]*)\|", self.page, re.M)
+        self.assertTrue(rows, "the page has no container table any more")
+
+        checked = 0
+        for name, description in rows:
+            named = re.findall(r"port (\d+)", description)
+            if not named:
+                continue
+            opened = {str(p["containerPort"])
+                      for p in _container(name).get("ports", [])}
+            for port in named:
+                checked += 1
+                with self.subTest(container=name, port=port):
+                    self.assertIn(
+                        port, opened,
+                        f"the page puts `{name}` on port {port}; the pod "
+                        f"opens {sorted(opened) or 'none'}")
+        self.assertTrue(checked, "the table names no port at all")
+
+    def test_the_probe_table_is_the_probes_the_pod_declares(self):
+        """The page repeats the three probes, which is a fourth copy of them.
+
+        Worth having — an operator reading about a restart loop is on this
+        page, not in the Deployment — and worth checking, because the whole
+        point of /livez and /readyz is that the kubelet stopped asking
+        /health, and a page that went on naming /health would send somebody
+        to debug the endpoint that is deliberately not wired to anything.
+        """
+        container = _container("wdash")
+        declared = {kind: container[f"{kind}Probe"]["httpGet"]["path"]
+                    for kind in ("startup", "liveness", "readiness")}
+
+        rows = dict(re.findall(r"^\|\s*(startup|liveness|readiness)\s*\|"
+                               r"\s*`([^`]+)`\s*\|", self.page, re.M))
+        self.assertEqual(
+            set(rows), set(declared),
+            "the page's probe table does not name the same three probes the "
+            "pod declares")
+        for kind, path in sorted(declared.items()):
+            with self.subTest(probe=kind):
+                self.assertEqual(
+                    rows[kind], path,
+                    f"the page says the {kind} probe asks {rows[kind]}; the "
+                    f"pod asks {path}")
+
+    def test_it_says_what_the_first_sign_in_asks_for(self):
+        """The page walked the reader to `/setup` and stopped there.
+
+        Setup no longer ends at an account. Every local account needs an
+        authenticator, and claiming the installation hands straight over to
+        enrolling one — measured here rather than asserted, because where it
+        hands over is the thing the page has to keep up with.
+        """
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.secrets import SecretBox
+
+        directory = tempfile.mkdtemp()
+
+        class Fresh(Config):
+            TESTING = True
+            SECRET_KEY = "manifests"
+            DATABASE_URL = f"sqlite:///{os.path.join(directory, 'first.db')}"
+            ELASTICSEARCH_URL = ""
+            OIDC_CLIENT_ID = None
+            WTF_CSRF_ENABLED = False
+            ENCRYPTION_KEY = SecretBox.generate_key()
+
+        client = create_app(Fresh).test_client()
+        self.assertEqual(client.get("/").headers.get("Location"), "/setup",
+                         "the first visit no longer lands on /setup")
+
+        claimed = client.post("/setup", data={
+            "username": "operator",
+            "password": "a-long-enough-passphrase-9",
+            "confirm": "a-long-enough-passphrase-9",
+        })
+        landing = claimed.headers.get("Location", "")
+        self.assertTrue(
+            landing, "claiming the installation redirected nowhere")
+        # `assertTrue`, not `assertIn`: a failing `assertIn` prints the
+        # haystack, and the haystack here is the whole page.
+        self.assertTrue(
+            landing in self.page,
+            f"claiming the installation hands over to {landing}, and the "
+            f"page does not mention it — so the reader is told setup ends "
+            f"with an account when it ends with an authenticator")
+
+    def test_it_and_the_secret_agree_about_the_encryption_key(self):
+        """`encryption-key` ships empty, and an empty value is valid base64.
+
+        So a deployment that forgets it starts. What it cannot then do is let
+        anybody sign in locally: the authenticator every local account needs
+        is sealed with this key, and the store refuses to write a secret as
+        plain text. The application says so at start-up as an ERROR; both
+        documents said only that the configuration page would refuse to save
+        a credential, which is the smaller half and reads as a permissions
+        problem.
+
+        The phrase is taken from what the application actually logs, so the
+        two files are held to the application's own words rather than to a
+        sentence written here.
+        """
+        import logging
+
+        from wdash.app import create_app
+        from wdash.config import Config
+
+        class NoKey(Config):
+            TESTING = True
+            SECRET_KEY = "manifests"
+            DATABASE_URL = "sqlite:///:memory:"
+            ELASTICSEARCH_URL = ""
+            OIDC_CLIENT_ID = None
+            ENCRYPTION_KEY = None
+
+        class Captured(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.errors = []
+
+            def emit(self, record):
+                if record.levelno >= logging.ERROR:
+                    self.errors.append(record.getMessage())
+
+        handler = Captured()
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            create_app(NoKey)
+        finally:
+            root.removeHandler(handler)
+
+        spoken = " ".join(handler.errors).lower()
+        self.assertIn(
+            "no local account can sign in", spoken,
+            "the application no longer says this at start-up, so the two "
+            "documents below are quoting something that is gone")
+
+        for name, text in (("kubernetes/README.md", self.page),
+                           ("kubernetes/secrets.yaml",
+                            _read_manifest("secrets.yaml"))):
+            # Whitespace flattened: both documents wrap at 72 or 79, so the
+            # sentence they are held to falls across a line break in places
+            # and would otherwise be found only where it happens to fit.
+            flattened = " ".join(text.lower().split())
+            with self.subTest(document=name):
+                self.assertTrue(
+                    "no local account can sign in" in flattened,
+                    f"{name} does not say what an empty encryption-key "
+                    f"costs, and the application says it as an ERROR")
+
+    def test_the_number_it_gives_for_picking_up_a_source_is_the_real_one(self):
+        """"More than one replica" promises that a source saved on the page
+        reaches every replica within five seconds and without a restart.
+
+        That is the hub's `RELOAD_TTL`, and it is the sentence that decides
+        whether somebody rolls the Deployment after every configuration
+        change. A vague "a few seconds" needed no check; a number does.
+        """
+        from wdash.hub import Hub
+
+        stated = re.search(r"reaches every replica within (\w+)\s*\n?seconds",
+                           self.page)
+        self.assertIsNotNone(
+            stated, "the page no longer says how long a replica takes")
+        words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                 "six": 6, "ten": 10, "thirty": 30}
+        said = words.get(stated.group(1), None) or int(stated.group(1))
+        self.assertEqual(
+            said, int(Hub.RELOAD_TTL),
+            f"the page says {said} seconds; Hub.RELOAD_TTL is "
+            f"{Hub.RELOAD_TTL}")
+
+    def test_the_shell_it_sends_you_to_can_reach_the_store(self):
+        """The page says to exec into the `wdash` container and run the
+        recovery commands there, because `DATABASE_URL` is already in that
+        environment and the commands read it the way the application does.
+
+        Run anywhere else — a laptop, a debug pod — and they default to
+        `sqlite:///data/wdash.db` beside the working directory: a store that
+        is empty, created on the spot, and reported on as though it were the
+        installation. The operator is locked out and has just been shown a
+        healthy-looking answer about nothing.
+        """
+        given = _environment(_container("wdash"))
+        for name in ("DATABASE_URL", "WDASH_ENCRYPTION_KEY"):
+            with self.subTest(variable=name):
+                self.assertIn(
+                    name, given,
+                    f"the page sends a locked-out operator into this "
+                    f"container, and {name} is not in its environment")
+
+    def test_every_recovery_command_it_gives_is_one_that_exists(self):
+        """A way back that does not parse is worse than none.
+
+        The page tells a locked-out operator what to run. Two of those
+        commands exist only because a second factor is mandatory and the
+        one-directory rule can shut everybody out — neither is reachable
+        from a browser, which is the whole point — so a flag that has been
+        renamed strands the reader at the exact moment the page is for.
+        """
+        import argparse
+        import importlib
+
+        quoted = re.findall(r"python -m (wdash\.store\.\w+)((?: +--[\w-]+)*)",
+                            self.page)
+        self.assertTrue(quoted, "the page gives no recovery command at all")
+
+        by_module = {}
+        for module, flags in quoted:
+            by_module.setdefault(module, set()).update(re.findall(r"--[\w-]+",
+                                                                  flags))
+
+        for module, flags in sorted(by_module.items()):
+            parser = _parser_of(importlib.import_module(module))
+            accepted = {option
+                        for action in parser._actions
+                        for option in action.option_strings}
+            for flag in sorted(flags):
+                with self.subTest(command=module, flag=flag):
+                    self.assertIn(
+                        flag, accepted,
+                        f"the page runs `python -m {module} {flag}`, which "
+                        f"that command does not accept")
+
+        self.assertIn(
+            "--reset-totp", by_module.get("wdash.store.recover", set()),
+            "a local account cannot sign in without a code and the page that "
+            "would reset one is behind the sign-in that needs it, so this is "
+            "the only way back and the page has to name it")
+
+
+def _parser_of(module):
+    """The ArgumentParser a `python -m wdash.store.x` command builds.
+
+    Built by calling `main` with `--help` under a parser that records itself,
+    because these modules construct the parser inside `main` rather than at
+    import — which is right for them and awkward for exactly one reader.
+    """
+    import argparse
+
+    captured = []
+    original = argparse.ArgumentParser.parse_args
+
+    def record(self, *arguments, **keywords):
+        captured.append(self)
+        raise SystemExit(0)
+
+    argparse.ArgumentParser.parse_args = record
+    try:
+        try:
+            module.main([])
+        except SystemExit:
+            pass
+    finally:
+        argparse.ArgumentParser.parse_args = original
+
+    assert captured, f"{module.__name__} built no parser"
+    return captured[-1]

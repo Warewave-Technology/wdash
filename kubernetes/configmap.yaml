@@ -33,25 +33,60 @@ data:
   # SQLite is right for one replica. For more than one, point this at
   # Postgres — postgresql+psycopg://user:pass@host/wdash — and then the
   # replica count, the Recreate strategy and the alert evaluator's place in
-  # this pod are all free to change. See kubernetes/README.md.
+  # this pod are all free to change. A plain `postgresql://` is accepted and
+  # normalised to the installed driver, so an address copied out of a
+  # managed-database console works as it is. See kubernetes/README.md.
   DATABASE_URL: "sqlite:////data/wdash.db"
   # Keeps the dashboards and the saved searches with the rest of the
-  # metadata. This is the default; it is spelt out because setting it to
-  # "file" sends them to DASHBOARD_STORAGE_FILE instead, so half the state
-  # is on the volume as JSON and half is in the database.
+  # metadata. This is the DEFAULT and is spelt out only because setting it
+  # to "file" sends them to DASHBOARD_STORAGE_FILE instead, so half the
+  # state is on the volume as JSON and half is in the database.
+  #
+  # Those two values are the whole list. Anything else — one transposed
+  # letter — stops the pod at start-up with a message naming both, rather
+  # than falling through to the JSON store the way it used to: that showed
+  # an empty dashboard list AND an empty saved-search list for data sitting
+  # in the database, with nothing anywhere saying why.
   DASHBOARD_STORAGE: "database"
   # Still read with DASHBOARD_STORAGE=database, in two ways: it is where a
   # switch to "file" would put them, and it is the path the start-up check
   # looks at to tell an upgrade that its old JSON files have not been
   # migrated. On the volume, or an upgrade cannot see them at all.
+  #
+  # That check names both files in full — saved searches are taken from
+  # beside this path — and prints the migration command. The command carries
+  # no --database-url on purpose, because a Postgres address holds a
+  # password and this goes to a log; it therefore has to be run somewhere
+  # DATABASE_URL is already set, which is this pod:
+  #
+  #   kubectl -n wdash exec deploy/wdash -c wdash -- <the printed command>
   DASHBOARD_STORAGE_FILE: "/data/dashboards.json"
 
-  # Elasticsearch.
+  # Elasticsearch, declared in the environment.
   #
-  # This registers a source of its own, named "elasticsearch". If the same
-  # cluster is also declared on the configuration page, both register and a
-  # merged search counts every matching record twice. Pick one; WDash warns
-  # on the configuration page when it sees both.
+  # This is the OLDER of the two ways to give WDash a backend and it still
+  # works. The other one is the configuration page, which is where Loki,
+  # VictoriaLogs, Tempo and any further Elasticsearch clusters are declared,
+  # and which stores what it is given in the metadata database. A deployment
+  # that has moved to the page leaves this empty.
+  #
+  # Set, it registers sources of its own — `elasticsearch-logs`,
+  # `elasticsearch-traces` (unless TRACE_INDEX_PATTERNS below is empty) and
+  # `elasticsearch-monitors`. Those names are not decoration: a role's rules
+  # address a source by name, and the configuration page REFUSES a source
+  # that would take one of them, because the environment's is registered
+  # first and would keep it.
+  #
+  # If the same cluster is ALSO declared on the page, both register and a
+  # merged search counts every matching record twice — silently, because the
+  # totals simply look bigger. WDash says so twice when it sees it: once in
+  # the start-up log, and once as a banner on the configuration page.
+  #
+  #   Source 'prod-logs' points at the same Elasticsearch as
+  #   ELASTICSEARCH_URL (http://elasticsearch:9200). Both are registered, so
+  #   a merged search counts every matching record twice. Unset
+  #   ELASTICSEARCH_URL to keep only the configured source, or delete the
+  #   configured one.
   ELASTICSEARCH_URL: "http://elasticsearch:9200"
   ELASTICSEARCH_TIMEOUT: "30"
   # Certificate verification, and it is off because the URL above is plain
@@ -71,7 +106,24 @@ data:
   # own default names. A deployment that renamed them says so here.
   MONITOR_INDEX_PATTERNS: ""
 
-  # OIDC.
+  # OIDC, declared in the environment — the same older-of-two-ways as
+  # ELASTICSEARCH_URL above. The configuration page declares OIDC and LDAP
+  # too, and stores them.
+  #
+  # AT MOST ONE DIRECTORY SIGNS PEOPLE IN. Not one of each: one. Enabling a
+  # second is refused on the page, and a directory saved there BEATS one
+  # configured here — so filling these keys in on an installation that has
+  # an LDAP card saved changes nothing, and nothing on this side says so.
+  # The answer comes from the pod:
+  #
+  #   kubectl -n wdash exec deploy/wdash -c wdash -- \
+  #       python -m wdash.store.recover --status
+  #   Directory: LDAP (configured on the page); OpenID Connect is configured
+  #   and NOT in use
+  #
+  # `--use-directory ldap|oidc|none` is how it is changed from here, and it
+  # is the only way back when the directory in force is one nobody can sign
+  # in to — the page that would fix it is behind that sign-in.
   #
   # The redirect URI has to be the host in ingress.yaml, over https, or the
   # provider sends the person back to somewhere that is not this application
@@ -87,10 +139,29 @@ data:
 
   # Roles, groups and index boundaries, from the file mounted below.
   #
-  # Read ONCE, when the roles table is empty. After that this file is ignored
-  # and the configuration page is the only editor — so an edit made in the UI
-  # is never overwritten by a restart, and an edit made HERE after the first
-  # boot changes nothing at all.
+  # Roles live in the metadata store now, and the configuration page is their
+  # editor. This file SEEDS them, and it is read by two importers with two
+  # different conditions — which matters, because one of them is not "the
+  # first boot":
+  #
+  #   * the roles, `group_roles`, `user_roles` and `default_role` are read
+  #     when the ROLES TABLE IS EMPTY, which on a new installation is the
+  #     first start and after that is never. A role added here later is not
+  #     imported by a restart;
+  #   * `claim_mappings` is read the first start that finds NONE STORED. On
+  #     a new installation that is the same start — the block below is read
+  #     and kept. It is separate because an installation seeded before WDash
+  #     read the block at all has a full roles table and no stored mapping,
+  #     and went on ignoring its `groups_claim: memberOf` after the upgrade
+  #     that said it would not.
+  #
+  # So: an edit made in the UI is never overwritten by a restart, and an edit
+  # made HERE after the first boot changes nothing — as long as the block is
+  # already stored, which it is because this file ships one. Delete
+  # `claim_mappings` from the ConfigMap and that stops being true: nothing is
+  # stored, every start reads the file again, and a block added months later
+  # takes effect on the next restart. tests/test_kubernetes_manifests.py
+  # measures both halves against two real starts.
   RBAC_CONFIG_FILE: "/etc/config/rbac.yaml"
 
   # Application
@@ -125,13 +196,19 @@ metadata:
     app.kubernetes.io/component: rbac
 data:
   rbac.yaml: |
-    # WDash authorization, imported into the metadata store on FIRST BOOT.
+    # WDash authorization, seeded into the metadata store on FIRST BOOT.
     #
-    # This file is read once, when the roles table is empty, and ignored ever
-    # after — roles are edited on the configuration page from then on. It is
-    # here so a cluster can come up with its group mapping already in place
-    # instead of somebody clicking through the UI; it is NOT a way to change
-    # roles later, and editing it after the first boot does nothing.
+    # The roles here are read once, when the roles table is empty, and
+    # ignored ever after — roles live in the store and the configuration
+    # page is their editor from then on. This file is here so a cluster can
+    # come up with its group mapping already in place instead of somebody
+    # clicking through the UI; it is NOT a way to change roles later, and
+    # editing the roles below after the first boot does nothing.
+    #
+    # `claim_mappings` at the bottom is the one block with a condition of
+    # its own — see the comment beside RBAC_CONFIG_FILE. Keep it here even
+    # if it holds the defaults: a ConfigMap with no such block is re-read on
+    # every single start.
     #
     # The schema is the one src/wdash/store/roles.py reads. This file used to
     # carry an older one — `index_patterns` instead of `indices`, `users:`
