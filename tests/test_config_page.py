@@ -45,7 +45,6 @@ class ConfigTestCase(unittest.TestCase):
             SECRET_KEY = "config-page"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = key
-            OIDC_CLIENT_ID = None
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
@@ -507,28 +506,24 @@ class OneDirectoryOnThePageTest(ConfigTestCase):
                     f" settings refused", self.actions())
                 self.tearDown()
 
-    def test_an_environment_provider_counts_as_the_other_one(self):
-        """It can be turned off from this page — saving the card with Enabled
-        unchecked stores a disabled row — so exempting it would leave the
-        commonest shape with no refusal and no guidance."""
-        self.app.config["OIDC_CLIENT_ID"] = "env-client"
-        self.app.config["OIDC_DISCOVERY_URL"] = "https://env/.well-known/x"
-        page = self.save(LDAP_FORM, enabled="on").get_data(as_text=True)
-        self.assertIn("OpenID Connect is the directory in use here", page)
-        self.assertIn("Enabled unchecked", page)
-        self.assertIsNone(self.app.store.settings.get("auth.ldap"))
-
     def test_the_directory_in_force_can_still_be_edited(self):
         """Otherwise an administrator on that installation can never touch
         the settings of the directory they are actually using."""
-        self.app.config["OIDC_CLIENT_ID"] = "env-client"
-        self.app.config["OIDC_DISCOVERY_URL"] = "https://env/.well-known/x"
         self.save(OIDC_FORM, enabled="on")
         page = self.save(OIDC_FORM, client_id="renamed",
                          enabled="on").get_data(as_text=True)
         self.assertNotIn("directory in use here", page)
         self.assertEqual(self.app.store.settings.get("auth.oidc")["client_id"],
                          "renamed")
+
+    def test_the_refusal_names_no_variable_and_says_how_to_switch(self):
+        self.save(OIDC_FORM, enabled="on")
+        page = self.save(LDAP_FORM, enabled="on").get_data(as_text=True)
+        self.assertIn("OpenID Connect is the directory in use here", page)
+        self.assertIn("turn it off on this page and save, then enable LDAP",
+                      page)
+        self.assertNotIn("environment", page.split("directory in use here")[1]
+                         [:600])
 
     def test_turning_the_second_one_off_is_never_refused(self):
         self.save(LDAP_FORM, enabled="on")
@@ -566,11 +561,12 @@ class DirectorySwitchTest(ConfigTestCase):
 
     def test_the_sentence_lands_on_the_save_that_turns_the_old_one_off(self):
         """The handover happens there whenever the incoming directory is
-        already configured — the environment shape, and the shape the demo is
-        in. Keyed to the checkbox that switches a directory ON, the sentence
-        would never appear on this path at all."""
-        self.app.config["OIDC_CLIENT_ID"] = "env-client"
-        self.app.config["OIDC_DISCOVERY_URL"] = "https://env/.well-known/x"
+        already stored and enabled — the shape an installation that once had
+        both is in. Keyed to the checkbox that switches a directory ON, the
+        sentence would never appear on this path at all."""
+        self.app.store.settings.set("auth.oidc", {
+            "client_id": "wdash", "enabled": True,
+            "discovery_url": "https://idp/.well-known/openid-configuration"})
         self.app.store.settings.set("auth.ldap", {
             "server": "ldaps://ldap:636", "base_dn": "dc=x", "enabled": True})
 
@@ -758,7 +754,7 @@ class TwoDirectoriesAreReportedTest(unittest.TestCase):
         if os.path.exists(self.database):
             os.unlink(self.database)
 
-    def build(self, oidc_client_id=None):
+    def build(self):
         database, key = self.database, self.key
 
         class TestConfig(Config):
@@ -766,9 +762,6 @@ class TwoDirectoriesAreReportedTest(unittest.TestCase):
             SECRET_KEY = "two-directories"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = key
-            OIDC_CLIENT_ID = oidc_client_id
-            OIDC_DISCOVERY_URL = ("https://env/.well-known/openid-configuration"
-                                  if oidc_client_id else None)
 
         return create_app(TestConfig)
 
@@ -776,12 +769,16 @@ class TwoDirectoriesAreReportedTest(unittest.TestCase):
         first = self.build()
         client = first.test_client()
         secret = support.set_up(client, username="owner", password=PASSWORD)
+        # Both rows enabled — written by an earlier version, or by hand —
+        # and a restart: nobody pressed anything, and the installation has
+        # two. LDAP saved last, so it is the one in force.
+        first.store.settings.set("auth.oidc", {
+            "client_id": "wdash", "enabled": True,
+            "discovery_url": "https://idp/.well-known/openid-configuration"})
         first.store.settings.set("auth.ldap", {
             "server": "ldaps://ldap:636", "base_dn": "dc=x", "enabled": True})
 
-        # A restart with the environment provider also configured: nobody
-        # pressed anything, and the installation now has two.
-        second = self.build(oidc_client_id="env-client")
+        second = self.build()
         rows = [row for row in second.store.audit.recent()
                 if row["action"] == "two directories configured"]
         self.assertEqual(len(rows), 1)
@@ -1238,7 +1235,6 @@ class SecretsUnavailableTest(unittest.TestCase):
             SECRET_KEY = "no-key"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = key
-            OIDC_CLIENT_ID = None
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
@@ -1270,6 +1266,37 @@ class SecretsUnavailableTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class OidcScopesTest(ConfigTestCase):
+    """The scopes a sign-in asks for are on the card, with the rest of the
+    provider. They were an environment variable, the one part of the
+    provider the page could not change — a provider that refused a scope it
+    did not know needed a redeploy."""
+
+    def save(self, **overrides):
+        return self.client.post("/admin/auth", data={**OIDC_FORM, **overrides,
+                                                     "enabled": "on"},
+                                follow_redirects=True)
+
+    def test_the_field_is_stored_and_used(self):
+        from wdash.auth.providers import oidc_settings
+        self.save(scopes="openid email")
+        self.assertEqual(self.app.store.settings.get("auth.oidc")["scopes"],
+                         "openid email")
+        self.assertEqual(oidc_settings(self.app)["scopes"], "openid email")
+
+    def test_a_blank_field_is_stored_blank_so_a_changed_default_reaches_it(self):
+        from wdash.auth.providers import oidc_settings
+        self.save()
+        self.assertEqual(self.app.store.settings.get("auth.oidc")["scopes"], "")
+        self.assertIsNone(oidc_settings(self.app)["scopes"])
+
+    def test_the_card_shows_what_is_stored(self):
+        self.save(scopes="openid email")
+        page = self.client.get("/admin/config").get_data(as_text=True)
+        self.assertIn('name="scopes"', page)
+        self.assertIn('value="openid email"', page)
 
 
 class AStoredSourceNeedsAnAddressTest(ConfigTestCase):

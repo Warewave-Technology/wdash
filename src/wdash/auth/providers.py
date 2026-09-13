@@ -1,15 +1,12 @@
 """
 Which identity provider settings are actually in force.
 
-Two places can configure a provider: the environment (how it has always
-worked) and the configuration page (how it works now). Both have to keep
-working, so the rule is stated once here rather than guessed at each call site:
-
-    a provider configured in the store wins; otherwise the environment is used
-
-The store wins because it is the thing an administrator just edited. If the
-environment took precedence, the config page would save successfully and change
-nothing — the same illusion that made permissions-in-the-cookie a bug.
+A provider is configured in one place — the configuration page, whose card
+is stored in the metadata database — so the rule that decides which one
+signs people in is a function of the stored rows and nothing else. There
+used to be a second place: the environment could declare an OpenID Connect
+provider, a stored row shadowed it, and every rule here carried a flag for
+"is one configured in the environment". That path is gone.
 
 `enabled` is honoured separately from completeness. Turning a provider off must
 disable it even though its settings are still filled in, or the switch is
@@ -33,17 +30,17 @@ admin mapping and opened her private dashboard, and the audit trail showed two
 ordinary sign-in rows.
 
 Which one is in force is decided here, once, from CONFIGURATION — a settings
-row that exists and is enabled, or, for OIDC only, the environment pair when
-no row exists at all. Deliberately not from usability: deciding it from
-"usable" while refusing the second one from "configured" means an LDAP whose
-bind password can no longer be decrypted stops shadowing an environment OIDC,
-and the installation silently changes directory with no banner and no audit
-row. Usability is reported separately, and a directory in force that cannot be
-used takes the sign-in door with it rather than handing it to the other one.
+row that exists and is enabled. Deliberately not from usability: deciding it
+from "usable" while refusing the second one from "configured" means an LDAP
+whose bind password can no longer be decrypted stops shadowing the other
+directory, and the installation silently changes directory with no banner and
+no audit row. Usability is reported separately, and a directory in force that
+cannot be used takes the sign-in door with it rather than handing it to the
+other one.
 
-    1. Configured in the store beats configured only in the environment.
-    2. Both stored and enabled: the row saved most recently is in force, ties
+    1. Both stored and enabled: the row saved most recently is in force, ties
        broken in favour of LDAP, so the answer never depends on row order.
+    2. One: that one.
     3. Neither: no directory. Local accounts are unaffected.
 
 `directory(app)` answers in NAMES and a sentence and never returns the
@@ -92,16 +89,18 @@ def _later(one, other):
         return False
 
 
-def resolve(rows, environment_oidc=False):
-    """Which directory is in force, from configuration alone.
+def resolve(rows):
+    """Which directory is in force, from the stored rows alone.
 
-    `rows` is `store.settings.all(prefix="auth.")`, `environment_oidc` says
-    whether OIDC_CLIENT_ID and OIDC_DISCOVERY_URL are both set. Pure, so the
-    page, the sign-in form, the startup check and the recovery tool all get
-    the same answer from the same rule.
+    `rows` is `store.settings.all(prefix="auth.")`. Pure, so the page, the
+    sign-in form, the startup check and the recovery tool all get the same
+    answer from the same rule. It took a second argument once — whether the
+    environment configured an OpenID Connect provider — and every branch
+    below had a case for it; there is one place a provider comes from now.
 
     Returns {"in_force", "shadowed", "sources"}, where `sources` is
-    {"ldap": "configuration"|None, "oidc": "configuration"|"environment"|None}.
+    {"ldap": "configuration"|None, "oidc": "configuration"|None} — a row that
+    exists and is enabled, or nothing.
     """
     def stored(key):
         row = rows.get(key) or {}
@@ -113,19 +112,12 @@ def resolve(rows, environment_oidc=False):
     sources = {"ldap": None, "oidc": None}
     if ldap_value and ldap_value.get("enabled"):
         sources["ldap"] = "configuration"
-    if oidc_value is not None:
-        # A stored row answers for OIDC whether it is on or off. That is what
-        # makes "save the card with Enabled unchecked" turn an environment
-        # provider off, which is the only in-page way to do it.
-        if oidc_value and oidc_value.get("enabled"):
-            sources["oidc"] = "configuration"
-    elif environment_oidc:
-        sources["oidc"] = "environment"
+    if oidc_value and oidc_value.get("enabled"):
+        sources["oidc"] = "configuration"
 
     both = bool(sources["ldap"] and sources["oidc"])
     if both:
-        in_force = ("ldap" if sources["oidc"] == "environment"
-                    else ("oidc" if _later(oidc_at, ldap_at) else "ldap"))
+        in_force = "oidc" if _later(oidc_at, ldap_at) else "ldap"
     elif sources["ldap"]:
         in_force = "ldap"
     elif sources["oidc"]:
@@ -141,13 +133,7 @@ def resolve(rows, environment_oidc=False):
 def _state(app):
     store = _store(app)
     rows = store.settings.all(prefix="auth.") if store is not None else {}
-    return resolve(rows, bool(app.config.get("OIDC_CLIENT_ID")
-                              and app.config.get("OIDC_DISCOVERY_URL")))
-
-
-def _where(source):
-    return ("on this page" if source == "configuration"
-            else "in the environment")
+    return resolve(rows)
 
 
 def _reason(state, unusable):
@@ -158,18 +144,13 @@ def _reason(state, unusable):
     in_force, shadowed = state["in_force"], state["shadowed"]
     said = []
     if shadowed:
-        how = (f"turn {LABELS[in_force]} off on this page and save, then "
-               f"enable {LABELS[shadowed]}"
-               if state["sources"][shadowed] == "configuration"
-               else f"turn {LABELS[in_force]} off on this page and save")
         said.append(
             f"Two directories are configured here and WDash signs people in "
-            f"through one at a time. {LABELS[in_force]} is in force "
-            f"(configured {_where(state['sources'][in_force])}); "
-            f"{LABELS[shadowed]} is configured "
-            f"{_where(state['sources'][shadowed])} and is not in use. To use "
-            f"{LABELS[shadowed]} instead, {how}. From the command line: "
-            f"{RECOVERY}.")
+            f"through one at a time. {LABELS[in_force]} is in force; "
+            f"{LABELS[shadowed]} is configured and is not in use. To use "
+            f"{LABELS[shadowed]} instead, turn {LABELS[in_force]} off on this "
+            f"page and save, then enable {LABELS[shadowed]}. From the "
+            f"command line: {RECOVERY}.")
     if in_force is not None and unusable:
         said.append(
             f"{LABELS[in_force]} is the directory in force here and its saved "
@@ -253,18 +234,12 @@ def refuses_second_directory(app, which, enabling):
     if in_force is None or in_force == which:
         return None
 
-    source = _state(app)["sources"][in_force]
-    how = ("turn it off on this page and save"
-           if source == "configuration" else
-           "save the OpenID Connect card with Enabled unchecked, which stores "
-           "a disabled row and turns the environment's provider off")
-    return (f"{LABELS[in_force]} is the directory in use here"
-            f"{'' if source == 'configuration' else ' (configured in the environment)'}"
-            f", and WDash signs people in through one directory at a time — "
-            f"otherwise a name at one directory belongs to somebody at the "
-            f"other. {LABELS[which]} was not enabled and nothing was saved. To "
-            f"switch: {how}, then enable {LABELS[which]}. From the command "
-            f"line: {RECOVERY}.")
+    return (f"{LABELS[in_force]} is the directory in use here, and WDash "
+            f"signs people in through one directory at a time — otherwise a "
+            f"name at one directory belongs to somebody at the other. "
+            f"{LABELS[which]} was not enabled and nothing was saved. To "
+            f"switch: turn it off on this page and save, then enable "
+            f"{LABELS[which]}. From the command line: {RECOVERY}.")
 
 
 #: Which claims name a person, unless something more specific says otherwise.
@@ -308,55 +283,39 @@ def _oidc_effective(app, if_enabled=False):
     question asked of a directory nobody is using yet.
     """
     store = _store(app)
-    if store is not None:
-        stored = store.settings.get(OIDC_KEY)
-        if stored is not None and (stored.get("enabled") or if_enabled):
-            try:
-                secret = store.settings.secret(OIDC_KEY)
-            except Exception as exc:
-                # A key that has changed since the secret was written. Say so:
-                # falling back to the environment here would sign people in
-                # against a provider the administrator thought they had
-                # replaced.
-                logger.error(f"OIDC client secret could not be read: {exc}")
-                return None, "the client secret could not be decrypted"
-            if stored.get("client_id") and stored.get("discovery_url"):
-                return {
-                    "client_id": stored["client_id"],
-                    "client_secret": secret or "",
-                    "discovery_url": stored["discovery_url"],
-                    "redirect_uri": stored.get("redirect_uri")
-                    or app.config.get("OIDC_REDIRECT_URI"),
-                    "source": "configuration",
-                    **_claims(app, stored),
-                }, None
-            logger.warning(
-                "OIDC is enabled but incomplete (client id and discovery URL "
-                "are both required); it will not be offered")
-            return None, ("a client id and a discovery URL are both required "
-                          "and one of them is blank")
-        if stored is not None and not stored.get("enabled"):
-            # Explicitly turned off. Do NOT fall back to the environment —
-            # that would make the switch do nothing on a deployment that has
-            # both, which is every deployment that has just migrated.
-            return None, None
+    if store is None:
+        return None, None
 
-    if app.config.get("OIDC_CLIENT_ID") and app.config.get("OIDC_DISCOVERY_URL"):
-        return {
-            "client_id": app.config["OIDC_CLIENT_ID"],
-            "client_secret": app.config.get("OIDC_CLIENT_SECRET") or "",
-            "discovery_url": app.config["OIDC_DISCOVERY_URL"],
-            "redirect_uri": app.config.get("OIDC_REDIRECT_URI"),
-            "source": "environment",
-            **_claims(app, {
-                "username_claim": app.config.get("OIDC_USERNAME_CLAIM"),
-                "email_claim": app.config.get("OIDC_EMAIL_CLAIM"),
-                "groups_claim": app.config.get("OIDC_GROUPS_CLAIM"),
-                "trust_unverified_email":
-                    app.config.get("OIDC_TRUST_UNVERIFIED_EMAIL"),
-            }),
-        }, None
-    return None, None
+    stored = store.settings.get(OIDC_KEY)
+    if stored is None or not (stored.get("enabled") or if_enabled):
+        return None, None
+    try:
+        secret = store.settings.secret(OIDC_KEY)
+    except Exception as exc:
+        # A key that has changed since the secret was written. Say so, and
+        # offer nothing: signing people in against some other provider would
+        # be worse than signing nobody in.
+        logger.error(f"OIDC client secret could not be read: {exc}")
+        return None, "the client secret could not be decrypted"
+    if not (stored.get("client_id") and stored.get("discovery_url")):
+        logger.warning(
+            "OIDC is enabled but incomplete (client id and discovery URL "
+            "are both required); it will not be offered")
+        return None, ("a client id and a discovery URL are both required "
+                      "and one of them is blank")
+    return {
+        "client_id": stored["client_id"],
+        "client_secret": secret or "",
+        "discovery_url": stored["discovery_url"],
+        # Blank is left blank: the route that starts a sign-in derives this
+        # WDash's own callback from the request, which this function — also
+        # run by the recovery tool, outside any request — cannot.
+        "redirect_uri": stored.get("redirect_uri") or None,
+        # Blank means the default the sign-in asks for; see auth.init_oauth.
+        "scopes": stored.get("scopes") or None,
+        "source": "configuration",
+        **_claims(app, stored),
+    }, None
 
 
 def oidc_settings(app):

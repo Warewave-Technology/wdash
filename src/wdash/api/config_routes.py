@@ -761,7 +761,9 @@ def save_auth():
             "discovery_url": (request.form.get("discovery_url") or "").strip(),
             "redirect_uri": (request.form.get("redirect_uri") or "").strip(),
             # Blank is "use the default", and saved as blank so a default
-            # that changes reaches this installation too.
+            # that changes reaches this installation too. The scopes as
+            # well: blank asks for what auth.DEFAULT_SCOPES says.
+            "scopes": (request.form.get("scopes") or "").strip(),
             "username_claim": (request.form.get("username_claim") or "").strip(),
             "email_claim": (request.form.get("email_claim") or "").strip(),
             "groups_claim": (request.form.get("groups_claim") or "").strip(),
@@ -843,10 +845,10 @@ def save_auth():
 
     after = directory(current_app)
     # A switch is the save where the RESOLUTION changes, not the save where a
-    # checkbox does. On the shape this installation is most likely to be in —
-    # a directory on this page and another in the environment — the handover
-    # happens on the save that turns the first one OFF, and no second save
-    # follows; keyed to the checkbox, the sentence would never appear.
+    # checkbox does. With both directories stored and enabled the handover
+    # happens on the save that turns the one in force OFF — the other takes
+    # over on that very save, and no second save follows; keyed to the
+    # checkbox, the sentence would never appear.
     switched = (after["in_force"] is not None
                 and after["in_force"] != before["in_force"])
     inherited = _inherited(store) if switched else None

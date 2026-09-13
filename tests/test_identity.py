@@ -41,7 +41,6 @@ class IdentityTestCase(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "identity"
             DATABASE_URL = f"sqlite:///{database}"
-            OIDC_CLIENT_ID = None
             # Stated, not inherited. A local account cannot finish signing in
             # without a key: its authenticator's secret is sealed with this
             # one, and WDash refuses to write a secret as plain text. The
@@ -150,7 +149,6 @@ class SetupFormTest(IdentityTestCase):
             TESTING = True
             SECRET_KEY = "keyless"
             DATABASE_URL = f"sqlite:///{database}"
-            OIDC_CLIENT_ID = None
             ENCRYPTION_KEY = None
 
         client = create_app(Keyless).test_client()
@@ -166,7 +164,6 @@ class SetupFormTest(IdentityTestCase):
             TESTING = True
             SECRET_KEY = "keyless"
             DATABASE_URL = f"sqlite:///{database}"
-            OIDC_CLIENT_ID = None
             ENCRYPTION_KEY = None
 
         app = create_app(Keyless)
@@ -454,22 +451,23 @@ class OidcScopeTest(unittest.TestCase):
     to return, including groups nobody asked for.
     """
 
-    def _registered_scope(self, config=None):
+    def _registered_scope(self, scopes=None):
+        """The scope the client is registered with, for a card whose Scopes
+        field holds `scopes` — None for a card without the field, as one
+        saved before it existed."""
         from wdash.auth.auth import init_oauth
 
         settings = {"client_id": "wdash", "client_secret": "secret",
                     "discovery_url": "https://idp.invalid/.well-known/"
                                      "openid-configuration",
                     "redirect_uri": "http://127.0.0.1:5001/auth/callback"}
+        if scopes is not None:
+            settings["scopes"] = scopes
 
         class OidcConfig(Config):
             TESTING = True
             SECRET_KEY = "scope"
             DATABASE_URL = "sqlite:///:memory:"
-
-        if config:
-            for name, value in config.items():
-                setattr(OidcConfig, name, value)
 
         app = create_app(OidcConfig)
         with app.app_context():
@@ -486,9 +484,15 @@ class OidcScopeTest(unittest.TestCase):
 
     def test_a_deployment_can_override_it(self):
         """An authorization server MAY refuse a scope it does not recognise.
-        A deployment that meets one needs a way out that is not a fork."""
-        scope = self._registered_scope({"OIDC_SCOPES": "openid email"})
-        self.assertEqual(scope, "openid email")
+        A deployment that meets one needs a way out that is not a fork: the
+        Scopes field on the OpenID Connect card."""
+        self.assertEqual(self._registered_scope("openid email"), "openid email")
+
+    def test_a_blank_field_asks_for_the_default(self):
+        """Blank is what a card saved with the field untouched holds, and a
+        sign-in that asked for no scope at all would not even get `openid`."""
+        self.assertIn("groups", self._registered_scope("").split())
+        self.assertIn("openid", self._registered_scope("").split())
 
 
 class KnockingTest(IdentityTestCase):
@@ -790,35 +794,19 @@ class ClaimSettingsTest(IdentityTestCase):
         settings = oidc_settings(self.app)
         self.assertEqual({key: settings[key] for key in stored}, stored)
 
-    def test_the_environment_can_name_them(self):
+    def test_the_card_can_name_them_and_trust_an_unverified_address(self):
+        """Every claim, and the trust switch, from the one place a provider
+        is configured."""
         from wdash.auth.providers import oidc_settings
-        self.app.config.update(OIDC_CLIENT_ID="c", OIDC_DISCOVERY_URL="https://i/.w",
-                               OIDC_GROUPS_CLAIM="cognito:groups",
-                               OIDC_USERNAME_CLAIM="sub",
-                               OIDC_EMAIL_CLAIM="mail",
-                               OIDC_TRUST_UNVERIFIED_EMAIL=True)
+        self.app.store.settings.set("auth.oidc", {
+            "enabled": True, "client_id": "c", "discovery_url": "https://i/.w",
+            "groups_claim": "cognito:groups", "username_claim": "sub",
+            "email_claim": "mail", "trust_unverified_email": True})
         settings = oidc_settings(self.app)
         self.assertEqual(settings["groups_claim"], "cognito:groups")
         self.assertEqual(settings["username_claim"], "sub")
         self.assertEqual(settings["email_claim"], "mail")
         self.assertIs(settings["trust_unverified_email"], True)
-
-    def test_the_trust_switch_is_read_from_the_environment_as_written(self):
-        """In a process of its own: `Config` reads the environment once, at
-        import, and reloading it here would leave two classes behind."""
-        import subprocess
-        source = os.path.join(os.path.dirname(__file__), "..", "src")
-        for written, meant in (("true", True), ("1", True), ("yes", True),
-                               ("false", False), ("", False)):
-            with self.subTest(written=written):
-                environment = {**os.environ, "WDASH_NO_DOTENV": "1",
-                               "PYTHONPATH": source,
-                               "OIDC_TRUST_UNVERIFIED_EMAIL": written}
-                shown = subprocess.run(
-                    [sys.executable, "-c", "from wdash.config import Config; "
-                     "print(Config.OIDC_TRUST_UNVERIFIED_EMAIL)"],
-                    env=environment, capture_output=True, text=True, check=True)
-                self.assertEqual(shown.stdout.strip(), str(meant))
 
     def test_what_is_stored_is_not_overwritten_by_a_restart(self):
         """An installation whose provider sends `memberOf` has that stored.
@@ -853,7 +841,6 @@ class SetupRoleTest(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "setup-role"
             DATABASE_URL = f"sqlite:///{database}"
-            OIDC_CLIENT_ID = None
             ENCRYPTION_KEY = SecretBox.generate_key()
 
         app = create_app(TestConfig)

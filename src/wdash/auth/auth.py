@@ -29,6 +29,14 @@ PENDING = 'pending_totp'
 #: password and the code is not a way in.
 PENDING_MINUTES = 5
 
+#: What a sign-in asks the provider for when the card's Scopes field is
+#: blank. `groups` is in it because this product maps groups to roles — the
+#: callback reads the groups claim — and a provider that gates the claim
+#: behind a scope sends nothing without it. Dex does; so do Keycloak and
+#: Okta with the usual configuration.
+DEFAULT_SCOPES = 'openid email profile groups'
+
+
 def init_oauth(app, settings=None):
     """Build the OIDC client from whatever settings are currently in force.
 
@@ -46,23 +54,16 @@ def init_oauth(app, settings=None):
         client_id=settings['client_id'],
         client_secret=settings['client_secret'],
         server_metadata_url=settings['discovery_url'],
-        # `groups` is in the default because this product maps groups to
-        # roles — the callback reads the groups claim (`groups_claim`, from
-        # the configuration page, the environment or the stored claim
-        # mappings) — and a provider that gates the claim behind a scope
-        # sends nothing without it. Dex does; so do Keycloak and Okta with
-        # the usual configuration.
+        # Measured in the lab: without `groups` in the scope every OIDC
+        # identity signed in perfectly and landed on the DEFAULT role,
+        # whatever directory groups it held. Nothing failed, nothing logged,
+        # and the only symptom was an administrator who could not see the
+        # configuration page.
         #
-        # Measured in the lab: without this every OIDC identity signed in
-        # perfectly and landed on the DEFAULT role, whatever directory groups
-        # it held. Nothing failed, nothing logged, and the only symptom was
-        # an administrator who could not see the configuration page.
-        #
-        # Configurable because an authorization server MAY refuse a scope it
-        # does not recognise, and a deployment that meets one needs a way out
-        # that is not a fork.
-        client_kwargs={'scope': current_app.config.get(
-            'OIDC_SCOPES', 'openid email profile groups')},
+        # The card's Scopes field overrides the default, because an
+        # authorization server MAY refuse a scope it does not recognise, and
+        # a deployment that meets one needs a way out that is not a fork.
+        client_kwargs={'scope': settings.get('scopes') or DEFAULT_SCOPES},
     )
     return oauth, oidc
 
@@ -595,7 +596,14 @@ def oidc_login():
     # is given one.
     nonce = secrets.token_urlsafe(24)
     session['oidc_nonce'] = nonce
-    return oidc.authorize_redirect(settings['redirect_uri'], nonce=nonce)
+    # A blank Redirect URI on the card means this WDash's own callback, as
+    # the browser reached it — right on a laptop, where it used to be an
+    # environment default of http://127.0.0.1:5001/auth/callback. Behind a
+    # proxy that terminates TLS the request arrives as plain http, so the
+    # card says to type the https address there.
+    redirect_uri = (settings.get('redirect_uri')
+                    or url_for('auth.callback', _external=True))
+    return oidc.authorize_redirect(redirect_uri, nonce=nonce)
 
 
 @auth_bp.route('/callback')

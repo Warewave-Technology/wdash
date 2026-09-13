@@ -211,20 +211,22 @@ Dave is there on purpose. What a directory returns for somebody who
 authenticates and is entitled to nothing is a different path through the code
 from a refused password, and it is the one that tends to be wrong.
 
-Point WDash at both:
+Point WDash at both, on the configuration page under **Authentication** —
+the only place a directory is configured:
 
-```bash
-# LDAP — the settings the configuration page asks for
-LDAP_SERVER=ldap://localhost:1389
-LDAP_BASE_DN=dc=lab,dc=local
-LDAP_BIND_DN=cn=admin,dc=lab,dc=local
-LDAP_BIND_PASSWORD=hunter2
+```
+# The LDAP card
+Server            ldap://localhost:1389
+Base DN           dc=lab,dc=local
+Bind DN           cn=admin,dc=lab,dc=local
+Bind password     hunter2
 
-# OIDC
-OIDC_CLIENT_ID=wdash
-OIDC_CLIENT_SECRET=wdash-lab-secret
-OIDC_DISCOVERY_URL=http://localhost:5556/dex/.well-known/openid-configuration
-OIDC_REDIRECT_URI=http://127.0.0.1:5001/auth/callback
+# The OpenID Connect card
+Discovery URL     http://localhost:5556/dex/.well-known/openid-configuration
+Client ID         wdash
+Client secret     wdash-lab-secret
+Redirect URI      http://127.0.0.1:5001/auth/callback  (or blank: it is
+                  derived from the address the browser used)
 ```
 
 Dex reads the same directory rather than carrying its own users, which is
@@ -234,12 +236,12 @@ identity truth and two paths to it: alice through LDAP and alice through OIDC
 should reach the same role, and if they do not, one of the two paths is
 wrong.
 
-**WDash itself uses one of those paths at a time.** Both can be configured
-here — that is what makes the lab useful for testing the rule — but only one
-signs people in: with LDAP stored on the configuration page and OIDC in the
-environment above, the stored LDAP is in force and the environment provider is
-shadowed, reported in the log, in an audit row and on `/admin/config`. To try
-the other path instead, turn LDAP off on the page and save, or run
+**WDash itself uses one of those paths at a time.** Both cards can be saved
+— that is what makes the lab useful for testing the rule — but only one
+signs people in: enabling the second is refused, and with both enabled the
+card saved most recently is in force and the other is shadowed, reported in
+the log, in an audit row and on `/admin/config`. To try the other path,
+turn the first off on the page and save, then enable the other, or run
 `python -m wdash.store.recover --use-directory oidc`.
 
 And measured here: this Dex sends no `preferred_username`, so alice arrives as
@@ -262,8 +264,8 @@ Worth reading before adding to it, because each cost an hour:
 * **WDash was not asking for the `groups` scope.** Dex gates the claim behind
   it, so every OIDC identity signed in perfectly and landed on the default
   role — no error, no log line, and an administrator who could not see the
-  configuration page. Fixed in `auth.py`; `OIDC_SCOPES` overrides it for a
-  provider that refuses the scope.
+  configuration page. Fixed in `auth.py`; the Scopes field on the OpenID
+  Connect card overrides it for a provider that refuses the scope.
 
 ### The group names are namespaced on purpose
 

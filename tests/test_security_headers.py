@@ -44,7 +44,6 @@ class HeaderTestCase(unittest.TestCase):
             SECRET_KEY = "headers"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            OIDC_CLIENT_ID = None
             SESSION_COOKIE_SECURE = secure
 
         self.app = create_app(TestConfig)

@@ -209,7 +209,27 @@
             <div class="mb-2">
               <label class="form-label small">Redirect URI</label>
               <input class="form-control form-control-sm" name="redirect_uri"
+                     placeholder="https://wdash.example.com/auth/callback"
                      value="{{ oidc.value.redirect_uri if oidc.value else '' }}">
+              <div class="form-text">
+                Blank uses this WDash's own <code>/auth/callback</code> as the
+                browser reached it, which is right on a laptop. Behind a proxy
+                that terminates TLS, type the <code>https://</code> address
+                here and register the same one at the provider.
+              </div>
+            </div>
+            <div class="mb-2">
+              <label class="form-label small">Scopes</label>
+              <input class="form-control form-control-sm" name="scopes"
+                     placeholder="openid email profile groups"
+                     value="{{ oidc.value.scopes if oidc.value and oidc.value.scopes else '' }}">
+              <div class="form-text">
+                Blank asks for the placeholder. <code>groups</code> is in it
+                because roles are mapped from groups, and a provider that gates
+                that claim behind a scope sends nothing without it; a provider
+                that refuses a scope it does not know needs the list changed
+                here.
+              </div>
             </div>
             <div class="row g-2 mb-2">
               {% for field, default in (("username_claim", "preferred_username"),
@@ -505,11 +525,9 @@
     what makes this page safe to experiment on: a wrong setting costs the
     single sign-on button, not your way back in.
     <br>
-    A provider switched off is off, even with its settings still filled in.
-    WDash does not fall back to the environment in that case &mdash; otherwise
-    the switch would do nothing on a deployment that has both. That is also
-    how an OIDC provider configured in the environment is turned off from
-    here: save the card with <strong>Enabled</strong> unchecked.
+    A provider switched off is off, even with its settings still filled in,
+    and this page is the only place a provider is configured &mdash; nothing
+    about one is read from the environment.
     <br>
     <strong>At most one directory signs people in.</strong> Either LDAP or
     OpenID Connect, never both: a dashboard belongs to a username and a role

@@ -57,8 +57,7 @@ kubectl create namespace wdash
 
 kubectl -n wdash create secret generic wdash-secrets \
     --from-literal=secret-key="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" \
-    --from-literal=encryption-key="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" \
-    --from-literal=oidc-client-secret=""
+    --from-literal=encryption-key="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 ```
 
 Back the encryption key up with the database and not separately from it.
@@ -73,21 +72,25 @@ apply would overwrite whatever you created here with empty values, and the
 next restart would refuse to start on a session key it no longer had. Create
 the Secret once, keep the file as the record of what goes in it.
 
-**2. The hostname**, in two files that have to agree: the `host` and `tls`
-entries in `ingress.yaml`, and `OIDC_REDIRECT_URI` in `configmap.yaml`. A
-mismatch surfaces as the identity provider refusing an unknown redirect URI,
-which names neither file.
+**2. The hostname**: the `host` and `tls` entries in `ingress.yaml`. The
+redirect URI typed on the OpenID Connect card after the first sign-in has to
+be `https://<that host>/auth/callback`, and the same URI registered at the
+provider; a mismatch surfaces as the provider refusing an unknown redirect
+URI, which names neither.
 
-Nothing in these files names a data source, and nothing needs to. **Sources
-are declared on the configuration page** after the first sign-in and stored
-in the metadata database: Elasticsearch, Loki, VictoriaLogs, Jaeger, Tempo,
-one cluster or several, each with its own credentials, index patterns and
-certificate authority. An earlier version of these files declared one
-Elasticsearch in the ConfigMap as well, with its credentials in the Secret;
-a pod that still carries those keys is told so at start-up, as an ERROR
-naming them, and reads nothing from them — so add the cluster on the page
-before upgrading such a deployment, or its logs, traces and monitors pages
-come up with no source.
+Nothing in these files names a data source or a directory, and nothing needs
+to. **Sources are declared on the configuration page** after the first
+sign-in and stored in the metadata database: Elasticsearch, Loki,
+VictoriaLogs, Jaeger, Tempo, one cluster or several, each with its own
+credentials, index patterns and certificate authority. **So are OpenID
+Connect and LDAP**, under Authentication, the client secret and bind password
+sealed with the encryption key. An earlier version of these files declared
+one Elasticsearch and an OpenID Connect provider in the ConfigMap as well,
+with their credentials in the Secret; a pod that still carries those keys is
+told so at start-up, as an ERROR naming them, and reads nothing from them —
+so add the cluster and save the provider on the page before upgrading such
+a deployment, or its logs, traces and monitors pages come up with no source
+and nobody signs in through the provider until somebody does.
 
 ## Apply
 
@@ -117,6 +120,11 @@ address, its credentials, and which indices hold logs, traces and synthetic
 monitors. It is in use the moment it is saved, on every replica, with no
 restart. Until one is saved the logs, traces and monitors pages say they
 have no source, which is the truth rather than an outage.
+
+**And the directory**, under **Configuration → Authentication**: the OpenID
+Connect card or the LDAP card, one of them in force at a time. The redirect
+URI on the OpenID Connect card is `https://<the ingress host>/auth/callback`.
+Both take effect on save; until one is saved, only local accounts sign in.
 
 **Roles are made on the configuration page, not in these files.** A new
 installation starts with three — `admin`, `developer` and `viewer`, mapped
@@ -157,8 +165,8 @@ python -m wdash.store.recover --reset-totp <username>
 python -m wdash.store.recover --enable <username>
 
 # Two directories, and the one in force is the one nobody can reach. WDash
-# signs people in through at most ONE, a stored provider beats one
-# configured in the environment, and `none` leaves local accounts.
+# signs people in through at most ONE — with both enabled, the card saved
+# most recently — and `none` leaves local accounts.
 python -m wdash.store.recover --use-directory ldap
 ```
 
@@ -285,7 +293,7 @@ in the cluster's own namespace; there is a template at the bottom of the file.
 | --- | --- |
 | `namespace.yaml` | the namespace, labelled so a policy elsewhere can name it |
 | `serviceaccount.yaml` | an account with no API token and no permissions |
-| `secrets.yaml` | three empty keys — two of them required — and the commands that fill them |
+| `secrets.yaml` | two empty keys, both required, and the commands that fill them |
 | `configmap.yaml` | every setting, and the sidecar's nginx.conf |
 | `wdash-deployment.yaml` | the pod, the Service and the volume claim |
 | `ingress.yaml` | a plain `networking.k8s.io/v1` Ingress, TLS required |

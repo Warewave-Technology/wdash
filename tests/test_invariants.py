@@ -30,13 +30,6 @@ def role(name, *permissions, groups=()):
             "groups": list(groups)}
 
 
-#: What an OIDC provider configured the old way — in the environment, with no
-#: settings row at all — looks like to the recovery tool.
-ENVIRONMENT_OIDC = {
-    "OIDC_CLIENT_ID": "env-client",
-    "OIDC_DISCOVERY_URL": "https://idp/.well-known/openid-configuration",
-}
-
 ADMIN = role("admin", "system:admin", "logs:read")
 CO_ADMIN = role("co-admin", "system:admin")
 VIEWER = role("viewer", "logs:read")
@@ -541,56 +534,52 @@ class RecoveryToolTest(unittest.TestCase):
         be asked of a row that is currently OFF: a row saying `enabled: false`
         is not a complaint about its settings, so silence there is what let
         the tool enable a card nobody could sign in through."""
-        with mock.patch.dict(os.environ, ENVIRONMENT_OIDC):
-            self.store.settings.set("auth.ldap", {"server": "",
-                                                  "base_dn": "dc=x",
-                                                  "enabled": False})
-            code, output = self.run_tool("--use-directory", "ldap")
-            self.assertEqual(code, 1)
-            self.assertIn("cannot be used as it stands", output)
-            self.assertIn("server and a base DN", output)
-            self.assertIs(self.store.settings.get("auth.ldap")["enabled"],
-                          False)
-            self.assertIsNone(self.store.settings.get("auth.oidc"),
-                              "a refusal must not have written the other flag")
+        self.store.settings.set("auth.ldap", {"server": "",
+                                              "base_dn": "dc=x",
+                                              "enabled": False})
+        code, output = self.run_tool("--use-directory", "ldap")
+        self.assertEqual(code, 1)
+        self.assertIn("cannot be used as it stands", output)
+        self.assertIn("server and a base DN", output)
+        self.assertIs(self.store.settings.get("auth.ldap")["enabled"],
+                      False)
+        self.assertIsNone(self.store.settings.get("auth.oidc"),
+                          "a refusal must not have written the other flag")
 
     def test_a_directory_that_was_never_configured_gets_no_row(self):
         """It wrote `auth.ldap = {"enabled": False}` on an installation that
         only ever had OIDC. That row is not a configuration — nothing was
-        typed into it and there is no environment LDAP for it to suppress —
-        but it then answered the tool's own "is it configured" guard, and
-        the next `--use-directory ldap` was accepted."""
-        with mock.patch.dict(os.environ, ENVIRONMENT_OIDC):
-            code, output = self.run_tool("--use-directory", "oidc")
-            self.assertEqual(code, 0, output)
-            self.assertIsNone(self.store.settings.get("auth.ldap"))
+        typed into it — but it then answered the tool's own "is it
+        configured" guard, and the next `--use-directory ldap` was accepted."""
+        self.store.settings.set("auth.oidc", {"client_id": "w",
+                                              "discovery_url": "https://i/.w",
+                                              "enabled": False})
+        code, output = self.run_tool("--use-directory", "oidc")
+        self.assertEqual(code, 0, output)
+        self.assertTrue(self.store.settings.get("auth.oidc")["enabled"])
+        self.assertIsNone(self.store.settings.get("auth.ldap"))
 
-            code, output = self.run_tool("--use-directory", "ldap")
-            self.assertEqual(code, 1)
-            self.assertIn("No LDAP settings are stored", output)
+        code, output = self.run_tool("--use-directory", "ldap")
+        self.assertEqual(code, 1)
+        self.assertIn("No LDAP settings are stored", output)
 
-    def test_the_row_that_suppresses_an_environment_provider_is_undone(self):
-        """A row holding nothing but `enabled: False` is an off-switch, not a
-        directory. Choosing OIDC again has to remove it, or the tool is
-        one-way: the row it writes to turn the environment's provider off is
-        the same row that would then be enabled, blank, as the directory in
-        force."""
+    def test_an_off_switch_row_is_not_a_directory(self):
+        """A row holding nothing but `enabled: False` — which an earlier
+        version wrote to turn off a provider read from the environment, and
+        which is still in databases — is an off-switch, not a directory.
+        Read as one, this tool enabled a blank card, disabled the LDAP that
+        worked, and printed that OpenID Connect was in force."""
         self.store.settings.set("auth.ldap", {"enabled": True,
                                               "server": "ldap://x",
                                               "base_dn": "dc=x"})
-        with mock.patch.dict(os.environ, ENVIRONMENT_OIDC):
-            code, output = self.run_tool("--use-directory", "ldap")
-            self.assertEqual(code, 0, output)
-            self.assertEqual(self.store.settings.get("auth.oidc"),
-                             {"enabled": False})
-
-            code, output = self.run_tool("--use-directory", "oidc")
-            self.assertEqual(code, 0, output)
-            self.assertIn("OpenID Connect is now the directory in force",
-                          output)
-            self.assertIsNone(self.store.settings.get("auth.oidc"),
-                              "that row is what suppressed the environment")
-            self.assertFalse(self.store.settings.get("auth.ldap")["enabled"])
+        self.store.settings.set("auth.oidc", {"enabled": False})
+        code, output = self.run_tool("--use-directory", "oidc")
+        self.assertEqual(code, 1)
+        self.assertIn("No OIDC settings are stored", output)
+        self.assertTrue(self.store.settings.get("auth.ldap")["enabled"],
+                        "the directory that worked was turned off anyway")
+        self.assertEqual(self.store.settings.get("auth.oidc"),
+                         {"enabled": False})
 
     def test_status_says_which_directory_would_sign_people_in(self):
         self.store.settings.set("auth.ldap", {"enabled": True,
@@ -598,6 +587,21 @@ class RecoveryToolTest(unittest.TestCase):
                                               "base_dn": "dc=x"})
         _, output = self.run_tool("--status")
         self.assertIn("Directory: LDAP", output)
+
+    def test_status_names_the_directory_that_is_configured_and_not_in_use(self):
+        """The one line that says why every LDAP administrator is locked
+        out, read from the pod when the page cannot be. Two rows enabled,
+        OpenID Connect saved last: it is in force, and LDAP is said to be
+        configured and not in use rather than left out."""
+        self.store.settings.set("auth.ldap", {"enabled": True,
+                                              "server": "ldap://x",
+                                              "base_dn": "dc=x"})
+        self.store.settings.set("auth.oidc", {"enabled": True,
+                                              "client_id": "w",
+                                              "discovery_url": "https://i/.w"})
+        _, output = self.run_tool("--status")
+        self.assertIn("Directory: OpenID Connect; LDAP is configured and "
+                      "NOT in use", output)
 
 
 class AccountChangeTest(unittest.TestCase):

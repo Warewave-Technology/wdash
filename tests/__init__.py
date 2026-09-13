@@ -48,6 +48,9 @@ RETIRED = (
     "ELASTICSEARCH_URL", "ELASTICSEARCH_USERNAME", "ELASTICSEARCH_PASSWORD",
     "ELASTICSEARCH_TIMEOUT", "ELASTICSEARCH_VERIFY_CERTS",
     "ELASTICSEARCH_CA_CERTS", "TRACE_INDEX_PATTERNS", "MONITOR_INDEX_PATTERNS",
+    "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_DISCOVERY_URL",
+    "OIDC_REDIRECT_URI", "OIDC_SCOPES", "OIDC_USERNAME_CLAIM",
+    "OIDC_EMAIL_CLAIM", "OIDC_GROUPS_CLAIM", "OIDC_TRUST_UNVERIFIED_EMAIL",
 )
 
 #: Forced to a value, because removing them lands on a default that points at
@@ -85,10 +88,10 @@ PROTECTED_BY_THE_APP = {
 }
 
 #: Points at something real and is reached by nothing, checked rather than
-#: assumed. Listed so the next person does not have to re-derive it.
-INERT = {
-    "OIDC_REDIRECT_URI": "echoed into a redirect; nothing connects to it",
-}
+#: assumed. Listed so the next person does not have to re-derive it. Empty
+#: since the redirect URI moved to the OpenID Connect card; the list stays
+#: because the guard below reads it.
+INERT = {}
 
 def points_at_something_real(value):
     """Would a test reaching this value talk to, or write into, something?

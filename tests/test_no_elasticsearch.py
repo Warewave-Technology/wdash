@@ -43,7 +43,6 @@ class NoElasticsearchTestCase(unittest.TestCase):
             SECRET_KEY = "no-elastic"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            OIDC_CLIENT_ID = None
             DASHBOARD_STORAGE = storage
 
         self.config = TestConfig
@@ -193,7 +192,6 @@ class DashboardStorageTest(NoElasticsearchTestCase):
             SECRET_KEY = "no-elastic"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            OIDC_CLIENT_ID = None
             DASHBOARD_STORAGE = "elasticsearch"
 
         with self.assertRaises(RuntimeError) as caught:

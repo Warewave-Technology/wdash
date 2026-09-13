@@ -186,7 +186,6 @@ class FlowTestCase(unittest.TestCase):
             SECRET_KEY = "totp"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = key
-            OIDC_CLIENT_ID = None
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
@@ -399,7 +398,6 @@ class EnrolmentTest(FlowTestCase):
             SECRET_KEY = "keyless"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = None
-            OIDC_CLIENT_ID = None
 
         app = create_app(Keyless)
         client = app.test_client()

@@ -2,26 +2,25 @@
 Identity provider settings, and whether they are actually in force.
 
 Storing a setting is not the same as applying one. These tests hold the rule
-that decides which of two sources wins, and the two mistakes that rule exists
-to prevent:
-
-  * the environment overriding the config page, so an administrator saves a
-    change and nothing happens
-  * a provider switched off still being offered, because its settings are
-    still filled in and something fell back to the environment
+that decides which stored provider is in force, and the mistake that rule
+exists to prevent: a provider switched off still being offered, because its
+settings are still filled in. (A second mistake — the environment overriding
+the page, so an administrator saves a change and nothing happens — is gone
+with the environment path: a provider is configured on the page and nowhere
+else.)
 
 They also cover the LDAP bind, where the classic bug is treating a successful
 *search* as a successful *authentication* — which is a complete bypass that
 looks like working code.
 
 And the rule that at most ONE directory signs people in. Measured before it
-existed: a stored LDAP and an OIDC provider in the environment were both
-usable at once, both doors rendered on one sign-in page, and an OIDC principal
-who chose `preferred_username` signed in as the directory user `alice`, got
-her role mapping and opened her private dashboard (C147). The subtle half is
-that "in force" and "configured" must be decided on the same footing: decide
-"in force" from usability and an LDAP whose bind password can no longer be
-decrypted stops shadowing the environment, and the installation changes
+existed: a stored LDAP and a second provider were both usable at once, both
+doors rendered on one sign-in page, and an OIDC principal who chose
+`preferred_username` signed in as the directory user `alice`, got her role
+mapping and opened her private dashboard (C147). The subtle half is that "in
+force" and "configured" must be decided on the same footing: decide "in
+force" from usability and an LDAP whose bind password can no longer be
+decrypted stops shadowing the other directory, and the installation changes
 directory with nothing anywhere saying so.
 """
 
@@ -29,6 +28,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -46,7 +46,7 @@ from wdash.store import SecretBox  # noqa: E402
 PASSWORD = "a-sufficiently-long-password"
 
 
-def make_app(oidc_client_id=None, oidc_discovery=None):
+def make_app():
     handle, database = tempfile.mkstemp(suffix=".db")
     os.close(handle)
     os.unlink(database)
@@ -57,19 +57,13 @@ def make_app(oidc_client_id=None, oidc_discovery=None):
         SECRET_KEY = "providers"
         DATABASE_URL = f"sqlite:///{database}"
         ENCRYPTION_KEY = key
-        OIDC_CLIENT_ID = oidc_client_id
-        OIDC_DISCOVERY_URL = oidc_discovery
-        OIDC_CLIENT_SECRET = "env-secret"
-        OIDC_REDIRECT_URI = "http://env/callback"
 
     return create_app(TestConfig), database
 
 
 class OidcResolutionTest(unittest.TestCase):
     def setUp(self):
-        self.app, self.database = make_app(
-            oidc_client_id="env-client",
-            oidc_discovery="https://env-idp/.well-known/openid-configuration")
+        self.app, self.database = make_app()
 
     def tearDown(self):
         if os.path.exists(self.database):
@@ -82,23 +76,34 @@ class OidcResolutionTest(unittest.TestCase):
         value.update(overrides)
         self.app.store.settings.set("auth.oidc", value, secret="stored-secret")
 
-    def test_the_environment_is_used_when_nothing_is_stored(self):
-        settings = oidc_settings(self.app)
-        self.assertEqual(settings["client_id"], "env-client")
-        self.assertEqual(settings["source"], "environment")
+    def test_nothing_stored_means_no_provider(self):
+        """Nothing else configures one: not the environment, not a file."""
+        self.assertIsNone(oidc_settings(self.app))
 
-    def test_a_stored_provider_wins_over_the_environment(self):
-        """Otherwise the config page saves successfully and changes nothing."""
+    def test_a_stored_provider_is_the_one_used(self):
         self.store_oidc()
         settings = oidc_settings(self.app)
         self.assertEqual(settings["client_id"], "stored-client")
         self.assertEqual(settings["client_secret"], "stored-secret")
         self.assertEqual(settings["source"], "configuration")
 
-    def test_switching_it_off_does_not_fall_back_to_the_environment(self):
-        """The switch must do something on a deployment that has both."""
+    def test_switching_it_off_disables_it(self):
+        """The switch is not decoration: a row switched off, with every
+        setting still filled in, offers nothing."""
         self.store_oidc(enabled=False)
         self.assertIsNone(oidc_settings(self.app))
+
+    def test_a_blank_redirect_uri_is_left_for_the_route_to_derive(self):
+        """Nothing here can derive it: this is also run by the recovery
+        tool, outside any request. The route does; see LoginPageTest."""
+        self.store_oidc(redirect_uri="")
+        self.assertIsNone(oidc_settings(self.app)["redirect_uri"])
+
+    def test_the_scopes_come_from_the_card(self):
+        self.store_oidc(scopes="openid email")
+        self.assertEqual(oidc_settings(self.app)["scopes"], "openid email")
+        self.store_oidc(scopes="")
+        self.assertIsNone(oidc_settings(self.app)["scopes"])
 
     def test_incomplete_stored_settings_disable_it_rather_than_half_work(self):
         self.store_oidc(discovery_url="")
@@ -119,9 +124,10 @@ class OidcResolutionTest(unittest.TestCase):
 
     def test_a_change_takes_effect_without_a_restart(self):
         """The client is built per request, so the same app object sees it."""
-        self.assertEqual(oidc_settings(self.app)["client_id"], "env-client")
         self.store_oidc()
         self.assertEqual(oidc_settings(self.app)["client_id"], "stored-client")
+        self.store_oidc(client_id="repaired-client")
+        self.assertEqual(oidc_settings(self.app)["client_id"], "repaired-client")
 
 
 class LoginPageTest(unittest.TestCase):
@@ -156,21 +162,58 @@ class LoginPageTest(unittest.TestCase):
         response = self.client.get("/auth/callback")
         self.assertEqual(response.status_code, 302)
 
+    def _start_with(self, redirect_uri):
+        """Start a sign-in against a stored provider, and read the redirect
+        URI it sends. The client is faked at `init_oauth`, the one call that
+        would fetch the provider's discovery document."""
+        self.app.store.settings.set("auth.oidc", {
+            "client_id": "wdash", "enabled": True,
+            "discovery_url": "https://idp/.well-known/openid-configuration",
+            "redirect_uri": redirect_uri}, secret="s")
+        sent = {}
+
+        class FakeClient:
+            def authorize_redirect(self, redirect_uri, nonce=None):
+                from flask import redirect
+                sent["redirect_uri"] = redirect_uri
+                return redirect("https://idp/authorize")
+
+        with mock.patch("wdash.auth.auth.init_oauth",
+                        return_value=(None, FakeClient())):
+            response = self.client.get("/auth/oidc")
+        self.assertEqual(response.status_code, 302)
+        return sent["redirect_uri"]
+
+    def test_the_stored_redirect_uri_is_what_the_provider_is_sent(self):
+        self.assertEqual(self._start_with("https://wdash.example/auth/callback"),
+                         "https://wdash.example/auth/callback")
+
+    def test_a_blank_redirect_uri_is_this_wdash_own_callback(self):
+        """As the browser reached it. That used to be an environment default
+        of http://127.0.0.1:5001/auth/callback, right for exactly one
+        machine; this is right for whichever address the person is on."""
+        self.assertEqual(self._start_with(""),
+                         "http://localhost/auth/callback")
+
 
 class OneDoorOnTheSignInPageTest(unittest.TestCase):
     """Two directories configured, one door offered, and the other said.
 
-    Measured before the rule: a store with LDAP enabled beside an environment
-    OIDC rendered "Continue with single sign-on" AND "directory accounts both
-    use this form" on the same page, and /auth/oidc really started a flow.
+    Measured before the rule: a store with LDAP enabled beside a second
+    provider rendered "Continue with single sign-on" AND "directory accounts
+    both use this form" on the same page, and /auth/oidc really started a
+    flow.
     """
 
     MARKERS = (b"single sign-on", b"directory accounts both use this form")
 
     def setUp(self):
-        self.app, self.database = make_app(**ENVIRONMENT)
+        self.app, self.database = make_app()
         client = self.app.test_client()
         support.set_up(client, username="owner", password=PASSWORD)
+        # OpenID Connect stored first, LDAP saved after it: the row saved
+        # most recently is in force, and the other is the one shadowed.
+        self.app.store.settings.set("auth.oidc", OIDC_VALUE, secret="s")
         self.app.store.settings.set("auth.ldap", LDAP_VALUE, secret="bind")
         self.client = self.app.test_client()
 
@@ -270,9 +313,6 @@ LDAP_VALUE = {"server": "ldaps://ldap:636", "bind_dn": "cn=svc,dc=x",
               "group_attribute": "memberOf", "enabled": True}
 OIDC_VALUE = {"client_id": "stored-client", "enabled": True,
               "discovery_url": "https://stored-idp/.well-known/openid-configuration"}
-ENVIRONMENT = dict(
-    oidc_client_id="env-client",
-    oidc_discovery="https://env-idp/.well-known/openid-configuration")
 
 
 class OneDirectoryTest(unittest.TestCase):
@@ -287,9 +327,8 @@ class OneDirectoryTest(unittest.TestCase):
         if database and os.path.exists(database):
             os.unlink(database)
 
-    def app_with(self, ldap=None, oidc=None, environment=False, order=("ldap",
-                                                                       "oidc")):
-        app, self.database = make_app(**(ENVIRONMENT if environment else {}))
+    def app_with(self, ldap=None, oidc=None, order=("ldap", "oidc")):
+        app, self.database = make_app()
         rows = {"ldap": ldap, "oidc": oidc}
         for which in order:
             if rows[which] is not None:
@@ -297,19 +336,23 @@ class OneDirectoryTest(unittest.TestCase):
                                        secret="a-secret")
         return app
 
-    def test_a_stored_directory_shadows_one_in_the_environment(self):
-        """The demo's shape. Both were usable at once, and the sign-in page
-        rendered two doors."""
-        app = self.app_with(ldap=LDAP_VALUE, environment=True)
+    def test_the_sentence_names_both_and_the_way_out(self):
+        """The shape the demo was in when both were usable at once and the
+        sign-in page rendered two doors: OpenID Connect saved, then LDAP."""
+        app = self.app_with(oidc=OIDC_VALUE, ldap=LDAP_VALUE,
+                            order=("oidc", "ldap"))
         self.assertIsNotNone(ldap_settings(app))
         self.assertIsNone(oidc_settings(app))
         state = directory(app)
         self.assertEqual((state["in_force"], state["shadowed"]),
                          ("ldap", "oidc"))
         self.assertIn("LDAP is in force", state["reason"])
-        self.assertIn("OpenID Connect is configured in the environment",
+        self.assertIn("OpenID Connect is configured and is not in use",
                       state["reason"])
+        self.assertIn("turn LDAP off on this page and save, then enable "
+                      "OpenID Connect", state["reason"])
         self.assertIn("--use-directory", state["reason"])
+        self.assertNotIn("environment", state["reason"])
 
     def test_both_stored_the_one_saved_most_recently_is_in_force(self):
         for order in (("ldap", "oidc"), ("oidc", "ldap")):
@@ -325,19 +368,20 @@ class OneDirectoryTest(unittest.TestCase):
 
     def test_a_directory_that_cannot_be_read_keeps_the_installation(self):
         """The hole a usability-based rule leaves: an LDAP whose bind password
-        no longer decrypts stops shadowing the environment, the environment
-        provider becomes the only door, and because ownership is the username
-        an OIDC principal can then take a directory user's name. Configured
-        and in-force are decided on the SAME footing, so the door closes
-        instead of moving."""
-        app = self.app_with(ldap=LDAP_VALUE, environment=True)
+        no longer decrypts stops shadowing the other directory, that one
+        becomes the only door, and because ownership is the username an OIDC
+        principal can then take a directory user's name. Configured and
+        in-force are decided on the SAME footing, so the door closes instead
+        of moving."""
+        app = self.app_with(oidc=OIDC_VALUE, ldap=LDAP_VALUE,
+                            order=("oidc", "ldap"))
         app.store.secrets._fernet = SecretBox(SecretBox.generate_key())._fernet
 
         state = directory(app)
         self.assertEqual(state["in_force"], "ldap")
         self.assertIsNone(ldap_settings(app))
         self.assertIsNone(oidc_settings(app),
-                          "the environment provider took over the installation")
+                          "the other provider took over the installation")
         self.assertIn("bind password could not be decrypted", state["unusable"])
         self.assertIn("cannot be used", state["reason"])
         self.assertIn("Directory sign-in is unavailable", shadow_notice(app))
@@ -345,8 +389,8 @@ class OneDirectoryTest(unittest.TestCase):
     def test_an_enabled_but_incomplete_directory_shadows_too(self):
         """Presence-and-enabled, not usability — the same rule the refusal
         uses, so a half-filled row cannot hand the installation over."""
-        app = self.app_with(ldap={**LDAP_VALUE, "base_dn": ""},
-                            environment=True)
+        app = self.app_with(oidc=OIDC_VALUE, ldap={**LDAP_VALUE, "base_dn": ""},
+                            order=("oidc", "ldap"))
         self.assertEqual(directory(app)["in_force"], "ldap")
         self.assertIsNone(oidc_settings(app))
 
@@ -365,6 +409,24 @@ class OneDirectoryTest(unittest.TestCase):
         app = self.app_with()
         self.assertEqual(directory(app)["in_force"], None)
         self.assertIsNone(shadow_notice(app))
+
+    def test_a_switched_off_row_does_not_shadow_the_other_directory(self):
+        """A card saved with Enabled unchecked is stored — every field of it
+        — and is not a directory. Counted as one, the card saved most
+        recently would win, and an LDAP that worked would be shadowed by an
+        OpenID Connect nobody switched on: every directory user locked out
+        by a save that said off."""
+        for order in (("ldap", "oidc"), ("oidc", "ldap")):
+            with self.subTest(saved=order):
+                app = self.app_with(ldap=LDAP_VALUE,
+                                    oidc={**OIDC_VALUE, "enabled": False},
+                                    order=order)
+                state = directory(app)
+                self.assertEqual((state["in_force"], state["shadowed"]),
+                                 ("ldap", None))
+                self.assertIsNotNone(ldap_settings(app))
+                self.assertIsNone(shadow_notice(app))
+                self.tearDown()
 
     def test_the_answer_never_carries_a_secret(self):
         """It goes to a template, to the log and to an audit row."""
@@ -388,15 +450,13 @@ class OneDirectoryTest(unittest.TestCase):
                                   "re-saving the one in force is not a second")
                 self.tearDown()
 
-    def test_an_environment_provider_counts_as_the_other_directory(self):
-        """The page CAN turn it off — saving the card with Enabled unchecked
-        stores a disabled row, which suppresses the environment — so exempting
-        it would leave the one shape that gets no refusal and no guidance."""
-        app = self.app_with(environment=True)
+    def test_the_refusal_says_how_to_switch_and_names_no_variable(self):
+        app = self.app_with(oidc=OIDC_VALUE)
         message = refuses_second_directory(app, "ldap", True)
-        self.assertIsNotNone(message)
-        self.assertIn("Enabled unchecked", message)
-        self.assertNotIn("OIDC_CLIENT_ID", message)
+        self.assertIn("OpenID Connect is the directory in use here", message)
+        self.assertIn("turn it off on this page and save, then enable LDAP",
+                      message)
+        self.assertNotIn("environment", message)
 
     def test_nothing_configured_means_nothing_to_refuse(self):
         app = self.app_with()

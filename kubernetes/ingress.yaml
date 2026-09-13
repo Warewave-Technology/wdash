@@ -61,7 +61,7 @@ spec:
     - wdash.example.com          # Change to your domain
     secretName: wdash-tls
   rules:
-  - host: wdash.example.com      # Change to your domain, and OIDC_REDIRECT_URI with it
+  - host: wdash.example.com      # Change to your domain, and the redirect URI on the OpenID Connect card with it
     http:
       paths:
       - path: /

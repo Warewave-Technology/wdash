@@ -287,6 +287,12 @@ RETIRED_VARIABLES = (
      "Sources",
      "until the cluster is added there, the logs, traces and monitors pages "
      "have no source"),
+    (("OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_DISCOVERY_URL",
+      "OIDC_REDIRECT_URI", "OIDC_SCOPES", "OIDC_USERNAME_CLAIM",
+      "OIDC_EMAIL_CLAIM", "OIDC_GROUPS_CLAIM", "OIDC_TRUST_UNVERIFIED_EMAIL"),
+     "the OpenID Connect provider is",
+     "Authentication → OpenID Connect",
+     "until the provider is saved there, nobody signs in through it"),
 )
 
 

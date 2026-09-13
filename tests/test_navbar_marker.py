@@ -78,7 +78,6 @@ class NavbarTestCase(unittest.TestCase):
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = key
             DASHBOARD_STORAGE = "database"
-            OIDC_CLIENT_ID = None
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()

@@ -182,12 +182,15 @@ class ProviderSignInTest(unittest.TestCase):
             SECRET_KEY = "identity-lab"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = SecretBox.generate_key()
-            OIDC_CLIENT_ID = "wdash"
-            OIDC_CLIENT_SECRET = "wdash-lab-secret"
-            OIDC_DISCOVERY_URL = f"{DEX_URL}/.well-known/openid-configuration"
-            OIDC_REDIRECT_URI = "http://127.0.0.1:5001/auth/callback"
 
         self.app = create_app(OidcConfig)
+        # The provider as the configuration page stores it, which is the
+        # only way one reaches WDash.
+        self.app.store.settings.set("auth.oidc", {
+            "client_id": "wdash", "enabled": True,
+            "discovery_url": f"{DEX_URL}/.well-known/openid-configuration",
+            "redirect_uri": "http://127.0.0.1:5001/auth/callback"},
+            secret="wdash-lab-secret")
         # Until an administrator exists every route leads to /setup, including
         # the one that starts the flow.
         password = "correct-horse-battery"

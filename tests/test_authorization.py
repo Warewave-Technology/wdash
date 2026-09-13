@@ -278,7 +278,6 @@ class GateTestCase(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "authz"
             DATABASE_URL = f"sqlite:///{database}"
-            OIDC_CLIENT_ID = None
             # A local account cannot finish signing in without one: its
             # authenticator's secret is sealed with this key.
             ENCRYPTION_KEY = SecretBox.generate_key()

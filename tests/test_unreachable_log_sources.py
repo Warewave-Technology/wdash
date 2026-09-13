@@ -59,7 +59,6 @@ class _Installation(unittest.TestCase):
             SECRET_KEY = "unreachable"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = key
-            OIDC_CLIENT_ID = None
 
         self.app = create_app(TestConfig)
         self.app.hub.replace_all(logs=[self.build()])

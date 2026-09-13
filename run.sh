@@ -57,8 +57,7 @@ fi
 # Display configuration summary
 echo ""
 echo "📋 Configuration Summary:"
-echo "   Sources: declared on the configuration page after sign-in"
-echo "   OIDC Configured: $([ ! -z "$OIDC_CLIENT_ID" ] && echo "Yes" || echo "No")"
+echo "   Sources and identity providers: declared on the configuration page after sign-in"
 echo ""
 
 # Start the application

@@ -673,19 +673,6 @@ class TheIngressTest(unittest.TestCase):
                 self.assertEqual(service["name"], "wdash")
                 self.assertEqual(service["port"]["number"], 80)
 
-    def test_the_identity_provider_sends_people_back_here(self):
-        """OIDC_REDIRECT_URI pointed at `http://wdash.local` while the TLS
-        route served `wdash.yourdomain.com`. The provider then refuses with a
-        message about a mismatched redirect URI, which names neither of the
-        two files that disagree."""
-        redirect = _config_map()["OIDC_REDIRECT_URI"]
-        hosts = {rule["host"] for rule in self.ingress["spec"]["rules"]}
-        self.assertTrue(redirect.startswith("https://"),
-                        f"{redirect} is not over TLS")
-        self.assertIn(redirect.split("/")[2], hosts,
-                      f"{redirect} is not a host this Ingress serves")
-
-
 class TheNetworkPolicyTest(unittest.TestCase):
     def setUp(self):
         self.policy = _by_name("networkpolicy.yaml", "NetworkPolicy",
@@ -1125,7 +1112,6 @@ class ThePageTest(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "manifests"
             DATABASE_URL = f"sqlite:///{os.path.join(directory, 'first.db')}"
-            OIDC_CLIENT_ID = None
             WTF_CSRF_ENABLED = False
             ENCRYPTION_KEY = SecretBox.generate_key()
 
@@ -1173,7 +1159,6 @@ class ThePageTest(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "manifests"
             DATABASE_URL = "sqlite:///:memory:"
-            OIDC_CLIENT_ID = None
             ENCRYPTION_KEY = None
 
         class Captured(logging.Handler):
@@ -1261,6 +1246,25 @@ class ThePageTest(unittest.TestCase):
         self.assertEqual(named, held,
                          f"the command fills {sorted(named)}; secrets.yaml "
                          f"holds {sorted(held)}")
+
+    def test_the_callback_it_tells_you_to_type_is_one_the_application_serves(self):
+        """The redirect URI is typed on the OpenID Connect card now, not in
+        these files, so nothing here can hold it to the ingress host any
+        more. What the page CAN be held to: it tells the operator the path to
+        type, and that path is a route this application serves — a page
+        naming `/auth/oidc/callback` would send the provider to a 404, with
+        an error about a mismatched redirect that names neither."""
+        from wdash.app import create_app
+        from wdash.config import Config
+
+        named = set(re.findall(r"https://<[^>]+>(/auth/[\w/]+)", self.page))
+        self.assertTrue(named, "the page no longer says what to type on the "
+                               "OpenID Connect card")
+        rules = {str(rule) for rule in create_app(Config).url_map.iter_rules()}
+        for path in sorted(named):
+            with self.subTest(path=path):
+                self.assertIn(path, rules, f"the page names {path}, which "
+                                           f"this application does not serve")
 
     def test_the_shell_it_sends_you_to_can_reach_the_store(self):
         """The page says to exec into the `wdash` container and run the

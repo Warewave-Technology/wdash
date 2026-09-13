@@ -47,7 +47,6 @@ class AccountPageTestCase(unittest.TestCase):
             SECRET_KEY = "local-accounts"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = key
-            OIDC_CLIENT_ID = None
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()

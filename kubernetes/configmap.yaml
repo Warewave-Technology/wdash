@@ -69,36 +69,24 @@ data:
   # of a save. An earlier version took one Elasticsearch from this file as
   # well, under eight keys; a pod that still carries any of them is told so
   # at start-up, as an ERROR naming them, and reads nothing from them.
-
-  # OIDC, declared in the environment. This is the older of two ways; the
-  # configuration page declares OIDC and LDAP too, and stores them.
   #
-  # AT MOST ONE DIRECTORY SIGNS PEOPLE IN. Not one of each: one. Enabling a
-  # second is refused on the page, and a directory saved there BEATS one
-  # configured here — so filling these keys in on an installation that has
-  # an LDAP card saved changes nothing, and nothing on this side says so.
-  # The answer comes from the pod:
+  # Nor is a directory. OpenID Connect and LDAP are configured under
+  # Authentication on the same page — AT MOST ONE OF THEM SIGNS PEOPLE IN,
+  # and enabling the second is refused there — and stored in the same
+  # database, the client secret and the bind password sealed with the
+  # encryption key. An earlier version took an OpenID Connect provider from
+  # this file too, under nine keys, and the same start-up ERROR names any of
+  # those that are still here. The redirect URI typed on the card has to be
+  # the host in ingress.yaml, over https, or the provider sends the person
+  # back to somewhere that is not this application. When the directory in
+  # force is one nobody can sign in to, the page that would fix it is behind
+  # that sign-in, and the way back is from the pod:
   #
   #   kubectl -n wdash exec deploy/wdash -c wdash -- \
   #       python -m wdash.store.recover --status
-  #   Directory: LDAP (configured on the page); OpenID Connect is configured
-  #   and NOT in use
+  #   Directory: LDAP; OpenID Connect is configured and NOT in use
   #
-  # `--use-directory ldap|oidc|none` is how it is changed from here, and it
-  # is the only way back when the directory in force is one nobody can sign
-  # in to — the page that would fix it is behind that sign-in.
-  #
-  # The redirect URI has to be the host in ingress.yaml, over https, or the
-  # provider sends the person back to somewhere that is not this application
-  # — and the error it shows is about a mismatched redirect, not about a
-  # ConfigMap. tests/test_kubernetes_manifests.py holds the two together.
-  OIDC_DISCOVERY_URL: ""
-  OIDC_CLIENT_ID: ""
-  OIDC_REDIRECT_URI: "https://wdash.example.com/auth/callback"
-  # `groups` is here because roles are mapped from groups, and a provider that
-  # gates that claim behind a scope sends nothing without it — which arrives
-  # as "this person belongs to nothing" and lands them on the default role.
-  OIDC_SCOPES: "openid email profile groups"
+  # `--use-directory ldap|oidc|none` changes which.
 
   # Roles are not configured here, and no file in this directory holds
   # them. They live in the metadata store and are edited on the

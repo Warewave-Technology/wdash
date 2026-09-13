@@ -220,23 +220,17 @@ opens.
 
 ## Configuration
 
-Data sources are not environment variables. Every source — Elasticsearch,
-Loki, VictoriaLogs, Jaeger, Tempo — is declared on the configuration page
-and stored in the metadata database, with its own credentials, index
-patterns and certificate authority, and is in use the moment it is saved.
+Data sources and identity providers are not environment variables. Every
+source — Elasticsearch, Loki, VictoriaLogs, Jaeger, Tempo — is declared on
+the configuration page and stored in the metadata database, with its own
+credentials, index patterns and certificate authority, and is in use the
+moment it is saved; so are OpenID Connect and LDAP, under Authentication.
 The variables below configure the process itself.
 
 | Variable | Description | Default |
 |---|---|---|
 | `SECRET_KEY` | Flask session signing key | `dev-secret-key-change-in-production` |
 | `FLASK_DEBUG` | `true` turns on Flask's debugger and reloader | `False` |
-| `OIDC_CLIENT_ID` | OIDC client id | — |
-| `OIDC_CLIENT_SECRET` | OIDC client secret | — |
-| `OIDC_DISCOVERY_URL` | Provider discovery document | — |
-| `OIDC_REDIRECT_URI` | Callback URL | `http://127.0.0.1:5001/auth/callback` |
-| `OIDC_USERNAME_CLAIM` / `OIDC_EMAIL_CLAIM` / `OIDC_GROUPS_CLAIM` | Which claims name a person. Unset falls back to the claim mappings stored for this installation, then `preferred_username` / `email` / `groups` | — |
-| `OIDC_TRUST_UNVERIFIED_EMAIL` | Use an email the provider has not marked verified. Only for a provider that never sends `email_verified` and lets nobody edit the address | `false` |
-| `OIDC_SCOPES` | What to ask the provider for. `groups` is included because roles are mapped from groups, and a provider that gates that claim behind a scope sends nothing without it | `openid email profile groups` |
 | `LOGS_PER_PAGE` | Records per page in the log list | `50` |
 | `SESSION_COOKIE_SECURE` | Send the session cookie over HTTPS only. Also enables HSTS | `False` |
 | `TRUSTED_PROXY_COUNT` | How many reverse proxies sit in front of WDash. `0` ignores `X-Forwarded-For` entirely — trusting it without knowing the depth lets a client name its own address and step around the per-address rate limit | `0` |
@@ -248,16 +242,21 @@ The variables below configure the process itself.
 
 ### Identity providers
 
-OIDC and LDAP are configured on `/admin/config` and take effect immediately —
-the client is built per request, which is what lets an administrator repair a
-broken provider and try again without a restart.
+OIDC and LDAP are configured on `/admin/config`, under **Authentication**,
+and take effect immediately — the client is built per request, which is what
+lets an administrator repair a broken provider and try again without a
+restart. That page is the only place either is configured: nothing about a
+provider is read from the environment, and a provider switched off is off,
+even with its settings still filled in.
 
-Where two places configure the same provider, the stored settings win over the
-environment: otherwise the config page would save successfully and change
-nothing. A provider switched off is off, with no fall back to the environment —
-or the switch would do nothing on a deployment that has both. Saving the OIDC
-card with **Enabled** unchecked is therefore also how a provider configured in
-the environment is turned off from the page, with no restart.
+The OpenID Connect card asks the provider for `openid email profile groups`
+unless its **Scopes** field says otherwise — `groups` because roles are
+mapped from groups, and a provider that gates that claim behind a scope
+sends nothing without it; a provider that refuses a scope it does not know
+needs the list changed there. A blank **Redirect URI** means this WDash's
+own `/auth/callback` as the browser reached it, which is right on a laptop;
+behind a proxy that terminates TLS, type the `https://` address and register
+the same one at the provider.
 
 **At most one directory.** Either LDAP or OIDC signs people in, never both.
 Ownership here is the username — a dashboard belongs to `created_by`, a role
@@ -267,10 +266,9 @@ signs in as somebody at the other and gets their dashboards and their role.
 Which one is in force is decided in one place, from configuration and not from
 usability:
 
-1. a directory configured in the store beats one configured only in the
-   environment;
-2. both stored and enabled: the row saved most recently wins, ties to LDAP, so
+1. both stored and enabled: the row saved most recently wins, ties to LDAP, so
    the answer never depends on row order;
+2. one: that one;
 3. neither: no directory, and local accounts are unaffected.
 
 Enabling the second one is refused on the page, in words that say how to
@@ -329,8 +327,7 @@ the provider sends `email_verified: true`: roles can be mapped to an address,
 and a provider that lets people set their own address would otherwise let them
 take somebody else's mapping. A provider that never sends the claim has to be
 trusted explicitly. The username, email and groups claims are chosen on the
-page or with `OIDC_USERNAME_CLAIM`, `OIDC_EMAIL_CLAIM` and
-`OIDC_GROUPS_CLAIM`. A dotted name reaches into an
+OpenID Connect card. A dotted name reaches into an
 object (`realm_access.roles`). `email_verified` speaks for the `email` claim
 only: another email claim is used only if unverified addresses are trusted.
 Ownership and name mappings trust the username claim, so choose one your users
@@ -528,9 +525,9 @@ installation that had two directories enabled at once, where the losing one
 held every administrator. It refuses a directory that cannot be used as it
 stands, naming the field that is blank or the secret that cannot be
 decrypted, rather than putting it in force and turning off the one that
-worked; and a stored row holding nothing but `enabled: false` is read as the
-off-switch it is, not as a configuration, so choosing OIDC again restores a
-provider configured in the environment.
+worked; and a stored row holding nothing but `enabled: false` — which an
+earlier version wrote to switch off a provider read from the environment —
+is read as the off-switch it is, not as a configuration to put in force.
 
 ### Authorization is resolved per request
 
@@ -991,7 +988,12 @@ as a break, because `>=3.8` was never installable: `psycopg` has required
   saying they have no source. A process that still has any of the variables
   set says so at start-up, as an ERROR naming them and the page, and reads
   nothing from them — it does not import them, because a one-shot import at
-  start-up is the mechanism that was removed.
+  start-up is the mechanism that was removed. The same goes for the OpenID
+  Connect provider, which 2.5 and earlier also read from `OIDC_CLIENT_ID`,
+  `OIDC_CLIENT_SECRET`, `OIDC_DISCOVERY_URL` and the six variables around
+  them: save the provider on the OpenID Connect card before upgrading, or
+  nobody signs in through it until somebody does. Local accounts are
+  unaffected either way.
 - Put WDash on the only network path to Elasticsearch. Application-level
   authorization is worthless if the cluster is directly reachable — the
   Advisor's `SEC001` check exists to remind you.

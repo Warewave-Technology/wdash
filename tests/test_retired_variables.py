@@ -37,7 +37,6 @@ class TestConfig(Config):
     SECRET_KEY = "retired"
     DATABASE_URL = "sqlite:///:memory:"
     ENCRYPTION_KEY = SecretBox.generate_key()
-    OIDC_CLIENT_ID = None
 
 
 class Captured(logging.Handler):
@@ -97,6 +96,26 @@ class TheSentenceTest(unittest.TestCase):
         self.assertIn("MONITOR_INDEX_PATTERNS is set, and WDash no longer "
                       "reads it", said[0])
 
+    def test_the_provider_group_names_its_own_tab(self):
+        said = variables_left_behind({"OIDC_CLIENT_ID": "wdash",
+                                      "OIDC_DISCOVERY_URL": "https://idp/.w",
+                                      "OIDC_CLIENT_SECRET": "s"})
+        self.assertEqual(len(said), 1, said)
+        self.assertIn("OIDC_CLIENT_ID, OIDC_CLIENT_SECRET and "
+                      "OIDC_DISCOVERY_URL are set", said[0])
+        self.assertIn("the OpenID Connect provider is configured on the "
+                      "configuration page, under Authentication → OpenID "
+                      "Connect", said[0])
+        self.assertIn("nobody signs in through it", said[0])
+
+    def test_both_groups_set_is_two_sentences(self):
+        """One per page, because each names a different tab."""
+        said = variables_left_behind({"ELASTICSEARCH_URL": "http://es",
+                                      "OIDC_CLIENT_ID": "wdash"})
+        self.assertEqual(len(said), 2)
+        self.assertIn("under Sources", said[0])
+        self.assertIn("under Authentication", said[1])
+
     def test_the_harness_clears_exactly_the_names_the_application_refuses(self):
         """`tests/__init__.py` pops them before anything is imported, so a
         developer's shell cannot put this ERROR under every app the suite
@@ -147,6 +166,27 @@ class AtStartUpTest(unittest.TestCase):
         _, errors = started_with()
         self.assertEqual([line for line in errors if "no longer reads" in line],
                          [])
+
+    def test_a_provider_in_the_environment_signs_nobody_in(self):
+        """The variables an earlier version built a provider from: named in
+        the ERROR, and no directory is in force, no single sign-on is
+        offered, and nothing was written to the provider's card."""
+        from tests import support
+        from wdash.auth.providers import directory
+
+        app, errors = started_with(
+            OIDC_CLIENT_ID="wdash", OIDC_CLIENT_SECRET="wdash-lab-secret",
+            OIDC_DISCOVERY_URL="https://idp/.well-known/openid-configuration",
+            OIDC_REDIRECT_URI="http://127.0.0.1:5001/auth/callback")
+        said = [line for line in errors if "no longer reads" in line]
+        self.assertEqual(len(said), 1, errors)
+        self.assertIn("OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_DISCOVERY_URL "
+                      "and OIDC_REDIRECT_URI are set", said[0])
+        self.assertIsNone(directory(app)["in_force"])
+        self.assertIsNone(app.store.settings.get("auth.oidc"))
+        support.claim(app)
+        self.assertNotIn(b"single sign-on",
+                         app.test_client().get("/auth/login").data)
 
 
 #: What a person reads before setting a variable, and so what must not tell

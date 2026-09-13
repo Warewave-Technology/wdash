@@ -71,7 +71,6 @@ class _Installation(unittest.TestCase):
             "SECRET_KEY": "storage-default",
             "DATABASE_URL": f"sqlite:///{self.database}",
             "ENCRYPTION_KEY": SecretBox.generate_key(),
-            "OIDC_CLIENT_ID": None,
             "DASHBOARD_STORAGE_FILE": self.dashboards,
         }
         chosen = self.STORAGE if storage is KEEP else storage
@@ -167,7 +166,6 @@ class TheDefaultIsTheDatabaseTest(_Installation):
         Bare.SECRET_KEY = "no-storage-key"
         Bare.DATABASE_URL = f"sqlite:///{self.database}"
         Bare.ENCRYPTION_KEY = SecretBox.generate_key()
-        Bare.OIDC_CLIENT_ID = None
         Bare.DASHBOARD_STORAGE_FILE = self.dashboards
 
         app = create_app(Bare)

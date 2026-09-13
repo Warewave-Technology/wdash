@@ -83,7 +83,6 @@ class _Store(unittest.TestCase):
             SECRET_KEY = "source-liveness"
             DATABASE_URL = f"sqlite:///{database}"
             ENCRYPTION_KEY = secret
-            OIDC_CLIENT_ID = None
             DASHBOARD_STORAGE = "database"
 
         return create_app(TestConfig)

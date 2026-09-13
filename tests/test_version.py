@@ -145,7 +145,6 @@ class EverythingElseReadsItTest(unittest.TestCase):
             TESTING = True
             SECRET_KEY = "version"
             DATABASE_URL = "sqlite:///:memory:"
-            OIDC_CLIENT_ID = None
             ENCRYPTION_KEY = SecretBox.generate_key()
 
         payload = create_app(TestConfig).test_client().get("/health").get_json()

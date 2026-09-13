@@ -36,9 +36,10 @@ staticClients:
     name: WDash
     secret: wdash-lab-secret
     redirectURIs:
-      # `127.0.0.1` first because that is what `OIDC_REDIRECT_URI` defaults
-      # to, and a provider compares redirect URIs as strings — `localhost`
-      # and `127.0.0.1` are different ones.
+      # `127.0.0.1` first because that is where `python main.py` serves, so
+      # it is what a blank Redirect URI on the OpenID Connect card derives —
+      # and a provider compares redirect URIs as strings: `localhost` and
+      # `127.0.0.1` are different ones.
       - http://127.0.0.1:5001/auth/callback
       - http://localhost:5001/auth/callback
 

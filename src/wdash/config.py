@@ -63,28 +63,14 @@ class Config:
     # start-up, as an ERROR naming them (`variables_left_behind` in app.py),
     # and nothing is read from them.
 
-    # OIDC Configuration
-    OIDC_CLIENT_ID = os.environ.get('OIDC_CLIENT_ID')
-    OIDC_CLIENT_SECRET = os.environ.get('OIDC_CLIENT_SECRET')
-    OIDC_DISCOVERY_URL = os.environ.get('OIDC_DISCOVERY_URL')
-    OIDC_REDIRECT_URI = os.environ.get('OIDC_REDIRECT_URI') or 'http://127.0.0.1:5001/auth/callback'
-    # Which claims name a person. Unset falls back to the claim mappings
-    # stored for this installation, then to preferred_username / email /
-    # groups.
-    OIDC_USERNAME_CLAIM = os.environ.get('OIDC_USERNAME_CLAIM')
-    OIDC_EMAIL_CLAIM = os.environ.get('OIDC_EMAIL_CLAIM')
-    OIDC_GROUPS_CLAIM = os.environ.get('OIDC_GROUPS_CLAIM')
-    # An email is used only when the provider says it is verified. A provider
-    # that never sends email_verified needs this to be trusted at all.
-    OIDC_TRUST_UNVERIFIED_EMAIL = (os.environ.get('OIDC_TRUST_UNVERIFIED_EMAIL', '')
-                                   .lower() in ('1', 'true', 'yes'))
-    #: What to ask the provider for. `groups` is included because roles are
-    #: mapped from groups, and a provider that gates that claim behind a
-    #: scope sends nothing without it — which reaches WDash as "this person
-    #: belongs to nothing" and lands them on the default role.
-    OIDC_SCOPES = (os.environ.get('OIDC_SCOPES')
-                   or 'openid email profile groups')
-    
+    # Nor is a directory. OpenID Connect and LDAP are configured on the
+    # configuration page under Authentication — one of them in force at a
+    # time — and stored in the metadata database, the client secret and the
+    # bind password sealed with the encryption key below. The environment
+    # used to declare an OpenID Connect provider beside the card, under nine
+    # variables; an installation that still sets any of them is told so at
+    # start-up, as an ERROR naming them, and nothing is read from them.
+
     # ------------------------------------------------------------------
     # METADATA DATABASE
     #

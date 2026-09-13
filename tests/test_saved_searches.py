@@ -46,7 +46,6 @@ class SavedSearchTestCase(unittest.TestCase):
             DASHBOARD_STORAGE_FILE = storage
             DASHBOARD_STORAGE = backend
             ENCRYPTION_KEY = SecretBox.generate_key()
-            OIDC_CLIENT_ID = None
 
         self.app = create_app(TestConfig)
         self.client = self.app.test_client()
