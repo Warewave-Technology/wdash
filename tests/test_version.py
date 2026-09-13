@@ -109,6 +109,24 @@ class EverythingElseReadsItTest(unittest.TestCase):
                     self.assertEqual(tag, self.version)
         self.assertTrue(found, "no manifest names a wdash image at all")
 
+    def test_the_page_beside_them_names_the_same_image(self):
+        """`kubernetes/README.md` tells the reader to build and push the
+        image the manifests pull, and gives the `docker build` line to do it
+        with. A bump that moves the manifests and not the page hands over a
+        command that builds a tag nothing deploys — and it is the page, not
+        the YAML, that somebody copies from.
+
+        Both images: the server's and the browser agent's, which is built
+        from the same tree under a different target.
+        """
+        page = _read("kubernetes", "README.md")
+        tags = re.findall(r"wdash(?:-elastic-dashboard|-browser):(\d+\.\d+\.\d+)",
+                          page)
+        self.assertTrue(tags, "the page names no image to build")
+        for tag in tags:
+            with self.subTest(tag=tag):
+                self.assertEqual(tag, self.version)
+
     def test_a_running_instance_can_be_asked(self):
         """`/health` is the one endpoint that answers before sign-in, which
         makes it the one an operator can reach at three in the morning.

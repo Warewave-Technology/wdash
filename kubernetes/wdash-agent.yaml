@@ -57,11 +57,11 @@ spec:
         #
         # For BROWSER JOURNEYS, build and push the other target and use it
         # here instead:
-        #     docker build -t <registry>/wdash-browser:2.4.1 --target browser .
+        #     docker build -t <registry>/wdash-browser:2.5.0 --target browser .
         # and raise the memory limit below with it. An agent that has no
         # browser reports nothing for a journey, so the journey reads unknown
         # rather than down.
-        image: yigitbasalma/wdash-elastic-dashboard:2.4.1
+        image: yigitbasalma/wdash-elastic-dashboard:2.5.0
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "wdash.agent"]
         env:

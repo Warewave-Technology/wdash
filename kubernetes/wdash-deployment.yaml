@@ -48,7 +48,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: wdash
-        image: yigitbasalma/wdash-elastic-dashboard:2.4.1
+        image: yigitbasalma/wdash-elastic-dashboard:2.5.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5000
@@ -187,7 +187,7 @@ spec:
       # somebody on. `replicas: 1` above is what holds it, and
       # tests/test_kubernetes_manifests.py holds `replicas: 1`.
       - name: alerts
-        image: yigitbasalma/wdash-elastic-dashboard:2.4.1
+        image: yigitbasalma/wdash-elastic-dashboard:2.5.0
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "wdash.alerts"]
         envFrom:
@@ -306,7 +306,7 @@ spec:
 
       initContainers:
       - name: copy-static-files
-        image: yigitbasalma/wdash-elastic-dashboard:2.4.1
+        image: yigitbasalma/wdash-elastic-dashboard:2.5.0
         command: ['sh', '-c', 'cp -r /app/static/* /shared/static/']
         volumeMounts:
         - name: static-files

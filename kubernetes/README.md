@@ -15,16 +15,16 @@ shipping nothing.
 Four things, and none of them start without you.
 
 **0. The image.** The manifests name
-`yigitbasalma/wdash-elastic-dashboard:2.4.1`, and the published images stop at
+`yigitbasalma/wdash-elastic-dashboard:2.5.0`, and the published images stop at
 2.2.4 — an apply of these files as they are pulls a tag that does not exist,
 and every container waits in `ErrImagePull`. Build this version and push it
 where your cluster can pull from, then point the manifests at it:
 
 ```bash
-docker build -t <registry>/wdash-elastic-dashboard:2.4.1 --target server .
-docker push <registry>/wdash-elastic-dashboard:2.4.1
+docker build -t <registry>/wdash-elastic-dashboard:2.5.0 --target server .
+docker push <registry>/wdash-elastic-dashboard:2.5.0
 cd kubernetes && kustomize edit set image \
-    yigitbasalma/wdash-elastic-dashboard=<registry>/wdash-elastic-dashboard:2.4.1
+    yigitbasalma/wdash-elastic-dashboard=<registry>/wdash-elastic-dashboard:2.5.0
 ```
 
 `wdash-agent.yaml` is not part of the kustomization; set its `image:` by hand.
@@ -120,7 +120,7 @@ Browser journeys need the browser image, which is 1.77GB against 260MB and is
 not published:
 
 ```bash
-docker build -t <registry>/wdash-browser:2.4.1 --target browser .
+docker build -t <registry>/wdash-browser:2.5.0 --target browser .
 ```
 
 Raise the agent's memory limit with it: Chromium needs gigabytes, not the
