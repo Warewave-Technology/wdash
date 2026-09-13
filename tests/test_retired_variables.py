@@ -88,7 +88,14 @@ class TheSentenceTest(unittest.TestCase):
         self.assertIn("no longer reads them", sentence)
         self.assertIn("configuration page, under Sources", sentence)
         self.assertIn("Nothing was read", sentence)
-        self.assertIn("have no source", sentence)
+        # Not "the pages have no source": an installation that also stored a
+        # Loki or a second cluster still has one, and what changed for it is
+        # WHICH one answers by default. Measured on the demo the day the
+        # environment path went — its board fell from 18,169 records to
+        # 1,213 without a word, because the oldest stored source was Loki.
+        self.assertIn("answer from the sources that are stored", sentence)
+        self.assertIn("the default is now the oldest stored one", sentence)
+        self.assertNotIn("have no source", sentence)
 
     def test_one_variable_is_named_in_the_singular(self):
         said = variables_left_behind({"MONITOR_INDEX_PATTERNS": "hb-*"})

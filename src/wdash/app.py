@@ -286,7 +286,10 @@ RETIRED_VARIABLES = (
      "the Elasticsearch cluster and its index patterns are",
      "Sources",
      "until the cluster is added there, the logs, traces and monitors pages "
-     "have no source"),
+     "answer from the sources that are stored, or from nothing if there are "
+     "none; the cluster the environment declared was also the default "
+     "source, and the default is now the oldest stored one, so an unpinned "
+     "dashboard and the search page may be reading a different backend"),
     (("OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_DISCOVERY_URL",
       "OIDC_REDIRECT_URI", "OIDC_SCOPES", "OIDC_USERNAME_CLAIM",
       "OIDC_EMAIL_CLAIM", "OIDC_GROUPS_CLAIM", "OIDC_TRUST_UNVERIFIED_EMAIL"),

@@ -984,8 +984,13 @@ as a break, because `>=3.8` was never installable: `psycopg` has required
   seven variables around it (the credentials, timeout, certificate switch and
   bundle, and the trace and monitor index patterns). Nothing reads them now.
   Before upgrading, add that cluster under **Configuration → Sources** with
-  the same index patterns, or the logs, traces and monitors pages come up
-  saying they have no source. A process that still has any of the variables
+  the same index patterns. Without it, the logs, traces and monitors pages
+  answer from whatever other sources are stored — or say they have none —
+  and since the environment's cluster was also the default source, the
+  default becomes the oldest stored one: an unpinned dashboard and the search
+  page may quietly be reading a different backend (measured: a demo board
+  fell from 18,169 records to 1,213 because its oldest stored source was a
+  Loki). A process that still has any of the variables
   set says so at start-up, as an ERROR naming them and the page, and reads
   nothing from them — it does not import them, because a one-shot import at
   start-up is the mechanism that was removed. The same goes for the OpenID
