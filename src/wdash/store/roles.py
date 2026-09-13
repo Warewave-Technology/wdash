@@ -15,7 +15,6 @@ being allowed to see every service inside it.
 Fail closed remains the rule. A boundary that is not declared grants nothing.
 """
 
-import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -23,15 +22,14 @@ from sqlalchemy import select
 from .database import upsert
 from .schema import roles
 
-logger = logging.getLogger(__name__)
-
 #: What an installation with no roles is given, so that it is usable before
-#: anybody opens the configuration page.
+#: anybody opens the configuration page. Written by migration 19, the only
+#: thing in the application that reads it.
 #:
 #: The one definition. There were three: this, `config/rbac.yaml`, and the
 #: copy of that file in the Kubernetes ConfigMap — and which one an
 #: installation got depended on whether a file happened to be where the
-#: configuration said it was. Seeding happens once, so whichever it got was
+#: configuration said it was. They are written once, so whichever it got was
 #: the one it kept. They had drifted apart in names, in groups and in
 #: boundaries. A test held two of them together; the ConfigMap's copy was
 #: held to nothing, and it gave `developer` every service. An installation
@@ -90,11 +88,11 @@ DEFAULT_ROLES = {
 #: Which claims name a person, when neither the provider's own settings nor
 #: the environment name one.
 #:
-#: Stored with the roles for an installation that has none, and read by
-#: `auth.providers` as its last fallback — one object, so what a new
-#: installation stores and what one with nothing stored reads cannot drift
-#: apart. The values are the `claim_mappings` block `config/rbac.yaml`
-#: shipped, which every installation made from this repository has stored.
+#: Stored by migration 19 with the roles, and read by `auth.providers` as
+#: its last fallback — one object, so what a new installation stores and
+#: what one with nothing stored reads cannot drift apart. The values are the
+#: `claim_mappings` block `config/rbac.yaml` shipped, which every
+#: installation made from this repository has stored.
 DEFAULT_CLAIM_MAPPINGS = {
     "email_claim": "email",
     "username_claim": "preferred_username",
@@ -137,39 +135,3 @@ class RoleRepository:
         with self._engine.begin() as connection:
             result = connection.execute(roles.delete().where(roles.c.name == name))
         return result.rowcount > 0
-
-    def seed(self, settings_repository):
-        """Give an installation with no roles the built-in ones.
-
-        Does nothing once any role exists, so an edit made on the
-        configuration page is never overwritten by a restart, and an
-        installation that imported its roles from an rbac.yaml at an earlier
-        version keeps exactly what it imported.
-
-        A claim mapping already stored is kept. It is the one setting here
-        that may predate the roles table being empty — and replacing it is
-        the regression that sent an installation whose provider sends
-        `memberOf` back to reading `groups`, where every group mapping
-        resolves nothing and everybody lands on the default role.
-        """
-        if self.all():
-            return False
-
-        for name, definition in DEFAULT_ROLES.items():
-            self.upsert(
-                name,
-                permissions=definition["permissions"],
-                containers=definition["containers"],
-                trace_containers=definition["trace_containers"],
-                services=definition["services"],
-                groups=definition["groups"],
-                description=definition["description"])
-
-        settings_repository.set("rbac.default_role", "viewer")
-        settings_repository.set("rbac.user_roles", {})
-        if settings_repository.get("rbac.claim_mappings") is None:
-            settings_repository.set("rbac.claim_mappings",
-                                    dict(DEFAULT_CLAIM_MAPPINGS))
-
-        logger.info(f"Seeded the {len(DEFAULT_ROLES)} built-in roles")
-        return True

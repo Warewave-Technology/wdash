@@ -74,13 +74,11 @@ class Store:
 
     @classmethod
     def open(cls, url=None, secret_box=None):
-        """Build the store, migrate, and give an installation with no roles
-        the built-in ones."""
+        """Build the store and migrate it — which is also what gives an
+        installation with no roles the built-in ones (migration 19)."""
         engine = build_engine(url)
         migrate(engine)
-        store = cls(engine, secret_box)
-        store.roles.seed(store.settings)
-        return store
+        return cls(engine, secret_box)
 
     def describe(self):
         return describe(self.engine)

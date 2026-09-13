@@ -15,7 +15,9 @@ starts again at one.
 
 The source is only read, and has to be at the version this WDash writes —
 start this version against it once, which migrates it. The target is
-migrated here and has to be empty. Every table is copied in the order its
+migrated here and has to hold nothing but what migrating it wrote: since
+migration 19 that is an empty installation's built-in roles and three
+settings, which the source's replace. Every table is copied in the order its
 keys need, through the schema, so a JSON value arrives as JSON and a time as
 a time. Sealed columns are copied as they are: the target needs the same
 WDASH_ENCRYPTION_KEY, and this needs none. Both databases are then counted,
@@ -59,6 +61,42 @@ def _aware(table):
             if isinstance(c.type, DateTime) and c.type.timezone]
 
 
+def _contents(engine, names):
+    """The rows of the named tables as the schema reads them, moments aside,
+    in primary-key order — comparable across dialects and across days."""
+    found = {}
+    with engine.connect() as connection:
+        for table in _tables():
+            if table.name not in names:
+                continue
+            moments = {c.name for c in table.columns
+                       if isinstance(c.type, DateTime)}
+            keys = [c.name for c in table.primary_key.columns]
+            rows = [{k: v for k, v in row.items() if k not in moments}
+                    for row in connection.execute(select(table)).mappings()]
+            found[table.name] = sorted(
+                rows, key=lambda row: tuple(str(row[k]) for k in keys))
+    return found
+
+
+def _left_by_migrating():
+    """What migrating an empty database leaves in it, table by table.
+
+    Since migration 19 that is not nothing, and a target is not "occupied"
+    for holding it: an installation with no roles is given the built-in ones.
+    Measured rather than listed — a database of its own, migrated and read —
+    so a later migration that writes a row is accounted for here without
+    anybody remembering that this exists.
+    """
+    engine = build_engine("sqlite:///:memory:")
+    try:
+        migrate(engine)
+        written = {name for name, rows in _counts(engine).items() if rows}
+        return _contents(engine, written)
+    finally:
+        engine.dispose()
+
+
 def copy_store(source, target, log=logger.info):
     """Copy every row from engine `source` to engine `target`.
 
@@ -75,7 +113,15 @@ def copy_store(source, target, log=logger.info):
             f"migrates on start — and copy after that.")
 
     migrate(target)
-    occupied = {name: rows for name, rows in _counts(target).items() if rows}
+    held = {name: rows for name, rows in _counts(target).items() if rows}
+    left = _left_by_migrating()
+    # A table holding exactly what migrating wrote is replaced by the
+    # source's rows. Anything else — one more row, one edited field, a table
+    # migrating does not write to at all — is somebody's, and refused.
+    migrated = _contents(target, set(held) & set(left))
+    replaced = sorted(name for name in migrated if migrated[name] == left[name])
+    occupied = {name: rows for name, rows in held.items()
+                if name not in replaced}
     if occupied:
         raise CopyRefused(
             "the target is not empty: " + ", ".join(
@@ -84,6 +130,11 @@ def copy_store(source, target, log=logger.info):
 
     copied = {}
     with source.connect() as reading, target.begin() as writing:
+        for table in reversed(_tables()):
+            if table.name in replaced:
+                writing.execute(table.delete())
+                log(f"{table.name}: {held[table.name]} written by migrating "
+                    f"the target, replaced")
         for table in _tables():
             moments = _aware(table)
             rows, total = [], 0

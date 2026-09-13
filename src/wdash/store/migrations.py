@@ -393,6 +393,62 @@ def _add_local_totp(connection):
                 f"ALTER TABLE wdash_users ADD COLUMN {column} {kind}"))
 
 
+def _give_an_installation_with_no_roles_the_built_in_ones(connection):
+    """Version 19: the built-in roles, the default role and the claim
+    mappings — for an installation that has no roles, and for no other.
+
+    They were written by `RoleRepository.seed`, on every start that found the
+    roles table empty: after the migration and outside its lock, so the
+    workers booting one new installation raced each other to it, and each
+    write needed an upsert to survive the worker beside it. Here they are
+    written once, in the transaction that creates the tables, under the lock
+    every worker takes, and committed with the version row that says so.
+
+    An installation that has any role is left exactly as it is. Somebody's
+    edited `admin` is not reset by an upgrade, and an installation that
+    imported `auditor` and `ops` from an rbac.yaml at an earlier version is
+    not given an `admin` beside them — which would map `wdash-admins` onto
+    `system:admin` in an organisation that never granted it to anybody.
+
+    Each setting is written only where none is stored. On a new installation
+    none can be. Where the roles table was emptied by hand, the one that
+    matters is the claim mapping, whose loss is silent: `memberOf` replaced
+    by `groups` resolves no group mapping for anybody, and everybody lands
+    on the default role.
+
+    `DEFAULT_ROLES` is read when this runs, which for a new installation is
+    the version being installed. Changing it later changes what a new
+    installation gets and does nothing for one that exists — that takes a
+    migration of its own, as `monitors:read` did at version 8.
+    """
+    from .roles import DEFAULT_CLAIM_MAPPINGS, DEFAULT_ROLES
+    from .schema import roles, settings
+
+    if connection.execute(select(roles.c.name).limit(1)).first() is not None:
+        return
+
+    now = datetime.now(timezone.utc)
+    for name, definition in DEFAULT_ROLES.items():
+        services = definition["services"]
+        connection.execute(roles.insert().values(
+            name=name,
+            description=definition["description"],
+            permissions=list(definition["permissions"]),
+            containers=list(definition["containers"]),
+            trace_containers=list(definition["trace_containers"]),
+            services=list(services) if services is not None else None,
+            groups=list(definition["groups"]),
+            updated_at=now))
+
+    stored = set(connection.execute(select(settings.c.key)).scalars())
+    for key, value in (("rbac.default_role", "viewer"),
+                       ("rbac.user_roles", {}),
+                       ("rbac.claim_mappings", dict(DEFAULT_CLAIM_MAPPINGS))):
+        if key not in stored:
+            connection.execute(settings.insert().values(
+                key=key, value=value, updated_at=now))
+
+
 def _signals_of(row):
     """What a source row serves, as a set.
 
@@ -435,6 +491,9 @@ MIGRATIONS = [
     (17, "a check's own TLS decision, and whether its handshake was verified",
      _add_monitor_tls),
     (18, "a local account's second factor, sealed at rest", _add_local_totp),
+    (19, "the built-in roles, default role and claim mappings, for an "
+         "installation with no roles",
+     _give_an_installation_with_no_roles_the_built_in_ones),
 ]
 
 

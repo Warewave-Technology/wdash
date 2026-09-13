@@ -106,13 +106,57 @@ class CopyTest(unittest.TestCase):
     def test_a_target_that_holds_anything_is_refused(self):
         source = self.store("source")
         populate(source)
-        target = self.store("target")          # seeded roles are something
+        target = self.store("target")
+        target.users.create_first_admin("somebody", PASSWORD)
         from wdash.store.database import build_engine
         with self.assertRaises(CopyRefused) as refused:
             copy_store(source.engine, build_engine(f"sqlite:///{self.folder}/target.db"),
                        log=lambda *_: None)
-        self.assertIn("wdash_roles", str(refused.exception))
-        self.assertEqual(target.users.count(), 0, "something was copied anyway")
+        self.assertIn("wdash_users", str(refused.exception))
+        self.assertIsNone(target.users.by_username("owner"),
+                          "something was copied anyway")
+
+    def test_a_target_holding_only_what_migrating_wrote_is_copied_into(self):
+        """Migrating an empty database gives it the built-in roles, so a
+        target somebody started WDash against once — or a copy that failed
+        halfway and rolled back — holds rows that nobody wrote. They are
+        replaced by the source's, every field, not merged with them."""
+        source = self.store("source")
+        populate(source)
+        source.roles.upsert("admin", ["logs:read", "system:admin"], ["prod-*"],
+                            ["*"], groups=["corp-sre"], description="edited")
+        source.roles.upsert("auditor", ["logs:read"], ["audit-*"], [])
+        source.settings.set("rbac.claim_mappings", {"groups_claim": "memberOf"})
+        self.store("target").engine.dispose()           # migrated, nothing more
+
+        from wdash.store.database import build_engine
+        copy_store(source.engine, build_engine(f"sqlite:///{self.folder}/target.db"),
+                   log=lambda *_: None)
+        target = self.store("target")
+
+        def roles(store):
+            return {role["name"]: {k: v for k, v in role.items()
+                                   if k != "updated_at"}
+                    for role in store.roles.all()}
+        self.assertEqual(roles(target), roles(source))
+        self.assertEqual(target.settings.get("rbac.claim_mappings"),
+                         {"groups_claim": "memberOf"})
+        self.assertIsNotNone(target.users.verify("owner", PASSWORD))
+
+    def test_a_target_whose_built_in_roles_were_edited_is_refused(self):
+        """Holding the same number of rows as migrating writes is not holding
+        what migrating writes. An edited role is somebody's."""
+        source = self.store("source")
+        populate(source)
+        target = self.store("target")
+        target.roles.upsert("viewer", ["logs:read"], ["*"], [])
+        from wdash.store.database import build_engine
+        with self.assertRaises(CopyRefused) as refused:
+            copy_store(source.engine, build_engine(f"sqlite:///{self.folder}/target.db"),
+                       log=lambda *_: None)
+        self.assertIn("3 in wdash_roles", str(refused.exception))
+        self.assertEqual(target.roles.get("viewer")["containers"], ["*"])
+        self.assertIsNone(target.users.by_username("owner"))
 
     def test_a_source_behind_this_version_is_refused(self):
         """Read-only means not migrating it here: start WDash on it first."""
@@ -183,7 +227,6 @@ class SqliteToPostgresTest(unittest.TestCase):
         source_engine = create_engine(f"sqlite:///{folder}/volume.db")
         migrate(source_engine)
         source = Store(source_engine, SecretBox(key))
-        source.roles.seed(source.settings)
         populate(source)
 
         target_url = f"sqlite:///{folder}/postgres.db"   # routed to Postgres

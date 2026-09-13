@@ -921,10 +921,12 @@ The prefix is deliberate. A directory almost certainly has a group called
 mapped it to `system:admin` would hand WDash's highest privilege to everyone
 in it.
 
-They are written into an installation that has no roles, and into no other.
-An edit made on the configuration page is not overwritten by a restart or an
-upgrade, and an installation that already has roles — including one that
-imported them from an `rbac.yaml` at an earlier version — keeps exactly those.
+They are written by a schema migration, version 19, into an installation that
+has no roles and into no other — once, under the lock every worker takes at
+start-up. An edit made on the configuration page is not overwritten by a
+restart or an upgrade, and an installation that already has roles — including
+one that imported them from an `rbac.yaml` at an earlier version — keeps
+exactly those.
 
 There is no file for bringing roles of your own. Other roles, and other
 groups mapped onto them, are made on the configuration page under **Roles &

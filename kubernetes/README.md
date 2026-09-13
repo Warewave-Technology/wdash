@@ -268,9 +268,10 @@ To scale out:
        --to 'postgresql+psycopg://user:pass@host/wdash'
    ```
 
-   It refuses a target that holds anything, counts both sides afterwards,
-   and copies the sealed credentials as they are — so keep the same
-   `encryption-key` in the Secret;
+   It refuses a target that holds anything somebody wrote — the built-in
+   roles migrating an empty database gives it are replaced by the volume's
+   — counts both sides afterwards, and copies the sealed credentials as
+   they are, so keep the same `encryption-key` in the Secret;
 2. point `DATABASE_URL` at Postgres (`postgresql+psycopg://user:pass@host/wdash`
    — `postgresql://` works too), check that it starts and you can sign in,
    then drop the PVC and its mounts;

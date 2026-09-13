@@ -251,19 +251,6 @@ class RoleTest(unittest.TestCase):
                                groups=["corp-audit"])
         store = self.reopened(replace)
         self.assertEqual([r["name"] for r in store.roles.all()], ["auditor"])
-        self.assertFalse(store.roles.seed(store.settings))
-
-    def test_a_stored_claim_mapping_is_kept_when_the_roles_are_seeded(self):
-        """The one setting that can be there while the roles table is empty,
-        and the one whose loss is silent: `memberOf` replaced by `groups`
-        resolves no group mapping for anybody."""
-        store = fresh_store()
-        store.settings.set("rbac.claim_mappings", {"groups_claim": "memberOf"})
-        for role in store.roles.all():
-            store.roles.delete(role["name"])
-        self.assertTrue(store.roles.seed(store.settings))
-        self.assertEqual(store.settings.get("rbac.claim_mappings"),
-                         {"groups_claim": "memberOf"})
 
 
 class ObjectTest(unittest.TestCase):
@@ -728,29 +715,34 @@ if __name__ == "__main__":
 
 
 class TheDefaultRolesTest(unittest.TestCase):
-    """What a new installation is given, held to the one definition of it.
+    """What migrating an empty database gives it, held to the one definition.
 
     There were three answers to "what roles does a fresh install have":
     `DEFAULT_ROLES`, `config/rbac.yaml`, and the copy of that file in the
-    Kubernetes ConfigMap. Seeding happens once, so whichever an installation
+    Kubernetes ConfigMap. They are written once, so whichever an installation
     landed on was the one it kept — and they had drifted apart in names,
     groups, permissions and boundaries. A test compared the first two; the
     third was compared with nothing, and gave `developer` every service.
 
     One definition is left, so there is nothing to compare it with. What is
-    left to hold is that an installation actually gets it, every field of
-    it, and that what it says is still worth getting.
+    left to hold is that the migration writes it, every field of it, and
+    that what it says is still worth getting. Migrated here and opened with
+    no `Store.open`, so it is the migration being held and not whatever else
+    a start might do.
     """
 
     FIELDS = ("description", "permissions", "containers", "trace_containers",
               "services", "groups")
 
     def setUp(self):
+        from wdash.store import migrate
         from wdash.store.roles import DEFAULT_ROLES
         self.defaults = DEFAULT_ROLES
-        self.store = fresh_store()
+        engine = build_engine("sqlite:///:memory:")
+        migrate(engine)
+        self.store = Store(engine)
 
-    def test_a_new_installation_holds_exactly_the_default_roles(self):
+    def test_the_migration_writes_exactly_the_default_roles(self):
         stored = {role["name"]: {field: role[field] for field in self.FIELDS}
                   for role in self.store.roles.all()}
         self.assertEqual(stored, self.defaults)
@@ -1157,3 +1149,139 @@ class LocalTotpUpgradeTest(unittest.TestCase):
         from wdash.store import migrations
         engine = self._at_seventeen()
         self.assertEqual(migrations.migrate(engine), migrations.migrate(engine))
+
+
+class BuiltInRolesUpgradeTest(unittest.TestCase):
+    """Version 19 on the stores an upgrade actually meets.
+
+    Before it, the built-in roles were written at start-up by
+    `RoleRepository.seed`, so every store at version 18 that anybody runs
+    already has roles: the built-in ones, edited or not, or its own from an
+    rbac.yaml. The migration has to leave every one of them exactly as it
+    was — every column of every row, times included — and give the built-in
+    roles only to a store that has none.
+
+    Runs on both dialects: with WDASH_TEST_POSTGRES set, `build_engine` puts
+    this store in a Postgres schema instead.
+    """
+
+    MEMBEROF = {"email_claim": "mail", "username_claim": "uid",
+                "groups_claim": "memberOf"}
+
+    def at_eighteen(self):
+        from wdash.store import migrations
+
+        engine = build_engine("sqlite:///:memory:")
+        every = migrations.MIGRATIONS
+        migrations.MIGRATIONS = [step for step in every if step[0] <= 18]
+        try:
+            migrations.migrate(engine)
+        finally:
+            migrations.MIGRATIONS = every
+        return engine, Store(engine)
+
+    @staticmethod
+    def everything(engine):
+        """Every column of every role and every setting."""
+        from sqlalchemy import select
+
+        from wdash.store.schema import roles, settings
+        with engine.connect() as connection:
+            return {
+                "roles": {row["name"]: dict(row) for row in
+                          connection.execute(select(roles)).mappings()},
+                "settings": {row["key"]: dict(row) for row in
+                             connection.execute(select(settings)).mappings()},
+            }
+
+    def upgraded(self, engine):
+        """(before, after) migrating to the latest version."""
+        from wdash.store import migrations
+        before = self.everything(engine)
+        self.assertEqual(migrations.migrate(engine),
+                         max(step[0] for step in migrations.MIGRATIONS))
+        return before, self.everything(engine)
+
+    def test_an_installation_whose_roles_were_edited_is_left_as_it_was(self):
+        from wdash.store.roles import DEFAULT_CLAIM_MAPPINGS, DEFAULT_ROLES
+        engine, store = self.at_eighteen()
+        # What its first start gave it...
+        for name, definition in DEFAULT_ROLES.items():
+            store.roles.upsert(
+                name, definition["permissions"], definition["containers"],
+                definition["trace_containers"], services=definition["services"],
+                groups=definition["groups"],
+                description=definition["description"])
+        store.settings.set("rbac.default_role", "viewer")
+        store.settings.set("rbac.user_roles", {})
+        store.settings.set("rbac.claim_mappings", dict(DEFAULT_CLAIM_MAPPINGS))
+        # ...and then the page.
+        store.roles.upsert("admin", ["logs:read", "system:admin"],
+                           ["prod-*", "-prod-secrets"], ["tempo:*"],
+                           services=["checkout"],
+                           groups=["corp-sre", "wdash-admins"],
+                           description="edited on the page")
+        store.roles.delete("developer")
+        store.roles.upsert("auditor", ["logs:read"], ["audit-*"], [],
+                           services=[], groups=["corp-audit"])
+        store.settings.set("rbac.default_role", "auditor", updated_by="alice")
+        store.settings.set("rbac.user_roles", {"bob@example.com": "admin"},
+                           updated_by="alice")
+        store.settings.set("rbac.claim_mappings", self.MEMBEROF,
+                           updated_by="alice")
+
+        before, after = self.upgraded(engine)
+        self.assertEqual(after, before)
+        self.assertEqual(sorted(after["roles"]), ["admin", "auditor", "viewer"])
+
+    def test_an_installation_with_only_roles_of_its_own_is_given_nothing(self):
+        """What importing an rbac.yaml of `auditor` and `ops` left, at a
+        version before claim mappings were read. The built-in roles beside
+        them would map `wdash-admins` onto `system:admin` in an organisation
+        that never granted it; a claim mapping would be a write into an
+        installation that has roles, which this migration never makes."""
+        engine, store = self.at_eighteen()
+        store.roles.upsert("auditor", ["logs:read"], ["audit-*"], [],
+                           services=[], groups=["corp-audit"],
+                           description="Reads the audit indices")
+        store.roles.upsert("ops", ["logs:read", "traces:read", "system:admin"],
+                           ["*", "-secrets-*"], ["tempo:*"],
+                           services=["*", "-vault"],
+                           groups=["corp-sre", "corp-oncall"])
+        store.settings.set("rbac.default_role", "auditor")
+        store.settings.set("rbac.user_roles", {"carol@example.com": "ops"})
+
+        before, after = self.upgraded(engine)
+        self.assertEqual(after, before)
+        self.assertNotIn("rbac.claim_mappings", after["settings"])
+
+    def test_a_claim_mapping_already_stored_is_never_replaced(self):
+        """Roles emptied by hand leave their settings behind. The roles are
+        written again; a stored setting is not — `memberOf` replaced by
+        `groups` resolves no group mapping for anybody, and says nothing."""
+        from wdash.store.roles import DEFAULT_ROLES
+        engine, store = self.at_eighteen()
+        store.settings.set("rbac.claim_mappings", self.MEMBEROF,
+                           updated_by="alice")
+        store.settings.set("rbac.default_role", "ops", updated_by="alice")
+
+        before, after = self.upgraded(engine)
+        self.assertEqual(sorted(after["roles"]), sorted(DEFAULT_ROLES))
+        for key in ("rbac.claim_mappings", "rbac.default_role"):
+            self.assertEqual(after["settings"][key], before["settings"][key])
+        self.assertEqual(after["settings"]["rbac.user_roles"]["value"], {})
+
+    def test_running_it_again_changes_nothing(self):
+        """The version row keeps `migrate` from running it twice. This is
+        the step itself, over its own work: it must neither fail on a key it
+        wrote nor rewrite a row."""
+        from wdash.store import migrations
+        engine, _ = self.at_eighteen()
+        migrations.migrate(engine)
+        once = self.everything(engine)
+        with engine.begin() as connection:
+            migrations._give_an_installation_with_no_roles_the_built_in_ones(
+                connection)
+        self.assertEqual(self.everything(engine), once)
+        self.assertEqual(migrations.migrate(engine), migrations.migrate(engine))
+        self.assertEqual(self.everything(engine), once)

@@ -266,7 +266,8 @@ def _open_store(url, barrier=None, results=None):
 
 class ConcurrentSeedTest(unittest.TestCase):
     """Four workers opening one fresh store at the same time — the whole of
-    it, seeding included, which the migration tests above stop short of.
+    it, the built-in roles included, which the migration tests above do not
+    look at.
 
     The migration ran under a lock; the seed after it did not. It read the
     roles table, found it empty, and wrote each role with a select and then
@@ -274,6 +275,11 @@ class ConcurrentSeedTest(unittest.TestCase):
     100 starts ended in "UNIQUE constraint failed: wdash_roles.name", and
     gunicorn stopped the whole server over the one worker that failed to
     boot. On Postgres the same, on wdash_settings.
+
+    The roles are written by migration 19 now, inside the lock and in the
+    transaction that records the version, so the second worker finds them
+    already there instead of racing to write them — and this test is what
+    holds that, because an insert that races fails where an upsert did not.
     """
 
     ROUNDS = 6
