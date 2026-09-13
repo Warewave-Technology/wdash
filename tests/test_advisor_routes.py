@@ -185,15 +185,20 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 
 
-class DefaultSourceTest(unittest.TestCase):
+class BareRequestTest(unittest.TestCase):
     """What a bare `/advisor` — the link in the menu — analyses.
 
-    It used to mean a cluster declared in the environment, unconditionally,
-    from when that was the only cluster there could be. With every source on
-    the configuration page the first thing an admin saw was "no Elasticsearch
-    is configured" on a screen that was simultaneously offering five sources
-    it could analyse. Picking any of them fixed it, so the fault read as
-    intermittent rather than as a wrong default.
+    One source it can inspect: that one, because there is no choice to
+    make. Several: nothing, until one is picked. The Advisor reads one
+    cluster at a time — findings about two deployments in one list are a
+    report about neither — and it no longer picks one for you.
+
+    It used to analyse the oldest stored source, the hub's rule for a query
+    that named no source while the hub had one; and before that a cluster
+    declared in the environment, unconditionally, so that with every source
+    on the configuration page the first thing an admin saw was "no
+    Elasticsearch is configured" on a screen offering five sources it could
+    analyse.
     """
 
     # Not a subclass of AdvisorRouteTest: inheriting the harness would also
@@ -215,36 +220,75 @@ class DefaultSourceTest(unittest.TestCase):
             name=name, signal=["logs"], kind=kind,
             config={"url": url, "verify_certs": False})
 
-    def test_a_bare_request_reads_a_configured_source(self):
+    def test_a_bare_request_reads_the_only_source(self):
         self._add("lab-elastic", kind="elasticsearch",
                   url="http://cluster:9200")
         with self.app.test_request_context("/advisor"):
-            self.assertEqual(advisor_routes._default_source(), "lab-elastic")
+            self.assertEqual(advisor_routes._resolve(None), "lab-elastic")
 
-    def test_the_default_is_the_oldest_source_not_the_first_by_name(self):
-        """The hub's own rule for a query that names no source, so a bare
-        /advisor and a bare search mean one cluster. The repository lists by
-        name, and by name `aaa-loki` — added last — would have taken the
-        page over from the cluster the installation has always run on."""
+    def test_with_several_a_bare_request_reads_none_of_them(self):
+        """Not the oldest, not the first by name: there is nothing left
+        that could honestly be called "the" source, and the caller is told
+        which names it may use."""
         self._add("lab-elastic", kind="elasticsearch",
                   url="http://cluster:9200")
         self._add("aaa-loki")
         with self.app.test_request_context("/advisor"):
-            self.assertEqual(advisor_routes._default_source(), "lab-elastic")
+            with self.assertRaises(advisor_routes.ChooseSource) as caught:
+                advisor_routes._resolve(None)
+            self.assertEqual(caught.exception.choices, ["aaa-loki", "lab-elastic"])
+            self.assertIn("aaa-loki, lab-elastic", str(caught.exception))
+
+    def test_the_list_is_by_name_because_order_decides_nothing(self):
+        """It was creation order, to agree with the hub about which source
+        an unnamed query read. Neither has such a rule now."""
+        self._add("lab-elastic", kind="elasticsearch",
+                  url="http://cluster:9200")
+        self._add("aaa-loki")
+        with self.app.test_request_context("/advisor"):
             self.assertEqual(
                 [entry["value"] for entry in advisor_routes._advisable_sources()],
-                ["lab-elastic", "aaa-loki"])
+                ["aaa-loki", "lab-elastic"])
 
     def test_nothing_at_all_resolves_to_nothing(self):
         with self.app.test_request_context("/advisor"):
-            self.assertIsNone(advisor_routes._default_source())
+            self.assertIsNone(advisor_routes._resolve(None))
 
-    def test_the_bare_page_analyses_that_source(self):
+    def test_the_bare_page_analyses_the_only_source(self):
         self._add("lab-elastic", kind="elasticsearch",
                   url="http://cluster:9200")
         body = self.client.get("/advisor").get_data(as_text=True)
         self.assertNotIn("no Elasticsearch is configured", body)
         self.assertEqual(self.call_count, 1)
+
+    def test_the_bare_page_over_several_offers_the_choice_and_analyses_nothing(self):
+        """The picker, every source in it, none highlighted, and a sentence
+        saying nothing has been looked at — not a report about whichever
+        happened to be first, and not "Analysis unavailable" either, because
+        nothing failed."""
+        self._add("lab-elastic", kind="elasticsearch",
+                  url="http://cluster:9200")
+        self._add("aaa-loki")
+        body = self.client.get("/advisor").get_data(as_text=True)
+        self.assertIn("Choose a source to analyse", body)
+        self.assertNotIn("Analysis unavailable", body)
+        self.assertIn("aaa-loki", body)
+        self.assertIn("lab-elastic", body)
+        self.assertIsNone(self._selected_option(body))
+        self.assertEqual(self.call_count, 0)
+        self.assertEqual(list(advisor_routes._cache), [])
+
+    def test_the_json_endpoint_over_several_asks_for_a_name(self):
+        self._add("lab-elastic", kind="elasticsearch",
+                  url="http://cluster:9200")
+        self._add("aaa-loki")
+        response = self.client.get("/api/advisor/report")
+        self.assertEqual(response.status_code, 400)
+        payload = response.get_json()
+        self.assertEqual(payload["error_type"], "source_required")
+        self.assertEqual(payload["sources"], ["aaa-loki", "lab-elastic"])
+        self.assertIn("?source=", payload["error"])
+        self.assertEqual(self.call_count, 0)
 
     def _selected_option(self, body):
         """Which option carries `selected`. The attribute is on its own line
@@ -271,14 +315,15 @@ class DefaultSourceTest(unittest.TestCase):
         body = self.client.get("/advisor?source=lab-elastic").get_data(as_text=True)
         self.assertEqual(self._selected_option(body), "lab-elastic")
 
-    def test_the_bare_picker_shows_the_source_that_was_analysed(self):
+    def test_the_named_picker_shows_the_source_that_was_analysed(self):
         # Two, because the picker is hidden when there is only one thing to
         # pick — and a hidden picker cannot disagree with anything.
         self._add("aaa-loki")
         self._add("lab-elastic", kind="elasticsearch",
                   url="http://cluster:9200")
-        body = self.client.get("/advisor").get_data(as_text=True)
+        body = self.client.get("/advisor?source=aaa-loki").get_data(as_text=True)
         self.assertEqual(self._selected_option(body), "aaa-loki")
+        self.assertNotIn("Choose a source", body)
 
     def test_an_elasticsearch_report_knows_which_source_it_is_about(self):
         """`analyze()` inspects a client it was handed and never learns what
@@ -292,8 +337,9 @@ class DefaultSourceTest(unittest.TestCase):
         self.assertEqual(report.source, "lab-elastic")
 
     def test_the_bare_page_and_the_named_one_share_one_cache_entry(self):
-        """They are the same report. Keying the bare request separately would
-        analyse the cluster twice and let the two copies drift apart."""
+        """They are the same report, on an installation with one source.
+        Keying the bare request separately would analyse the cluster twice
+        and let the two copies drift apart."""
         self._add("lab-elastic", kind="elasticsearch",
                   url="http://cluster:9200")
         self.client.get("/advisor")
@@ -312,10 +358,10 @@ class DefaultSourceTest(unittest.TestCase):
             raise RuntimeError("connection refused")
 
         advisor_routes.analyze = explode
-        body = self.client.get("/advisor").get_data(as_text=True)
+        body = self.client.get("/advisor?source=lab-elastic").get_data(as_text=True)
         self.assertIn("lab-loki", body)
 
-    def test_the_json_endpoint_uses_the_same_default(self):
+    def test_the_json_endpoint_reads_the_only_source_unnamed(self):
         self._add("lab-elastic", kind="elasticsearch",
                   url="http://cluster:9200")
         payload = self.client.get("/api/advisor/report").get_json()

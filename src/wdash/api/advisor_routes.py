@@ -41,20 +41,18 @@ class NoCluster(RuntimeError):
 
 
 def _advisable_sources():
-    """Every source the Advisor can say something about, oldest first.
+    """Every source the Advisor can say something about, by name.
 
     A source it cannot inspect is left OUT rather than listed and skipped: an
     entry that produces nothing reads as a clean bill of health for a backend
     that was never looked at.
 
-    In the order they were created, which is the hub's own order for a query
-    that names no source — so a bare `/advisor` reads the same cluster a
-    bare search does. The repository lists by name, and by name the source
-    somebody added last week can sort ahead of the one the installation has
-    always run on.
+    In the repository's order. It was creation order once, to agree with the
+    hub about which source an unnamed query meant; no query means one source
+    by naming none any more, and the Advisor has no first entry to fall back
+    on either — see `_resolve`.
     """
     from ..advisor.backends import COLLECTORS
-    from ..hub.factory import oldest_first
 
     store = getattr(current_app, "store", None)
     if store is None:
@@ -67,7 +65,7 @@ def _advisable_sources():
         return []
 
     out = []
-    for row in oldest_first(rows):
+    for row in rows:
         kind = row["kind"]
         if kind == "elasticsearch" or kind in COLLECTORS:
             out.append({"value": row["name"], "label": row["name"],
@@ -93,20 +91,41 @@ def _named(report, source):
     return report
 
 
-def _default_source():
-    """Which source a bare `/advisor` means: the oldest one it can inspect.
+class ChooseSource(RuntimeError):
+    """A bare request, and more than one source it could mean.
 
-    It used to mean a cluster declared in the environment, from when that was
-    the only cluster there could be, and with every source on the
-    configuration page that default turned into "no Elasticsearch is
-    configured" on a screen that was simultaneously listing five sources it
-    could analyse. The order is `_advisable_sources`'s and is not decided
-    again here: two places deciding the same order would drift.
-
-    Returns None only when there is genuinely nothing to analyse.
+    The Advisor analyses ONE cluster, and does not fan out: a report is a
+    list of findings about a deployment, and findings from two deployments
+    in one list would be a report about neither. So a request that names no
+    source, on an installation with several, is not answered from any of
+    them. It used to be answered from the oldest stored one — the hub's own
+    rule for an unnamed query, while the hub had one — and with that rule
+    gone there is nothing left that could honestly be called "the" source.
+    The page offers the list to choose from instead; the JSON endpoint says
+    which names it would take.
     """
-    entries = _advisable_sources()
-    return entries[0]["value"] if entries else None
+
+    def __init__(self, choices):
+        self.choices = list(choices)
+        super().__init__(
+            "Name the source to analyse (?source=): one of "
+            + ", ".join(self.choices) + ".")
+
+
+def _resolve(requested):
+    """The source a request means.
+
+    Named, that one. Unnamed, the only source the Advisor can inspect when
+    there is exactly one — there is no choice to make, so none is asked for
+    — and `ChooseSource` when there are several. With nothing to analyse at
+    all it is None, which `_build_report` refuses as NoCluster.
+    """
+    if requested:
+        return requested
+    entries = [entry["value"] for entry in _advisable_sources()]
+    if len(entries) > 1:
+        raise ChooseSource(entries)
+    return entries[0] if entries else None
 
 
 def _build_report(source):
@@ -162,7 +181,7 @@ def _get_report(force=False, source=None):
     # the unresolved value would file every bare request under one name while
     # the report underneath it changed with the configuration. With nothing
     # to resolve to, the build below refuses before anything is cached.
-    source = source or _default_source()
+    source = _resolve(source)
     key = source
     with _lock:
         entry = _cache.get(key)
@@ -176,8 +195,14 @@ def _get_report(force=False, source=None):
 
 
 def _selected():
-    """What the picker should show for this request."""
-    return request.args.get("source") or _default_source() or ""
+    """What the picker should show for this request: the source named, or
+    the only one there is, or nothing — a picker that highlighted its first
+    entry beside a page analysing nothing would be a picker disagreeing
+    with the page."""
+    try:
+        return _resolve(request.args.get("source")) or ""
+    except ChooseSource:
+        return ""
 
 
 def _require_admin():
@@ -195,6 +220,12 @@ def advisor_page():
         report, age, _ = _get_report(
             force=request.args.get("refresh") == "1",
             source=request.args.get("source"))
+    except ChooseSource:
+        # Nothing analysed, nothing claimed: the picker, and a sentence
+        # saying it is waiting for a choice. Not an error — nothing failed.
+        return render_template("advisor.html", report=None, age=0,
+                               choose=True, rule_count=len(all_rules()),
+                               sources=_advisable_sources(), selected="")
     except NoCluster as exc:
         flash(str(exc), "warning")
         return render_template("advisor.html", report=None, age=0,
@@ -238,6 +269,9 @@ def advisor_report_json():
         report, age, fresh = _get_report(
             force=request.args.get("refresh") == "1",
             source=request.args.get("source"))
+    except ChooseSource as exc:
+        return jsonify({"error": str(exc), "error_type": "source_required",
+                        "sources": exc.choices}), 400
     except NoCluster as exc:
         return jsonify({"error": str(exc), "error_type": "no_cluster"}), 503
     except Exception as exc:

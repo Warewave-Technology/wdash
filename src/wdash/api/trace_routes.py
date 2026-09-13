@@ -104,23 +104,23 @@ def _reaches_no_store(source, scope):
         return False
 
 
-def _traces(name=None, default_to_all=False):
+def _traces(name=None):
     """The trace source a request reads from, or None when none is configured.
 
-    `source=*` fans out across everything. An unknown name is an error rather
-    than a silent fall back to the default: quietly answering from a different
-    store is how somebody concludes a trace does not exist.
-
-    `default_to_all` is for looking up a trace BY ID. A trace id is globally
-    unique and nobody pasting one knows which backend holds it — answering
-    from whichever source happens to be first produced "Trace not found in the
-    selected time range" for a trace that was sitting in the next store along.
+    `source=*` and no source at all both mean every source. A trace id is
+    globally unique and nobody pasting one knows which backend holds it, so a
+    lookup by id has always fanned out; a service list or a search that named
+    nothing used to read whichever source was registered first, and answered
+    "Trace not found in the selected time range" for a trace sitting in the
+    next store along. An unknown name is an error rather than a silent fall
+    back to the rest: quietly answering from a different store is how
+    somebody concludes a trace does not exist.
     """
     hub = getattr(current_app, "hub", None)
     if hub is None:
         return None
     if not name:
-        return hub.traces(hub.ALL_SOURCES if default_to_all else None)
+        return hub.traces()
     try:
         return hub.traces(name)
     except KeyError:
@@ -253,8 +253,10 @@ def api_trace_logs(trace_id):
         return _denied("You need both traces:read and logs:read.")
 
     hub = getattr(current_app, "hub", None)
-    trace_source = (_traces(_requested_source(), default_to_all=True)
-                    if hub else None)
+    trace_source = _traces(_requested_source()) if hub else None
+    # Every log source: the records of a trace found in one trace store may
+    # sit in any log store, and the merged search is the one that finds
+    # them wherever they are.
     log_source = hub.logs() if hub else None
     if not trace_source or not log_source:
         return jsonify({"records": [], "error_type": "no_source"}), 503
@@ -396,11 +398,10 @@ def api_trace(trace_id):
         return _denied()
 
     try:
-        # By id, so look everywhere unless a source was named. A trace id is
-        # globally unique; answering from whichever source happens to be
-        # first reported a Jaeger trace as missing because the default source
-        # was Elasticsearch.
-        source = _traces(_requested_source(), default_to_all=True)
+        # By id, so look everywhere unless a source was named: a trace id is
+        # globally unique, and the store that holds it is the one thing the
+        # person pasting it does not know.
+        source = _traces(_requested_source())
     except TraceSourceMissing as exc:
         return jsonify({"error": str(exc),
                         "error_type": "source_missing"}), 400

@@ -79,11 +79,11 @@ def _require():
 def _source(name=None):
     """The monitor source to read, or None when none is configured.
 
-    Defaults to the fan-out over everything, unlike the log and trace screens
-    which default to a single source. There is no reason to look at one
-    agent's monitors in isolation — the question is always "is anything
-    down", and asking it of one region at a time is how an outage in the
-    other one is missed.
+    No name means every monitor source, which this screen asked for before
+    any other did: there is no reason to look at one agent's monitors in
+    isolation — the question is always "is anything down", and asking it of
+    one region at a time is how an outage in the other one is missed. The
+    log and trace screens read every source the same way now.
 
     A name that is not configured raises SourceMissing. It reached the
     browser as "500 Internal Server Error" — from a bookmark, after somebody
@@ -94,7 +94,7 @@ def _source(name=None):
     if hub is None:
         return None
     try:
-        return hub.monitors(name or hub.ALL_SOURCES)
+        return hub.monitors(name)
     except KeyError:
         raise SourceMissing(f"There is no monitor source called '{name}'.")
 

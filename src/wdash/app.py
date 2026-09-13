@@ -287,9 +287,8 @@ RETIRED_VARIABLES = (
      "Sources",
      "until the cluster is added there, the logs, traces and monitors pages "
      "answer from the sources that are stored, or from nothing if there are "
-     "none; the cluster the environment declared was also the default "
-     "source, and the default is now the oldest stored one, so an unpinned "
-     "dashboard and the search page may be reading a different backend"),
+     "none; a search or a dashboard that names no source asks every stored "
+     "source, so its numbers are every other backend's without the cluster's"),
     (("OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_DISCOVERY_URL",
       "OIDC_REDIRECT_URI", "OIDC_SCOPES", "OIDC_USERNAME_CLAIM",
       "OIDC_EMAIL_CLAIM", "OIDC_GROUPS_CLAIM", "OIDC_TRUST_UNVERIFIED_EMAIL"),

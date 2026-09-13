@@ -1069,11 +1069,16 @@ class DrillDownScopeTest(unittest.TestCase):
 
     def test_an_unpinned_dashboard_still_names_the_source_it_used(self):
         """Otherwise the badge would fall silent on exactly the installations
-        that have more than one store and only some dashboards pinned."""
-        self.second_source()
+        that have more than one store and only some dashboards pinned. An
+        unpinned board reads every source, and the name for that on the
+        wire is the picker's own `*` — not "all-sources", which is what the
+        fan-out calls itself and no control holds."""
+        archive = self.second_source()
         payload = self.search(q="*", dashboard=DASH_ID)
-        self.assertEqual(payload["dashboard"]["source"],
-                         self.app.hub.logs().name)
+        self.assertEqual(payload["dashboard"]["source"], "*")
+        self.assertEqual(payload["source"], "*")
+        self.assertGreater(len(archive.requests), 0,
+                           "the second source was not asked")
 
     def shared_board(self):
         """A dashboard somebody else wrote and shared — the ordinary case for

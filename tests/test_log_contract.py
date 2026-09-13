@@ -521,11 +521,39 @@ class TheRecordIsReadFromItsOwnSourceTest(unittest.TestCase):
 
     def test_a_scoped_exclusion_holds_on_every_record_view(self):
         self.login(["*", "-primary:app-*"])
-        for named in ("primary", None):          # None: the default source
-            for view, response in self.views(source=named).items():
-                with self.subTest(view=view, source=named):
-                    self.assertEqual(response.status_code, 403)
+        for view, response in self.views(source="primary").items():
+            with self.subTest(view=view):
+                self.assertEqual(response.status_code, 403)
         self.assertEqual(self.primary.gets, [], "the excluded record was read")
+
+    def test_an_unnamed_record_with_several_sources_is_refused_unread(self):
+        """One record lives in one place. With two sources an unnamed
+        request means every source, as it does everywhere else, and for a
+        single record that is refused as `*` always was — before anything
+        is read. It used to be answered from whichever source was first:
+        the same id from the wrong store, with confidence."""
+        self.login(["*"])
+        for view, response in self.views().items():
+            with self.subTest(view=view):
+                self.assertEqual(response.status_code, 400,
+                                 response.get_data(as_text=True)[:200])
+                self.assertIn("name it", response.get_json()["error"])
+        self.assertEqual(self.primary.gets, [])
+        self.assertEqual(self.secondary.gets, [])
+
+    def test_an_unnamed_record_with_one_source_is_read_from_it(self):
+        """An older link on an installation with one source still opens."""
+        from wdash.hub import Hub
+        from wdash.hub.adapters import ElasticsearchLogSource
+
+        only = Hub()
+        only.add_logs(ElasticsearchLogSource(self.primary, name="primary"))
+        self.app.hub = only
+        self.login(["*"])
+        response = self.client.get("/api/log/app-logs-000001/doc-1")
+        self.assertEqual(response.status_code, 200,
+                         response.get_data(as_text=True)[:200])
+        self.assertEqual(self.primary.gets, ["app-logs-000001"])
 
     def test_a_scoped_grant_opens_them_in_its_source_only(self):
         """The other half: a role granted only `primary:app-*` was refused

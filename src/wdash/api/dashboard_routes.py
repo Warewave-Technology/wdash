@@ -96,13 +96,18 @@ FILLED_SIGNALS = frozenset({"logs", "traces", "monitors", "alerts"})
 def _logs(dashboard=None):
     """The log source a dashboard reads from.
 
-    A dashboard may name one. Without a name it gets the default, which is
-    what every dashboard stored before there was more than one source does —
-    and what most deployments will always want.
+    A dashboard may name one. Without a name it reads every log source at
+    once — the same question the Logs page asks on its first search —
+    which is what every dashboard stored before there was a choice now
+    means. It used to mean one source, whichever was registered first: the
+    environment's cluster while there was one, the oldest stored row after
+    that. Measured on the demo the day the environment path went, the board
+    fell from 18,169 records to 1,213 because its oldest stored source was a
+    Loki, with nothing on screen to say so.
 
-    A dashboard naming a source that no longer exists is an error rather than
-    a silent fall back to the default: quietly answering from a different store
-    is how somebody concludes their data has disappeared.
+    A dashboard naming a source that no longer exists is an error rather
+    than a silent fall back to the rest: quietly answering from a different
+    store is how somebody concludes their data has disappeared.
     """
     hub = getattr(current_app, "hub", None)
     if hub is None:
@@ -1638,15 +1643,48 @@ def _visible(dashboards):
 
 
 def _source_name(dashboard):
-    """Which source a dashboard reads from, for a message about it failing."""
+    """Which source a dashboard reads from, for a message about it failing.
+
+    Every one of them, named, for a board that reads every source: the
+    fan-out raises only when no member could be asked, so "Unable to connect
+    to lab-elasticsearch, lab-loki and lab-victorialogs" is the true
+    sentence, and "all-sources" is a name nobody configured.
+    """
     name = getattr(dashboard, "source", None)
     if name:
         return str(name)
     hub = getattr(current_app, "hub", None)
     try:
-        return hub.logs().name if hub is not None else "the log source"
+        source = hub.logs() if hub is not None else None
     except Exception:
+        source = None
+    if source is None:
         return "the log source"
+    return _listed(_members(source))
+
+
+def _fanned_out(source):
+    """The members of a fan-out, or None for a source that is one thing.
+
+    By the SHAPE of `sources` and not its presence: a source that answers
+    every attribute — a test's dead stand-in does — must read as one source
+    that is down, not as a fan-out over a function.
+    """
+    members = getattr(source, "sources", None)
+    return list(members) if isinstance(members, (list, tuple)) else None
+
+
+def _members(source):
+    """The names behind a source: a fan-out's members, or the source itself."""
+    return [member.name for member in (_fanned_out(source) or [source])]
+
+
+def _listed(names):
+    """`A`, `A and B`, `A, B and C`."""
+    names = [str(name) for name in names]
+    if len(names) < 2:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
 
 def _unreachable(dashboard, exc):
@@ -1932,9 +1970,17 @@ def _group_by_fields(name):
     if source is None:
         return standard, "No log source is configured."
 
-    # Absent as well as declined: a fan-out over several sources, and a
-    # source object that is not a `LogSource` subclass, both reach here, and
-    # "there is no such method" is the same fact as "not implemented".
+    # A board over every source is asked nothing: each member lists its own
+    # fields, and a name one of them groups by is a name the others refuse.
+    # The standard four are what every adapter answers, and picking one
+    # source in the select is how an author sees what it alone can do.
+    if _fanned_out(source):
+        return standard, ("A board over all sources offers the standard "
+                          "fields, because each source lists different ones; "
+                          "pick one source to see what it can group by.")
+    # Absent as well as declined: a source object that is not a `LogSource`
+    # subclass reaches here, and "there is no such method" is the same fact
+    # as "not implemented".
     ask = getattr(source, "group_by_fields", None)
     if ask is None:
         return standard, (f"'{source.name}' does not list the fields it can "

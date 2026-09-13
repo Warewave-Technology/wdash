@@ -353,16 +353,59 @@ class FanOutLogSource(LogSource):
                            warnings=warnings)
 
     def aggregate(self, query, aggregations, scope):
+        return self.multi_aggregate([(query, aggregations)], scope)[0]
+
+    def multi_aggregate(self, requests, scope):
+        """Every member's batch, in parallel, merged request by request.
+
+        The batch reaches each member WHOLE, so a member that answers a batch
+        in one round trip still does: a dashboard's current window and its
+        baseline are one Elasticsearch msearch through the fan-out, as they
+        are through the source alone. The base class's `multi_aggregate` is a
+        loop over `aggregate`, and a fan-out that inherited it would have
+        asked every member once per request — two searches of the cluster
+        for a board that costs one, on every refresh of every board that
+        names no source.
+
+        A member that raised is a member that answered none of the batch, so
+        it is marked failed in every result.
+        """
         if Capability.AGGREGATION not in self.capabilities:
             raise NotImplementedError(
                 f"{self.name} cannot aggregate: not every source can")
         if scope.is_empty:
-            return AggregationResult(
+            return [AggregationResult(
                 warnings=("the scope permits no containers",))
+                for _ in requests]
 
-        results = self._parallel(
-            lambda source: source.aggregate(query, aggregations, scope))
+        def ask(source):
+            batch = getattr(source, "multi_aggregate", None)
+            if batch is None:
+                # Written against the interface's one required method: it
+                # answers a request at a time, and its answers are its own.
+                return [source.aggregate(query, aggregations, scope)
+                        for query, aggregations in requests]
+            return list(batch(requests, scope))
 
+        answers = self._parallel(ask)
+
+        out = []
+        for index, (_, aggregations) in enumerate(requests):
+            results = []
+            for source, batch, error in answers:
+                if error is None and (batch is None or index >= len(batch)):
+                    # Fewer answers than questions is not an answer to the
+                    # rest of them.
+                    error = RuntimeError(
+                        f"{source.name} answered {len(batch or ())} of "
+                        f"{len(requests)} requests")
+                results.append((source, None if error else batch[index], error))
+            out.append(self._merge(results, aggregations))
+        return out
+
+    @staticmethod
+    def _merge(results, aggregations):
+        """One request's answers from every member, as one result."""
         merged, warnings, notes = {}, [], {}
         total, failed = 0, False
 

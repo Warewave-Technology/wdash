@@ -164,26 +164,6 @@ def build_source(record, credential, catalogue=None, signal=None):
 SIGNALS = ("logs", "traces", "monitors")
 
 
-def oldest_first(records):
-    """Stored sources in the order they were created.
-
-    The repository lists by name, for the page that reads them. The HUB's
-    order is the interface — `hub.logs()` with no name answers from the first
-    registered source — so the alphabetically first row was the default, and
-    adding `archive-es` to a deployment that had always answered from
-    `loki-prod` moved every unnamed query onto it without a word. Creation
-    order does not move when a source is added. The Advisor's default is
-    decided by this same order, so a bare `/advisor` and a bare search mean
-    one source.
-
-    `created_at` is compared as text: SQLite hands back a naive datetime and
-    Postgres an aware one, and this only ever compares rows from one store.
-    """
-    return sorted(records,
-                  key=lambda record: (str(record.get("created_at") or ""),
-                                      record["name"]))
-
-
 def build_configured_sources(store, catalogue=None):
     """Every enabled stored source, built, grouped by signal.
 
@@ -191,6 +171,12 @@ def build_configured_sources(store, catalogue=None):
     restart: it needs the sources in hand before it swaps them in, so that a
     store it cannot read leaves the previous ones running rather than taking
     them all away.
+
+    In the repository's order, which is by name. Nothing answers by position
+    — a query that names no source asks every source — so the order decides
+    how a picker lists them and nothing else. It used to be creation order,
+    kept so that the source an installation started with stayed the one an
+    unnamed query read; there is no such query any more.
 
     The fourth key, `failures`, is {name: why} for a row that is stored and
     NOT built. It used to be a line in the log and nothing else, so the page
@@ -204,7 +190,7 @@ def build_configured_sources(store, catalogue=None):
         failures[name] = (f"{failures[name]}; {reason}" if name in failures
                           else reason)
 
-    for record in oldest_first(store.sources.all(enabled_only=True)):
+    for record in store.sources.all(enabled_only=True):
         try:
             credential = store.sources.credential(record["id"])
         except Exception as exc:

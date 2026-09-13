@@ -34,11 +34,13 @@ log_bp = Blueprint("logs", __name__)
 def _logs(name=None):
     """The log source a request reads from.
 
-    `source=*` fans out across everything. Without a name the default source is
-    used, so a deployment that has always had one behaves exactly as it did.
-    An unknown name is an error rather than a silent fall back to the default:
-    quietly answering from a different store is how somebody concludes their
-    data has disappeared.
+    `source=*` and no source at all both mean every source — the question
+    the page's picker asks on its first search, and the one a request that
+    names nothing asks now. It used to be answered from one source,
+    whichever was registered first, with nothing in the answer to say so.
+    An unknown name is an error rather than a silent fall back to the rest:
+    quietly answering from a different store is how somebody concludes
+    their data has disappeared.
     """
     hub = getattr(current_app, "hub", None)
     if hub is None:
@@ -49,6 +51,25 @@ def _logs(name=None):
         return hub.logs(name)
     except KeyError:
         raise SourceMissing(f"There is no log source called '{name}'.")
+
+
+def _public_name(source):
+    """The name a request may send back to get this source again.
+
+    A fan-out's own name is "all-sources", which no picker holds and no
+    request can name; the value that means it on the wire is `*`.
+    """
+    hub = getattr(current_app, "hub", None)
+    if _fanned_out(source) and hub is not None:
+        return hub.ALL_SOURCES
+    return source.name
+
+
+def _fanned_out(source):
+    """Whether this source is several, by the shape of its member list —
+    not by the presence of the attribute, which a stand-in that answers
+    every name would also have."""
+    return isinstance(getattr(source, "sources", None), (list, tuple))
 
 
 class SourceMissing(RuntimeError):
@@ -113,16 +134,19 @@ def _record_source():
     as "not found" or as somebody else's document, and a role's
     source-qualified rules were not consulted at all.
 
-    Without a name — an older link, a client that never sent one — the
-    default source, as before. `*` is refused: one record lives in one place,
-    and an id asked of every backend means something different in each.
+    Without a name — an older link, a client that never sent one — the one
+    source there is, when there is one. With several, every source is what
+    an unnamed request means everywhere else, and for a single record that
+    is refused, as `*` has always been: one record lives in one place, and
+    an id asked of every backend means something different in each. It used
+    to be answered from whichever source was registered first, which is the
+    same record from the wrong store, said with confidence.
     """
-    hub = getattr(current_app, "hub", None)
-    name = request.args.get("source") or None
-    if hub is not None and name == hub.ALL_SOURCES:
+    source = _logs(request.args.get("source") or None)
+    if _fanned_out(source):
         raise SourceMissing("A single record lives in one source; name it "
                             "rather than asking all of them.")
-    return _logs(name)
+    return source
 
 
 def _record_refused(scope, source, index):
@@ -436,7 +460,7 @@ def api_search():
         # difference between "this is missing" and "you are looking at the
         # wrong store".
         "multiple_sources": _source_count() > 1,
-        "source": (source.name if dashboard is not None
+        "source": (_public_name(source) if dashboard is not None
                    else request.args.get("source") or None),
     })
     if dashboard is not None:
@@ -452,8 +476,9 @@ def api_search():
                                 # that on every later search from the page. The
                                 # control said one store and the answer came
                                 # from another, with nothing on screen to say
-                                # so; the badge sets the picker from this.
-                                "source": source.name}
+                                # so; the badge sets the picker from this. As
+                                # the picker spells it: `*` for every source.
+                                "source": _public_name(source)}
     return jsonify(payload)
 
 

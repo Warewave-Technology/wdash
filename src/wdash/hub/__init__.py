@@ -35,7 +35,7 @@ from .models import (
 from .aggregation import AggregationResult, Bucket, DateHistogram, Terms
 from .query import LogQuery, TimeWindow, TraceQuery, SORT_RECENT, SORT_SLOWEST
 from .scope import Scope, ScopeViolation
-from .fanout import FanOutLogSource, FanOutTraceSource
+from .fanout import FanOutLogSource, FanOutMonitorSource, FanOutTraceSource
 from .source import Capability, LogSource, Source, TraceSource
 
 logger = logging.getLogger(__name__)
@@ -54,10 +54,15 @@ __all__ = [
 class Hub:
     """Registry of configured sources.
 
-    One log source and one trace source are enough today; the registry exists
-    so callers depend on the interface rather than a concrete adapter. When
-    multiple sources are needed (separate clusters, for example) the fan-out
-    happens here and callers stay unchanged.
+    The registry exists so callers depend on the interface rather than a
+    concrete adapter, and so that several sources of one signal are one
+    object to a caller: `logs()`, `traces()` and `monitors()` answer with the
+    source called by name, or — with no name — with every source of that
+    signal at once. There is no default source. An unnamed lookup used to
+    answer from whichever source was registered first, which was the
+    environment's cluster while there was one and the oldest stored row after
+    that, so a search or a board that named nothing read one backend chosen
+    by creation order and said nothing about it.
 
     Sources come from two places, and the difference is why this class has a
     reload at all:
@@ -263,19 +268,17 @@ class Hub:
     def _registry(self, kind):
         """One signal's sources: the base ones first, then the configured.
 
-        Order is the interface. `logs()` with no name returns the first, so
-        the configured sources keep the order they were created in, and an
-        operator adding a source on the configuration page does not silently
-        take over every query that names no source.
+        Nothing answers by position. An unnamed lookup is every source, so
+        the order here is the order pickers list them in and fan-outs ask
+        them in, and nothing more — the configured ones arrive in the
+        repository's order, which is by name.
 
         A configured source whose NAME is a base one does not replace it.
         `{**base, **configured}` kept the key's position and swapped the
         value, so a stored source called by a base name took the base source
-        out of the registry entirely and answered every query that named it
-        — the guarantee this method's first paragraph makes, broken by the
-        one thing it does not look at. The base source stays; the configured
-        one is recorded as shadowed, which is how the configuration page
-        comes to say so.
+        out of the registry entirely and answered every query that named it.
+        The base source stays; the configured one is recorded as shadowed,
+        which is how the configuration page comes to say so.
         """
         with self._lock:
             configured = self._configured[kind]
@@ -346,72 +349,79 @@ class Hub:
             | frozenset(self._monitors)
 
     def logs(self, name=None):
-        """One log source, or the fan-out over all of them.
+        """The log source called `name`, or every log source at once.
 
-        `name="*"` asks for every source at once. With a single source that is
-        the source itself rather than a wrapper: a fan-out of one adds a thread
-        pool, an intersection and a merge to answer a question one object
-        already answers.
+        No name — and the reserved name `*` — means every source: the fan-out
+        over all of them, the single source itself when there is only one (a
+        fan-out of one adds a thread pool, an intersection and a merge to
+        answer a question one object already answers), and None when there
+        is none. A name that is not registered is a KeyError rather than a
+        fall back to anything: quietly answering from a different store is
+        how somebody concludes their data has disappeared.
         """
         self._fresh()
-        if name == self.ALL_SOURCES:
-            sources = self.log_sources
-            if not sources:
-                return None
-            if len(sources) == 1:
-                return sources[0]
-            from .fanout import FanOutLogSource, FanOutTraceSource
-            return FanOutLogSource(sources)
-        return self._pick(self._registry("logs"), name, "log")
+        registry = self._registry("logs")
+        if name and name != self.ALL_SOURCES:
+            return self._named(registry, name, "log")
+        return self._every(registry, FanOutLogSource)
 
     def traces(self, name=None):
-        """One trace source, or the fan-out over all of them.
+        """The trace source called `name`, or every trace source at once.
 
-        Same shape as `logs`. Without this, a second trace source registered
-        from the configuration page was reachable by nothing: it appeared in
-        the source list, the health check probed it, and every query went to
-        whichever one happened to be first. Registered and unreachable is
-        worse than absent — the page says it is there.
+        Same shape as `logs`. Without the fan-out, a second trace source
+        registered from the configuration page was reachable by nothing: it
+        appeared in the source list, the health check probed it, and every
+        query went to whichever one happened to be first. Registered and
+        unreachable is worse than absent — the page says it is there.
         """
         self._fresh()
-        if name == self.ALL_SOURCES:
-            sources = self.trace_sources
-            if not sources:
-                return None
-            if len(sources) == 1:
-                return sources[0]
-            from .fanout import FanOutTraceSource
-            return FanOutTraceSource(sources)
-        return self._pick(self._registry("traces"), name, "trace")
+        registry = self._registry("traces")
+        if name and name != self.ALL_SOURCES:
+            return self._named(registry, name, "trace")
+        return self._every(registry, FanOutTraceSource)
 
     def monitors(self, name=None):
-        """One monitor source, or the fan-out over all of them.
+        """The monitor source called `name`, or every monitor source at once.
 
         Same shape as `logs` and `traces`. A deployment can easily have two:
         Heartbeat writing to the production cluster and a second agent
         watching from another region, which is the whole point of running
-        checks from outside.
+        checks from outside — and asking one region at a time is how an
+        outage in the other one is missed.
         """
         self._fresh()
-        if name == self.ALL_SOURCES:
-            sources = self.monitor_sources
-            if not sources:
-                return None
-            if len(sources) == 1:
-                return sources[0]
-            from .fanout import FanOutMonitorSource
-            return FanOutMonitorSource(sources)
-        return self._pick(self._registry("monitors"), name, "monitor")
+        registry = self._registry("monitors")
+        if name and name != self.ALL_SOURCES:
+            return self._named(registry, name, "monitor")
+        return self._every(registry, FanOutMonitorSource)
 
     @staticmethod
-    def _pick(registry, name, kind):
-        if name:
-            if name not in registry:
-                raise KeyError(f"no {kind} source named {name}")
-            return registry[name]
-        if not registry:
+    def _named(registry, name, kind):
+        if name not in registry:
+            raise KeyError(f"no {kind} source named {name}")
+        return registry[name]
+
+    @staticmethod
+    def _every(registry, fan_out):
+        sources = list(registry.values())
+        if not sources:
             return None
-        return next(iter(registry.values()))
+        if len(sources) == 1:
+            return sources[0]
+        return fan_out(sources)
+
+    def signals_of(self, name):
+        """The signals a source called `name` is registered for.
+
+        A frozenset drawn from "logs", "traces" and "monitors"; empty for a
+        name nothing answers to. For a caller holding one name and asking
+        what it can mean: a dashboard pinned to a Loki reads its logs from
+        that Loki and its traces from every trace source, because the Loki
+        serves none and the pin cannot mean them.
+        """
+        self._fresh()
+        return frozenset(kind for kind in ("logs", "traces", "monitors")
+                         if name in self._registry(kind))
 
     @property
     def log_sources(self):

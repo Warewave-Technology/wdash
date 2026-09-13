@@ -19,10 +19,16 @@
            bill of health for a backend nobody looked at. #}
         <select class="form-select form-select-sm" id="advisorSource"
                 style="width:auto">
+            {# Nothing chosen is shown as nothing chosen. The first entry
+               used to be highlighted for a bare page, which was true while
+               a bare page analysed the first entry; it analyses nothing
+               until one is picked. #}
+            {% if not selected %}
+            <option value="" selected disabled>Choose a source to analyse&hellip;</option>
+            {% endif %}
             {% for choice in sources %}
             <option value="{{ choice.value }}"
-                    {% if selected == choice.value
-                          or (not selected and loop.first) %}selected{% endif %}>
+                    {% if selected == choice.value %}selected{% endif %}>
                 {{ choice.label }} &middot; {{ choice.backend }}
             </option>
             {% endfor %}
@@ -54,7 +60,19 @@
 </div>
 {% endif %}
 
-{% if not report %}
+{% if choose %}
+{# Several sources and none named. The Advisor reads one cluster at a time
+   — findings about two deployments in one list are a report about neither
+   — and it no longer picks one for you: the source it used to pick was
+   whichever happened to be stored first. #}
+<div class="alert alert-secondary" id="advisorChoose">
+    <h5><i class="fas fa-hand-pointer"></i> Choose a source to analyse</h5>
+    <p class="mb-0">
+        {{ sources|length }} sources can be analysed, one at a time. Pick one
+        above; nothing has been looked at yet.
+    </p>
+</div>
+{% elif not report %}
 <div class="alert alert-danger">
     <h5><i class="fas fa-exclamation-circle"></i> Analysis unavailable</h5>
     <p class="mb-0">

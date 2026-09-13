@@ -90,11 +90,14 @@ class TheSentenceTest(unittest.TestCase):
         self.assertIn("Nothing was read", sentence)
         # Not "the pages have no source": an installation that also stored a
         # Loki or a second cluster still has one, and what changed for it is
-        # WHICH one answers by default. Measured on the demo the day the
-        # environment path went — its board fell from 18,169 records to
-        # 1,213 without a word, because the oldest stored source was Loki.
+        # what an unnamed query reads — every stored source, without the
+        # cluster. Not "the default is now the oldest stored one" either:
+        # there is no default source any more, and a sentence naming one
+        # sends the reader to look for a rule that does not exist.
         self.assertIn("answer from the sources that are stored", sentence)
-        self.assertIn("the default is now the oldest stored one", sentence)
+        self.assertIn("names no source asks every stored source", sentence)
+        self.assertNotIn("oldest", sentence)
+        self.assertNotIn("default", sentence)
         self.assertNotIn("have no source", sentence)
 
     def test_one_variable_is_named_in_the_singular(self):

@@ -105,6 +105,14 @@ for span, depth in trace.waterfall():
     print("  " * depth, span.service, span.duration_us)
 ```
 
+`hub.logs()`, `hub.traces()` and `hub.monitors()` with no name — or with the
+reserved name `*` — answer with every source of that signal at once: the
+fan-out over all of them, the single source itself when there is only one,
+and `None` when there is none. A name answers with that one source, and a
+name that is not registered is a `KeyError` rather than a fall back to
+anything. There is no default source, and the order sources are registered
+in decides nothing but how a picker lists them.
+
 ## Schema independence, verified
 
 The claim the hub rests on is this: *the same logical trace resolves the same

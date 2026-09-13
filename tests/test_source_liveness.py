@@ -349,41 +349,47 @@ class ThePageLooksBeforeItReportsTest(_Store):
         self.assertEqual(stamps, [])
 
 
-class TheDefaultDoesNotMoveTest(_Store):
-    """The first source configured stays the default.
+class AnUnnamedQueryReachesEverySourceTest(_Store):
+    """A source added later joins every query that names no source.
 
-    The repository lists by name, and the hub's order is the interface, so
-    `archive-es` added a month later took over every query that names no
-    source — searches, the dashboard, the trace screen.
+    There used to be a default — the source configured first — held in
+    place by creation order so that `archive-es`, added a month after
+    `loki-prod`, did not take over every unnamed query. It could not take
+    over now and it is not left out either: an unnamed query is every
+    source, in every worker, and the order the store lists them in decides
+    nothing but how a picker lists them.
     """
 
-    def test_adding_a_source_that_sorts_first_does_not_take_over(self):
+    def members(self, app):
+        with app.app_context():
+            source = app.hub.logs()
+        return sorted(s.name for s in getattr(source, "sources", [source]))
+
+    def test_a_second_source_joins_every_unnamed_query(self):
         self.save(name="loki-prod", url="http://localhost:3100")
-        with self.app.app_context():
-            self.assertEqual(self.app.hub.logs().name, "loki-prod")
+        self.assertEqual(self.members(self.app), ["loki-prod"])
         self.save(name="archive-es", kind="victorialogs",
                   url="http://localhost:9428")
-        with self.app.app_context():
-            self.assertEqual(self.app.hub.logs().name, "loki-prod")
-            self.assertEqual([s.name for s in self.app.hub.log_sources],
-                             ["loki-prod", "archive-es"])
+        self.assertEqual(self.members(self.app), ["archive-es", "loki-prod"])
 
-    def test_another_worker_agrees_about_which_one_it_is(self):
-        """Order that came from the store, not from this process's history."""
+    def test_another_worker_reaches_the_same_set(self):
         self.save(name="loki-prod", url="http://localhost:3100")
         self.save(name="archive-es", kind="victorialogs",
                   url="http://localhost:9428")
-        other = self.worker()
-        with other.app_context():
-            self.assertEqual(other.hub.logs().name, "loki-prod")
+        self.assertEqual(self.members(self.worker()),
+                         ["archive-es", "loki-prod"])
 
-    def test_the_page_still_lists_them_by_name(self):
-        """The table is for reading; only the hub's order is the interface."""
+    def test_the_hub_lists_them_as_the_page_does(self):
+        """One order, by name: nothing answers by position any more, so the
+        hub has no reason to keep an order of its own."""
         self.save(name="loki-prod", url="http://localhost:3100")
         self.save(name="archive-es", kind="victorialogs",
                   url="http://localhost:9428")
         self.assertEqual([s["name"] for s in self.app.store.sources.all()],
                          ["archive-es", "loki-prod"])
+        with self.app.app_context():
+            self.assertEqual([s.name for s in self.app.hub.log_sources],
+                             ["archive-es", "loki-prod"])
 
 
 class ServicePickerTest(_Store):

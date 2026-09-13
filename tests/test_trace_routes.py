@@ -479,14 +479,13 @@ class TraceLookupAcrossSourcesTest(TraceRouteTest):
         response = self.client.get("/api/traces/nowhere?time_range=24h")
         self.assertEqual(response.status_code, 404)
 
-    def test_listing_without_a_source_does_not_fan_out(self):
-        """The distinction is deliberate, and it is not symmetric.
-
-        Looking a trace up BY ID has one right answer wherever it lives, so
-        the lookup asks everywhere. A LIST has no such id: fanning out by
-        default would make every unfiltered page load query every backend,
-        and the picker sends a source as soon as there is more than one to
-        choose from.
+    def test_listing_without_a_source_asks_every_store_too(self):
+        """A list that names no source is every store's list, as a lookup
+        by id has always been every store's lookup. The page's picker starts
+        on "All sources" and sends `*`, so this is the question the page
+        asks; a request that named nothing used to be answered from
+        whichever store was registered first, which is a shorter list with
+        nothing to say it is short.
         """
         first = self._Holder("first", "a")
         second = self._Holder("second", "b")
@@ -499,8 +498,8 @@ class TraceLookupAcrossSourcesTest(TraceRouteTest):
                              searched.append(name) or [])
 
         self.client.get("/api/traces?time_range=24h")
-        self.assertEqual(searched, ["first"],
-                         "an unfiltered list queried every backend")
+        self.assertEqual(sorted(searched), ["first", "second"],
+                         "an unfiltered list read one store")
 
     def test_a_split_trace_comes_back_whole(self):
         """Two backends holding halves of one trace is the case the fan-out

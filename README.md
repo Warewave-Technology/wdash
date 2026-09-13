@@ -661,21 +661,23 @@ the Logs screen shows it as a badge — but only when more than one source is
 configured. A badge repeated on every row that always says the same thing is
 noise, and noise is how people stop reading the row footer at all.
 
-A dashboard may name the source it reads from — a **Log source** field on the
-create and edit forms, shown once more than one is configured, and stored in
-whichever dashboard store is in use. Leaving it on the default is what every
-dashboard written before there was a choice means. One naming a source that is
-no longer configured reports that plainly instead of falling back to the
-default: quietly answering from a different store is how somebody concludes
-their data has disappeared. An edit that does not carry the field leaves the
-stored source alone, for the same reason — on an installation with one source
-the field is not even drawn.
+A dashboard reads **every log source** unless it names one — the same
+question the Logs screen asks on its first search. There is no default
+source: a search or a board that names none asks all of them. A board may
+name the source its log panels read — a **Log source** field on the create
+and edit forms, shown once more than one is configured, and stored in
+whichever dashboard store is in use. One naming a source that is no longer
+configured reports that plainly instead of falling back to the rest:
+quietly answering from a different store is how somebody concludes their
+data has disappeared. An edit that does not carry the field leaves the
+stored source alone, for the same reason — on an installation with one
+source the field is not even drawn.
 
-A drill-down from a dashboard that names a source is answered from that
-source, and the Logs screen names it in the scope badge and moves its own
-source picker to match. The picker was left on its first option while the
-server answered from the dashboard's, so the control on screen and the records
-under it disagreed.
+A drill-down from a dashboard is answered from the dashboard's source — the
+one it names, or every source — and the Logs screen names it in the scope
+badge and moves its own source picker to match. The picker was left on its
+first option while the server answered from the dashboard's, so the control
+on screen and the records under it disagreed.
 
 ### OpenTelemetry
 
@@ -734,7 +736,7 @@ and the id from it for the record views below, and sends the record's
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `GET` | `/api/search` | Search log records |
-| `GET` | `/api/log/<container>/<id>` | Single record, all fields. `?source=` names the source it came from — every record says which — and without it the default source is asked |
+| `GET` | `/api/log/<container>/<id>` | Single record, all fields. `?source=` names the source it came from — every record says which. Without it the one source there is answers; with several configured the request is refused, as `?source=*` is, because one record lives in one place |
 | `GET` | `/api/log/<container>/<id>/context` | Surrounding records, from a source that declares the capability; `?source=` as above |
 | `GET` | `/api/log/<container>/<id>/raw` | The stored document, backend-shaped (diagnostic); `?source=` as above |
 | `GET` | `/api/field-stats` | Field value distributions |
@@ -979,6 +981,20 @@ as a break, because `>=3.8` was never installable: `psycopg` has required
 - **Protect the local administrator account.** It is a permanent credential
   that keeps working when the identity provider does not, which is exactly what
   makes it worth stealing.
+- **Upgrading: a board or a search that names no source reads every source.**
+  It used to read one — whichever was stored first — and on a mixed
+  installation that is a different number. Measured on the demo's five
+  stored sources over a rolling 24 hours: an unpinned board read 1,115
+  records from the Loki alone and now reads 15,431 (13,245 from the
+  cluster, 1,066 from the Loki, 1,120 from VictoriaLogs, twenty minutes
+  later); its trace list for `api-gateway` was empty, because the oldest
+  trace source was a Tempo with no such service, and lists ten traces from
+  the cluster now; a bare `/api/search` answered 5 records from the Loki
+  and answers 14,353 across all three, with the breakdown. A board that
+  names a log source keeps reading it. The cost moves with the rule — an
+  unpinned eight-panel board was 10 requests to the Loki per refresh and is
+  1 to the cluster, 10 to the Loki and 10 to VictoriaLogs. Name the source
+  on the boards that should read one.
 - **Upgrading a deployment that declared its cluster in the environment.**
   2.5 and earlier registered an Elasticsearch from `ELASTICSEARCH_URL` and the
   seven variables around it (the credentials, timeout, certificate switch and
@@ -986,11 +1002,9 @@ as a break, because `>=3.8` was never installable: `psycopg` has required
   Before upgrading, add that cluster under **Configuration → Sources** with
   the same index patterns. Without it, the logs, traces and monitors pages
   answer from whatever other sources are stored — or say they have none —
-  and since the environment's cluster was also the default source, the
-  default becomes the oldest stored one: an unpinned dashboard and the search
-  page may quietly be reading a different backend (measured: a demo board
-  fell from 18,169 records to 1,213 because its oldest stored source was a
-  Loki). A process that still has any of the variables
+  and a search or a board that names no source reads every stored source,
+  so its numbers are every other backend's without the cluster's. A process
+  that still has any of the variables
   set says so at start-up, as an ERROR naming them and the page, and reads
   nothing from them — it does not import them, because a one-shot import at
   start-up is the mechanism that was removed. The same goes for the OpenID

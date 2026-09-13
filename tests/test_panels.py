@@ -434,10 +434,13 @@ class SourceBindingTest(unittest.TestCase):
     def data(self):
         return self.client.get("/api/dashboard/s1/data")
 
-    def test_no_source_named_means_the_default(self):
+    def test_no_source_named_means_every_source(self):
+        """Both stores, once each — not the first registered and not the
+        second. The batch reaches each member whole, so a board that names
+        nothing costs each cluster what it costs a board pinned to it."""
         self.data()
-        self.assertGreater(self.primary.round_trips, 0)
-        self.assertEqual(self.secondary.round_trips, 0)
+        self.assertEqual(self.primary.round_trips, 1)
+        self.assertEqual(self.secondary.round_trips, 1)
 
     def test_a_named_source_is_the_one_queried(self):
         change_dashboard(self.app, self.dashboard, source="secondary")
@@ -446,7 +449,7 @@ class SourceBindingTest(unittest.TestCase):
         self.assertGreater(self.secondary.round_trips, 0)
 
     def test_naming_a_source_that_is_gone_says_so(self):
-        """Quietly answering from the default is how somebody concludes their
+        """Quietly answering from the rest is how somebody concludes their
         data has disappeared."""
         change_dashboard(self.app, self.dashboard, source="retired")
         response = self.data()
@@ -454,7 +457,19 @@ class SourceBindingTest(unittest.TestCase):
         self.assertEqual(response.get_json()["error_type"], "source_missing")
         self.assertIn("retired", response.get_json()["error"])
         self.assertEqual(self.primary.round_trips, 0,
-                         "it fell back to the default instead of reporting")
+                         "it fell back to the rest instead of reporting")
+
+    def test_an_outage_over_every_source_names_each_of_them(self):
+        """The fan-out raises only when no member could be asked, so the
+        sentence names them all — not "all-sources", which is what the
+        fan-out calls itself and nobody configured."""
+        for source in self.app.hub.log_sources:
+            source.containers = lambda scope, *a, **k: (_ for _ in ()).throw(
+                ConnectionError("refused"))
+        payload = self.data().get_json()
+        self.assertIn("primary", payload["error"])
+        self.assertIn("secondary", payload["error"])
+        self.assertNotIn("all-sources", payload["error"])
 
 
 class SourceFormTest(unittest.TestCase):
@@ -540,7 +555,7 @@ class SourceFormTest(unittest.TestCase):
         self.assertEqual(self.primary.round_trips, 0)
         self.assertGreater(self.secondary.round_trips, 0)
 
-    def test_choosing_nothing_leaves_it_on_the_default(self):
+    def test_choosing_nothing_leaves_it_on_every_source(self):
         self.create()
         self.assertIsNone(self.stored().source)
 
@@ -612,7 +627,7 @@ class SourceFormTest(unittest.TestCase):
         self.assertEqual(self.stored().description, "edited from the only source")
         self.assertEqual(self.stored().source, "secondary")
 
-    def test_it_can_be_put_back_on_the_default(self):
+    def test_it_can_be_put_back_on_every_source(self):
         self.create(source="secondary")
         board = self.stored()
         self.client.post(f"/dashboard/{board.id}/edit",

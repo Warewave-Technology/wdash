@@ -465,11 +465,31 @@ class EditorOfferRouteTest(unittest.TestCase):
         offered, _ = self.offer(None, indices=indices)
         self.assertIn("clearance", offered)
 
-    def test_the_default_source_answers_with_its_own_fields(self):
+    def test_the_only_source_answers_with_its_own_fields(self):
         payload = self.ask().get_json()
         self.assertIn("http_status", payload["fields"])
         self.assertIn("severity", payload["fields"])
         self.assertIsNone(payload["reason"])
+
+    def test_a_board_over_every_source_is_offered_the_standard_fields(self):
+        """With two sources an unnamed offer is for a board over both, and
+        each lists different fields: the standard four, with the sentence
+        that says to pick one source to see its own. Naming one still gets
+        that one's list."""
+        from wdash.hub.adapters import ElasticsearchLogSource
+
+        self.hub.add_logs(ElasticsearchLogSource(
+            ModelledES({"other-logs-000001": (LAB_MAPPING, [])}),
+            name="es-other"))
+        payload = self.ask().get_json()
+        self.assertEqual(payload["fields"], list(AGGREGATABLE_FIELDS))
+        self.assertIn("all sources", payload["reason"])
+        self.assertIn("pick one source", payload["reason"])
+        self.assertNotIn("all-sources", payload["reason"])
+
+        named = self.ask("es-lab").get_json()
+        self.assertIn("http_status", named["fields"])
+        self.assertIsNone(named["reason"])
 
     def test_a_source_named_by_the_form_is_the_one_asked(self):
         from wdash.hub.adapters.loki import LokiLogSource

@@ -667,9 +667,12 @@ class LogSearch {
             // ignored. Naming it here and moving the picker to match is what
             // stops the control and the answer from disagreeing.
             const source = data.dashboard.source;
+            // `*` is how the server and the picker both spell "every
+            // source"; a person reads it as words.
+            const label = source === '*' ? 'all sources' : source;
             scope.textContent =
                 `Scoped to the "${data.dashboard.name}" dashboard`
-                + ` (${source ? `${source}, ` : ''}`
+                + ` (${label ? `${label}, ` : ''}`
                 + `${(data.dashboard.containers || []).length} indices)`;
             scope.classList.remove('d-none');
             const picker = document.getElementById('sourceSelect');

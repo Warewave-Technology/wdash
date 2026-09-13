@@ -266,6 +266,23 @@ check('a drill-down from a pinned dashboard names the store that answered', () =
            `the badge said "${badge.textContent}"`);
 });
 
+// An unpinned dashboard reads every source, and the server names that as
+// the picker spells it: `*`. A person reads it as words.
+check('a drill-down from an unpinned dashboard says all sources, not a star', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.updateIndexInfo({
+        accessible_containers: ['app-logs-000001'],
+        dashboard: { id: 'board-7', name: 'App board', source: '*',
+                     containers: ['app-logs-000001'] },
+    });
+    const badge = w.document.getElementById('dashboardScopeBadge');
+    assert(/all sources/.test(badge.textContent),
+           `the badge said "${badge.textContent}"`);
+    assert(!/\*/.test(badge.textContent),
+           `the badge said "${badge.textContent}"`);
+});
+
 check('and moves the picker to it, so the next search agrees', () => {
     const calls = [];
     const w = makeWindow((url) => { calls.push(url); return new Promise(() => {}); });

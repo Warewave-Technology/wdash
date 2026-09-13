@@ -567,6 +567,9 @@ class MultiAggregateTest(unittest.TestCase):
 
 class HubRegistryTest(unittest.TestCase):
     def test_returns_registered_sources(self):
+        """One source of a signal is the answer to an unnamed lookup, as
+        itself: a fan-out of one adds a thread pool, an intersection and a
+        merge to answer a question one object already answers."""
         es = FakeES()
         hub = Hub()
         logs = hub.add_logs(ElasticsearchLogSource(es, name="es-logs"))
@@ -576,9 +579,67 @@ class HubRegistryTest(unittest.TestCase):
         self.assertIs(hub.traces(), traces)
         self.assertIs(hub.logs("es-logs"), logs)
 
+    def test_an_unnamed_lookup_is_every_source(self):
+        """Two sources of a signal, and no name: the fan-out over both. It
+        used to be the first registered, which made the order sources were
+        added in the interface — and nothing on any page said which one a
+        search that named nothing had read."""
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+        from wdash.hub.fanout import (
+            FanOutLogSource, FanOutMonitorSource, FanOutTraceSource,
+        )
+
+        hub = Hub()
+        hub.add_logs(ElasticsearchLogSource(FakeES(), name="a"))
+        hub.add_logs(ElasticsearchLogSource(FakeES(), name="b"))
+        hub.add_traces(ElasticsearchTraceSource(FakeES(), name="t-a"))
+        hub.add_traces(ElasticsearchTraceSource(FakeES(), name="t-b"))
+
+        class Store:
+            pass
+        hub.add_monitors(StoreMonitorSource(Store()))
+        second = StoreMonitorSource(Store())
+        second.name = "second-agents"
+        hub.add_monitors(second)
+
+        for lookup, kind, names in (
+                (hub.logs, FanOutLogSource, ["a", "b"]),
+                (hub.traces, FanOutTraceSource, ["t-a", "t-b"]),
+                (hub.monitors, FanOutMonitorSource,
+                 ["wdash-agents", "second-agents"])):
+            with self.subTest(signal=kind.__name__):
+                unnamed = lookup()
+                self.assertIsInstance(unnamed, kind)
+                self.assertEqual([s.name for s in unnamed.sources], names)
+                # `*` is the same answer, not a different door to it.
+                self.assertEqual([s.name for s in lookup("*").sources], names)
+                # And a name is still that one source, and nothing else.
+                self.assertEqual(lookup(names[1]).name, names[1])
+
     def test_empty_hub_returns_none(self):
         self.assertIsNone(Hub().logs())
         self.assertIsNone(Hub().traces())
+        self.assertIsNone(Hub().monitors())
+        self.assertIsNone(Hub().logs("*"))
+
+    def test_signals_of_a_name(self):
+        """Which signals one name answers for — the question a caller
+        holding a dashboard's pin asks before deciding whose traces the
+        board reads."""
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+
+        hub = Hub()
+        hub.add_logs(ElasticsearchLogSource(FakeES(), name="cluster"))
+        hub.add_traces(ElasticsearchTraceSource(FakeES(), name="cluster"))
+        monitors = StoreMonitorSource(object())
+        monitors.name = "cluster"
+        hub.add_monitors(monitors)
+        hub.add_logs(ElasticsearchLogSource(FakeES(), name="archive"))
+
+        self.assertEqual(hub.signals_of("cluster"),
+                         frozenset({"logs", "traces", "monitors"}))
+        self.assertEqual(hub.signals_of("archive"), frozenset({"logs"}))
+        self.assertEqual(hub.signals_of("gone"), frozenset())
 
     def test_unknown_name_raises(self):
         hub = Hub()
