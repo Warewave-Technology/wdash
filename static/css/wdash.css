@@ -294,6 +294,44 @@ body {
     transform: translateY(-1px);
 }
 
+/* The page you are on.
+ *
+ * Nothing said. Measured on every screen, no `.navbar .nav-link` carried
+ * `active` or `aria-current`, so Logs, Dashboards, Traces, Monitors and
+ * Alerts were five identical links whichever of them was open.
+ *
+ * Three signals, because one of them is a colour. The accent is the
+ * difference between #bdae93 and #fe8019 to somebody who can see it and no
+ * difference at all to somebody who cannot, and this is the navigation. The
+ * bar under the word is the one that carries it without hue; the weight
+ * separates "the page you are on" from "the link under your pointer",
+ * which is already accent-coloured.
+ *
+ * No wash behind it, on purpose: a 12% accent ground takes the light
+ * theme's accent from 4.94:1 to 4.16:1 against its own bar, and the audit
+ * in tests/test_rendered_pages.py would not have caught it — it reads
+ * through a ground that translucent to the one behind. As it stands the
+ * marker is 6.49:1 dark and 4.94:1 light. */
+.navbar-nav .nav-link.active {
+    color: var(--accent) !important;
+    font-weight: 600;
+    box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* The same mark inside the account menu, where the three administration
+   pages live. Bootstrap paints `.dropdown-item.active` in its own blue on
+   its own blue ground — the pressed state too, which is the same colour a
+   moment earlier. Accent on the card at 5.20:1 dark and 5.64:1 light, with
+   the bar down the leading edge rather than under the word because a menu
+   item is a row rather than a tab. */
+.dropdown-item.active,
+.dropdown-item:active {
+    background-color: transparent;
+    color: var(--accent);
+    font-weight: 600;
+    box-shadow: inset 2px 0 0 var(--accent);
+}
+
 /* ---------------------------------------------------------------------------
  * What Bootstrap decides when we have not.
  *

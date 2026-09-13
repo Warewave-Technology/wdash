@@ -129,6 +129,45 @@
     </script>
 </head>
 <body>
+{#- Which page you are on, decided HERE and from the request.
+
+    No `.navbar .nav-link` carried `active` or `aria-current` on any screen:
+    five identical links whichever one was open, and nothing at all for
+    somebody navigating by landmarks. The obvious repair is a flag each
+    template passes up — and a flag is a thing a later page forgets, which
+    is a page with no marker and nobody to notice. `request.blueprint` is
+    already true of the page being rendered and cannot be forgotten.
+
+    A whole section, not one URL. `/monitors/42` is Monitors and
+    `/dashboard/create` is Dashboards: a marker that vanished the moment
+    somebody went somewhere would be missing exactly where it is most
+    wanted. One blueprint is one entry — except `config`, which serves both
+    the configuration screen and the audit trail, and those two are named by
+    endpoint below.
+
+    Both halves. The class is what the stylesheet paints;
+    `aria-current="page"` is what a screen reader reads, and neither one
+    does the other's job. -#}
+{%- macro nav_item(endpoint, icon, label) -%}
+  {%- set current = request.blueprint == endpoint.split('.')[0] -%}
+  <a class="nav-link{{ ' active' if current }}"
+     {% if current %}aria-current="page"{% endif %}
+     href="{{ url_for(endpoint) }}">
+      <i class="fas {{ icon }}"></i> {{ label }}
+  </a>
+{%- endmacro -%}
+
+{#- The Administration section. It is in the account menu rather than the
+    strip, and it is one list because the items and the control that opens
+    them have to be decided from the same thing: a menu that says nothing
+    while the page inside it is open is the navbar's own fault repeated one
+    level down. Named by endpoint because `config` holds two of them. -#}
+{%- set admin_pages = [
+      ('config.config_page', 'fa-sliders', 'Configuration'),
+      ('config.audit_page', 'fa-clipboard-list', 'Audit trail'),
+      ('advisor.advisor_page', 'fa-stethoscope', 'Cluster Advisor'),
+    ] -%}
+{%- set admin_here = request.endpoint in admin_pages|map(attribute=0)|list -%}
     <nav class="navbar navbar-expand-lg border-bottom">
         <div class="container">
             <a class="navbar-brand" href="{{ url_for('index') }}">
@@ -159,28 +198,26 @@
             <div class="collapse navbar-collapse" id="navbarNav">
                 <div class="navbar-nav ms-auto">
                     {% if current_user.is_authenticated %}
-                        <a class="nav-link" href="{{ url_for('logs.logs_page') }}">
-                            <i class="fas fa-file-alt"></i> Logs
-                        </a>
-                        <a class="nav-link" href="{{ url_for('dashboards.dashboards_page') }}">
-                            <i class="fas fa-chart-bar"></i> Dashboards
-                        </a>
+                        {{ nav_item('logs.logs_page', 'fa-file-alt', 'Logs') }}
+                        {{ nav_item('dashboards.dashboards_page',
+                                    'fa-chart-bar', 'Dashboards') }}
                         {% if current_user.has_permission('traces:read') %}
-                        <a class="nav-link" href="{{ url_for('traces.traces_page') }}">
-                            <i class="fas fa-project-diagram"></i> Traces
-                        </a>
+                        {{ nav_item('traces.traces_page',
+                                    'fa-project-diagram', 'Traces') }}
                         {% endif %}
                         {% if current_user.has_permission('monitors:read') %}
-                        <a class="nav-link" href="{{ url_for('monitors.monitors_page') }}">
-                            <i class="fas fa-heart-pulse"></i> Monitors
-                        </a>
-                        <a class="nav-link" href="{{ url_for('alerts.history') }}">
-                            <i class="fas fa-bell"></i> Alerts
-                        </a>
+                        {{ nav_item('monitors.monitors_page',
+                                    'fa-heart-pulse', 'Monitors') }}
+                        {{ nav_item('alerts.history', 'fa-bell', 'Alerts') }}
                         {% endif %}
                         <div class="nav-item dropdown">
-                            <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
-                                <i class="fas fa-user"></i> {{ current_user.username }} 
+                            {# `active` and NOT `aria-current`: this control
+                               opens a menu, it is not a page, and saying it
+                               is one is a lie a screen reader repeats. The
+                               item inside carries the attribute. #}
+                            <a class="nav-link dropdown-toggle{{ ' active' if admin_here }}"
+                               href="#" role="button" data-bs-toggle="dropdown">
+                                <i class="fas fa-user"></i> {{ current_user.username }}
                                 <span class="badge bg-secondary ms-1">{{ current_user.role }}</span>
                             </a>
                             <ul class="dropdown-menu dropdown-menu-end">
@@ -191,15 +228,14 @@
                                 {% if current_user.has_permission('system:admin') %}
                                 <li><hr class="dropdown-divider"></li>
                                 <li><h6 class="dropdown-header">Administration</h6></li>
-                                <li><a class="dropdown-item" href="{{ url_for('config.config_page') }}">
-                                    <i class="fas fa-sliders fa-fw"></i> Configuration
+                                {% for endpoint, icon, label in admin_pages %}
+                                {% set current = request.endpoint == endpoint %}
+                                <li><a class="dropdown-item{{ ' active' if current }}"
+                                       {% if current %}aria-current="page"{% endif %}
+                                       href="{{ url_for(endpoint) }}">
+                                    <i class="fas {{ icon }} fa-fw"></i> {{ label }}
                                 </a></li>
-                                <li><a class="dropdown-item" href="{{ url_for('config.audit_page') }}">
-                                    <i class="fas fa-clipboard-list fa-fw"></i> Audit trail
-                                </a></li>
-                                <li><a class="dropdown-item" href="{{ url_for('advisor.advisor_page') }}">
-                                    <i class="fas fa-stethoscope fa-fw"></i> Cluster Advisor
-                                </a></li>
+                                {% endfor %}
                                 {% endif %}
                                 <li><hr class="dropdown-divider"></li>
                                 <li><a class="dropdown-item" href="{{ url_for('auth.logout') }}">
