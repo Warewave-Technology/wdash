@@ -30,6 +30,18 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
+# Local runtime files that are not part of the product. The agent's spool is
+# the monitor results it has not delivered yet — check outcomes and their
+# error text, host names included — and it sits in the root of a checkout
+# that ran `python -m wdash.agent` from there.
+agent-spool*.jsonl
+
+# Git worktrees made by tooling inside the checkout. Every pattern above is
+# anchored at the context root, so a worktree under .claude/ is a second
+# checkout that none of them reach: its own data/, its own .env, and its own
+# venv, all copied in by `COPY . .`.
+.claude/
+
 # Not needed at runtime
 .git/
 .gitignore
