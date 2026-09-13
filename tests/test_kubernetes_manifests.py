@@ -161,6 +161,18 @@ def _mount_paths(container=None):
             for mount in c.get("volumeMounts", [])}
 
 
+def _pods():
+    """(file, workload, pod spec) for every pod template in these manifests."""
+    for name, document in _every_document():
+        template = (document.get("spec") or {}).get("template")
+        if template and "spec" in template:
+            yield name, document["metadata"]["name"], template["spec"]
+
+
+def _containers_of(pod):
+    return pod.get("containers", []) + pod.get("initContainers", [])
+
+
 def _environment_names_read_by_the_app():
     """Every environment variable the source actually looks at.
 
@@ -250,7 +262,8 @@ class ConfigMapTest(unittest.TestCase):
         application's own defaults, so they cost nothing and looked correct.
         The sixth was RBAC_CONFIG_FILE — which is why the roles ConfigMap
         mounted at /etc/config was never opened, and why editing it appeared
-        to do nothing.
+        to do nothing. (Both have gone since: roles are not configured in
+        these files at all.)
         """
         given = _environment(_container("wdash"))
         missing = sorted(k for k in self.data if k.isupper() and k not in given)
@@ -313,200 +326,52 @@ class ConfigMapTest(unittest.TestCase):
                 "an https cluster with ELASTICSEARCH_VERIFY_CERTS off")
 
 
-class TheRolesFileIsReadableTest(unittest.TestCase):
-    """The rbac.yaml carried in a ConfigMap, put through the real importer.
+class ThePodsVolumesTest(unittest.TestCase):
+    """What a pod mounts has to exist, and what it declares has to be used.
 
-    It shipped in a schema nothing has read for two versions: `index_patterns`
-    where the loader wants `indices`, a nested `users:` block where it wants a
-    flat `user_roles:`, no `group_roles` and no `default_role`, and the retired
-    permissions `logs:search` and `user:manage`.
+    None of the three is checked anywhere else before a rollout. The
+    `manifests` job validates each object against its schema, and a schema
+    cannot say that one name must be another's: measured, a mount naming a
+    volume its pod does not declare, and a volume naming a ConfigMap nobody
+    defined, each validated 11 of 11 on Kubernetes 1.25, 1.31 and 1.34. The
+    first is refused by the API server when it is applied; the second is
+    accepted, and the pod waits in ContainerCreating for a ConfigMap that is
+    not coming, which reads as a scheduling fault. A volume that nothing
+    mounts is decoration.
 
-    Every one of those differences fails CLOSED — an unread `index_patterns`
-    leaves the role with no indices at all — so the file looked perfectly
-    valid and would have given every role an empty log screen. YAML that
-    parses proves nothing here; only importing it does.
+    The roles ConfigMap was one ConfigMap, one volume and two mounts, and
+    removing it is exactly the change that leaves one of the four behind.
     """
 
-    def setUp(self):
-        self.text = _by_name("configmap.yaml", "ConfigMap",
-                             "wdash-rbac-config")["data"]["rbac.yaml"]
+    def test_every_mount_names_a_volume_its_pod_declares(self):
+        for file, workload, pod in _pods():
+            declared = {volume["name"] for volume in pod.get("volumes", [])}
+            for container in _containers_of(pod):
+                for mount in container.get("volumeMounts", []):
+                    with self.subTest(file=file, container=container["name"],
+                                      mount=mount["name"]):
+                        self.assertIn(mount["name"], declared)
 
-    def test_the_mounted_file_is_the_one_the_application_opens(self):
-        """A ConfigMap mounted somewhere nothing reads is decoration."""
-        configured = _config_map()["RBAC_CONFIG_FILE"]
-        self.assertTrue(
-            any(configured.startswith(m.rstrip("/") + "/")
-                for m in _mount_paths(_container("wdash"))),
-            f"RBAC_CONFIG_FILE is {configured}, which nothing mounts")
-        self.assertTrue(configured.endswith("/rbac.yaml"),
-                        "the file name has to be the ConfigMap's key, which "
-                        "is what appears in the mounted directory")
+    def test_every_volume_a_pod_declares_is_mounted(self):
+        for file, workload, pod in _pods():
+            mounted = {mount["name"] for container in _containers_of(pod)
+                       for mount in container.get("volumeMounts", [])}
+            for volume in pod.get("volumes", []):
+                with self.subTest(file=file, workload=workload,
+                                  volume=volume["name"]):
+                    self.assertIn(volume["name"], mounted)
 
-    def test_the_roles_survive_the_import(self):
-        from wdash.store import Store
-
-        directory = tempfile.mkdtemp()
-        path = os.path.join(directory, "rbac.yaml")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(self.text)
-
-        store = Store.open(f"sqlite:///{os.path.join(directory, 'seed.db')}",
-                           rbac_file=path)
-        roles = {role["name"]: role for role in store.roles.all()}
-
-        self.assertIn("admin", roles, "the file seeded no admin role")
-        # The boundary that vanished under the old schema.
-        self.assertTrue(roles["admin"]["containers"],
-                        "admin was imported with no indices at all — the "
-                        "schema is not the one roles.py reads")
-        self.assertIn("*", roles["admin"]["containers"])
-        # Group mapping is inverted onto the role on the way in; losing it
-        # demotes an entire organisation to the default role on upgrade.
-        self.assertIn("wdash-admins", roles["admin"]["groups"] or [])
-        self.assertEqual(store.settings.get("rbac.default_role"), "viewer")
-
-    def _seed_then_edit(self, second):
-        """Boot on this file, edit it, boot again — what the second start saw.
-
-        Two `Store.open` calls against one database, which is a pod restart
-        after somebody edited the ConfigMap. Nothing here mocks the reader:
-        the question is what the application does with an edited file, and
-        only opening the store twice answers it.
-        """
-        from wdash.store import Store
-
-        directory = tempfile.mkdtemp()
-        path = os.path.join(directory, "rbac.yaml")
-        url = f"sqlite:///{os.path.join(directory, 'seed.db')}"
-
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(self.text)
-        store = Store.open(url, rbac_file=path)
-        before = (sorted(role["name"] for role in store.roles.all()),
-                  store.settings.get("rbac.default_role"),
-                  store.settings.get("rbac.claim_mappings"))
-        store.engine.dispose()
-
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(second)
-        store = Store.open(url, rbac_file=path)
-        after = (sorted(role["name"] for role in store.roles.all()),
-                 store.settings.get("rbac.default_role"),
-                 store.settings.get("rbac.claim_mappings"))
-        store.engine.dispose()
-        return before, after
-
-    def test_an_edit_after_the_first_boot_changes_nothing(self):
-        """Which is what the ConfigMap says about this file, in the comment
-        beside RBAC_CONFIG_FILE and again at the top of the file itself.
-
-        Both halves, because they are imported by different callers under
-        different conditions: `RoleRepository.seed` runs when the roles table
-        is empty, and `import_claims` runs when no claim mapping is stored.
-        A restart that re-read either would silently undo an edit made on the
-        configuration page, which is the one thing the page must be able to
-        promise.
-        """
-        parsed = yaml.safe_load(self.text)
-        parsed["roles"]["intruder"] = {
-            "description": "added after the first boot",
-            "permissions": ["logs:read"], "indices": ["*"]}
-        parsed["default_role"] = "intruder"
-        parsed["claim_mappings"] = {"email_claim": "mail",
-                                    "username_claim": "uid",
-                                    "groups_claim": "memberOf"}
-
-        before, after = self._seed_then_edit(yaml.safe_dump(parsed))
-
-        self.assertNotIn("intruder", after[0],
-                         "a role added to the file after the first boot was "
-                         "imported by the restart")
-        self.assertEqual(before, after,
-                         "editing the file after the first boot changed what "
-                         "the application runs on")
-
-    def test_the_claim_mappings_block_is_what_makes_that_true(self):
-        """The claim above holds for this file only because it carries one.
-
-        `import_claims` runs on every `Store.open` and stops at the first
-        line only when a mapping is already STORED — so a file that shipped
-        without the block stores nothing at the first boot, and every later
-        start reads it again. Adding `claim_mappings:` to this ConfigMap
-        after an installation is running would then take effect on the next
-        restart, which is exactly what the comment beside RBAC_CONFIG_FILE
-        promises cannot happen.
-
-        Measured rather than asserted: the same file with the block removed,
-        through the same two starts.
-        """
-        parsed = yaml.safe_load(self.text)
-        self.assertTrue(
-            parsed.get("claim_mappings"),
-            "this file carries no claim_mappings, so the ConfigMap's "
-            "'an edit made HERE after the first boot changes nothing at all' "
-            "is false: a block added later would be read on the next restart")
-
-        without = dict(parsed)
-        without.pop("claim_mappings")
-        self.text = yaml.safe_dump(without)
-        before, after = self._seed_then_edit(yaml.safe_dump(parsed))
-        self.assertIsNone(before[2])
-        self.assertEqual(
-            after[2], parsed["claim_mappings"],
-            "a file with no claim_mappings was expected to pick them up on a "
-            "later start — if this changed, the comment can be simplified")
-
-    def test_the_configmap_accounts_for_everything_that_reads_this_file(self):
-        """`Store.open` hands the file to TWO importers, not one.
-
-        `roles.seed` gates on an empty roles table; `import_claims` gates on
-        no stored claim mapping. The ConfigMap described one condition —
-        "Read ONCE, when the roles table is empty" — and drew a categorical
-        conclusion from it: "an edit made HERE after the first boot changes
-        nothing at all". That is true of the roles and is not a thing the
-        roles table can decide about `claim_mappings`, whose block is read
-        the first start that finds none stored — not necessarily the first
-        start at all, which is the case `import_claims` was added for.
-
-        Read out of `Store.open` rather than listed here, so a third importer
-        arriving means this fails rather than quietly describing two.
-        """
-        import inspect
-        from wdash.store import Store
-
-        body = inspect.getsource(Store.open)
-        readers = sorted(set(re.findall(
-            r"^\s*(?:\w+\.)*(seed|import_claims)\(", body, re.M)))
-        self.assertEqual(
-            readers, ["import_claims", "seed"],
-            f"Store.open reads rbac.yaml with {readers}; the ConfigMap's "
-            f"comment describes what these do, so it has to be revisited")
-
-        comment = re.search(
-            r"((?:^\s*#.*\n)+)\s*RBAC_CONFIG_FILE:",
-            _read_manifest("configmap.yaml"), re.M).group(1)
-        self.assertTrue(
-            "claim_mappings" in comment,
-            "the comment beside RBAC_CONFIG_FILE describes only `seed`, so "
-            "it states a condition that does not hold for `import_claims` — "
-            "which reads the same file under a different one. It says:\n"
-            + comment)
-
-    def test_no_role_asks_for_a_permission_that_was_retired(self):
-        """`logs:search` folded into `logs:read` and `user:manage` into
-        `system:admin`. A stored role is translated on the way out, so a
-        retired name is not an error — it is a file describing a version of
-        this application that no longer exists."""
-        from wdash.permissions import RETIRED, known
-
-        parsed = yaml.safe_load(self.text)
-        for name, definition in parsed["roles"].items():
-            for permission in definition["permissions"]:
-                with self.subTest(role=name, permission=permission):
-                    self.assertNotIn(permission, RETIRED)
-                    self.assertTrue(known(permission),
-                                    f"{permission} is not a permission this "
-                                    f"application has")
+    def test_every_config_map_a_volume_names_is_defined_here(self):
+        defined = {document["metadata"]["name"]
+                   for _, document in _every_document()
+                   if document.get("kind") == "ConfigMap"}
+        for file, workload, pod in _pods():
+            for volume in pod.get("volumes", []):
+                reference = volume.get("configMap")
+                if reference is None or reference.get("optional"):
+                    continue
+                with self.subTest(file=file, volume=volume["name"]):
+                    self.assertIn(reference["name"], defined)
 
 
 class DeploymentTest(unittest.TestCase):
@@ -540,7 +405,7 @@ class DeploymentTest(unittest.TestCase):
         """Each of these fails in a way that points somewhere else."""
         for name in ("DATABASE_URL", "TRUSTED_PROXY_COUNT",
                      "WDASH_ENCRYPTION_KEY", "SESSION_COOKIE_SECURE",
-                     "DASHBOARD_STORAGE", "RBAC_CONFIG_FILE"):
+                     "DASHBOARD_STORAGE"):
             self.assertIn(name, self.environment)
 
     def test_nothing_is_handed_a_variable_the_source_ignores(self):

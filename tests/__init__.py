@@ -83,8 +83,6 @@ PROTECTED_BY_THE_APP = {
 #: assumed. Listed so the next person does not have to re-derive it.
 INERT = {
     "OIDC_REDIRECT_URI": "echoed into a redirect; nothing connects to it",
-    "RBAC_CONFIG_FILE": "config/rbac.yaml is tracked, so it is the same file "
-                        "on every machine — not developer state",
 }
 
 def points_at_something_real(value):

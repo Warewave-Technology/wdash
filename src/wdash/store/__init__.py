@@ -21,7 +21,7 @@ from .objects import (
 from .audit import AuditLog
 from .signin import SignInGuard
 from .rbac import RoleResolver
-from .roles import RoleRepository, import_claims
+from .roles import RoleRepository
 from .settings_repo import SettingsRepository
 from .sources import SourceError, SourceRepository, SOURCE_KINDS
 from .secrets import SecretBox, SecretsCorrupt, SecretsUnavailable
@@ -73,13 +73,13 @@ class Store:
         self.alert_history = AlertHistoryRepository(engine)
 
     @classmethod
-    def open(cls, url=None, rbac_file=None, secret_box=None):
-        """Build the store, migrate, and seed roles on a fresh installation."""
+    def open(cls, url=None, secret_box=None):
+        """Build the store, migrate, and give an installation with no roles
+        the built-in ones."""
         engine = build_engine(url)
         migrate(engine)
         store = cls(engine, secret_box)
-        store.roles.seed(rbac_file, store.settings)
-        import_claims(rbac_file, store.settings)
+        store.roles.seed(store.settings)
         return store
 
     def describe(self):

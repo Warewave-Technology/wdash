@@ -31,10 +31,11 @@ from .auth import _hold
 def _administering_role(store):
     """A role that can administer, for the account setup creates.
 
-    It was always `admin`. An installation whose rbac.yaml calls its
-    administrator role something else — or has none — got a break-glass
-    account that fell through to the default role: it could sign in and
-    could not open the page that would fix anything.
+    It was always `admin`. An installation whose roles call the
+    administrator something else — imported from an rbac.yaml by an earlier
+    version, or edited on the configuration page — or have none, got a
+    break-glass account that fell through to the default role: it could sign
+    in and could not open the page that would fix anything.
     """
     from ..permissions import PERMISSIONS
 
@@ -59,7 +60,7 @@ def _administering_role(store):
     store.roles.upsert(
         name, permissions=list(PERMISSIONS), containers=["*"],
         trace_containers=["*"], services=None,
-        description="Created at setup: no role in rbac.yaml could administer.")
+        description="Created at setup: no existing role could administer.")
     return name
 
 setup_bp = Blueprint('setup', __name__)

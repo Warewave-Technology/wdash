@@ -1166,7 +1166,7 @@ class DirectoryAdministratorTest(ConfigTestCase):
     def setUp(self):
         super().setUp()
         admin = self.app.store.roles.get("admin")
-        self.assertIn("wdash-admins", admin["groups"])  # seeded by rbac.yaml
+        self.assertIn("wdash-admins", admin["groups"])  # a built-in role
         with self.client.session_transaction() as session:
             session["user_data"] = {
                 "id": "directory-1", "email": "alice@example.com",

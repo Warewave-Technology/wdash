@@ -399,7 +399,6 @@ def create_app(config_class=Config):
     # ever stops.
     store = Store.open(
         app.config.get('DATABASE_URL'),
-        rbac_file=app.config.get('RBAC_CONFIG_FILE'),
         secret_box=SecretBox(app.config.get('ENCRYPTION_KEY')))
     app.store = store
     # Until somebody claims this installation, every route leads to setup.

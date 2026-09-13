@@ -54,6 +54,8 @@ password.
 
 import logging
 
+from ..store.roles import DEFAULT_CLAIM_MAPPINGS
+
 logger = logging.getLogger(__name__)
 
 OIDC_KEY = "auth.oidc"
@@ -266,17 +268,20 @@ def refuses_second_directory(app, which, enabling):
 
 
 #: Which claims name a person, unless something more specific says otherwise.
-DEFAULT_CLAIMS = {"username_claim": "preferred_username",
-                  "email_claim": "email", "groups_claim": "groups"}
+#: The same object a new installation stores, so the two cannot disagree.
+DEFAULT_CLAIMS = DEFAULT_CLAIM_MAPPINGS
 
 
 def _claims(app, configured):
     """The claim names and the email rule, from the most specific place.
 
-    This provider's own settings first, then the `claim_mappings` block
-    rbac.yaml was imported with, then the defaults. That block was shipped,
-    documented and never read: an operator whose provider sends groups as
-    `roles` edited it and every OIDC user still landed on the default role.
+    This provider's own settings first, then the claim mappings stored for
+    this installation, then the defaults. A new installation stores the
+    defaults. One that imported `claim_mappings` from an rbac.yaml at an
+    earlier version keeps what it imported — which is the reason this is
+    read at all: that block was once shipped, documented and never read, and
+    an operator whose provider sends groups as `roles` edited it and every
+    OIDC user still landed on the default role.
     """
     store = _store(app)
     seeded = {}

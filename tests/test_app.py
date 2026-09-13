@@ -18,7 +18,6 @@ class TestConfig(Config):
     TESTING = True
     ELASTICSEARCH_URL = 'http://localhost:9200'
     SECRET_KEY = 'test-secret-key'
-    RBAC_CONFIG_FILE = 'config/rbac.yaml'
 
 
 class WDashTestCase(unittest.TestCase):

@@ -135,6 +135,16 @@ so an installation set up by somebody who then loses the phone needs
 Local accounts are managed afterwards on the configuration page, under
 **Authentication → Local accounts**.
 
+**Roles are made on the configuration page, not in these files.** A new
+installation starts with three — `admin`, `developer` and `viewer`, mapped
+from the directory groups `wdash-admins`, `wdash-developers` and
+`wdash-viewers` — and **Roles & access** is where they are changed, where
+others are made, and where a group or a named person is mapped onto one.
+Nothing in this directory feeds them, and no restart or upgrade changes a
+role that exists. An installation made from an earlier version of these files
+imported its roles from an `rbac.yaml` in a second ConfigMap, and keeps what
+it imported.
+
 ## When nobody can sign in
 
 A lost phone, a rotated `encryption-key`, an account somebody switched off, a
@@ -292,16 +302,17 @@ in the cluster's own namespace; there is a template at the bottom of the file.
 | `namespace.yaml` | the namespace, labelled so a policy elsewhere can name it |
 | `serviceaccount.yaml` | an account with no API token and no permissions |
 | `secrets.yaml` | five empty keys — two of them required — and the commands that fill them |
-| `configmap.yaml` | every setting, the roles a fresh installation is seeded with, the sidecar's nginx.conf |
+| `configmap.yaml` | every setting, and the sidecar's nginx.conf |
 | `wdash-deployment.yaml` | the pod, the Service and the volume claim |
 | `ingress.yaml` | a plain `networking.k8s.io/v1` Ingress, TLS required |
 | `networkpolicy.yaml` | who may reach the pod |
 | `wdash-agent.yaml` | a probe agent; needs a token, so not applied by default |
 
 `tests/test_kubernetes_manifests.py` holds all of it against the application —
-that every ConfigMap key reaches the process, that the roles file still parses
-under the schema the importer reads, that something evaluates the alert rules,
-and that the proxy count matches the number of proxies these files describe.
+that every ConfigMap key reaches the process, that every volume the pod mounts
+is one it declares and every ConfigMap a volume names is one these files
+define, that something evaluates the alert rules, and that the proxy count
+matches the number of proxies these files describe.
 
 **This page is held too, and it was not before.** It said the sidecar was on
 port 80 while the Deployment, the Service, the NetworkPolicy and the

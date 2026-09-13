@@ -1,6 +1,5 @@
 from flask_login import UserMixin
 from datetime import datetime
-import yaml
 import json
 
 class User(UserMixin):
@@ -34,58 +33,6 @@ class User(UserMixin):
         self.allowed_services = list(services) if services is not None else None
         return self
 
-    def load_rbac_config(self, config_file):
-        """Load RBAC from the legacy YAML file.
-
-        Superseded by the metadata store and the per-request resolver; kept so
-        a deployment that has not migrated still starts. New code must use
-        `apply()` with a resolved role.
-        """
-        try:
-            with open(config_file, 'r') as f:
-                config = yaml.safe_load(f)
-
-            # Determine user role
-            self.role = self._determine_role(config)
-
-            # Load permissions and access boundaries for the role.
-            # Fail-closed: a boundary that is not declared grants nothing.
-            if self.role and self.role in config['roles']:
-                role_config = config['roles'][self.role]
-                self.permissions = role_config.get('permissions', [])
-                self.allowed_indices = role_config.get('indices', [])
-                self.allowed_trace_indices = role_config.get('trace_indices', [])
-                self.allowed_services = role_config.get('services', [])
-
-        except Exception as e:
-            # Config unreadable — fall back to the narrowest useful role rather
-            # than guessing. No trace access at all: the fallback must never
-            # widen access beyond what an operator explicitly configured.
-            print(f"Error loading RBAC config: {e}")
-            self.role = 'viewer'
-            self.permissions = ['logs:read', 'dashboard:view']
-            self.allowed_indices = ['*']
-            self.allowed_trace_indices = []
-            self.allowed_services = []
-    
-    def _determine_role(self, config):
-        """Determine user role based on email, groups, or default"""
-        # Check direct user mapping
-        user_roles = config.get('user_roles', {})
-        if self.email in user_roles:
-            return user_roles[self.email]
-        if self.username in user_roles:
-            return user_roles[self.username]
-        
-        # Check group mapping
-        group_roles = config.get('group_roles', {})
-        for group in self.groups:
-            if group in group_roles:
-                return group_roles[group]
-        
-        # Return default role
-        return config.get('default_role', 'viewer')
-    
     def has_permission(self, permission):
         """Check if user has specific permission"""
         return permission in self.permissions

@@ -325,7 +325,7 @@ class EnvironmentIsolationTest(unittest.TestCase):
 
     def _somebodys_checkout(self):
         """A working directory holding what a developer's does: a metadata
-        store and a dashboards file under data/, beside the tracked config.
+        store and a dashboards file under data/.
 
         The classifier resolves a relative path against the working
         directory, so these tests read whatever this machine happens to
@@ -340,7 +340,7 @@ class EnvironmentIsolationTest(unittest.TestCase):
         @contextlib.contextmanager
         def inside():
             folder = tempfile.mkdtemp()
-            for name in ("data/wdash.db", "data/dashboards.json", "config/rbac.yaml"):
+            for name in ("data/wdash.db", "data/dashboards.json"):
                 os.makedirs(os.path.join(folder, os.path.dirname(name)), exist_ok=True)
                 open(os.path.join(folder, name), "w").close()
             previous = os.getcwd()
@@ -403,7 +403,6 @@ class EnvironmentIsolationTest(unittest.TestCase):
 
         with self._somebodys_checkout():
             self.assertTrue(points_at_something_real("data/dashboards.json"))
-            self.assertTrue(points_at_something_real("config/rbac.yaml"))
             self.assertFalse(points_at_something_real("data/not-a-file.json"))
 
     def test_an_address_counts_even_though_nothing_is_listening(self):

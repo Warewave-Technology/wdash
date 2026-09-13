@@ -68,7 +68,6 @@ fi
 echo ""
 echo "📋 Configuration Summary:"
 echo "   Elasticsearch: $ELASTICSEARCH_URL"
-echo "   RBAC Config: ${RBAC_CONFIG_FILE:-rbac_config.yaml}"
 echo "   OIDC Configured: $([ ! -z "$OIDC_CLIENT_ID" ] && echo "Yes" || echo "No")"
 echo ""
 

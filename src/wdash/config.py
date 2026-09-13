@@ -88,8 +88,9 @@ class Config:
     OIDC_CLIENT_SECRET = os.environ.get('OIDC_CLIENT_SECRET')
     OIDC_DISCOVERY_URL = os.environ.get('OIDC_DISCOVERY_URL')
     OIDC_REDIRECT_URI = os.environ.get('OIDC_REDIRECT_URI') or 'http://127.0.0.1:5001/auth/callback'
-    # Which claims name a person. Unset falls back to rbac.yaml's
-    # claim_mappings, then to preferred_username / email / groups.
+    # Which claims name a person. Unset falls back to the claim mappings
+    # stored for this installation, then to preferred_username / email /
+    # groups.
     OIDC_USERNAME_CLAIM = os.environ.get('OIDC_USERNAME_CLAIM')
     OIDC_EMAIL_CLAIM = os.environ.get('OIDC_EMAIL_CLAIM')
     OIDC_GROUPS_CLAIM = os.environ.get('OIDC_GROUPS_CLAIM')
@@ -139,9 +140,6 @@ class Config:
                        ','.join(DEFAULT_TRACE_PATTERNS)).split(',')
         if p.strip())
 
-    # RBAC Configuration
-    RBAC_CONFIG_FILE = os.environ.get('RBAC_CONFIG_FILE') or 'config/rbac.yaml'
-    
     # Application Settings
     LOGS_PER_PAGE = int(os.environ.get('LOGS_PER_PAGE', 50))
     MAX_SEARCH_RESULTS = int(os.environ.get('MAX_SEARCH_RESULTS', 1000))

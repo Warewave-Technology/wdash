@@ -9,8 +9,7 @@ data:
   # Every key here is read by the application, AND every key here reaches the
   # process: the Deployment loads this whole map with `envFrom`. It used to
   # name nine of them one at a time, so six keys sat in this file describing a
-  # deployment they never reached — RBAC_CONFIG_FILE among them, which is why
-  # the rbac.yaml mounted at /etc/config was never opened.
+  # deployment they never reached.
   #
   # Keys that looked like configuration and changed nothing — LOG_LEVEL,
   # LOG_FORMAT, SESSION_TIMEOUT, MAX_SEARCH_SIZE, WORKERS, WORKER_CONNECTIONS,
@@ -137,32 +136,13 @@ data:
   # as "this person belongs to nothing" and lands them on the default role.
   OIDC_SCOPES: "openid email profile groups"
 
-  # Roles, groups and index boundaries, from the file mounted below.
-  #
-  # Roles live in the metadata store now, and the configuration page is their
-  # editor. This file SEEDS them, and it is read by two importers with two
-  # different conditions — which matters, because one of them is not "the
-  # first boot":
-  #
-  #   * the roles, `group_roles`, `user_roles` and `default_role` are read
-  #     when the ROLES TABLE IS EMPTY, which on a new installation is the
-  #     first start and after that is never. A role added here later is not
-  #     imported by a restart;
-  #   * `claim_mappings` is read the first start that finds NONE STORED. On
-  #     a new installation that is the same start — the block below is read
-  #     and kept. It is separate because an installation seeded before WDash
-  #     read the block at all has a full roles table and no stored mapping,
-  #     and went on ignoring its `groups_claim: memberOf` after the upgrade
-  #     that said it would not.
-  #
-  # So: an edit made in the UI is never overwritten by a restart, and an edit
-  # made HERE after the first boot changes nothing — as long as the block is
-  # already stored, which it is because this file ships one. Delete
-  # `claim_mappings` from the ConfigMap and that stops being true: nothing is
-  # stored, every start reads the file again, and a block added months later
-  # takes effect on the next restart. tests/test_kubernetes_manifests.py
-  # measures both halves against two real starts.
-  RBAC_CONFIG_FILE: "/etc/config/rbac.yaml"
+  # Roles are not configured here, and no file in this directory holds
+  # them. They live in the metadata store and are edited on the
+  # configuration page. A new installation starts with admin, developer
+  # and viewer, mapped from the groups wdash-admins, wdash-developers and
+  # wdash-viewers, and nothing in these manifests — no restart, no
+  # upgrade — changes a role that exists: an installation that imported
+  # its roles from the rbac.yaml this directory used to carry keeps them.
 
   # Application
   LOGS_PER_PAGE: "50"
@@ -185,115 +165,6 @@ data:
   # declare `tls:` — a Secure cookie over http:// is never stored, and the
   # symptom is a sign-in that succeeds and returns to the sign-in page.
   SESSION_COOKIE_SECURE: "true"
-
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: wdash-rbac-config
-  labels:
-    app.kubernetes.io/name: wdash
-    app.kubernetes.io/component: rbac
-data:
-  rbac.yaml: |
-    # WDash authorization, seeded into the metadata store on FIRST BOOT.
-    #
-    # The roles here are read once, when the roles table is empty, and
-    # ignored ever after — roles live in the store and the configuration
-    # page is their editor from then on. This file is here so a cluster can
-    # come up with its group mapping already in place instead of somebody
-    # clicking through the UI; it is NOT a way to change roles later, and
-    # editing the roles below after the first boot does nothing.
-    #
-    # `claim_mappings` at the bottom is the one block with a condition of
-    # its own — see the comment beside RBAC_CONFIG_FILE. Keep it here even
-    # if it holds the defaults: a ConfigMap with no such block is re-read on
-    # every single start.
-    #
-    # The schema is the one src/wdash/store/roles.py reads. This file used to
-    # carry an older one — `index_patterns` instead of `indices`, `users:`
-    # instead of `user_roles:`, no `group_roles`, and the retired permissions
-    # `logs:search` and `user:manage`. Every difference failed CLOSED: an
-    # unread `index_patterns` leaves the role with no indices at all, so a
-    # perfectly valid-looking file gave every role an empty log screen.
-    #
-    # Fail closed throughout: a boundary that is not declared grants nothing.
-    # Trailing wildcards work ("app-*"); leading ones do not ("*-service").
-
-    roles:
-      admin:
-        description: "Full system administrator"
-        permissions:
-          - logs:read
-          - traces:read
-          - monitors:read
-          - dashboard:view
-          - dashboard:create
-          - dashboard:edit
-          - dashboard:delete
-          - system:admin
-        indices:
-          - "*"
-        trace_indices:
-          - "*"
-        services:
-          - "*"
-
-      developer:
-        description: "Development team member"
-        permissions:
-          - logs:read
-          - traces:read
-          - monitors:read
-          - dashboard:view
-          - dashboard:create
-          - dashboard:edit
-        indices:
-          - "app-*"
-          - "service-*"
-        trace_indices:
-          - "*"
-        services:
-          - "*"
-
-      viewer:
-        description: "Read-only access"
-        permissions:
-          - logs:read
-          - traces:read
-          - dashboard:view
-        indices:
-          - "app-*"
-        trace_indices:
-          - "*"
-        services:
-          - "api-gateway"
-
-    # Named people, ahead of any group they are in: one contractor, one
-    # stand-in during an outage, one person whose directory entry is wrong
-    # today. Deliberately empty — anything left here is a mapping every
-    # deployment made from this file would inherit from somebody else.
-    #
-    #   alice@example.com: admin
-    user_roles: {}
-
-    # Applied to authenticated people with no explicit mapping and no known
-    # group.
-    default_role: viewer
-
-    # Group to role. Namespaced on purpose: a directory almost certainly
-    # already has a group called `admins`, it usually means domain
-    # administrators, and mapping it here would hand `system:admin` to
-    # everybody in it.
-    group_roles:
-      wdash-admins: admin
-      wdash-developers: developer
-      wdash-viewers: viewer
-
-    claim_mappings:
-      email_claim: email
-      username_claim: preferred_username
-      groups_claim: groups
 
 ---
 apiVersion: v1

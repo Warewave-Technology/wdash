@@ -227,10 +227,9 @@ opens.
 | `OIDC_CLIENT_SECRET` | OIDC client secret | — |
 | `OIDC_DISCOVERY_URL` | Provider discovery document | — |
 | `OIDC_REDIRECT_URI` | Callback URL | `http://127.0.0.1:5001/auth/callback` |
-| `OIDC_USERNAME_CLAIM` / `OIDC_EMAIL_CLAIM` / `OIDC_GROUPS_CLAIM` | Which claims name a person. Unset falls back to rbac.yaml's `claim_mappings`, then `preferred_username` / `email` / `groups` | — |
+| `OIDC_USERNAME_CLAIM` / `OIDC_EMAIL_CLAIM` / `OIDC_GROUPS_CLAIM` | Which claims name a person. Unset falls back to the claim mappings stored for this installation, then `preferred_username` / `email` / `groups` | — |
 | `OIDC_TRUST_UNVERIFIED_EMAIL` | Use an email the provider has not marked verified. Only for a provider that never sends `email_verified` and lets nobody edit the address | `false` |
 | `OIDC_SCOPES` | What to ask the provider for. `groups` is included because roles are mapped from groups, and a provider that gates that claim behind a scope sends nothing without it | `openid email profile groups` |
-| `RBAC_CONFIG_FILE` | Roles imported **once** into the database on a fresh installation, then ignored | `config/rbac.yaml` |
 | `LOGS_PER_PAGE` | Records per page in the log list | `50` |
 | `SESSION_COOKIE_SECURE` | Send the session cookie over HTTPS only. Also enables HSTS | `False` |
 | `TRUSTED_PROXY_COUNT` | How many reverse proxies sit in front of WDash. `0` ignores `X-Forwarded-For` entirely — trusting it without knowing the depth lets a client name its own address and step around the per-address rate limit | `0` |
@@ -324,8 +323,8 @@ the provider sends `email_verified: true`: roles can be mapped to an address,
 and a provider that lets people set their own address would otherwise let them
 take somebody else's mapping. A provider that never sends the claim has to be
 trusted explicitly. The username, email and groups claims are chosen on the
-page, in rbac.yaml's `claim_mappings` or with `OIDC_USERNAME_CLAIM`,
-`OIDC_EMAIL_CLAIM` and `OIDC_GROUPS_CLAIM`. A dotted name reaches into an
+page or with `OIDC_USERNAME_CLAIM`, `OIDC_EMAIL_CLAIM` and
+`OIDC_GROUPS_CLAIM`. A dotted name reaches into an
 object (`realm_access.roles`). `email_verified` speaks for the `email` claim
 only: another email claim is used only if unverified addresses are trusted.
 Ownership and name mappings trust the username claim, so choose one your users
@@ -335,9 +334,10 @@ Entra v1 tokens do: that sign-in is refused, with a message naming the setting,
 rather than signing the person in as an opaque id that owns none of their
 dashboards. No provider, OIDC or directory, may sign somebody in under the
 name of a local account: that name owns the break-glass administrator's
-dashboards. Such a sign-in is refused and audited. `claim_mappings` in
-rbac.yaml is imported the first time a start finds none stored, on an existing
-installation as on a new one.
+dashboards. Such a sign-in is refused and audited. Named nowhere, the claims
+are `preferred_username`, `email` and `groups` — unless the installation
+imported other names from an rbac.yaml's `claim_mappings` at an earlier
+version, which it keeps and goes on using.
 
 ### The configuration page
 
@@ -361,8 +361,10 @@ instance metadata lives, and it hands out credentials to anything that asks.
 Private and loopback addresses stay allowed, because that is where these
 backends actually live.
 
-`config/rbac.yaml` is imported once into the database on a fresh installation
-and ignored afterwards, so an edit made here is never overwritten by a restart.
+Roles live in the database, and this page is where they are edited. An
+installation with none is given the built-in ones — see "Roles and directory
+groups" below — and nothing overwrites an edit made here: not a restart, and
+not an upgrade.
 
 #### Local accounts
 
@@ -575,10 +577,6 @@ configured.
 Every change to roles, mappings and identity settings is written to
 `wdash_audit` with the resulting state, so "what could this role see last
 Tuesday" has an answer.
-
-`config/rbac.yaml` is imported once into the database on a fresh installation
-and ignored afterwards, so an edit made in the UI is never overwritten by a
-restart.
 
 ### Who can see which dashboard
 
@@ -923,10 +921,16 @@ The prefix is deliberate. A directory almost certainly has a group called
 mapped it to `system:admin` would hand WDash's highest privilege to everyone
 in it.
 
-The seeding runs **once**, on an empty installation, importing
-`config/rbac.yaml` if it is there. After that the file is ignored and roles
-are edited in the UI — an edit made there is never overwritten on the next
-restart.
+They are written into an installation that has no roles, and into no other.
+An edit made on the configuration page is not overwritten by a restart or an
+upgrade, and an installation that already has roles — including one that
+imported them from an `rbac.yaml` at an earlier version — keeps exactly those.
+
+There is no file for bringing roles of your own. Other roles, and other
+groups mapped onto them, are made on the configuration page under **Roles &
+access**. When nobody can reach that page, `python -m wdash.store.recover`
+puts a local account on a role that exists (`--set-role`) or on one that
+administers (`--grant-admin`).
 
 ## Versioning
 

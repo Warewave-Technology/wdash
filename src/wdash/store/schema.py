@@ -77,7 +77,7 @@ users = Table(
 
 #: Roles and their boundaries — what config/rbac.yaml used to hold.
 #:
-#: The three boundaries stay independent, as they are in the file: a role may
+#: The three boundaries stay independent, as they were in the file: a role may
 #: read logs without reaching traces, and may reach a trace store without being
 #: allowed to see every service in it.
 roles = Table(

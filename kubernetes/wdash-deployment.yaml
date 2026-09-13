@@ -55,8 +55,7 @@ spec:
           name: http
         # The whole ConfigMap, rather than nine keys named one at a time.
         # Naming them individually left six keys in that file describing a
-        # deployment they never reached — including RBAC_CONFIG_FILE, which is
-        # why the roles mounted at /etc/config were never read.
+        # deployment they never reached.
         envFrom:
         - configMapRef:
             name: wdash-config
@@ -105,9 +104,6 @@ spec:
         # plausible reason to exist.
 
         volumeMounts:
-        - name: rbac-config
-          mountPath: /etc/config
-          readOnly: true
         - name: dashboard-storage
           mountPath: /data
         - name: tmp
@@ -219,9 +215,6 @@ spec:
               key: elasticsearch-password
               optional: true
         volumeMounts:
-        - name: rbac-config
-          mountPath: /etc/config
-          readOnly: true
         - name: dashboard-storage
           mountPath: /data
         - name: tmp
@@ -286,9 +279,6 @@ spec:
             - ALL
 
       volumes:
-      - name: rbac-config
-        configMap:
-          name: wdash-rbac-config
       - name: nginx-config
         configMap:
           name: wdash-nginx-config

@@ -47,11 +47,11 @@ def init_oauth(app, settings=None):
         client_secret=settings['client_secret'],
         server_metadata_url=settings['discovery_url'],
         # `groups` is in the default because this product maps groups to
-        # roles — the callback reads the groups claim (`groups_claim`,
-        # rbac.yaml's `claim_mappings` or the configuration page) — and a
-        # provider that gates the claim behind a scope sends nothing
-        # without it. Dex does; so do Keycloak and Okta with the
-        # usual configuration.
+        # roles — the callback reads the groups claim (`groups_claim`, from
+        # the configuration page, the environment or the stored claim
+        # mappings) — and a provider that gates the claim behind a scope
+        # sends nothing without it. Dex does; so do Keycloak and Okta with
+        # the usual configuration.
         #
         # Measured in the lab: without this every OIDC identity signed in
         # perfectly and landed on the DEFAULT role, whatever directory groups
@@ -65,11 +65,6 @@ def init_oauth(app, settings=None):
             'OIDC_SCOPES', 'openid email profile groups')},
     )
     return oauth, oidc
-
-def _resolver():
-    store = getattr(current_app, 'store', None)
-    return store.rbac if store else None
-
 
 def _start_session(user, local_role=None, provider=None):
     """Store IDENTITY in the session and sign the user in.
@@ -810,8 +805,12 @@ def load_user_from_session():
     )
 
     explicit = user_data.get('local_role')
+    # Always there: `create_app` opens the store unconditionally and does not
+    # return an application without one. There used to be a second path here
+    # for "no store", reading roles from rbac.yaml through the User object.
+    # It could not be reached, and instrumented, the whole suite never did.
     store = _store()
-    if store is not None and user_data.get('provider') == 'local account':
+    if user_data.get('provider') == 'local account':
         # Read now, not taken from the cookie. `local_role` was written at
         # sign-in and never looked at again, which is the same frozen
         # authorization that moving permissions out of the session was for:
@@ -828,14 +827,6 @@ def load_user_from_session():
             return None
         explicit = account['role']
 
-    resolver = _resolver()
-    if resolver is not None:
-        return user.apply(resolver.resolve(
-            email=user.email, username=user.username, groups=user.groups,
-            explicit=explicit))
-
-    # No store: a deployment still on the YAML file. Not a fallback to
-    # something permissive — the same file the resolver replaced.
-    user.load_rbac_config(current_app.config['RBAC_CONFIG_FILE'])
-
-    return user
+    return user.apply(store.rbac.resolve(
+        email=user.email, username=user.username, groups=user.groups,
+        explicit=explicit))

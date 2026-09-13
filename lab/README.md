@@ -75,7 +75,7 @@ The APM index is deliberately **not** named `traces-apm-*`: Elasticsearch's
 built-in `traces-apm@template` owns that pattern and only permits data streams.
 What matters for the adapter is the document schema, not the index type.
 
-RBAC works out of the box against `config/rbac.yaml` — `viewer` sees only
+RBAC works out of the box against the built-in roles — `viewer` sees only
 `app-*`, `developer` sees `app-*` and `service-*`, and `infra-*` is admin only.
 
 ## Deliberate misconfigurations
@@ -271,9 +271,10 @@ defaults. A real directory almost certainly has a group called `admins`, it
 usually means domain administrators, and a default that maps it to
 `system:admin` hands WDash's highest privilege to everyone in it.
 
-The two sets of defaults — `config/rbac.yaml` and `store/roles.py` — used to
-disagree about this, and about whether the middle role was called `developer`
-or `editor`. `tests/test_store.py` fails if they drift again.
+There used to be two sets of defaults — `config/rbac.yaml` and
+`store/roles.py` — and they disagreed about this, and about whether the middle
+role was called `developer` or `editor`. There is one now, `DEFAULT_ROLES` in
+`store/roles.py`, and `tests/test_store.py` holds a new installation to it.
 
 ## Postgres
 

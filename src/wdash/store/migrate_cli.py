@@ -320,11 +320,7 @@ def main(argv=None):
               "dashboards path.", file=sys.stderr)
         return 1
 
-    # Pass the RBAC file so an import run before the first app start does not
-    # seed built-in defaults and thereby shadow the roles somebody wrote.
-    store = Store.open(_database_url(arguments),
-                       rbac_file=os.environ.get("RBAC_CONFIG_FILE",
-                                                "config/rbac.yaml"))
+    store = Store.open(_database_url(arguments))
     print(f"Metadata store: {store.describe()}")
 
     records = None

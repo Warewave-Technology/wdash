@@ -5,8 +5,9 @@ The source is NOT mocked: a fake Elasticsearch is used so the real adapter and
 the real Scope logic run. Mocking the source would skip the very thing under
 test — authorization filtering.
 
-Roles are loaded from `config/rbac.yaml` for real, so the whole chain from yaml
-to User to session to Scope to adapter is exercised.
+The roles are the built-in ones a new installation is given, read from its
+store for real, so the whole chain from the stored role to the resolver to
+User to Scope to adapter is exercised.
 """
 
 import os
@@ -20,9 +21,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wdash.app import create_app  # noqa: E402
 from wdash.config import Config  # noqa: E402
-from wdash.models import User  # noqa: E402
-
-RBAC = os.path.join(os.path.dirname(__file__), "..", "config", "rbac.yaml")
 
 # Services mirroring the lab topology: application services plus infrastructure
 APP_SERVICES = ["api-gateway", "auth-service", "payment-service"]
@@ -74,27 +72,16 @@ class FakeES(ModelledES):
 class TestConfig(Config):
     TESTING = True
     SECRET_KEY = "trace-test"
-    RBAC_CONFIG_FILE = RBAC
 
 
 def session_for(role_name):
-    """Build session data from a real role in rbac.yaml."""
-    user = User("id-1", f"{role_name}@example.com", role_name, groups=[])
-    user.load_rbac_config(RBAC)
-    assert user.role is not None
-    # Pick the role directly, without relying on the user mapping
-    import yaml
-    with open(RBAC) as fh:
-        config = yaml.safe_load(fh)
-    role = config["roles"][role_name]
-    return {
-        "id": "id-1", "email": f"{role_name}@example.com", "username": role_name,
-        "groups": [], "role": role_name,
-        "permissions": role.get("permissions", []),
-        "allowed_indices": role.get("indices", []),
-        "allowed_trace_indices": role.get("trace_indices", []),
-        "allowed_services": role.get("services", []),
-    }
+    """The identity a session carries, and nothing else.
+
+    What the person may do is not in the cookie: it is resolved from the
+    store on every request, through the mapping `use_role` or `grant` writes.
+    """
+    return {"id": "id-1", "email": f"{role_name}@example.com",
+            "username": role_name, "groups": []}
 
 
 class TraceRouteTest(unittest.TestCase):
@@ -111,8 +98,8 @@ class TraceRouteTest(unittest.TestCase):
         self.client = self.app.test_client()
 
     def login(self, role):
-        # Authorization comes from the store now, so the role has to exist
-        # there — which it does: the store seeds from the same rbac.yaml.
+        # Authorization comes from the store, so the role has to exist there
+        # — which it does: admin, developer and viewer are the built-in roles.
         use_role(self.app, role, role)
         data = session_for(role)
         with self.client.session_transaction() as session:
@@ -151,7 +138,7 @@ class TraceRouteTest(unittest.TestCase):
             self.assertIn(service, seen)
 
     def test_developer_cannot_see_infrastructure_services(self):
-        """The developer role in rbac.yaml must not see infrastructure spans."""
+        """The built-in developer role must not see infrastructure spans."""
         seen = self.services_for("developer")
         for service in APP_SERVICES:
             self.assertIn(service, seen, f"developer should have seen {service}")

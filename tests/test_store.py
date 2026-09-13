@@ -13,7 +13,8 @@ The properties worth locking down:
   * a failed decryption is reported, and a missing key NEVER means plaintext
   * two people editing different objects never conflict; two editing the same
     one are told, rather than one of them silently losing their work
-  * an existing rbac.yaml is imported once and then left alone
+  * an installation with no roles is given the built-in ones, and one that
+    has roles is never given anything
 """
 
 import os
@@ -215,54 +216,54 @@ class SecretsTest(unittest.TestCase):
 
 
 class RoleTest(unittest.TestCase):
-    def test_defaults_are_seeded_when_no_file_exists(self):
-        store = fresh_store(rbac_file="does/not/exist.yaml")
-        self.assertIn("admin", [r["name"] for r in store.roles.all()])
+    def reopened(self, change):
+        """Open a store on a file, change it, and open it again — a restart."""
+        url = f"sqlite:///{tempfile.mkdtemp()}/restart.db"
+        store = Store.open(url)
+        change(store)
+        store.engine.dispose()
+        return Store.open(url)
 
-    def test_an_existing_rbac_file_is_imported(self):
-        """An upgrade must not silently discard the roles somebody wrote."""
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
-            handle.write("roles:\n  auditor:\n    permissions: [logs:read]\n"
-                         "    indices: ['audit-*']\n    groups: [auditors]\n")
-            path = handle.name
-        try:
-            store = fresh_store(rbac_file=path)
-            names = [r["name"] for r in store.roles.all()]
-            self.assertEqual(names, ["auditor"])
-        finally:
-            os.unlink(path)
+    def test_a_new_installation_has_the_default_roles(self):
+        from wdash.store.roles import DEFAULT_ROLES
+        self.assertEqual([r["name"] for r in fresh_store().roles.all()],
+                         sorted(DEFAULT_ROLES))
 
-    def test_the_file_is_imported_once_and_then_ignored(self):
+    def test_an_edit_survives_the_next_start(self):
         """Otherwise a restart quietly reverts every edit made in the UI."""
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
-            handle.write("roles:\n  auditor:\n    permissions: [logs:read]\n"
-                         "    indices: ['audit-*']\n")
-            path = handle.name
-        try:
-            store = fresh_store(rbac_file=path)
-            store.roles.upsert("auditor", ["logs:read", "traces:read"],
-                               ["audit-*"], ["*"])
-            self.assertFalse(store.roles.seed(path), "seeding ran a second time")
-            self.assertIn("traces:read", store.roles.get("auditor")["permissions"])
-        finally:
-            os.unlink(path)
+        def edit(store):
+            store.roles.upsert("admin", ["logs:read", "system:admin"],
+                               ["prod-*"], ["*"], groups=["corp-sre"])
+        admin = self.reopened(edit).roles.get("admin")
+        self.assertEqual(admin["permissions"], ["logs:read", "system:admin"])
+        self.assertEqual(admin["containers"], ["prod-*"])
+        self.assertEqual(admin["groups"], ["corp-sre"])
 
-    def test_the_config_shape_matches_what_rbac_consumers_expect(self):
-        config = fresh_store().roles.as_config()
-        self.assertIn("roles", config)
-        for role in config["roles"].values():
-            for key in ("permissions", "indices", "trace_indices", "groups"):
-                self.assertIn(key, role, key)
+    def test_an_installation_with_roles_of_its_own_is_given_none_of_these(self):
+        """What an installation that imported `auditor` from an rbac.yaml at
+        an earlier version looks like. Adding the built-in roles beside it
+        would map `wdash-admins` onto `system:admin` in an organisation that
+        never granted that to anybody."""
+        def replace(store):
+            for role in store.roles.all():
+                store.roles.delete(role["name"])
+            store.roles.upsert("auditor", ["logs:read"], ["audit-*"], [],
+                               groups=["corp-audit"])
+        store = self.reopened(replace)
+        self.assertEqual([r["name"] for r in store.roles.all()], ["auditor"])
+        self.assertFalse(store.roles.seed(store.settings))
 
-    def test_a_broken_file_falls_back_rather_than_failing_to_start(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
-            handle.write("roles: [this is not a mapping\n")
-            path = handle.name
-        try:
-            store = fresh_store(rbac_file=path)
-            self.assertTrue(store.roles.all(), "left with no roles at all")
-        finally:
-            os.unlink(path)
+    def test_a_stored_claim_mapping_is_kept_when_the_roles_are_seeded(self):
+        """The one setting that can be there while the roles table is empty,
+        and the one whose loss is silent: `memberOf` replaced by `groups`
+        resolves no group mapping for anybody."""
+        store = fresh_store()
+        store.settings.set("rbac.claim_mappings", {"groups_claim": "memberOf"})
+        for role in store.roles.all():
+            store.roles.delete(role["name"])
+        self.assertTrue(store.roles.seed(store.settings))
+        self.assertEqual(store.settings.get("rbac.claim_mappings"),
+                         {"groups_claim": "memberOf"})
 
 
 class ObjectTest(unittest.TestCase):
@@ -726,316 +727,99 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 
 
-class TheTwoSetsOfDefaultsAgreeTest(unittest.TestCase):
-    """There are two answers to "what roles does a fresh install have".
+class TheDefaultRolesTest(unittest.TestCase):
+    """What a new installation is given, held to the one definition of it.
 
-    `DEFAULT_ROLES` in `store/roles.py`, and `config/rbac.yaml`, which ships
-    with the repository and is imported when it is there. Seeding runs ONCE,
-    on an empty table, so whichever of the two a deployment landed on is the
-    one it keeps — and they had drifted apart:
+    There were three answers to "what roles does a fresh install have":
+    `DEFAULT_ROLES`, `config/rbac.yaml`, and the copy of that file in the
+    Kubernetes ConfigMap. Seeding happens once, so whichever an installation
+    landed on was the one it kept — and they had drifted apart in names,
+    groups, permissions and boundaries. A test compared the first two; the
+    third was compared with nothing, and gave `developer` every service.
 
-        roles.py     admin / editor    / viewer   groups wdash-*
-        rbac.yaml    admin / developer / viewer   groups admins, developers,
-                                                         viewers
-
-    So a directory group named `wdash-admins` granted nothing on an install
-    that had the file, and `admins` granted nothing on one that did not.
-    Neither failed; both signed people in and gave them the default role.
+    One definition is left, so there is nothing to compare it with. What is
+    left to hold is that an installation actually gets it, every field of
+    it, and that what it says is still worth getting.
     """
 
+    FIELDS = ("description", "permissions", "containers", "trace_containers",
+              "services", "groups")
+
     def setUp(self):
-        import yaml
         from wdash.store.roles import DEFAULT_ROLES
-        self.code = DEFAULT_ROLES
-        with open(os.path.join(os.path.dirname(__file__), "..",
-                               "config", "rbac.yaml")) as handle:
-            self.file = yaml.safe_load(handle)
+        self.defaults = DEFAULT_ROLES
+        self.store = fresh_store()
 
-    def test_the_role_names_match(self):
-        self.assertEqual(sorted(self.code), sorted(self.file["roles"]))
+    def test_a_new_installation_holds_exactly_the_default_roles(self):
+        stored = {role["name"]: {field: role[field] for field in self.FIELDS}
+                  for role in self.store.roles.all()}
+        self.assertEqual(stored, self.defaults)
 
-    def test_the_group_names_match(self):
-        """The file maps group -> role; the code stores groups per role, so
-        one of them is inverted before they can be compared at all."""
-        from_file = {}
-        for group, role in self.file["group_roles"].items():
-            from_file.setdefault(role, []).append(group)
-        from_code = {name: list(definition["groups"])
-                     for name, definition in self.code.items()
-                     if definition.get("groups")}
-        self.assertEqual({k: sorted(v) for k, v in from_code.items()},
-                         {k: sorted(v) for k, v in from_file.items()})
+    def test_it_maps_no_named_person_and_defaults_to_viewer(self):
+        """A mapping here is one every new installation inherits from
+        somebody else. The shipped file once carried a maintainer's own
+        username, which granted admin to anyone signing in with that name."""
+        self.assertEqual(self.store.settings.get("rbac.user_roles"), {})
+        self.assertEqual(self.store.settings.get("rbac.default_role"), "viewer")
+
+    def test_it_stores_the_claims_the_shipped_file_named(self):
+        """`config/rbac.yaml` carried `claim_mappings`, and every installation
+        made from this repository stored them. Written out rather than read
+        from `DEFAULT_CLAIM_MAPPINGS`: with the file gone this is the record
+        of what they were, and changing one changes which claim a new
+        installation reads a person's groups from."""
+        self.assertEqual(self.store.settings.get("rbac.claim_mappings"),
+                         {"email_claim": "email",
+                          "username_claim": "preferred_username",
+                          "groups_claim": "groups"})
 
     def test_the_groups_are_namespaced(self):
         """A directory almost certainly has a group called `admins` already,
         it usually means domain administrators, and a default that maps it to
         `system:admin` hands WDash's highest privilege to everyone in it."""
-        for group in self.file["group_roles"]:
-            self.assertTrue(group.startswith("wdash-"),
-                            f"{group!r} is a name somebody else's directory "
-                            f"probably already uses")
-
-    def test_the_permissions_match(self):
-        """Names and groups agreeing is not enough, and the gap was measured
-        rather than imagined: the file predated `monitors:read` and granted it
-        to nobody, so a fresh installation that had it — which is every clone
-        of this repository — had no Monitors screen for anyone at all,
-        including the administrator. No error; the nav item simply was not
-        there."""
-        from_code = {name: sorted(definition["permissions"])
-                     for name, definition in self.code.items()}
-        from_file = {name: sorted(definition["permissions"])
-                     for name, definition in self.file["roles"].items()}
-        self.assertEqual(from_code, from_file)
+        for name, definition in self.defaults.items():
+            for group in definition["groups"]:
+                self.assertTrue(group.startswith("wdash-"),
+                                f"{name} maps {group!r}, a name somebody "
+                                f"else's directory probably already uses")
 
     def test_every_permission_is_granted_by_some_default_role(self):
-        """A permission no shipped role holds is a screen a fresh install
-        cannot open, and the only symptom is a missing menu item. Both sets
-        are checked: a deployment lands on one of them, not on the union."""
+        """A permission no shipped role holds is a screen a new installation
+        cannot open, and the only symptom is a missing menu item. Measured
+        once already: the file predated `monitors:read` and granted it to
+        nobody, so every clone of this repository had no Monitors screen for
+        anyone, the administrator included."""
         from wdash.permissions import PERMISSIONS
-        for label, roles in (("roles.py", self.code),
-                             ("rbac.yaml", self.file["roles"])):
-            granted = {permission for definition in roles.values()
-                       for permission in definition["permissions"]}
-            for permission in PERMISSIONS:
-                with self.subTest(source=label, permission=permission):
-                    self.assertIn(permission, granted,
-                                  f"{label} grants {permission} to no role, "
-                                  f"so nothing it gates can be reached")
+        granted = {permission for definition in self.defaults.values()
+                   for permission in definition["permissions"]}
+        for permission in PERMISSIONS:
+            with self.subTest(permission=permission):
+                self.assertIn(permission, granted)
 
-    @staticmethod
-    def _boundaries(definition, containers, trace_containers):
-        """The three boundaries, with the two spellings of "everything"
-        written the same way. `services: None` means no service restriction
-        and the file's `["*"]` is a pattern that matches every service; they
-        come to the same thing, and demanding one spelling would make this a
-        test about style rather than about access."""
-        def unrestricted(value):
-            return ["*"] if value is None else sorted(value)
-        return {"containers": unrestricted(definition.get(containers)),
-                "trace_containers": unrestricted(
-                    definition.get(trace_containers)),
-                "services": unrestricted(definition.get("services"))}
+    def test_no_default_role_asks_for_a_permission_that_is_not_one(self):
+        """`logs:search` folded into `logs:read` and `user:manage` into
+        `system:admin`. The ConfigMap's copy of the roles once shipped both. A
+        retired name is translated on the way out, so it is not an error — it
+        is a definition of a version of this application that no longer
+        exists."""
+        from wdash.permissions import RETIRED, known
+        for name, definition in self.defaults.items():
+            for permission in definition["permissions"]:
+                with self.subTest(role=name, permission=permission):
+                    self.assertNotIn(permission, RETIRED)
+                    self.assertTrue(known(permission))
 
-    def test_the_boundaries_match(self):
-        """Names, groups and permissions agreeing is not enough: the three
-        boundaries are what a role IS, and they had drifted the other way
-        from the names. `developer` reached every log container and every
-        service here, while the file held it to `app-*`, `service-*` and six
-        application services; `viewer` reached every service here and exactly
-        one in the file. An installation that found no readable file — a pip
-        install outside the repository, a renamed ConfigMap key, a mount that
-        was not there yet — was seeded with the WIDER set, and seeding runs
-        once."""
-        from_code = {name: self._boundaries(
-            definition, "containers", "trace_containers")
-            for name, definition in self.code.items()}
-        from_file = {name: self._boundaries(
-            definition, "indices", "trace_indices")
-            for name, definition in self.file["roles"].items()}
-        self.assertEqual(from_code, from_file)
-
-    def test_an_installation_seeded_without_the_file_gets_them(self):
-        """The comparison above is between two literals. This is what a
-        deployment actually ends up holding."""
-        store = Store.open("sqlite:///:memory:")
-        developer = store.roles.get("developer")
-        self.assertEqual(sorted(developer["containers"]),
-                         ["app-*", "service-*"])
+    def test_the_middle_roles_do_not_reach_infrastructure(self):
+        """The boundaries are what a role IS. `developer` once reached every
+        log container and every service from here, and `viewer` every
+        service, while the file held them to applications — so an
+        installation that found no file was seeded with the wider set."""
+        developer = self.store.roles.get("developer")
+        self.assertEqual(sorted(developer["containers"]), ["app-*", "service-*"])
         self.assertIn("api-gateway", developer["services"])
         self.assertNotIn("postgres", developer["services"])
-        self.assertEqual(store.roles.get("viewer")["services"],
+        self.assertEqual(self.store.roles.get("viewer")["services"],
                          ["api-gateway"])
-
-    def test_the_shipped_file_maps_no_named_person(self):
-        """It is imported into every fresh installation, so anything here is
-        a mapping a stranger inherits. It used to carry a maintainer's own
-        username, which granted admin to anyone signing in with that name."""
-        self.assertEqual(self.file.get("user_roles") or {}, {})
-
-
-class AnRbacFileThatCannotBeUsedSaysSoTest(unittest.TestCase):
-    """Seeding runs once, so a file that is not read is not read ever.
-
-    Three ways of losing one, all of which happen: the path is wrong (a
-    renamed ConfigMap key, a mount that moved, a pip install run outside the
-    repository), the `roles` block is mis-indented or misnamed — `role:` —
-    or it is there and empty. Every one of them produced a running
-    installation on the built-in default roles with the file's own
-    group_roles, user_roles and default_role dropped, and the only line
-    written was INFO "Seeded 3 roles from built-in defaults".
-    """
-
-    LOGGER = "wdash.store.roles"
-
-    def setUp(self):
-        self.directory = tempfile.mkdtemp()
-
-    def tearDown(self):
-        import shutil
-        shutil.rmtree(self.directory, ignore_errors=True)
-
-    def written(self, body):
-        path = os.path.join(self.directory, "rbac.yaml")
-        with open(path, "w") as handle:
-            handle.write(body)
-        return path
-
-    def seed(self, path, level="INFO"):
-        """Open a store on that file and hand back what was logged."""
-        with self.assertLogs(self.LOGGER, level) as caught:
-            store = Store.open("sqlite:///:memory:", rbac_file=path)
-        return store, [f"{r.levelname} {r.getMessage()}" for r in caught.records]
-
-    # ---------- the file is not read ----------
-
-    def test_a_missing_file_is_a_warning_naming_the_path(self):
-        path = os.path.join(self.directory, "not-here", "rbac.yaml")
-        _, lines = self.seed(path)
-        warnings = [line for line in lines if line.startswith("WARNING")]
-        self.assertEqual(len(warnings), 1)
-        self.assertIn(os.path.abspath(path), warnings[0])
-
-    def test_a_roles_block_that_is_a_list_is_an_error_naming_the_path(self):
-        """`roles:` written as a list, which is what a mis-indentation
-        produces."""
-        path = self.written("roles:\n  - admin\n  - viewer\n")
-        _, lines = self.seed(path)
-        errors = [line for line in lines if line.startswith("ERROR")]
-        self.assertEqual(len(errors), 1)
-        self.assertIn(os.path.abspath(path), errors[0])
-
-    def test_a_misspelt_block_is_an_error_naming_the_path(self):
-        path = self.written("role:\n  ops:\n    permissions: [logs:read]\n"
-                            "default_role: ops\n")
-        _, lines = self.seed(path)
-        self.assertTrue([line for line in lines if line.startswith("ERROR")])
-
-    def test_an_empty_roles_block_is_an_error_too(self):
-        """The worst of the three: it parsed, so it counted as a file."""
-        path = self.written("roles: {}\ndefault_role: ops\n")
-        _, lines = self.seed(path)
-        self.assertTrue([line for line in lines if line.startswith("ERROR")])
-
-    def test_the_info_line_names_the_source_actually_used(self):
-        """With `roles: {}` it named the file while seeding the built-in
-        roles, which is the one combination that cannot be true."""
-        path = self.written(
-            "roles: {}\ndefault_role: ops\n"
-            "group_roles:\n  corp-admins: admin\n")
-        _, lines = self.seed(path)
-        seeded = [line for line in lines if "Seeded" in line]
-        self.assertEqual(len(seeded), 1)
-        self.assertIn("built-in defaults", seeded[0])
-        self.assertNotIn(path, seeded[0])
-
-    def test_an_unusable_roles_block_takes_the_file_s_mappings_with_it(self):
-        """Half of one file and half of another is the state nothing can
-        describe: the built-in roles were seeded, and then the file's group
-        mapping was applied to them, its default_role stored and its
-        user_roles stored — pointing at roles from the other source."""
-        path = self.written(
-            "roles: {}\ndefault_role: ops\n"
-            "user_roles:\n  alice@example.com: admin\n"
-            "group_roles:\n  corp-admins: admin\n")
-        store, _ = self.seed(path)
-        self.assertEqual(store.roles.get("admin")["groups"], ["wdash-admins"])
-        self.assertEqual(store.settings.get("rbac.default_role"), "viewer")
-        self.assertEqual(store.settings.get("rbac.user_roles"), {})
-
-    def test_an_unusable_roles_block_keeps_the_claim_mappings(self):
-        """`claim_mappings` names the claims an identity provider sends. It
-        is not a role mapping and does not depend on one, and dropping it
-        with the roles block is the same loss this file is about, one step
-        earlier: an installation whose provider sends `memberOf` goes back to
-        reading `groups`, every group mapping resolves nothing, and everybody
-        lands on the default role. Silently — import_claims is deliberately
-        quiet, and the ERROR above it enumerates group_roles, user_roles and
-        default_role.
-        """
-        path = self.written(
-            "roles: {}\n"
-            "claim_mappings:\n"
-            "  email_claim: mail\n"
-            "  username_claim: uid\n"
-            "  groups_claim: memberOf\n")
-        store, _ = self.seed(path)
-        self.assertEqual(store.settings.get("rbac.claim_mappings"),
-                         {"email_claim": "mail", "username_claim": "uid",
-                          "groups_claim": "memberOf"})
-
-    def test_a_file_that_cannot_be_parsed_at_all_keeps_nothing(self):
-        """The other side of it: a document that is not a mapping of blocks
-        has no claim_mappings to keep, and must not be invented."""
-        path = self.written("- admin\n- viewer\n")
-        store, _ = self.seed(path)
-        self.assertIsNone(store.settings.get("rbac.claim_mappings"))
-
-    # ---------- the file is read, and points at roles it has not got ----------
-
-    def test_a_group_mapped_to_an_undefined_role_is_named(self):
-        """The inversion can only attach a group to a role being seeded, so
-        this one was dropped on the floor."""
-        path = self.written(
-            "roles:\n  ops:\n    permissions: [logs:read]\n"
-            "  viewer:\n    permissions: [logs:read]\n"
-            "default_role: viewer\n"
-            "group_roles:\n  corp-devs: developers\n")
-        store, lines = self.seed(path, level="WARNING")
-        self.assertTrue(any("corp-devs" in line and "developers" in line
-                            for line in lines), lines)
-        self.assertEqual(store.roles.get("ops")["groups"], [])
-
-    def test_a_person_mapped_to_an_undefined_role_is_named(self):
-        """Stored as written, resolving to a role that is not there, which
-        is no permissions at all."""
-        path = self.written(
-            "roles:\n  ops:\n    permissions: [logs:read]\n"
-            "default_role: ops\n"
-            "user_roles:\n  bob@example.com: developers\n")
-        _, lines = self.seed(path, level="WARNING")
-        self.assertTrue(any("bob@example.com" in line for line in lines), lines)
-
-    def test_a_default_role_that_is_not_defined_is_named(self):
-        path = self.written(
-            "roles:\n  ops:\n    permissions: [logs:read]\n"
-            "default_role: readers\n")
-        _, lines = self.seed(path, level="WARNING")
-        self.assertTrue(any("readers" in line for line in lines), lines)
-
-    def test_a_default_role_the_file_names_is_quoted_as_the_file_s(self):
-        """The half that was already right, held so the other half cannot be
-        fixed by flattening both into one vague sentence."""
-        path = self.written(
-            "roles:\n  ops:\n    permissions: [logs:read]\n"
-            "default_role: readers\n")
-        _, lines = self.seed(path, level="WARNING")
-        self.assertTrue(
-            any("names 'readers' as the default role" in line
-                for line in lines), lines)
-
-    def test_a_file_with_no_default_role_is_not_blamed_for_naming_one(self):
-        """`default_role` falls back to 'viewer' in the code, so a file that
-        omits the key and defines no viewer was told it "names 'viewer' as
-        the default role and does not define it". The alarm is right —
-        everybody with no mapping gets nothing — but an operator sent to the
-        file to find `default_role: viewer` does not find it.
-        """
-        path = self.written("roles:\n  ops:\n    permissions: [logs:read]\n")
-        _, lines = self.seed(path, level="WARNING")
-        warnings = [line for line in lines if line.startswith("WARNING")]
-        self.assertEqual(len(warnings), 1, warnings)
-        self.assertNotIn("names 'viewer' as the default role", warnings[0])
-        self.assertIn("built-in default", warnings[0])
-        self.assertIn("viewer", warnings[0])
-
-    def test_the_shipped_file_produces_nothing_above_info(self):
-        """The one that matters: none of this may cry wolf on a fresh clone
-        of this repository."""
-        rbac = os.path.join(os.path.dirname(__file__), "..", "config",
-                            "rbac.yaml")
-        with self.assertNoLogs(self.LOGGER, "WARNING"):
-            Store.open("sqlite:///:memory:", rbac_file=rbac)
 
 
 class DatabaseAddressTest(unittest.TestCase):

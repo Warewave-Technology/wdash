@@ -254,7 +254,7 @@ def _open_store(url, barrier=None, results=None):
     try:
         if barrier is not None:
             barrier.wait(timeout=20)
-        store = Store.open(url, rbac_file="config/rbac.yaml")
+        store = Store.open(url)
         store.engine.dispose()
         outcome = "ok"
     except Exception as exc:
@@ -294,7 +294,7 @@ class ConcurrentSeedTest(unittest.TestCase):
         for process in processes:
             process.join(timeout=60)
         from wdash.store import Store
-        store = Store.open(url, rbac_file="config/rbac.yaml")
+        store = Store.open(url)
         roles = sorted(role["name"] for role in store.roles.all())
         mapped = store.settings.get("rbac.default_role")
         store.engine.dispose()
@@ -304,8 +304,8 @@ class ConcurrentSeedTest(unittest.TestCase):
         return outcomes, roles, mapped
 
     def test_every_worker_starts_and_the_seed_is_whole(self):
-        from wdash.store.roles import _read_rbac_file
-        expected = sorted(_read_rbac_file("config/rbac.yaml")["roles"])
+        from wdash.store.roles import DEFAULT_ROLES
+        expected = sorted(DEFAULT_ROLES)
         for _ in range(self.ROUNDS):
             outcomes, roles, default = self._round()
             failed = [o for o in outcomes if o != "ok"]

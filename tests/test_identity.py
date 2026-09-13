@@ -443,7 +443,7 @@ class OidcScopeTest(unittest.TestCase):
     """What WDash asks the identity provider for.
 
     It asked for `openid email profile`, and this product maps GROUPS to
-    roles — `rbac.yaml` names a `groups_claim` and the callback reads it. A
+    roles — a `groups_claim` names the claim and the callback reads it. A
     provider that gates that claim behind a scope therefore sent nothing, and
     every OIDC identity signed in perfectly and landed on the default role.
     No error, no log line; the symptom was an administrator who could not see
@@ -765,8 +765,11 @@ class ClaimSettingsTest(IdentityTestCase):
         self.assertEqual(settings["email_claim"], "email")
         self.assertTrue(settings["trust_unverified_email"])
 
-    def test_rbac_yaml_s_claim_mappings_are_the_default(self):
-        """Shipped, documented and never read."""
+    def test_stored_claim_mappings_are_the_default(self):
+        """What an installation imported from an rbac.yaml at an earlier
+        version, and still has. The block was once shipped, documented and
+        never read: an operator whose provider sends groups as `roles` edited
+        it and every OIDC user still landed on the default role."""
         from wdash.auth.providers import oidc_settings
         self.app.store.settings.set("rbac.claim_mappings",
                                     {"groups_claim": "roles"})
@@ -774,15 +777,19 @@ class ClaimSettingsTest(IdentityTestCase):
             "enabled": True, "client_id": "c", "discovery_url": "https://i/.w"})
         self.assertEqual(oidc_settings(self.app)["groups_claim"], "roles")
 
-    def test_the_import_carries_them(self):
-        from wdash.store import Store
-        path = os.path.join(tempfile.mkdtemp(), "rbac.yaml")
-        with open(path, "w") as handle:
-            handle.write("roles:\n  admin:\n    permissions: [system:admin]\n"
-                         "claim_mappings:\n  groups_claim: roles\n")
-        store = Store.open(f"sqlite:///{tempfile.mkdtemp()}/c.db", rbac_file=path)
-        self.assertEqual(store.settings.get("rbac.claim_mappings"),
-                         {"groups_claim": "roles"})
+    def test_with_none_stored_the_claims_are_the_ones_a_new_installation_stores(self):
+        """An installation that never stored a mapping — seeded before WDash
+        read the block, or from a file without one — reads the fallback. A
+        new installation stores its claims instead. Two answers to one
+        question have to be one answer, or which claim names a person's
+        groups depends on the age of the installation."""
+        from wdash.auth.providers import oidc_settings
+        stored = dict(self.app.store.settings.get("rbac.claim_mappings"))
+        self.app.store.settings.delete("rbac.claim_mappings")
+        self.app.store.settings.set("auth.oidc", {
+            "enabled": True, "client_id": "c", "discovery_url": "https://i/.w"})
+        settings = oidc_settings(self.app)
+        self.assertEqual({key: settings[key] for key in stored}, stored)
 
     def test_the_environment_can_name_them(self):
         from wdash.auth.providers import oidc_settings
@@ -814,67 +821,66 @@ class ClaimSettingsTest(IdentityTestCase):
                     env=environment, capture_output=True, text=True, check=True)
                 self.assertEqual(shown.stdout.strip(), str(meant))
 
-    def test_an_installation_seeded_before_them_gets_them(self):
-        """`seed` runs on an empty installation only, and one seeded before
-        claim_mappings was read never got it."""
+    def test_what_is_stored_is_not_overwritten_by_a_restart(self):
+        """An installation whose provider sends `memberOf` has that stored.
+        A start that wrote the defaults over it would send every group
+        mapping back to reading `groups`, where each resolves nothing and
+        everybody lands on the default role — silently."""
         from wdash.store import Store
-        folder = tempfile.mkdtemp()
-        path = os.path.join(folder, "rbac.yaml")
-        with open(path, "w") as handle:
-            handle.write("roles:\n  admin:\n    permissions: [system:admin]\n")
-        url = f"sqlite:///{folder}/old.db"
-        Store.open(url, rbac_file=path).engine.dispose()
-        with open(path, "a") as handle:
-            handle.write("claim_mappings:\n  groups_claim: roles\n")
-        store = Store.open(url, rbac_file=path)
-        self.assertEqual(store.settings.get("rbac.claim_mappings"),
-                         {"groups_claim": "roles"})
-
-    def test_what_is_stored_is_not_overwritten_by_the_file(self):
-        from wdash.store import Store
-        folder = tempfile.mkdtemp()
-        path = os.path.join(folder, "rbac.yaml")
-        with open(path, "w") as handle:
-            handle.write("roles:\n  admin:\n    permissions: [system:admin]\n"
-                         "claim_mappings:\n  groups_claim: roles\n")
-        url = f"sqlite:///{folder}/kept.db"
-        store = Store.open(url, rbac_file=path)
-        store.settings.set("rbac.claim_mappings", {"groups_claim": "teams"})
+        url = f"sqlite:///{tempfile.mkdtemp()}/kept.db"
+        store = Store.open(url)
+        store.settings.set("rbac.claim_mappings", {"groups_claim": "memberOf"})
         store.engine.dispose()
-        self.assertEqual(Store.open(url, rbac_file=path).settings.get(
-            "rbac.claim_mappings"), {"groups_claim": "teams"})
+        self.assertEqual(Store.open(url).settings.get("rbac.claim_mappings"),
+                         {"groups_claim": "memberOf"})
 
 
 class SetupRoleTest(unittest.TestCase):
     """The account setup creates always got the role called `admin`. An
-    rbac.yaml that calls its administrator role something else — or has
-    none — left the break-glass account on the default role: it could sign
-    in and could not open the page that fixes anything."""
+    installation whose roles call the administrator something else —
+    imported from an rbac.yaml by an earlier version, or edited since — or
+    have none, left the break-glass account on the default role: it could
+    sign in and could not open the page that fixes anything.
 
-    def app_with(self, rbac):
-        path = os.path.join(tempfile.mkdtemp(), "rbac.yaml")
-        with open(path, "w") as handle:
-            handle.write(rbac)
+    Made here the way such an installation is found: a store holding those
+    roles and mappings, which nobody has claimed yet.
+    """
+
+    def unclaimed(self, roles, default_role, user_roles=None):
+        """`roles` maps a name to (permissions, log containers)."""
         database = os.path.join(tempfile.mkdtemp(), "setup.db")
 
         class TestConfig(Config):
             TESTING = True
             SECRET_KEY = "setup-role"
             DATABASE_URL = f"sqlite:///{database}"
-            RBAC_CONFIG_FILE = path
             OIDC_CLIENT_ID = None
             ENCRYPTION_KEY = SecretBox.generate_key()
 
         app = create_app(TestConfig)
+        store = app.store
+        for existing in store.roles.all():
+            store.roles.delete(existing["name"])
+        for name, (permissions, containers) in roles.items():
+            store.roles.upsert(name, permissions=permissions,
+                               containers=containers, trace_containers=[])
+        store.settings.set("rbac.default_role", default_role)
+        store.settings.set("rbac.user_roles", user_roles or {})
+        store.rbac.invalidate()
+        return app
+
+    def app_with(self, roles, default_role, user_roles=None):
+        app = self.unclaimed(roles, default_role, user_roles)
         client = app.test_client()
         support.set_up(client, username="owner", password=PASSWORD)
         return app, client
 
+    READERS = {"readers": (["logs:read"], [])}
+
     def test_an_administering_role_by_another_name_is_used(self):
         app, client = self.app_with(
-            "roles:\n  superusers:\n    permissions: [system:admin]\n"
-            "    indices: ['*']\n  readers:\n    permissions: [logs:read]\n"
-            "default_role: readers\n")
+            {"superusers": (["system:admin"], ["*"]), **self.READERS},
+            default_role="readers")
         self.assertEqual(app.store.users.by_username("owner")["role"], "superusers")
         self.assertEqual(client.get("/admin/config").status_code, 200)
 
@@ -883,9 +889,8 @@ class SetupRoleTest(unittest.TestCase):
         was called that. Setup made `admin` with every permission, and bob
         was an administrator of every container."""
         app, client = self.app_with(
-            "roles:\n  readers:\n    permissions: [logs:read]\n"
-            "default_role: readers\n"
-            "user_roles:\n  bob: admin\n  carol: setup-admin\n")
+            self.READERS, default_role="readers",
+            user_roles={"bob": "admin", "carol": "setup-admin"})
         role = app.store.users.by_username("owner")["role"]
         self.assertNotIn(role, ("admin", "setup-admin"))
         self.assertIsNone(app.store.roles.get("admin"))
@@ -894,29 +899,13 @@ class SetupRoleTest(unittest.TestCase):
     def test_nor_one_the_default_role_names(self):
         """A default role that names no role gives nothing; made at setup,
         it would give everybody everything."""
-        app, _ = self.app_with(
-            "roles:\n  readers:\n    permissions: [logs:read]\n"
-            "default_role: setup-admin\n")
+        app, _ = self.app_with(self.READERS, default_role="setup-admin")
         role = app.store.users.by_username("owner")["role"]
         self.assertNotEqual(role, "setup-admin")
         self.assertIsNone(app.store.roles.get("setup-admin"))
 
     def test_a_refused_password_makes_no_role(self):
-        path = os.path.join(tempfile.mkdtemp(), "rbac.yaml")
-        with open(path, "w") as handle:
-            handle.write("roles:\n  readers:\n    permissions: [logs:read]\n"
-                         "default_role: readers\n")
-        database = os.path.join(tempfile.mkdtemp(), "setup.db")
-
-        class TestConfig(Config):
-            TESTING = True
-            SECRET_KEY = "setup-role"
-            DATABASE_URL = f"sqlite:///{database}"
-            RBAC_CONFIG_FILE = path
-            OIDC_CLIENT_ID = None
-            ENCRYPTION_KEY = SecretBox.generate_key()
-
-        app = create_app(TestConfig)
+        app = self.unclaimed(self.READERS, default_role="readers")
         response = app.test_client().post("/setup", data={
             "username": "owner", "password": "short", "confirm": "short"})
         self.assertEqual(response.status_code, 400)
@@ -924,9 +913,7 @@ class SetupRoleTest(unittest.TestCase):
                          ["readers"])
 
     def test_with_no_administering_role_one_is_made(self):
-        app, client = self.app_with(
-            "roles:\n  readers:\n    permissions: [logs:read]\n"
-            "default_role: readers\n")
+        app, client = self.app_with(self.READERS, default_role="readers")
         role = app.store.users.by_username("owner")["role"]
         self.assertIn("system:admin", app.store.roles.get(role)["permissions"])
         self.assertEqual(client.get("/admin/config").status_code, 200)

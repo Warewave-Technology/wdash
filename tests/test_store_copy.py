@@ -183,7 +183,7 @@ class SqliteToPostgresTest(unittest.TestCase):
         source_engine = create_engine(f"sqlite:///{folder}/volume.db")
         migrate(source_engine)
         source = Store(source_engine, SecretBox(key))
-        source.roles.seed("config/rbac.yaml", source.settings)
+        source.roles.seed(source.settings)
         populate(source)
 
         target_url = f"sqlite:///{folder}/postgres.db"   # routed to Postgres
