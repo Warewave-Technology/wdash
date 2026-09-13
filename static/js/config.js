@@ -962,15 +962,56 @@ document.querySelectorAll('.edit-monitor').forEach(button => {
     });
 });
 
-// The tab the server sent us back to. Without this every save lands on
-// Sources and the person has to find their way back to what they just
-// changed.
-if (window.location.hash === '#tab-monitors') {
-    const trigger = document.querySelector('[data-bs-target="#tab-monitors"]');
-    if (trigger && window.bootstrap) {
-        window.bootstrap.Tab.getOrCreateInstance(trigger).show();
+/**
+ * Open the tab a hash names, and every tab it sits inside.
+ *
+ * The tab the server sent us back to. Without it every save lands on
+ * Sources and the person has to find their way back to what they just
+ * changed.
+ *
+ * One function rather than a copy per tab. There were two of these, written
+ * out for `#tab-monitors` and for `#tab-alerts`, and a third tab arriving
+ * meant a third copy — which is exactly why Authentication had none and why
+ * every save on it landed on Sources.
+ *
+ * It walks OUT from the pane it is given: Authentication holds a strip of
+ * its own now, and showing `#tab-auth-local` while `#tab-auth` stays shut
+ * opens nothing anybody can see. Outermost first because that is the order
+ * it reads in — measured, and Bootstrap is happy either way round, so the
+ * order is for whoever reads this rather than for the browser.
+ *
+ * @param {string} hash The URL fragment, `#tab-auth-local` and the like.
+ * @returns {boolean} Whether anything was opened.
+ */
+function openTab(hash) {
+    if (!hash || !window.bootstrap) { return false; }
+    const named = document.getElementById(hash.slice(1));
+    if (!named || !named.classList.contains('tab-pane')) { return false; }
+
+    const chain = [];
+    for (let pane = named; pane; pane = pane.parentElement
+             ? pane.parentElement.closest('.tab-pane') : null) {
+        chain.unshift(pane);
     }
+
+    let opened = false;
+    for (const pane of chain) {
+        const trigger = document.querySelector(
+            '[data-bs-target="#' + pane.id + '"]');
+        if (!trigger) { continue; }
+        window.bootstrap.Tab.getOrCreateInstance(trigger).show();
+        opened = true;
+    }
+    return opened;
 }
+
+openTab(window.location.hash);
+
+// A link followed from inside the page changes the fragment and loads
+// nothing, so the call above never runs a second time: somebody sent
+// `#tab-auth-local` while already looking at this page would watch the URL
+// change and the screen not.
+window.addEventListener('hashchange', () => openTab(window.location.hash));
 
 // Timestamps as the reader's local time.
 document.querySelectorAll('[data-timestamp]').forEach(element => {
@@ -1003,12 +1044,6 @@ function applyRuleKind() {
 document.getElementById('ruleKind')?.addEventListener('change', applyRuleKind);
 applyRuleKind();
 
-if (window.location.hash === '#tab-alerts') {
-    const trigger = document.querySelector('[data-bs-target="#tab-alerts"]');
-    if (trigger && window.bootstrap) {
-        window.bootstrap.Tab.getOrCreateInstance(trigger).show();
-    }
-}
 
 
 // ---------------------------------------------------------------------------

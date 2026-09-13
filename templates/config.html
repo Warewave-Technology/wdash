@@ -163,10 +163,31 @@
 </div>
 
 <!-- ============================ AUTH ============================ -->
+{# Three ways in, three tabs. This pane held an OIDC card, an LDAP card and
+   the Local accounts card stacked one under the other, and a page you have
+   to scroll to find out what is on it is a page nobody reads to the end.
+
+   The strip inside the strip uses the page's own idiom — `data-bs-toggle`
+   with a `data-bs-target`, and `config.js` opening a pane named by the URL
+   hash — rather than a second mechanism. `openTab` walks OUT from the pane
+   it is given, so `#tab-auth-local` opens Authentication as well as Local
+   accounts: a link somebody is sent lands on what it names. #}
 <div class="tab-pane fade" id="tab-auth">
-  <div class="row g-3">
-    <div class="col-lg-6">
-      <div class="card h-100">
+  <ul class="nav nav-tabs mb-3" role="tablist">
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab"
+        data-bs-target="#tab-auth-oidc" type="button">
+        <i class="fas fa-key"></i> OpenID Connect</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
+        data-bs-target="#tab-auth-ldap" type="button">
+        <i class="fas fa-sitemap"></i> LDAP</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab"
+        data-bs-target="#tab-auth-local" type="button">
+        <i class="fas fa-user-lock"></i> Local accounts</button></li>
+  </ul>
+
+  <div class="tab-content">
+    <div class="tab-pane fade show active" id="tab-auth-oidc">
+      <div class="card">
         <div class="card-header"><h5 class="mb-0">OpenID Connect</h5></div>
         <div class="card-body">
           <form method="POST" action="{{ url_for('config.save_auth') }}">
@@ -239,8 +260,8 @@
       </div>
     </div>
 
-    <div class="col-lg-6">
-      <div class="card h-100">
+    <div class="tab-pane fade" id="tab-auth-ldap">
+      <div class="card">
         <div class="card-header"><h5 class="mb-0">LDAP</h5></div>
         <div class="card-body">
           <form method="POST" action="{{ url_for('config.save_auth') }}">
@@ -316,7 +337,7 @@
         </div>
       </div>
     </div>
-  </div>
+
   {# ------------------------- LOCAL ACCOUNTS -------------------------
      Here rather than beside Roles, because this tab is the page's one
      answer to "how do people get in". An account could only be made by
@@ -325,158 +346,168 @@
      held an account, when they last used it, or that one had been left
      enabled. Roles & access answers what a role may REACH, which is a
      different question — a role is not a person. #}
-  <div class="card mt-3" id="localAccounts">
-    <div class="card-header d-flex justify-content-between align-items-center">
-      <h5 class="mb-0">Local accounts</h5>
-      <button class="btn btn-sm btn-primary" data-bs-toggle="modal"
-              data-bs-target="#accountModal">
-        <i class="fas fa-plus"></i> Add account
-      </button>
-    </div>
-    <div class="card-body p-0">
-      <table class="table table-hover mb-0">
-        <thead><tr>
-          <th>Username</th><th>Email</th><th>Role</th><th>Authenticator</th>
-          <th>Created</th><th>Last sign-in</th><th></th>
-        </tr></thead>
-        <tbody>
-        {% for account in local_accounts %}
-          <tr>
-            <td>
-              <strong>{{ account.username }}</strong>
-              {% if account.disabled %}
-                <span class="badge bg-secondary ms-1">disabled</span>
-              {% endif %}
-              {% if account.username == current_user.username %}
-                <span class="badge bg-primary-subtle text-primary ms-1">you</span>
-              {% endif %}
-            </td>
-            <td class="text-muted">
-              {{ account.email or '—' }}</td>
-            <td>
-              {# The role, and ONLY the role. The enabled switch used to ride
-                 on this form as a checkbox, and an unticked checkbox is
-                 indistinguishable from an absent one on the wire — so a
-                 submission that never mentioned the switch disabled the
-                 account, silently, and now signs that person out on their
-                 next request. It has its own control beside Delete. #}
-              <form method="POST" class="d-flex align-items-center gap-2"
-                    action="{{ url_for('config.save_account', username=account.username) }}">
-                <select class="form-select form-select-sm" name="role"
-                        style="width:auto" aria-label="Role for {{ account.username }}">
-                  {% for role in roles %}
-                    <option value="{{ role.name }}"
-                      {% if role.name == account.role %}selected{% endif %}>{{ role.name }}</option>
-                  {% endfor %}
-                </select>
-                <button class="btn btn-sm btn-outline-primary">Save role</button>
-              </form>
-              {# The two can disagree, and the reader cannot see why. A local
-                 account's own role is what the resolver reads FIRST — before
-                 a mapping by email, by username, by group, and before the
-                 default — so a mapping naming this account changes nothing
-                 while the account exists. Said here because the mapping is
-                 on another tab, looks authoritative, and is not. #}
-              {% if account.username in user_roles
-                    or (account.email and account.email in user_roles) %}
-              <div class="text-muted mt-1" style="font-size:.75rem">
-                <i class="fas fa-circle-info"></i>
-                &ldquo;Who gets which role&rdquo; also maps this account, to
-                <code>{{ user_roles.get(account.username)
-                         or user_roles.get(account.email) }}</code>.
-                The role chosen here wins: a local account's own role comes
-                first, so that mapping does nothing while this account exists.
-              </div>
-              {% endif %}
-            </td>
-            <td>
-              {# What the column can say, and no more. WDash cannot read the
-                 secret back to a screen — it is sealed, and sealed secrets
-                 are replaced, never shown. #}
-              {% if account.totp_enrolled %}
-                <span class="badge bg-success-subtle text-success">set up</span>
-                <div class="text-muted" style="font-size:.72rem">
-                  {{ account.totp_confirmed_at.strftime('%Y-%m-%d')
-                     if account.totp_confirmed_at else '' }}
+    <div class="tab-pane fade" id="tab-auth-local">
+      <div class="card" id="localAccounts">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">Local accounts</h5>
+        <button class="btn btn-sm btn-primary" data-bs-toggle="modal"
+                data-bs-target="#accountModal">
+          <i class="fas fa-plus"></i> Add account
+        </button>
+      </div>
+      <div class="card-body p-0">
+        <table class="table table-hover mb-0">
+          <thead><tr>
+            <th>Username</th><th>Email</th><th>Role</th><th>Authenticator</th>
+            <th>Created</th><th>Last sign-in</th><th></th>
+          </tr></thead>
+          <tbody>
+          {% for account in local_accounts %}
+            <tr>
+              <td>
+                <strong>{{ account.username }}</strong>
+                {% if account.disabled %}
+                  <span class="badge bg-secondary ms-1">disabled</span>
+                {% endif %}
+                {% if account.username == current_user.username %}
+                  <span class="badge bg-primary-subtle text-primary ms-1">you</span>
+                {% endif %}
+              </td>
+              <td class="text-muted">
+                {{ account.email or '—' }}</td>
+              <td>
+                {# The role, and ONLY the role. The enabled switch used to ride
+                   on this form as a checkbox, and an unticked checkbox is
+                   indistinguishable from an absent one on the wire — so a
+                   submission that never mentioned the switch disabled the
+                   account, silently, and now signs that person out on their
+                   next request. It has its own control beside Delete. #}
+                <form method="POST" class="d-flex align-items-center gap-2"
+                      action="{{ url_for('config.save_account', username=account.username) }}">
+                  <select class="form-select form-select-sm" name="role"
+                          style="width:auto" aria-label="Role for {{ account.username }}">
+                    {% for role in roles %}
+                      <option value="{{ role.name }}"
+                        {% if role.name == account.role %}selected{% endif %}>{{ role.name }}</option>
+                    {% endfor %}
+                  </select>
+                  <button class="btn btn-sm btn-outline-primary">Save role</button>
+                </form>
+                {# The two can disagree, and the reader cannot see why. A local
+                   account's own role is what the resolver reads FIRST — before
+                   a mapping by email, by username, by group, and before the
+                   default — so a mapping naming this account changes nothing
+                   while the account exists. Said here because the mapping is
+                   on another tab, looks authoritative, and is not. #}
+                {% if account.username in user_roles
+                      or (account.email and account.email in user_roles) %}
+                <div class="text-muted mt-1" style="font-size:.75rem">
+                  <i class="fas fa-circle-info"></i>
+                  &ldquo;Who gets which role&rdquo; also maps this account, to
+                  <code>{{ user_roles.get(account.username)
+                           or user_roles.get(account.email) }}</code>.
+                  The role chosen here wins: a local account's own role comes
+                  first, so that mapping does nothing while this account exists.
                 </div>
-              {% else %}
-                <span class="badge bg-warning-subtle text-warning">not yet</span>
-                <div class="text-muted" style="font-size:.72rem">
-                  set up at next sign-in
-                </div>
-              {% endif %}
-            </td>
-            <td class="text-muted">
-              {{ account.created_at.strftime('%Y-%m-%d %H:%M') if account.created_at else '—' }}</td>
-            <td class="text-muted">
-              {{ account.last_login_at.strftime('%Y-%m-%d %H:%M')
-                 if account.last_login_at else 'never' }}</td>
-            <td class="text-end">
-              {# Its own act, and it says which one it is. Disabling ends a
-                 session the person is using, which is a different kind of
-                 thing from moving them to another role. #}
-              {% if account.disabled %}
-              <form method="POST" class="d-inline"
-                    action="{{ url_for('config.enable_account', username=account.username) }}">
-                <button class="btn btn-sm btn-outline-primary">Enable</button>
-              </form>
-              {% else %}
-              <form method="POST" class="d-inline"
-                    action="{{ url_for('config.disable_account', username=account.username) }}">
-                <button class="btn btn-sm btn-outline-secondary">Disable</button>
-              </form>
-              {% endif %}
-              <button class="btn btn-sm btn-outline-secondary reset-password"
-                      data-username="{{ account.username }}"
-                      data-action="{{ url_for('config.reset_account_password', username=account.username) }}"
-                      data-bs-toggle="modal" data-bs-target="#passwordModal">
-                Reset password
-              </button>
-              {% if account.totp_enrolled %}
-              {# Recoverable for the person — they enrol again at their next
-                 sign-in — and a real weakening in the meantime: whoever knows
-                 the password gets in with no second factor until they do. So
-                 it asks first, like the other controls that change what a
-                 credential is worth. #}
-              <form method="POST" class="d-inline"
-                    action="{{ url_for('config.reset_account_totp', username=account.username) }}"
-                    data-confirm="Reset the authenticator for {{ account.username }}? Until they set up a new one at their next sign-in, their password alone gets in.">
-                <button class="btn btn-sm btn-outline-danger">Reset TOTP</button>
-              </form>
-              {% endif %}
-              {# Deleting an account is not something a person can undo, so it
-                 takes the same confirmation every other destructive button on
-                 this page takes. #}
-              <form method="POST" class="d-inline"
-                    action="{{ url_for('config.delete_account', username=account.username) }}"
-                    data-confirm="Delete the local account {{ account.username }}? Its dashboards and saved searches stay, owned by a name nobody can sign in as.">
-                <button class="btn btn-sm btn-outline-danger">Delete</button>
-              </form>
-            </td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    <div class="card-footer text-muted" style="font-size:.8rem">
-      Local accounts are not a directory: they are checked here, against a
-      password stored as an Argon2 hash, and they keep working when LDAP or
-      OpenID Connect does not. That is what they are for, and it is why the
-      installation refuses to be left without one that is enabled and can
-      administer. <code>python -m wdash.store.recover --status</code> says who
-      that is from the command line, without signing in.
-      <br>
-      Every local account needs an authenticator as well as a password, set up
-      at its first sign-in and never optional. LDAP and OpenID Connect
-      accounts are not listed here and get no second factor from WDash: it
-      never sees their passwords, and a second factor for them belongs at the
-      provider that checks them. If somebody loses their phone, reset it here,
-      or run <code>python -m wdash.store.recover --reset-totp
-      &lt;username&gt;</code> when nobody can open this page.
+                {% endif %}
+              </td>
+              <td>
+                {# What the column can say, and no more. WDash cannot read the
+                   secret back to a screen — it is sealed, and sealed secrets
+                   are replaced, never shown. #}
+                {% if account.totp_enrolled %}
+                  <span class="badge bg-success-subtle text-success">set up</span>
+                  <div class="text-muted" style="font-size:.72rem">
+                    {{ account.totp_confirmed_at.strftime('%Y-%m-%d')
+                       if account.totp_confirmed_at else '' }}
+                  </div>
+                {% else %}
+                  <span class="badge bg-warning-subtle text-warning">not yet</span>
+                  <div class="text-muted" style="font-size:.72rem">
+                    set up at next sign-in
+                  </div>
+                {% endif %}
+              </td>
+              <td class="text-muted">
+                {{ account.created_at.strftime('%Y-%m-%d %H:%M') if account.created_at else '—' }}</td>
+              <td class="text-muted">
+                {{ account.last_login_at.strftime('%Y-%m-%d %H:%M')
+                   if account.last_login_at else 'never' }}</td>
+              <td class="text-end">
+                {# Its own act, and it says which one it is. Disabling ends a
+                   session the person is using, which is a different kind of
+                   thing from moving them to another role. #}
+                {% if account.disabled %}
+                <form method="POST" class="d-inline"
+                      action="{{ url_for('config.enable_account', username=account.username) }}">
+                  <button class="btn btn-sm btn-outline-primary">Enable</button>
+                </form>
+                {% else %}
+                <form method="POST" class="d-inline"
+                      action="{{ url_for('config.disable_account', username=account.username) }}">
+                  <button class="btn btn-sm btn-outline-secondary">Disable</button>
+                </form>
+                {% endif %}
+                <button class="btn btn-sm btn-outline-secondary reset-password"
+                        data-username="{{ account.username }}"
+                        data-action="{{ url_for('config.reset_account_password', username=account.username) }}"
+                        data-bs-toggle="modal" data-bs-target="#passwordModal">
+                  Reset password
+                </button>
+                {% if account.totp_enrolled %}
+                {# Recoverable for the person — they enrol again at their next
+                   sign-in — and a real weakening in the meantime: whoever knows
+                   the password gets in with no second factor until they do. So
+                   it asks first, like the other controls that change what a
+                   credential is worth. #}
+                <form method="POST" class="d-inline"
+                      action="{{ url_for('config.reset_account_totp', username=account.username) }}"
+                      data-confirm="Reset the authenticator for {{ account.username }}? Until they set up a new one at their next sign-in, their password alone gets in.">
+                  <button class="btn btn-sm btn-outline-danger">Reset TOTP</button>
+                </form>
+                {% endif %}
+                {# Deleting an account is not something a person can undo, so it
+                   takes the same confirmation every other destructive button on
+                   this page takes. #}
+                <form method="POST" class="d-inline"
+                      action="{{ url_for('config.delete_account', username=account.username) }}"
+                      data-confirm="Delete the local account {{ account.username }}? Its dashboards and saved searches stay, owned by a name nobody can sign in as.">
+                  <button class="btn btn-sm btn-outline-danger">Delete</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="card-footer text-muted" style="font-size:.8rem">
+        Local accounts are not a directory: they are checked here, against a
+        password stored as an Argon2 hash, and they keep working when LDAP or
+        OpenID Connect does not. That is what they are for, and it is why the
+        installation refuses to be left without one that is enabled and can
+        administer. <code>python -m wdash.store.recover --status</code> says who
+        that is from the command line, without signing in.
+        <br>
+        Every local account needs an authenticator as well as a password, set up
+        at its first sign-in and never optional. LDAP and OpenID Connect
+        accounts are not listed here and get no second factor from WDash: it
+        never sees their passwords, and a second factor for them belongs at the
+        provider that checks them. If somebody loses their phone, reset it here,
+        or run <code>python -m wdash.store.recover --reset-totp
+        &lt;username&gt;</code> when nobody can open this page.
+      </div>
     </div>
   </div>
+  </div>
 
-  <div class="alert alert-secondary mt-3 mb-0" style="font-size:.85rem">
+  {# OUTSIDE the three panes, on purpose. This is the sentence that says
+     which directory is in force and which one is shadowed, and it is
+     load-bearing: somebody on the LDAP tab needs to know OIDC is the one
+     answering, and somebody on Local accounts needs the last line of it —
+     that none of this touches them. Inside a pane it would be three copies
+     or two people who never see it. #}
+  <div class="alert alert-secondary mt-3 mb-0" style="font-size:.85rem"
+       id="directoryRule">
     <i class="fas fa-info-circle"></i>
     <strong>These take effect immediately &mdash; no restart.</strong>
     Nobody is signed out by a change here, and the local account created at

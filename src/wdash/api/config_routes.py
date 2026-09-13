@@ -753,6 +753,22 @@ def test_source():
 # Authentication
 # --------------------------------------------------------------------------
 
+def _back_to_auth(which=None):
+    """Back to the card this save came from.
+
+    Every one of these used to be a bare `/admin/config`, which opens on
+    Sources: somebody who had just saved LDAP was returned to a different
+    tab and had to find their way back to read the flash about what they
+    had done. The Checks and Alerts tabs have sent people back to
+    themselves since they were written; Authentication could not, because
+    it was one pane holding three unrelated things and there was nowhere
+    more precise to point at than the pane. There is now.
+    """
+    pane = {"oidc": "#tab-auth-oidc", "ldap": "#tab-auth-ldap",
+            "local": "#tab-auth-local"}.get(which, "#tab-auth")
+    return redirect(url_for("config.config_page") + pane)
+
+
 @config_bp.route("/auth", methods=["POST"])
 @login_required
 def save_auth():
@@ -798,10 +814,10 @@ def save_auth():
             flash(f"The CA file {value['ca_certs']} cannot be used: {unusable}. "
                   f"Every ldaps:// sign-in would fail on it. Nothing was "
                   f"saved.", "error")
-            return redirect(url_for("config.config_page"))
+            return _back_to_auth(which)
     else:
         flash("Unknown provider.", "error")
-        return redirect(url_for("config.config_page"))
+        return _back_to_auth(which)
 
     # Which directory this installation signs people in through, before and
     # after. Both refusals below and the sentence at the end are computed from
@@ -826,7 +842,7 @@ def save_auth():
         flash(refusal, "error")
         _audit(f"{label} settings refused", subject=f"auth:{which}",
                state={**value, "reason": refusal})
-        return redirect(url_for("config.config_page"))
+        return _back_to_auth(which)
 
     held = store.settings.all(prefix=key).get(key) or {}
     url_key, verify_key, what = (
@@ -840,14 +856,14 @@ def save_auth():
               f"save it. Nothing was saved.", "error")
         _audit(f"{label} settings refused", subject=f"auth:{which}",
                state={**value, "reason": moved})
-        return redirect(url_for("config.config_page"))
+        return _back_to_auth(which)
 
     try:
         store.settings.set(key, value, secret=secret,
                            updated_by=current_user.username)
     except SecretsUnavailable as exc:
         flash(str(exc).split("\n")[0], "error")
-        return redirect(url_for("config.config_page"))
+        return _back_to_auth(which)
 
     after = directory(current_app)
     # A switch is the save where the RESOLUTION changes, not the save where a
@@ -882,7 +898,7 @@ def save_auth():
           + (" " + _switch_sentence(before["in_force"], after["in_force"],
                                     inherited) if switched else ""),
           "warning" if switched else "success")
-    return redirect(url_for("config.config_page"))
+    return _back_to_auth(which)
 
 
 def _plural(count, noun):
@@ -1466,7 +1482,14 @@ def _account_state(account, was=None, **extra):
 
 
 def _back():
-    return redirect(url_for("config.config_page"))
+    """Back to Local accounts, which is where every one of these was done.
+
+    It was `/admin/config` with no fragment, so a person who had just
+    deleted an account, reset a password or been REFUSED one of those
+    landed on Sources — with the sentence explaining the refusal at the top
+    of a tab that has nothing to do with accounts.
+    """
+    return _back_to_auth("local")
 
 
 def _refused(action, username, refusal):

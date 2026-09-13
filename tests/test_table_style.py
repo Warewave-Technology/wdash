@@ -157,10 +157,12 @@ class EveryTableIsTheSameTableTest(unittest.TestCase):
     PAGES = (("monitors", "/monitors"), ("alerts", "/alerts"),
              ("audit", "/admin/audit"))
 
-    #: The configuration page is five pages wearing one URL, and a hidden
+    #: The configuration page is several pages wearing one URL, and a hidden
     #: pane measures nothing: `getClientRects()` is empty for all of it.
-    PANES = ("#tab-sources", "#tab-auth", "#tab-monitors", "#tab-alerts",
-             "#tab-roles")
+    #: Outermost first — Authentication holds a strip of its own, and its
+    #: sub-panes cannot be shown until it is.
+    PANES = ("#tab-sources", "#tab-auth", "#tab-auth-local", "#tab-monitors",
+             "#tab-alerts", "#tab-roles")
 
     @classmethod
     def setUpClass(cls):
