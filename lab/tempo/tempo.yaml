@@ -21,7 +21,31 @@ ingester:
   # A lab that makes you wait five minutes to see whether the adapter works
   # is a lab nobody runs twice.
   max_block_duration: 5m
-  complete_block_timeout: 10s
+  # How long a flushed block stays queryable in the ingester as well. It was
+  # ten seconds, which assumed storage picks it up immediately; storage picks
+  # it up on `blocklist_poll` below. Long enough to overlap that poll, or
+  # there is a hole of up to one poll between the two.
+  complete_block_timeout: 5m
+
+query_frontend:
+  search:
+    # Tempo splits a search in two: the ingesters answer for the last
+    # `query_backend_after`, and only the part of the range OLDER than that is
+    # looked for in storage. At its default of 15m, a block the ingester has
+    # just flushed belongs to neither half, and the lab had a fifteen-minute
+    # hole in it.
+    #
+    # Measured on this lab: 200 traces seeded at 19:11 were searchable at
+    # 19:13 (from the ingester), gone at 19:23 — `total_blocks=0` on a
+    # 48-hour query, with the block sitting in the tenant index holding all
+    # 200 — and back at 19:27, once they were fifteen minutes old. Restarting
+    # Tempo did not bring them back, which is what makes the shape of the
+    # thing unguessable: it reads as data loss.
+    #
+    # It cost `tests/test_dashboard_tables.py` a failure — "the lab holds no
+    # service here" — on a tree with nothing wrong with it, and it would cost
+    # anybody adding this Tempo to WDash the same quarter of an hour.
+    query_backend_after: 0s
 
 compactor:
   compaction:
@@ -30,6 +54,10 @@ compactor:
 storage:
   trace:
     backend: local
+    # Default five minutes. A block written between two polls is invisible to
+    # the query path until the next one, and in a lab that is a hole somebody
+    # fills with a bug report.
+    blocklist_poll: 1m
     wal:
       path: /var/tempo/wal
     local:
