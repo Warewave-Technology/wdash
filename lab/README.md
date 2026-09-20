@@ -25,26 +25,58 @@ To point the application at the lab, add it on the configuration page —
 `synthetics-*`, which are the defaults the form offers. Nothing about a
 source is read from `.env`.
 
+## One target at a time
+
+A target is one thing WDash can be pointed at, started, filled and read on
+its own:
+
+```bash
+./lab.sh up loki              # a Loki and nothing else
+./lab.sh seed loki            # 2,000 lines over the last 24 hours
+./lab.sh targets              # what is up, what is in it, what to type
+```
+
+Five of them hold data — `elasticsearch`, `loki`, `victorialogs`, `jaeger`,
+`tempo` — and each has its own seeder writing its own service names, so a
+merged search visibly draws from all of them and a per-source breakdown has
+something to say. The rest support the application rather than feeding it:
+`synthetics` (Heartbeat and its probe endpoints), `identity` (OpenLDAP and
+Dex), `postgres` (the metadata store), `otel`, `kibana`, `cluster`.
+
+Adding them one at a time is worth the extra minute the first time through.
+Started together, a screen that is wrong is a screen you have to bisect;
+started alone, whatever it shows came from the one backend you just added.
+
+`./lab.sh targets` is the sheet to work from — for each target: whether it is
+up, how much it holds **in the last 24 hours**, and the fields to fill in on
+the configuration page. The window matters. A lab seeded last week is up,
+healthy, full of documents and completely empty on every page, because every
+page opens on the last 24 hours. An empty count there is the answer, and
+`./lab.sh seed <target>` is the fix.
+
 ## Commands
 
 | Command | Description |
 |---|---|
-| `./lab.sh up [profile...]` | Start the stack |
-| `./lab.sh seed [args]` | Load data into every running backend. Arguments go to `seed.py`; Loki and VictoriaLogs are seeded too when their profiles are up, with different service names so a merged search visibly draws from all three |
+| `./lab.sh up [target...]` | Start the stack, or exactly the named targets. With no target: Elasticsearch |
+| `./lab.sh seed [target...] [args]` | Load sample data. With no target: every backend that is running. Arguments after a target name go to that target's seeder; with no target named they go to `seed.py`, because the others take different options |
+| `./lab.sh targets` | Every target: up or not, what it holds over the last 24 hours, and what to type into WDash to read it |
 | `./lab.sh status` | Cluster health and index list |
 | `./lab.sh logs [service]` | Container logs |
 | `./lab.sh down` | Stop, keeping data |
 | `./lab.sh reset` | Stop and delete all data |
 
-### Profiles
+### Targets
 
 ```bash
-./lab.sh up kibana            # Kibana on 5601, for comparison
-./lab.sh up cluster           # a second data node, for shard/allocation rules
-./lab.sh up kibana cluster
+./lab.sh up victorialogs jaeger   # two of them
+./lab.sh up kibana                # Kibana on 5601, for comparison
+./lab.sh up cluster               # a second data node, for shard rules
 ```
 
-Both are off by default because they cost memory.
+Everything except Elasticsearch is off by default because it costs memory.
+Starting a target starts what it needs: `synthetics` brings up the cluster
+Heartbeat writes into, and so do `otel` and `kibana`.
 
 ### Seed options
 
@@ -54,6 +86,9 @@ Both are off by default because they cost memory.
 ./lab.sh seed --days 30               # wider time range
 ./lab.sh seed --only traces
 ./lab.sh seed --seed 42               # reproducible data
+
+./lab.sh seed loki --hours 168        # one target, its own options
+./lab.sh seed tempo --traces 1000
 ```
 
 ## Generated indices

@@ -2,19 +2,20 @@
 #
 # WDash lab environment.
 #
-#   ./lab.sh up [profile...]   start the stack
-#                             profiles: kibana, cluster, otel, loki, victorialogs,
-#                                       synthetics (Heartbeat + probe targets),
-#                                       identity (OpenLDAP + Dex),
-#                                       postgres (the metadata store),
-#                                       jaeger, tempo
-#   ./lab.sh seed [args...]    load sample data into every running backend
-#                             (args go to seed.py; Loki and VictoriaLogs are
-#                              seeded too when their profiles are up)
-#   ./lab.sh status            cluster health and index list
-#   ./lab.sh logs [service]    container logs
-#   ./lab.sh down              stop, keeping data
-#   ./lab.sh reset             stop and delete ALL data
+#   ./lab.sh up [target...]    start the stack, or exactly the named targets
+#   ./lab.sh seed [target...] [args...]
+#                             load sample data. With no target named, every
+#                             backend that is running; with one, that one, and
+#                             the remaining arguments go to its seeder
+#   ./lab.sh targets          what is up, what is in it over the last 24
+#                             hours, and what to type into WDash to read it
+#   ./lab.sh status           cluster health and index list
+#   ./lab.sh logs [service]   container logs
+#   ./lab.sh down             stop, keeping data
+#   ./lab.sh reset            stop and delete ALL data
+#
+# Targets: elasticsearch, loki, victorialogs, jaeger, tempo, synthetics,
+#          identity, postgres, otel, kibana, cluster
 #
 set -euo pipefail
 
@@ -28,6 +29,10 @@ set -a
 set +a
 
 ES_URL="http://localhost:${ES_PORT:-9200}"
+LOKI_URL="http://localhost:${LOKI_PORT:-3100}"
+VICTORIALOGS_URL="http://localhost:${VICTORIALOGS_PORT:-9428}"
+JAEGER_URL="http://localhost:${JAEGER_PORT:-16686}"
+TEMPO_URL="http://localhost:${TEMPO_PORT:-3200}"
 
 if docker compose version >/dev/null 2>&1; then
     COMPOSE="docker compose"
@@ -37,6 +42,254 @@ else
     echo "docker compose not found." >&2
     exit 1
 fi
+
+# --------------------------------------------------------------------------
+# Targets
+#
+# One name per thing that can be started, seeded and pointed at on its own.
+# WDash reads five of them and each is a different adapter; bringing them up
+# together is convenient and it is also how a bug in one gets read as a bug in
+# the page. `./lab.sh up loki` starts a Loki and nothing else, so what the
+# screen then shows came from the Loki.
+#
+# bash 3.2 is the macOS default and has no associative arrays, so this is a
+# case rather than a map.
+# --------------------------------------------------------------------------
+
+#: Everything `up` accepts, in the order `targets` prints them.
+ALL_TARGETS="elasticsearch loki victorialogs jaeger tempo synthetics identity postgres otel kibana cluster"
+
+#: The ones with a seeder behind them.
+DATA_TARGETS="elasticsearch loki victorialogs jaeger tempo"
+
+target_known() {
+    case " $ALL_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+# The compose profile a target lives behind, if any. Elasticsearch has none:
+# it is what `./lab.sh up` with no argument starts.
+target_profile() {
+    case "$1" in
+        elasticsearch) echo "" ;;
+        cluster)       echo "cluster" ;;
+        *)             echo "$1" ;;
+    esac
+}
+
+# The compose services to start for a target. Named explicitly rather than
+# letting `up` start everything, which is what made "start just this one"
+# impossible before.
+target_services() {
+    case "$1" in
+        elasticsearch) echo "elasticsearch" ;;
+        loki)          echo "loki" ;;
+        victorialogs)  echo "victorialogs" ;;
+        jaeger)        echo "jaeger" ;;
+        tempo)         echo "tempo" ;;
+        # Heartbeat writes into Elasticsearch, so compose starts that too.
+        synthetics)    echo "synthetics-targets heartbeat" ;;
+        identity)      echo "openldap dex" ;;
+        postgres)      echo "postgres" ;;
+        otel)          echo "otel-collector" ;;
+        kibana)        echo "kibana" ;;
+        cluster)       echo "elasticsearch2" ;;
+    esac
+}
+
+target_url() {
+    case "$1" in
+        elasticsearch) echo "$ES_URL" ;;
+        loki)          echo "$LOKI_URL" ;;
+        victorialogs)  echo "$VICTORIALOGS_URL" ;;
+        jaeger)        echo "$JAEGER_URL" ;;
+        tempo)         echo "$TEMPO_URL" ;;
+        kibana)        echo "http://localhost:${KIBANA_PORT:-5601}" ;;
+        otel)          echo "localhost:${OTLP_GRPC_PORT:-4317} (gRPC), ${OTLP_HTTP_PORT:-4318} (HTTP)" ;;
+        identity)      echo "ldap://localhost:${LDAP_PORT:-1389}, http://localhost:${DEX_PORT:-5556}/dex" ;;
+        postgres)      echo "postgresql+psycopg://wdash:wdash-lab@localhost:${POSTGRES_PORT:-55432}/wdash" ;;
+        synthetics)    echo "http://localhost:18080 and five more" ;;
+        # No published port: it joins the cluster on the compose network, and
+        # what it changes is visible at the Elasticsearch address above.
+        cluster)       echo "a second data node, at $ES_URL" ;;
+    esac
+}
+
+# Reachable right now? Asked of the service itself rather than of docker, so a
+# container that is up and not yet serving reads as not ready — which is what
+# a seeder about to write into it needs to know.
+target_ready() {
+    case "$1" in
+        elasticsearch) curl -sf -o /dev/null "$ES_URL/_cluster/health" ;;
+        loki)          curl -s "$LOKI_URL/ready" 2>/dev/null | grep -qi ready ;;
+        victorialogs)  curl -s "$VICTORIALOGS_URL/health" 2>/dev/null | grep -q OK ;;
+        jaeger)        curl -s "$JAEGER_URL/api/services" 2>/dev/null | grep -q data ;;
+        tempo)         curl -s "$TEMPO_URL/ready" 2>/dev/null | grep -q "^ready" ;;
+        kibana)        curl -sf -o /dev/null "http://localhost:${KIBANA_PORT:-5601}/api/status" ;;
+        postgres)      docker exec wdash-lab-postgres pg_isready -U wdash -d wdash >/dev/null 2>&1 ;;
+        identity)      curl -s "http://localhost:${DEX_PORT:-5556}/dex/.well-known/openid-configuration" 2>/dev/null | grep -q issuer ;;
+        synthetics)    curl -s "http://localhost:18080/" 2>/dev/null | grep -q ok ;;
+        otel|cluster)  docker inspect -f '{{.State.Running}}' "$(container_of "$1")" 2>/dev/null | grep -q true ;;
+    esac
+}
+
+container_of() {
+    case "$1" in
+        otel)    echo "wdash-lab-otel" ;;
+        cluster) echo "wdash-lab-es02" ;;
+    esac
+}
+
+commas() {
+    awk '{ n=$0; s=""; while (length(n) > 3) {
+               s = "," substr(n, length(n) - 2) s; n = substr(n, 1, length(n) - 3)
+           } print n s }'
+}
+
+# What is in a target over the last 24 hours — the window the pages open on.
+# An all-time count would say "there is data" about a lab whose data aged out
+# of every screen, which is the one mistake this line exists to prevent.
+#
+# Each phrase carries its own window, because they are not the same window:
+# Jaeger will not count traces at all and answers with its service list, which
+# is everything it holds.
+target_volume() {
+    local now start
+    now="$(date +%s)"
+    start="$((now - 86400))"
+    case "$1" in
+        elasticsearch)
+            local logs traces
+            logs="$(curl -s -H 'Content-Type: application/json' \
+                "$ES_URL/*logs*/_count" \
+                -d '{"query":{"range":{"@timestamp":{"gte":"now-24h"}}}}' \
+                | sed -n 's/.*"count":\([0-9]*\).*/\1/p')"
+            traces="$(curl -s -H 'Content-Type: application/json' \
+                "$ES_URL/*traces*,*apm*/_count" \
+                -d '{"query":{"range":{"@timestamp":{"gte":"now-24h"}}}}' \
+                | sed -n 's/.*"count":\([0-9]*\).*/\1/p')"
+            echo "$(echo "${logs:-0}" | commas) logs and $(echo "${traces:-0}" | commas) trace spans in the last 24 hours"
+            ;;
+        loki)
+            # Loki reports no match count for a range query; an instant
+            # count_over_time is the only number it will give.
+            local n
+            n="$(curl -sG "$LOKI_URL/loki/api/v1/query" \
+                --data-urlencode 'query=sum(count_over_time({service_name=~".+"}[24h]))' \
+                2>/dev/null | sed -n 's/.*"value":\[[0-9.]*,"\([0-9]*\)".*/\1/p')"
+            echo "$(echo "${n:-0}" | commas) lines in the last 24 hours"
+            ;;
+        victorialogs)
+            local n
+            n="$(curl -sG "$VICTORIALOGS_URL/select/logsql/query" \
+                --data-urlencode 'query=_time:24h | count()' 2>/dev/null \
+                | sed -n 's/.*"count(\*)":"\([0-9]*\)".*/\1/p')"
+            echo "$(echo "${n:-0}" | commas) lines in the last 24 hours"
+            ;;
+        jaeger)
+            # Jaeger has no count endpoint and its storage here is in memory.
+            # The service list is what it will answer cheaply, so that is what
+            # is reported — as services, not as traces.
+            local n
+            n="$(curl -s "$JAEGER_URL/api/services" 2>/dev/null \
+                | sed -n 's/.*"total":\([0-9]*\).*/\1/p')"
+            echo "${n:-0} services, all it holds"
+            ;;
+        tempo)
+            # Bounded by the limit, so it is a floor and says so. Tempo only
+            # makes a new block searchable after it flushes, which takes a few
+            # minutes — a fresh seed reads as 0 here for that long.
+            local n
+            n="$(curl -sG "$TEMPO_URL/api/search" --data-urlencode 'q={}' \
+                --data-urlencode "start=$start" --data-urlencode "end=$now" \
+                --data-urlencode 'limit=20' 2>/dev/null \
+                | grep -o '"traceID"' | wc -l | tr -d ' ')"
+            [ "${n:-0}" -ge 20 ] && echo "20+ traces in the last 24 hours" \
+                || echo "$((n)) traces in the last 24 hours"
+            ;;
+        *) echo "" ;;
+    esac
+}
+
+# What to type into WDash for this target. The form's own defaults are the
+# right answer for most fields, and saying "leave it blank" is shorter to
+# follow than a pattern list somebody has to compare against the placeholder.
+target_form() {
+    case "$1" in
+        elasticsearch) cat <<EOF
+    Configuration → Sources → Add source
+      Type     Elasticsearch          Signals  logs, traces, monitors
+      URL      $ES_URL
+      Leave the three pattern fields blank: the defaults are the lab's
+      (*traces*/*apm* for traces, heartbeat-*/synthetics-* for monitors).
+EOF
+            ;;
+        loki) cat <<EOF
+    Configuration → Sources → Add source
+      Type     Grafana Loki           Signals  logs
+      URL      $LOKI_URL
+      Leave Tenant and Stream label blank — the seed writes service_name.
+EOF
+            ;;
+        victorialogs) cat <<EOF
+    Configuration → Sources → Add source
+      Type     VictoriaLogs           Signals  logs
+      URL      $VICTORIALOGS_URL
+      Leave Tenant and Stream field blank — the seed writes service.
+EOF
+            ;;
+        jaeger) cat <<EOF
+    Configuration → Sources → Add source
+      Type     Jaeger                 Signals  traces
+      URL      $JAEGER_URL
+EOF
+            ;;
+        tempo) cat <<EOF
+    Configuration → Sources → Add source
+      Type     Grafana Tempo          Signals  traces
+      URL      $TEMPO_URL
+EOF
+            ;;
+        synthetics) cat <<EOF
+    No source of its own. Heartbeat writes its checks into Elasticsearch, so
+    the Monitors page fills in as soon as that cluster is added above with
+    the monitors signal ticked.
+EOF
+            ;;
+        identity) cat <<EOF
+    Configuration → Authentication → LDAP
+      Server   ldap://localhost:${LDAP_PORT:-1389}     Base DN  dc=lab,dc=local
+      Bind DN  cn=admin,dc=lab,dc=local        Password  hunter2
+      Users: alice, bob, carol, dave — password hunter2. alice is in
+      cn=admins, which is the group to map onto the admin role.
+    Configuration → Authentication → OpenID Connect (the same directory,
+    through Dex — at most one of the two can be in force)
+      Discovery  http://localhost:${DEX_PORT:-5556}/dex/.well-known/openid-configuration
+      Client id  wdash            Client secret  wdash-lab-secret
+      Redirect   http://127.0.0.1:5001/auth/callback
+EOF
+            ;;
+        postgres) cat <<EOF
+    Not a source: the metadata store. Point WDash at it before first start
+      DATABASE_URL=postgresql+psycopg://wdash:wdash-lab@localhost:${POSTGRES_PORT:-55432}/wdash
+EOF
+            ;;
+        otel) cat <<EOF
+    Not a source: a collector that writes into Elasticsearch. Applications
+    send OTLP to localhost:${OTLP_GRPC_PORT:-4317}; WDash reads the cluster.
+EOF
+            ;;
+        kibana) cat <<EOF
+    Not a source: Kibana itself, on http://localhost:${KIBANA_PORT:-5601}, for
+    comparing a screen against the thing WDash is an alternative to.
+EOF
+            ;;
+        cluster) cat <<EOF
+    Not a source: a second Elasticsearch data node, so the Advisor's shard
+    and replica rules have something to be right about.
+EOF
+            ;;
+    esac
+}
 
 require_daemon() {
     if ! docker info >/dev/null 2>&1; then
@@ -50,6 +303,12 @@ Run this command again once the daemon is up.
 EOF
         exit 1
     fi
+}
+
+refuse_unknown() {
+    echo "Unknown target: $1" >&2
+    echo "Targets: $ALL_TARGETS" >&2
+    exit 1
 }
 
 wait_for_es() {
@@ -69,35 +328,51 @@ wait_for_es() {
 
 cmd_up() {
     require_daemon
-    local profile_args=()
+    local profile_args=() services=()
     for p in "$@"; do
-        profile_args+=(--profile "$p")
+        target_known "$p" || refuse_unknown "$p"
+        local profile
+        profile="$(target_profile "$p")"
+        if [ -n "$profile" ]; then
+            profile_args+=(--profile "$profile")
+        fi
         # The TLS targets need certificates before nginx starts, and the
         # certificates are generated rather than committed — a repository with
         # a private key in it teaches whoever reads it that this is normal.
         if [ "$p" = "synthetics" ]; then
-            bash "$(dirname "$0")/synthetics/make-certs.sh"
+            bash "$LAB_DIR/synthetics/make-certs.sh"
         fi
+        for service in $(target_services "$p"); do
+            services+=("$service")
+        done
     done
 
     # bash 3.2 (the macOS default) errors on empty array expansion under
     # set -u; the ${arr[@]+"${arr[@]}"} form is portable.
-    $COMPOSE ${profile_args[@]+"${profile_args[@]}"} up -d
-    wait_for_es
+    #
+    # With no target named, no service is named either, which is compose's own
+    # "everything not behind a profile" — the Elasticsearch, as before.
+    $COMPOSE ${profile_args[@]+"${profile_args[@]}"} up -d \
+        ${services[@]+"${services[@]}"}
+
+    # Only when there is an Elasticsearch to wait for. `./lab.sh up loki` used
+    # to block for three minutes on a cluster it had not started.
+    if [ $# -eq 0 ] || docker inspect -f '{{.State.Running}}' wdash-lab-es01 \
+        2>/dev/null | grep -q true; then
+        wait_for_es
+    fi
 
     echo
-    echo "  Elasticsearch  $ES_URL"
-    for p in "$@"; do
-        [ "$p" = "kibana" ] && echo "  Kibana         http://localhost:${KIBANA_PORT:-5601}"
-        [ "$p" = "otel" ]   && echo "  OTLP           localhost:${OTLP_GRPC_PORT:-4317} (gRPC), ${OTLP_HTTP_PORT:-4318} (HTTP)"
-        [ "$p" = "loki" ]   && echo "  Loki           http://localhost:${LOKI_PORT:-3100}"
-        [ "$p" = "victorialogs" ] && echo "  VictoriaLogs   http://localhost:${VICTORIALOGS_PORT:-9428}"
-        [ "$p" = "jaeger" ] && echo "  Jaeger         http://localhost:${JAEGER_PORT:-16686}"
-        [ "$p" = "tempo" ] && echo "  Tempo          http://localhost:${TEMPO_PORT:-3200}"
-        [ "$p" = "postgres" ] && echo "  Postgres       postgresql+psycopg://wdash:wdash-lab@localhost:${POSTGRES_PORT:-55432}/wdash"
-    done
+    if [ $# -eq 0 ]; then
+        echo "  elasticsearch  $ES_URL"
+    else
+        for p in "$@"; do
+            printf "  %-14s %s\n" "$p" "$(target_url "$p")"
+        done
+    fi
     echo
-    echo "Load sample data with:  ./lab.sh seed"
+    echo "Load sample data with:  ./lab.sh seed ${*:-}"
+    echo "What to type into WDash: ./lab.sh targets"
 }
 
 # Find an interpreter for seed.py, creating a lab-local venv if needed. Only
@@ -129,45 +404,111 @@ seed_python() {
     echo "$venv/bin/python"
 }
 
+# One target, with whatever arguments were left over. Each backend gets its
+# own script on purpose: three transports in one file makes "which one failed"
+# a question you answer by reading code. Each writes DIFFERENT service names,
+# so a merged search over three backends visibly draws from all three.
+target_seed() {
+    local name="$1"
+    shift
+    case "$name" in
+        elasticsearch)
+            "$(seed_python)" "$LAB_DIR/seed/seed.py" --url "$ES_URL" "$@" ;;
+        loki)
+            "$(seed_python)" "$LAB_DIR/seed/seed_loki.py" --url "$LOKI_URL" "$@" ;;
+        victorialogs)
+            "$(seed_python)" "$LAB_DIR/seed/seed_victorialogs.py" \
+                --url "$VICTORIALOGS_URL" "$@" ;;
+        jaeger)
+            "$(seed_python)" "$LAB_DIR/seed/seed_jaeger.py" \
+                --query-url "$JAEGER_URL" \
+                --url "http://localhost:${JAEGER_OTLP_PORT:-4319}" "$@" ;;
+        tempo)
+            "$(seed_python)" "$LAB_DIR/seed/seed_tempo.py" \
+                --query-url "$TEMPO_URL" \
+                --url "http://localhost:${TEMPO_OTLP_PORT:-4320}" "$@" ;;
+        synthetics)
+            echo "synthetics has no seeder: Heartbeat is a running agent and" \
+                 "writes its own checks into Elasticsearch." ;;
+        *)
+            echo "$name has no sample data to load." ;;
+    esac
+}
+
 cmd_seed() {
     require_daemon
-    if ! curl -s -o /dev/null "$ES_URL/_cluster/health" 2>/dev/null; then
-        echo "Elasticsearch is not reachable. Run './lab.sh up' first." >&2
+
+    # Leading words are target names; everything from the first option on goes
+    # to the seeder. `./lab.sh seed --days 30` therefore still means what it
+    # always did, and `./lab.sh seed loki --hours 168` seeds one backend.
+    #
+    # A string rather than an array: bash 3.2 is the macOS default, and under
+    # `set -u` it calls an empty array unset.
+    local names=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -*) break ;;
+        esac
+        target_known "$1" || refuse_unknown "$1"
+        names="$names $1"
+        shift
+    done
+
+    if [ -n "$names" ]; then
+        for name in $names; do
+            if ! target_ready "$name"; then
+                echo "$name is not reachable at $(target_url "$name")." \
+                     "Start it with './lab.sh up $name'." >&2
+                exit 1
+            fi
+            target_seed "$name" "$@"
+        done
+        return
+    fi
+
+    # No target named: every backend that is running. Arguments go to the
+    # Elasticsearch seeder only — the others take different options, and a
+    # --days meant for one would abort the rest.
+    local seeded=0
+    for name in $DATA_TARGETS; do
+        if target_ready "$name"; then
+            seeded=1
+            if [ "$name" = "elasticsearch" ]; then
+                target_seed "$name" "$@"
+            else
+                target_seed "$name"
+            fi
+        fi
+    done
+    if [ "$seeded" -eq 0 ]; then
+        echo "No backend is running. Start one with './lab.sh up <target>'." >&2
+        echo "Targets with sample data: $DATA_TARGETS" >&2
         exit 1
     fi
+}
 
-    "$(seed_python)" "$LAB_DIR/seed/seed.py" --url "$ES_URL" "$@"
-
-    # The other backends, when they happen to be running. Skipped quietly
-    # rather than failing: `./lab.sh up` without a profile starts neither, and
-    # refusing to seed Elasticsearch because Loki is absent would be silly.
-    #
-    # Each one writes DIFFERENT service names on purpose. A merged search over
-    # three backends that all say "api-gateway" cannot show you that the merge
-    # is working.
-    local loki_url="http://localhost:${LOKI_PORT:-3100}"
-    if curl -s "$loki_url/ready" 2>/dev/null | grep -qi ready; then
-        "$(seed_python)" "$LAB_DIR/seed/seed_loki.py" --url "$loki_url"
-    fi
-
-    local vl_url="http://localhost:${VICTORIALOGS_PORT:-9428}"
-    if curl -s "$vl_url/health" 2>/dev/null | grep -q OK; then
-        "$(seed_python)" "$LAB_DIR/seed/seed_victorialogs.py" --url "$vl_url"
-    fi
-
-    local jaeger_url="http://localhost:${JAEGER_PORT:-16686}"
-    if curl -s "$jaeger_url/api/services" 2>/dev/null | grep -q data; then
-        "$(seed_python)" "$LAB_DIR/seed/seed_jaeger.py" \
-            --query-url "$jaeger_url" \
-            --url "http://localhost:${JAEGER_OTLP_PORT:-4319}"
-    fi
-
-    local tempo_url="http://localhost:${TEMPO_PORT:-3200}"
-    if curl -s "$tempo_url/ready" 2>/dev/null | grep -q "^ready"; then
-        "$(seed_python)" "$LAB_DIR/seed/seed_tempo.py" \
-            --query-url "$tempo_url" \
-            --url "http://localhost:${TEMPO_OTLP_PORT:-4320}"
-    fi
+cmd_targets() {
+    require_daemon
+    echo
+    for name in $ALL_TARGETS; do
+        local state volume
+        if target_ready "$name"; then
+            state="up"
+            volume="$(target_volume "$name")"
+            if [ -n "$volume" ]; then
+                state="up · $volume"
+            fi
+        else
+            state="not running — ./lab.sh up $name"
+        fi
+        printf "%-14s %s\n" "$name" "$state"
+        target_form "$name"
+        echo
+    done
+    cat <<'EOF'
+An empty count on a target that is up means its data has aged out of the
+window every page opens on. Reload it: ./lab.sh seed <target>
+EOF
 }
 
 cmd_status() {
@@ -183,9 +524,23 @@ cmd_status() {
     $COMPOSE ps
 }
 
+# Every profile, so that `down` stops what `up` started. It named two, and a
+# Loki brought up on its own went on running through a stop-the-lab.
+every_profile() {
+    local args=() profile
+    for name in $ALL_TARGETS; do
+        profile="$(target_profile "$name")"
+        if [ -n "$profile" ]; then
+            args+=(--profile "$profile")
+        fi
+    done
+    echo "${args[@]}"
+}
+
 cmd_down() {
     require_daemon
-    $COMPOSE --profile kibana --profile cluster down
+    # shellcheck disable=SC2046
+    $COMPOSE $(every_profile) down
     echo "Stopped. Data preserved — './lab.sh up' brings it back."
 }
 
@@ -195,7 +550,8 @@ cmd_reset() {
     read -r -p "Continue? [y/N] " answer
     case "$answer" in
         y|Y)
-            $COMPOSE --profile kibana --profile cluster down -v
+            # shellcheck disable=SC2046
+            $COMPOSE $(every_profile) down -v
             echo "Deleted."
             ;;
         *)
@@ -205,14 +561,15 @@ cmd_reset() {
 }
 
 case "${1:-}" in
-    up)     shift; cmd_up "$@" ;;
-    seed)   shift; cmd_seed "$@" ;;
-    status) cmd_status ;;
-    logs)   shift; require_daemon; $COMPOSE logs -f "$@" ;;
-    down)   cmd_down ;;
-    reset)  cmd_reset ;;
+    up)      shift; cmd_up "$@" ;;
+    seed)    shift; cmd_seed "$@" ;;
+    targets) cmd_targets ;;
+    status)  cmd_status ;;
+    logs)    shift; require_daemon; $COMPOSE logs -f "$@" ;;
+    down)    cmd_down ;;
+    reset)   cmd_reset ;;
     *)
-        sed -n '3,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+        sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
         exit 1
         ;;
 esac

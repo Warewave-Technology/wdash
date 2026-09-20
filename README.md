@@ -139,6 +139,19 @@ The lab's traces are in `*traces*` and `*apm*` and its synthetic checks in
 is in use the moment it is saved; nothing about a source is read from the
 environment or from `.env`.
 
+The lab holds four more backends — a Loki, a VictoriaLogs, a Jaeger and a
+Tempo — and each can be started, filled and added on its own:
+
+```bash
+./lab.sh up loki       # that one and nothing else
+./lab.sh seed loki     # 2,000 lines over the last 24 hours
+./lab.sh targets       # every target: up or not, what is in it, what to type
+```
+
+`./lab.sh targets` is the sheet to add sources from. It reports what each one
+holds **over the last 24 hours**, which is the window every page opens on: a
+lab seeded last week is healthy, full of documents, and blank on screen.
+
 > ### ⚠️ The first account is a local one
 >
 > **The account you create at `/setup` is stored in WDash's own database with
