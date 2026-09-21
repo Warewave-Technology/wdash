@@ -1330,6 +1330,11 @@ class LogSearch {
         // merged search, VictoriaLogs) left none, so Next asked for page one
         // again and labelled it page two.
         this.currentSearchAfter = data.cursor || null;
+        // How many sources this answer came from, so the sentence about not
+        // being able to page can name the right thing. A merge cannot page
+        // even when every member could; blaming "this source" for it sends
+        // somebody to look at a backend that is fine.
+        this.answeredBy = (data.sources || []).length;
         
         const startResult = this.currentPage * this.pageSize + 1;
         const endResult = Math.min(startResult + data.records.length - 1, this.totalResults);
@@ -1863,11 +1868,17 @@ class LogSearch {
         const hasMore = beyond && Boolean(this.currentSearchAfter);
         // More than fits and no way to page to it: said, rather than a Next
         // that cannot deliver.
+        const merged = this.answeredBy > 1;
+        const why = merged
+            ? 'a search across ' + this.answeredBy + ' sources cannot page '
+              + 'further — each backend\'s cursor means something different '
+              + 'and advancing them together would skip records'
+            : 'this source cannot page further';
         const note = (beyond && !hasMore)
             ? '<small class="text-muted d-block text-center">Showing the first ' +
               ((this.currentPage + 1) * this.pageSize).toLocaleString() + ' of ' +
-              this.totalResults.toLocaleString() + '; this source cannot page ' +
-              'further, so narrow the time range to see the rest.</small>'
+              this.totalResults.toLocaleString() + '; ' + why +
+              ', so narrow the time range to see the rest.</small>'
             : '';
         
         if (!hasMore && this.currentPage === 0) {

@@ -441,6 +441,46 @@ check('a role that may not see the index names is told how many', () => {
 // were not. `clearSearch` has swept all seven since it was written and
 // carries the sentence naming this fault; `showError` now calls the same
 // method rather than keeping a second list of ids.
+// More rows than fit and no cursor to ask for them with. The page says so
+// rather than drawing a Next that cannot deliver — and the sentence has to
+// name the right thing: a MERGE cannot page even when every member could,
+// and "this source cannot page further" sends somebody to look at a backend
+// that is fine.
+function pagingNote(sources) {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.totalResults = 5000;
+    search.pageSize = 50;
+    search.currentPage = 0;
+    search.currentSearchAfter = null;
+    search.answeredBy = sources;
+    search.updatePagination();
+    return w.document.getElementById('pagination').textContent;
+}
+
+check('one source that cannot page says so about itself', () => {
+    const said = pagingNote(1);
+    assert(/this source cannot page further/.test(said), said);
+    assert(/Showing the first 50 of 5,000/.test(said), said);
+});
+
+check('a merged search blames the merge, not a backend', () => {
+    const said = pagingNote(3);
+    assert(/across 3 sources cannot page further/.test(said), said);
+    assert(!/this source cannot page/.test(said), said);
+});
+
+check('a page that can go on draws a Next instead', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    Object.assign(search, { totalResults: 5000, pageSize: 50, currentPage: 0,
+                            currentSearchAfter: ['x'], answeredBy: 1 });
+    search.updatePagination();
+    const box = w.document.getElementById('pagination');
+    assert(box.querySelector('#paginationNext'), box.innerHTML);
+    assert(!/cannot page further/.test(box.textContent), box.textContent);
+});
+
 check('a refused search takes the last one off the screen with it', () => {
     const w = makeWindow();
     const search = Object.create(w.__LogSearch.prototype);

@@ -117,10 +117,12 @@ The repository ships a self-contained lab environment. You do not need an
 existing Elasticsearch cluster to try it.
 
 ```bash
-# 1. Start Elasticsearch and load sample data
+# 1. Start every backend that holds data, wait for each, and seed it.
+#    Prints what to type into WDash when it finishes.
 cd lab
-./lab.sh up
-./lab.sh seed          # ~50k logs, 2k traces across two schemas
+./lab.sh demo
+
+#    Or one at a time: ./lab.sh up loki && ./lab.sh seed loki
 
 # 2. Run the application
 cd ..

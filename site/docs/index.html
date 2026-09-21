@@ -420,6 +420,11 @@ $ docker run -d --name wdash-agent \
     you can bring up only what you want to look at.</p>
 
 <pre>$ cd lab
+$ ./lab.sh demo             <span class="c"># every backend that holds data:
+                            # start, wait, seed, and print what to type
+                            # into WDash</span>
+
+<span class="c"># or one at a time</span>
 $ ./lab.sh up loki          <span class="c"># or: elasticsearch, victorialogs,
                             #     jaeger, tempo, identity, otel, …</span>
 $ ./lab.sh seed loki        <span class="c"># 24 hours of data to search</span>

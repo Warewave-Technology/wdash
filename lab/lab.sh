@@ -2,6 +2,9 @@
 #
 # WDash lab environment.
 #
+#   ./lab.sh demo             one command: start every target that holds
+#                             data, wait for each, seed it, and print what to
+#                             type into WDash
 #   ./lab.sh up [target...]    start the stack, or exactly the named targets
 #   ./lab.sh seed [target...] [args...]
 #                             load sample data. With no target named, every
@@ -61,6 +64,12 @@ ALL_TARGETS="elasticsearch loki victorialogs jaeger tempo synthetics identity po
 
 #: The ones with a seeder behind them.
 DATA_TARGETS="elasticsearch loki victorialogs jaeger tempo"
+
+#: How long `demo` waits for one backend to become ready before moving on.
+#: Elasticsearch is the slow one from cold — measured at around 40s on a
+#: laptop with nothing cached — and a demo that gives up at 30 is a demo
+#: that fails on the machine it is most needed on.
+DEMO_WAIT_SECONDS="${DEMO_WAIT_SECONDS:-180}"
 
 target_known() {
     case " $ALL_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
@@ -511,6 +520,53 @@ window every page opens on. Reload it: ./lab.sh seed <target>
 EOF
 }
 
+cmd_demo() {
+    # The whole lab in one command, for somebody who wants to look at WDash
+    # rather than at the lab. `up` then `seed` is two commands with a WAIT
+    # between them that nobody is told about: a backend accepts connections
+    # before it will accept writes, and seeding a Loki that is up but not
+    # ready fails in a way that reads as a broken seeder.
+    #
+    # Only the targets that HOLD data. Kibana, Dex, Postgres and the otel
+    # collector are here for other reasons and have no seeder; starting them
+    # for a demo is three more containers and no more to look at.
+    require_daemon
+
+    echo "Starting ${DATA_TARGETS} …"
+    echo
+    # shellcheck disable=SC2086
+    cmd_up $DATA_TARGETS
+
+    echo
+    for name in $DATA_TARGETS; do
+        printf "waiting for %-14s" "$name"
+        local waited=0
+        until target_ready "$name"; do
+            if [ "$waited" -ge "$DEMO_WAIT_SECONDS" ]; then
+                echo "not ready after ${DEMO_WAIT_SECONDS}s."
+                echo "  Its log may say why: ./lab.sh logs" >&2
+                echo "  Seed it yourself once it is: ./lab.sh seed $name" >&2
+                # Not fatal. Four backends up and one slow is still a lab
+                # worth looking at, and stopping here would throw the other
+                # four away over the fifth.
+                continue 2
+            fi
+            sleep 2
+            waited=$((waited + 2))
+        done
+        echo "ready"
+        target_seed "$name" "$@"
+    done
+
+    echo
+    cmd_targets
+    cat <<'EOF'
+Now add them in WDash: Configuration → Sources → Add source, using the
+lines above. Each is one entry; an Elasticsearch serving logs AND traces
+is ONE source with both boxes ticked.
+EOF
+}
+
 cmd_status() {
     require_daemon
     echo "== Cluster =="
@@ -561,6 +617,7 @@ cmd_reset() {
 }
 
 case "${1:-}" in
+    demo)    shift; cmd_demo "$@" ;;
     up)      shift; cmd_up "$@" ;;
     seed)    shift; cmd_seed "$@" ;;
     targets) cmd_targets ;;

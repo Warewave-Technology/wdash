@@ -375,7 +375,18 @@ variables has to do something before it upgrades.
   for every refusal on the whole installation, on the one rule an
   unauthenticated stranger can produce at will.
 
+- **A merged search says the MERGE cannot page**, not that "this source
+  cannot page further" — which sent somebody to look at a backend that is
+  fine.
+
 ### Added
+
+- **`./lab.sh demo`** — one command: start every backend that holds data,
+  wait for each to be ready, seed it, and print what to type into WDash.
+  `up` then `seed` is two commands with a wait between them that nobody was
+  told about, and seeding a backend that is up but not ready fails in a way
+  that reads as a broken seeder.
+
 
 - **CSRF protection**, on every state-changing request, with the token in a
   hidden field for a form and in `X-CSRF-Token` for a `fetch`. The agent API

@@ -206,6 +206,58 @@ class EveryDataTargetHasASeederTest(unittest.TestCase):
         self.assertIn("Heartbeat", ask('target_seed synthetics'))
 
 
+class OneCommandToLookAtItTest(unittest.TestCase):
+    """`./lab.sh demo`: up, wait, seed, and what to type into WDash.
+
+    `up` then `seed` is two commands with a WAIT between them that nobody
+    is told about — a backend accepts connections before it accepts writes,
+    and seeding a Loki that is up but not ready fails in a way that reads
+    as a broken seeder.
+    """
+
+    def body(self):
+        return _read(LAB, "lab.sh").split("cmd_demo()")[1].split("\ncmd_status")[0]
+
+    def test_it_is_a_command_the_dispatcher_knows(self):
+        dispatch = _read(LAB, "lab.sh").split('case "${1:-}"')[1]
+        self.assertIn("demo)", dispatch)
+
+    def test_the_help_text_names_it(self):
+        header = _read(LAB, "lab.sh").split("set -euo")[0]
+        self.assertIn("./lab.sh demo", header)
+
+    def test_it_starts_and_seeds_the_targets_that_hold_data(self):
+        """Not every target: Kibana, Dex, Postgres and the collector have no
+        seeder, and starting them for a demo is three more containers and
+        nothing more to look at."""
+        body = self.body()
+        self.assertIn("cmd_up $DATA_TARGETS", body)
+        self.assertIn("target_seed", body)
+        self.assertNotIn("$ALL_TARGETS", body)
+
+    def test_it_waits_for_each_one_before_seeding_it(self):
+        body = self.body()
+        self.assertIn("target_ready", body)
+        self.assertIn("DEMO_WAIT_SECONDS", body)
+        # The wait comes BEFORE the seed, or it is not a wait.
+        self.assertLess(body.index("target_ready"), body.index("target_seed"))
+
+    def test_one_slow_backend_does_not_throw_the_others_away(self):
+        """Four up and one slow is still a lab worth looking at."""
+        body = self.body()
+        self.assertIn("continue 2", body)
+        self.assertNotIn("exit 1", body)
+
+    def test_it_ends_by_saying_what_to_type_into_wdash(self):
+        self.assertIn("cmd_targets", self.body())
+
+    def test_the_wait_is_long_enough_for_a_cold_elasticsearch(self):
+        """Measured at around 40s on a laptop with nothing cached, and a
+        demo that gives up at 30 is one that fails on the machine it is most
+        needed on."""
+        self.assertGreaterEqual(int(ask('echo "$DEMO_WAIT_SECONDS"')), 120)
+
+
 class TheGuidesNameTheSameTargetsTest(unittest.TestCase):
     """What somebody reads before typing a target name."""
 
