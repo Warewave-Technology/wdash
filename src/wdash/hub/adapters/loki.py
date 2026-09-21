@@ -793,11 +793,35 @@ class LokiLogSource(LogSource):
             note = self._split_note(split, split_counts, unlabelled, totals,
                                     len(ranked) - len(keep))
 
+        # A bucket is labelled with the START of the interval it counts,
+        # because that is what every reader of a time chart assumes and what
+        # every other adapter here produces.
+        #
+        # Loki does not answer that way. `count_over_time(...[step])`
+        # evaluated at t counts the lines in (t-step, t], so the sample
+        # Loki returns AT t is the bucket ENDING at t, and this used the
+        # instant verbatim. Every Loki chart was therefore drawn one whole
+        # interval late, and its first bar counted records from before the
+        # window entirely. Measured against the lab at a 1h interval over a
+        # 9-hour window: the bucket keyed 12:00 reported 79 lines and there
+        # are exactly 79 lines in [11:00, 12:00) — outside the window — while
+        # the true count for [12:00, 13:00) is 85. All nine buckets matched
+        # the end-labelled reading and none matched the start-labelled one.
+        #
+        # So the key moves back one step, and the sample that then lands
+        # before the window is dropped: it counts nothing the window asked
+        # for, and drawing it would make the chart wider than the range
+        # above it.
+        start = query.window.start.timestamp()
         rows = []
         for at in sorted(totals):
+            began = at - step
+            if began < start - 1:
+                continue
             bucket = Bucket(
-                key=int(at * 1000),
-                key_text=datetime.fromtimestamp(at, tz=timezone.utc).isoformat(),
+                key=int(began * 1000),
+                key_text=datetime.fromtimestamp(
+                    began, tz=timezone.utc).isoformat(),
                 count=totals[at])
             kept = [Bucket(key=key, count=count)
                     for key, count in sorted(split_counts.get(at, {}).items(),

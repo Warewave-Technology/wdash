@@ -87,6 +87,16 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **Every Loki time chart was drawn one interval late.** `count_over_time`
+  evaluated at *t* counts the lines before *t*, and the adapter used *t* as
+  the bucket's label — so each bar sat one whole interval to the right of the
+  records it counted, and the first bar counted records from before the
+  window entirely. Measured on a nine-hour window at hourly resolution: the
+  bucket labelled 12:00 held exactly the 79 lines of 11:00–12:00, while
+  12:00–13:00 really held 85. **Screenshots and saved comparisons of Loki
+  charts from before this version are off by one bar.** Elasticsearch and
+  VictoriaLogs charts are unaffected.
+
 - **A certificate alert is no longer closed by the endpoint going quiet.**
   A firing `certificate_expiring` alert resolved as "no longer being
   checked" and forgot its state the moment the check stopped returning a

@@ -132,6 +132,21 @@ class FakeResponse:
         return self._payload
 
 
+#: A `count_over_time` sample instant INSIDE the window these tests use
+#: (2026-08-04 11:00 -> 12:00), and the one a minute after it. The fixture
+#: answered with instants from 2025 — a year outside the range it was asked
+#: for, which the real Loki never does. It did not matter while the adapter
+#: passed every instant through untouched; it does now that the adapter reads
+#: the window to drop the one sample that counts only the past.
+SAMPLE_AT = 1785843000            # 2026-08-04 11:30:00Z
+NEXT_SAMPLE_AT = SAMPLE_AT + 60   # 11:31:00Z
+
+#: What those samples become. Loki's sample at t is the count for the step
+#: ENDING at t, so the bucket is keyed one step earlier; the step for a
+#: one-hour window is a minute.
+SAMPLE_KEY = (SAMPLE_AT - 60) * 1000
+NEXT_SAMPLE_KEY = (NEXT_SAMPLE_AT - 60) * 1000
+
 #: Streams a RANGE metric query counts over: a label set, and lines per
 #: second. Modelled rather than canned, because the fixture that ignores what
 #: it is asked is exactly how a missing `by` clause passes for a present one:
@@ -139,13 +154,13 @@ class FakeResponse:
 #: series, so a split the adapter never built and a split it built correctly
 #: were the same green test.
 #:
-#: The totals are what the canned answer was — 7 at the first second and 3 at
+#: The totals are what the canned answer was — 7 at the first sample and 3 at
 #: the next — so nothing that counted the whole had to change.
 METRIC_STREAMS = (
     ({"service_name": "api-gateway", "level": "info"},
-     {1754305800: 5, 1754305860: 3}),
+     {SAMPLE_AT: 5, NEXT_SAMPLE_AT: 3}),
     ({"service_name": "api-gateway", "level": "error"},
-     {1754305800: 2}),
+     {SAMPLE_AT: 2}),
 )
 
 #: The label names Loki holds, which is a short list and not the fields a
@@ -881,16 +896,84 @@ class LokiSpecificTest(unittest.TestCase):
         self.assertEqual(result.get("t"), [])
         self.assertEqual(result.warnings, ())
 
-    def _aggregate(self, text, *aggregations):
+    def _aggregate(self, text, *aggregations, hours=1):
         import datetime as dt
 
         from wdash.hub import LogQuery, Scope, TimeWindow
         now = dt.datetime(2026, 8, 4, 12, tzinfo=dt.timezone.utc)
         self.harness.reset()
         return self.source.aggregate(
-            LogQuery(window=TimeWindow.exact(now - dt.timedelta(hours=1), now),
+            LogQuery(window=TimeWindow.exact(now - dt.timedelta(hours=hours),
+                                             now),
                      text=text),
             list(aggregations), Scope.unrestricted())
+
+    # --- which interval a bucket counts ---
+    #
+    # `count_over_time(...[step])` evaluated at t counts the lines in
+    # (t-step, t], so the sample Loki returns AT t is the bucket ENDING at t.
+    # The adapter used the instant verbatim, so every Loki chart was drawn one
+    # whole interval late and its first bar counted records from before the
+    # window. Measured against the lab at a 1h interval: the bucket keyed
+    # 12:00 held exactly the 79 lines of [11:00, 12:00), outside the window,
+    # while [12:00, 13:00) really held 85.
+    #
+    #: 2026-08-04, on the hour, in epoch seconds. The window below is
+    #: 09:00 -> 12:00, so the sample at 09:00 counts 08:00-09:00 and belongs
+    #: to nobody.
+    HOURS = {hour: 1785837600 + (hour - 10) * 3600 for hour in range(8, 14)}
+
+    def _timeline(self, samples, hours=3):
+        from wdash.hub.aggregation import DateHistogram
+        self.harness.metric_streams = (
+            ({"service_name": "api-gateway"},
+             {self.HOURS[hour]: count for hour, count in samples.items()}),)
+        result = self._aggregate(
+            "*", DateHistogram(name="t", interval="1h", min_count=0),
+            hours=hours)
+        return [(bucket.key // 1000, bucket.count)
+                for bucket in result.get("t")]
+
+    def test_a_bucket_is_keyed_by_the_hour_it_counts(self):
+        """The sample Loki returns at 12:00 is the count for 11:00-12:00."""
+        self.assertEqual(self._timeline({10: 5, 11: 7, 12: 9}),
+                         [(self.HOURS[9], 5), (self.HOURS[10], 7),
+                          (self.HOURS[11], 9)])
+
+    def test_the_sample_that_counts_only_the_past_is_dropped(self):
+        """The first sample of a range query covers the step BEFORE the
+        window. Kept, it made the chart wider than the range above it and
+        opened it with a bar nobody asked for."""
+        self.assertEqual(self._timeline({9: 400, 10: 5}),
+                         [(self.HOURS[9], 5)])
+
+    def test_the_key_text_agrees_with_the_key(self):
+        """Two labels for one bucket, and the page reads whichever it likes."""
+        from wdash.hub.aggregation import DateHistogram
+        self.harness.metric_streams = (
+            ({"service_name": "api-gateway"}, {self.HOURS[12]: 3}),)
+        bucket = self._aggregate(
+            "*", DateHistogram(name="t", interval="1h", min_count=0),
+            hours=3).get("t")[0]
+        self.assertEqual(bucket.key // 1000, self.HOURS[11])
+        self.assertTrue(bucket.key_text.startswith("2026-08-04T11:00"),
+                        bucket.key_text)
+
+    def test_a_split_rides_the_same_key(self):
+        """The sub-buckets are the same sample, so a split that stayed on
+        the old key would stack under the wrong bar."""
+        from wdash.hub.aggregation import DateHistogram, Terms
+        self.harness.metric_streams = (
+            ({"service_name": "api-gateway", "level": "error"},
+             {self.HOURS[12]: 4}),)
+        result = self._aggregate(
+            "*", DateHistogram(name="t", interval="1h", min_count=0,
+                               sub=(Terms(name="s", field="level"),)),
+            hours=3)
+        bucket = result.get("t")[0]
+        self.assertEqual(bucket.key // 1000, self.HOURS[11])
+        self.assertEqual([(b.key, b.count) for b in bucket.sub["s"]],
+                         [("error", 4)])
 
     def test_a_panel_counts_what_the_query_selects_not_the_whole_stream(self):
         """count_over_time was built over the stream selector alone, so every
@@ -943,7 +1026,7 @@ class LokiSpecificTest(unittest.TestCase):
 
         rows = result.get("timeline")
         self.assertEqual([(row.key, row.count) for row in rows],
-                         [(1754305800000, 7), (1754305860000, 3)])
+                         [(SAMPLE_KEY, 7), (NEXT_SAMPLE_KEY, 3)])
         self.assertEqual(
             [sorted((b.key, b.count) for b in row.sub["split"]) for row in rows],
             [[("ERROR", 2), ("INFO", 5)], [("INFO", 3)]])
@@ -968,7 +1051,7 @@ class LokiSpecificTest(unittest.TestCase):
 
         rows = result.get("timeline")
         self.assertEqual([(row.key, row.count) for row in rows],
-                         [(1754305800000, 7), (1754305860000, 3)])
+                         [(SAMPLE_KEY, 7), (NEXT_SAMPLE_KEY, 3)])
         self.assertEqual([row.sub for row in rows], [{}, {}])
         self.assertEqual(result.reasons("timeline"),
                          ("'host' is not a Loki label on these streams; "
@@ -984,10 +1067,10 @@ class LokiSpecificTest(unittest.TestCase):
         from wdash.hub.aggregation import DateHistogram, Terms
         self.harness.metric_streams = (
             ({"service_name": "api-gateway", "host": "node-1"},
-             {1754305800: 4}),
+             {SAMPLE_AT: 4}),
             ({"service_name": "payment-service", "host": "node-2"},
-             {1754305800: 2}),
-            ({"service_name": "quiet-one"}, {1754305800: 6}),
+             {SAMPLE_AT: 2}),
+            ({"service_name": "quiet-one"}, {SAMPLE_AT: 6}),
         )
         result = self._aggregate("*", DateHistogram(
             name="timeline", sub=(Terms(name="split", field="host"),)))
@@ -1041,10 +1124,10 @@ class LokiSpecificTest(unittest.TestCase):
         """
         from wdash.hub.aggregation import DateHistogram, Terms
         self.harness.metric_streams = (
-            ({"service_name": "a", "host": "node-1"}, {1754305800: 4}),
-            ({"service_name": "b", "host": "node-2"}, {1754305800: 3}),
-            ({"service_name": "c", "host": "node-3"}, {1754305800: 2}),
-            ({"service_name": "d", "host": "node-4"}, {1754305800: 1}),
+            ({"service_name": "a", "host": "node-1"}, {SAMPLE_AT: 4}),
+            ({"service_name": "b", "host": "node-2"}, {SAMPLE_AT: 3}),
+            ({"service_name": "c", "host": "node-3"}, {SAMPLE_AT: 2}),
+            ({"service_name": "d", "host": "node-4"}, {SAMPLE_AT: 1}),
         )
 
         result = self._aggregate("*", DateHistogram(
@@ -1086,7 +1169,7 @@ class LokiSpecificTest(unittest.TestCase):
 
         rows = result.get("timeline")
         self.assertEqual([(row.key, row.count) for row in rows],
-                         [(1754305800000, 7), (1754305860000, 3)])
+                         [(SAMPLE_KEY, 7), (NEXT_SAMPLE_KEY, 3)])
         self.assertIn("cannot be a Loki label name",
                       " ".join(result.reasons("timeline")))
         for request in self.harness.requests():
@@ -1136,7 +1219,7 @@ class LokiSpecificTest(unittest.TestCase):
         self.assertFalse(result.failed)
         self.assertEqual([(row.key, row.count)
                           for row in result.get("timeline")],
-                         [(1754305800000, 7), (1754305860000, 3)])
+                         [(SAMPLE_KEY, 7), (NEXT_SAMPLE_KEY, 3)])
         self.assertIn("could not split", " ".join(result.reasons("timeline")))
         self.assertIn("maximum of series", " ".join(result.reasons("timeline")))
         self.assertTrue(any(query and " by (" not in query and
