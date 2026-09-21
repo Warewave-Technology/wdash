@@ -391,8 +391,8 @@ variables has to do something before it upgrades.
   panel kind, the three role boundaries and the pattern language, the three
   ways somebody signs in, monitoring, alerting, a reference for every
   variable the process reads, a table of everything WDash refuses, and
-  thirteen named failures with what each one means. It has no published
-  address yet; the README links it by path.
+  thirteen named failures with what each one means, at
+  <https://wdash.warewave.tech/docs/>.
 - **CSRF protection**, on every state-changing request, with the token in a
   hidden field for a form and in `X-CSRF-Token` for a `fetch`. The agent API
   is exempt: it authenticates with a bearer token and no cookie.

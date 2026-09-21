@@ -10,15 +10,16 @@ distributed traces, uptime checks and a cluster configuration advisor, without
 requiring a commercial licence for the features that matter. It collects
 nothing of its own.
 
-**[Documentation](site/docs/index.html)** ·
-[Install](site/docs/index.html#install) ·
-[Config reference](site/docs/index.html#config) ·
-[What WDash refuses](site/docs/index.html#refuses) ·
+**[Documentation](https://wdash.warewave.tech/docs/)** ·
+[Install](https://wdash.warewave.tech/docs/#install) ·
+[Config reference](https://wdash.warewave.tech/docs/#config) ·
+[What WDash refuses](https://wdash.warewave.tech/docs/#refuses) ·
 [Security policy](SECURITY.md)
 
-Those four are a static page in [`site/`](site/) — open it from disk, or serve
-that directory. There is no published address yet, and when there is, this
-paragraph and the links above it are the only things that change.
+That page is the two files in [`site/`](site/), served as they are — no build
+step, nothing fetched from anywhere else. It is generated from nothing and
+edited by hand, so a section renamed there and a link written here go out of
+step silently; `tests/test_site.py` is what refuses that.
 
 ## Why it exists
 

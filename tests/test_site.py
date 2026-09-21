@@ -40,6 +40,14 @@ OLDER_VERSIONS_NAMED_ON_PURPOSE = {
 
 _VERSION = re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?![\d.])")
 
+#: How the README may name the documentation page: the path a checkout has,
+#: or the address it is published at. `_LINK` captures the base so the four
+#: links can be held to ONE of them; `_ANCHOR` captures the section.
+_LINK = re.compile(r"\((site/docs/index\.html|https?://[^\s()#]+/docs/)"
+                   r"(?:#[a-z0-9-]+)?\)")
+_ANCHOR = re.compile(r"(?:site/docs/index\.html|https?://[^\s()#]+/docs/)"
+                     r"#([a-z0-9-]+)")
+
 
 def _read(*parts):
     with open(os.path.join(SITE, *parts), encoding="utf-8") as handle:
@@ -153,12 +161,27 @@ class TheReadmeLinksIntoTheSiteTest(unittest.TestCase):
     def test_every_anchor_it_names_is_there(self):
         """Asserting there is at least one covers "the README stopped
         linking to the page" as well, which is why that is not a second
-        test: it is the same assertion with less of it."""
-        deep = sorted(set(re.findall(
-            r"site/docs/index\.html#([a-z0-9-]+)", self.readme)))
+        test: it is the same assertion with less of it.
+
+        Both spellings, because the row moved from a path to a published
+        address the day the site went up and will move again if it moves:
+        what this is about is the ANCHOR, and the anchor is the half that
+        goes stale on its own.
+        """
+        deep = sorted(set(_ANCHOR.findall(self.readme)))
         self.assertTrue(deep, "the README links into no section")
         dangling = [name for name in deep if name not in self.sections]
         self.assertEqual(dangling, [], "README links with no section")
+
+    def test_the_whole_row_points_at_one_place(self):
+        """Half an edit is the failure here. The row was four relative
+        paths and became four absolute URLs in one commit; one left behind
+        still resolves for whoever has the repository checked out, and for
+        nobody reading the README on the web."""
+        bases = {match.group(1) for match in _LINK.finditer(self.readme)}
+        self.assertTrue(bases, "the README links to the docs page nowhere")
+        self.assertEqual(len(bases), 1,
+                         f"the link row points at {sorted(bases)}")
 
     def test_the_project_layout_lists_the_site(self):
         """The layout block is the map somebody reads instead of looking.
@@ -210,6 +233,28 @@ class TheSiteNeedsNoBuildTest(unittest.TestCase):
             self.assertNotIn("<script src=", text, f"{page} loads a script")
             self.assertNotIn('rel="stylesheet"', text,
                              f"{page} loads a stylesheet")
+
+    def test_each_page_says_where_it_is_published(self):
+        """A canonical URL and the three tags a shared link is rendered
+        from. Not decoration once the site has an address: without them the
+        same page under two hosts is two pages to a crawler, and a link
+        posted anywhere shows the URL and nothing else.
+
+        Held to the page's OWN address rather than to one base, because
+        `/docs/` and `/` are different pages and a canonical copied between
+        them points half the site at the other half.
+        """
+        for parts, expected in (((), "https://wdash.warewave.tech/"),
+                                (("docs",),
+                                 "https://wdash.warewave.tech/docs/")):
+            page = _read(*parts, "index.html")
+            with self.subTest(page=expected):
+                self.assertIn(f'<link rel="canonical" href="{expected}">',
+                              page, "no canonical, or not this page's")
+                self.assertIn(f'<meta property="og:url" content="{expected}">',
+                              page)
+                for tag in ("og:type", "og:title", "og:description"):
+                    self.assertIn(f'property="{tag}"', page, f"no {tag}")
 
     def test_the_mark_each_page_names_is_there(self):
         for parts, page in (((), "site/index.html"),
