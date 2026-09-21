@@ -415,9 +415,9 @@ can administer, and an administrator cannot do it to themselves by demoting,
 disabling or deleting their own account. Both are refused with a sentence
 naming what would break, an audit row, and nothing saved.
 
-Where a name also has a mapping under "Who gets which role", the row says so
-and says the account's own role wins — because it does, and the two can
-disagree with nothing on either page to explain why.
+Where a name also has a row under "Direct mappings", each table says so and
+says the account's own role wins — because it does, and the two can disagree
+with nothing on either page to explain why.
 
 Directory accounts are not listed and cannot be managed here. LDAP and OIDC
 principals are authenticated at the provider and have no row in this database
@@ -522,7 +522,7 @@ after the change. A refused attempt is recorded alongside the successful ones.
 A role something still points at cannot be deleted: the default role, a role a
 mapping names, or one a local account holds. Deleting the default role used to
 succeed, and the page then showed its first role — `admin` — as the default,
-so the next "Save mappings" made everybody unmapped an administrator.
+so the next save made everybody unmapped an administrator.
 
 If it happens anyway, `python -m wdash.store.recover --status` says who can
 administer and `--grant-admin <username>` puts one account back. The recovery

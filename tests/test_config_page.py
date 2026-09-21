@@ -1097,6 +1097,175 @@ class MappingTest(ConfigTestCase):
             row["action"] for row in self.app.store.audit.recent()])
 
 
+
+class OneMappingAtATimeTest(ConfigTestCase):
+    """The table on Roles & access, where a row is a record.
+
+    Every mapping used to ride on one form: the page held a stack of input
+    groups and "Save mappings" submitted all of them plus the default role
+    together. Three things followed from that, and all three are what these
+    ask about. Adding one person re-sent everybody, so a row nobody had
+    finished went to the server with the rest. A mapping could not be changed
+    without the set being rewritten. And the default role and the mappings
+    shared a submission, so a handler reading a missing field as "no
+    mappings" would empty the table on a save that never mentioned it.
+    """
+
+    def stored(self):
+        return self.app.store.settings.get("rbac.user_roles") or {}
+
+    def save(self, **form):
+        return self.client.post("/admin/mappings/entry", data=form,
+                                follow_redirects=True)
+
+    def test_one_is_added_and_the_others_are_untouched(self):
+        self.app.store.settings.set("rbac.user_roles", {"carol": "viewer"})
+        response = self.save(identifier="bob", role="developer", original="")
+        self.assertEqual(self.stored(),
+                         {"carol": "viewer", "bob": "developer"})
+        self.assertIn(b"mapped to developer", response.data)
+
+    def test_editing_the_role_replaces_only_that_row(self):
+        self.app.store.settings.set("rbac.user_roles",
+                                    {"carol": "viewer", "bob": "developer"})
+        self.save(identifier="carol", role="developer", original="carol")
+        self.assertEqual(self.stored(),
+                         {"carol": "developer", "bob": "developer"})
+
+    def test_editing_the_identifier_moves_it_rather_than_copying_it(self):
+        """The old row still granted. A mapping left behind under the name
+        somebody was editing away from is access nobody can see they gave."""
+        self.app.store.settings.set("rbac.user_roles",
+                                    {"alice@example.com": "developer"})
+        response = self.save(identifier="alice", role="developer",
+                             original="alice@example.com")
+        self.assertEqual(self.stored(), {"alice": "developer"})
+        self.assertIn(b"is now", response.data)
+
+    def test_a_blank_identifier_is_refused(self):
+        self.save(identifier="  ", role="viewer", original="")
+        self.assertEqual(self.stored(), {})
+
+    def test_a_role_nobody_chose_is_refused_rather_than_the_first_one(self):
+        """The first role is `admin`. An empty select submits its first
+        option unless it has one of its own, and the page gives it one —
+        this is the half that does not depend on the browser."""
+        response = self.save(identifier="bob", role="", original="")
+        self.assertEqual(self.stored(), {})
+        self.assertIn(b"Choose a role", response.data)
+
+    def test_a_role_that_does_not_exist_is_refused_by_name(self):
+        response = self.save(identifier="bob", role="auditor", original="")
+        self.assertEqual(self.stored(), {})
+        self.assertIn(b"no role called", response.data)
+        self.assertIn(b"auditor", response.data)
+
+    def test_adding_one_is_audited_with_what_it_grants(self):
+        self.save(identifier="bob", role="viewer", original="")
+        rows = [row for row in self.app.store.audit.recent()
+                if row["action"] == "mapping added"]
+        self.assertEqual(len(rows), 1, "the change was not recorded")
+        self.assertEqual(rows[0]["state"]["role"], "viewer")
+        self.assertEqual(rows[0]["state"]["user_roles"], {"bob": "viewer"})
+
+    def test_a_refused_one_is_audited_too(self):
+        self.save(identifier="bob", role="auditor", original="")
+        actions = [row["action"] for row in self.app.store.audit.recent()]
+        self.assertNotIn("mapping added", actions)
+
+    def test_deleting_one_leaves_the_rest(self):
+        self.app.store.settings.set("rbac.user_roles",
+                                    {"carol": "viewer", "bob": "developer"})
+        response = self.client.post("/admin/mappings/delete",
+                                    data={"identifier": "carol"},
+                                    follow_redirects=True)
+        self.assertEqual(self.stored(), {"bob": "developer"})
+        self.assertIn(b"is gone", response.data)
+        actions = [row["action"] for row in self.app.store.audit.recent()]
+        self.assertIn("mapping removed", actions)
+
+    def test_deleting_one_that_is_already_gone_says_so(self):
+        self.app.store.settings.set("rbac.user_roles", {"bob": "developer"})
+        response = self.client.post("/admin/mappings/delete",
+                                    data={"identifier": "carol"},
+                                    follow_redirects=True)
+        self.assertEqual(self.stored(), {"bob": "developer"})
+        self.assertIn(b"no longer there", response.data)
+
+    def test_saving_the_default_role_alone_does_not_empty_the_table(self):
+        """The form that carries the default no longer carries the mappings.
+        A handler reading an ABSENT field as "none" would delete everybody's
+        mapping every time somebody changed the default."""
+        self.app.store.settings.set("rbac.user_roles", {"bob": "developer"})
+        response = self.client.post("/admin/mappings",
+                                    data={"default_role": "viewer"},
+                                    follow_redirects=True)
+        self.assertEqual(self.stored(), {"bob": "developer"})
+        self.assertEqual(self.app.store.settings.get("rbac.default_role"),
+                         "viewer")
+        self.assertIn(b"now gets", response.data)
+
+    def test_an_empty_field_still_means_none(self):
+        """Absent is "not mentioned"; empty is a submission saying there are
+        none. The bulk form is still how a whole set is replaced."""
+        self.app.store.settings.set("rbac.user_roles", {"bob": "developer"})
+        self.client.post("/admin/mappings",
+                         data={"default_role": "viewer", "user_roles": ""},
+                         follow_redirects=True)
+        self.assertEqual(self.stored(), {})
+
+    def test_a_default_role_that_does_not_exist_is_still_refused_alone(self):
+        self.client.post("/admin/mappings", data={"default_role": "auditor"},
+                         follow_redirects=True)
+        self.assertEqual(self.app.store.settings.get("rbac.default_role"),
+                         "viewer")
+
+
+class TheMappingTableSaysWhatIsStoredTest(ConfigTestCase):
+    """What the page renders, asked of the page."""
+
+    def page(self):
+        return self.client.get("/admin/config").get_data(as_text=True)
+
+    def test_a_row_carries_its_own_values_and_its_own_delete(self):
+        self.app.store.settings.set("rbac.user_roles",
+                                    {"alice@example.com": "developer"})
+        page = self.page()
+        table = page.split('id="mappingsTable"', 1)[1].split("</table>", 1)[0]
+        self.assertIn("alice@example.com", table)
+        self.assertIn("developer", table)
+        self.assertIn("/admin/mappings/delete", table)
+        self.assertIn("data-mapping=", table)
+
+    def test_a_role_that_no_longer_exists_is_marked_rather_than_shown_plain(
+            self):
+        """It is still granting nothing, and a row that looks like every
+        other row says the opposite."""
+        self.app.store.settings.set("rbac.user_roles", {"bob": "auditor"})
+        table = self.page().split('id="mappingsTable"', 1)[1]
+        self.assertIn("no longer exists", table.split("</table>", 1)[0])
+
+    def test_with_none_stored_it_says_what_happens_instead(self):
+        page = self.page()
+        self.assertNotIn('id="mappingsTable"', page)
+        self.assertIn("No direct mappings", page)
+
+    def test_the_modal_offers_no_role_before_one_is_chosen(self):
+        """A select with nothing selected shows, and submits, its FIRST
+        option — and the first role is `admin`."""
+        modal = self.page().split('id="mappingRole"', 1)[1].split("</select>", 1)[0]
+        first = modal.split("<option", 2)[1]
+        self.assertIn('value=""', first)
+
+    def test_a_local_account_is_told_its_own_role_wins(self):
+        """A local account's stored role is read first, so a mapping naming
+        one does nothing while it exists. The accounts table says so from its
+        side; a reader on this tab would otherwise believe the row."""
+        self.app.store.settings.set("rbac.user_roles", {"owner": "viewer"})
+        table = self.page().split('id="mappingsTable"', 1)[1].split("</table>", 1)[0]
+        self.assertIn("its own role wins", table)
+
+
 class RoleDependentsTest(ConfigTestCase):
     """A role something still points at stays until it points elsewhere.
 
@@ -1200,6 +1369,42 @@ class DirectoryAdministratorTest(ConfigTestCase):
                    if row["action"] == "mappings save refused"]
         self.assertEqual(len(refused), 1, "the refusal was not recorded")
         self.assertIn("lose access", refused[0]["state"]["reason"])
+
+    def test_mapping_her_email_below_her_username_one_row_at_a_time(self):
+        """The same rule, through the table. A row saved on its own is still
+        a change to the whole picture — the invariant reads the set it would
+        leave behind, not the row."""
+        response = self.client.post("/admin/mappings/entry", data={
+            "identifier": "alice@example.com", "role": "viewer",
+            "original": ""}, follow_redirects=True)
+        self.assertIn(b"lose access", response.data)
+        self.assertEqual(self.app.store.settings.get("rbac.user_roles") or {},
+                         {})
+
+        refused = [row for row in self.app.store.audit.recent()
+                   if row["action"] == "mapping added refused"]
+        self.assertEqual(len(refused), 1, "the refusal was not recorded")
+        self.assertIn("lose access", refused[0]["state"]["reason"])
+
+    def test_removing_the_mapping_that_administers_her_is_refused(self):
+        """Deletion is a change to the set too. Hers is the only thing
+        putting her on a role that can administer, so removing it empties the
+        page she would need to put it back."""
+        admin = self.app.store.roles.get("admin")
+        self.app.store.roles.upsert(
+            "admin", permissions=admin["permissions"],
+            containers=admin["containers"],
+            trace_containers=admin["trace_containers"], groups=[])
+        self.app.store.settings.set("rbac.user_roles",
+                                    {"alice@example.com": "admin"})
+        self.app.store.rbac.invalidate()
+
+        response = self.client.post("/admin/mappings/delete",
+                                    data={"identifier": "alice@example.com"},
+                                    follow_redirects=True)
+        self.assertIn(b"lose access", response.data)
+        self.assertEqual(self.app.store.settings.get("rbac.user_roles"),
+                         {"alice@example.com": "admin"})
 
     def test_taking_her_group_off_the_admin_role_is_refused(self):
         admin = self.app.store.roles.get("admin")

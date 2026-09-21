@@ -900,8 +900,8 @@
                 {% endfor %}
               </select>
               <div class="form-text" style="font-size:.7rem">
-                The account's own role, which beats any mapping under
-                &ldquo;Who gets which role&rdquo;.
+                The account's own role, which beats any
+                &ldquo;Direct mapping&rdquo; naming it.
               </div>
             </div>
             <div class="col-md-6"></div>
@@ -969,6 +969,66 @@
           <button type="button" class="btn btn-sm btn-secondary"
                   data-bs-dismiss="modal">Cancel</button>
           <button type="submit" class="btn btn-sm btn-primary">Reset password</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================ MAPPING ============================ -->
+{# One direct mapping, added or edited on its own.
+   The identifier stays free text: an email or a username cannot be
+   enumerated from here, and a list to choose from would be a list of
+   everybody who has ever signed in. The ROLE is chosen, because a role name
+   that does not exist grants nothing and looks configured — the same failure
+   the permission catalogue exists to prevent.
+
+   The empty first option is what the browser shows when nothing has been
+   picked. Without it the browser shows, and submits, the FIRST option, and
+   the first role is `admin`. #}
+<div class="modal fade" id="mappingModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="POST" action="{{ url_for('config.save_mapping') }}"
+            id="mappingForm">
+        <div class="modal-header">
+          <h5 class="modal-title" id="mappingModalTitle">Add mapping</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          {# Which mapping is being edited, so that changing the identifier
+             MOVES it rather than leaving the old one behind beside it. #}
+          <input type="hidden" name="original" id="mappingOriginal">
+          <div class="mb-3">
+            <label class="form-label small">Email or username</label>
+            <input class="form-control form-control-sm" name="identifier"
+                   id="mappingIdentifier" autocomplete="off" required
+                   placeholder="alice@example.com">
+            <div class="form-text">
+              Whatever the directory sends as the username, or a verified
+              email address. Matched exactly.
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small">Role</label>
+            <select class="form-select form-select-sm" name="role"
+                    id="mappingRole" required>
+              <option value="">choose a role&hellip;</option>
+              {% for role in roles %}
+              <option value="{{ role.name }}">{{ role.name }}</option>
+              {% endfor %}
+            </select>
+            <div class="form-text">
+              This wins over every group mapping. It does not beat a local
+              account's own role, which is read first.
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-sm btn-secondary"
+                  data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-sm btn-primary">Save mapping</button>
         </div>
       </form>
     </div>

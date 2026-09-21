@@ -204,19 +204,40 @@ function build() {
     return { w, calls };
 }
 
-/** The mapping form alone, with the roles and mappings the page embeds. */
-function buildMappings(roleNames, mappings, defaultRole) {
+/** What Jinja's autoescape does to text, and to an attribute value. */
+function escapeText(value) {
+    return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;');
+}
+function escapeAttribute(value) {
+    return escapeText(value).replace(/"/g, '&#34;').replace(/'/g, '&#39;');
+}
+
+/**
+ * The mapping modal and the table it is opened from, as the server renders
+ * them: the role options are real <option> elements and each row carries its
+ * own values in a data attribute. Nothing here is built from a string in
+ * config.js, which is the point being checked.
+ */
+function buildMappings(roleNames, mappings) {
+    const options = ['<option value="">choose a role…</option>'].concat(
+        roleNames.map(name =>
+            `<option value="${escapeAttribute(name)}">${
+                escapeText(name)}</option>`)).join('');
+    const rows = Object.entries(mappings).map(([who, role]) =>
+        `<tr><td>${escapeText(who)}</td><td>${escapeText(role)}</td>
+         <td><button class="edit-mapping" data-mapping='${
+             JSON.stringify({ who, role }).replace(/'/g, '&#39;')
+         }'>Edit</button></td></tr>`).join('');
     const dom = new JSDOM(`<!doctype html><body>
+      <table id="mappingsTable"><tbody>${rows}</tbody></table>
+      <button id="addMappingBtn"></button>
       <form id="mappingForm">
-        <select name="default_role" id="defaultRole"></select>
-        <div id="mappingRows"></div>
-        <button type="button" id="addMappingRow"></button>
-        <input type="hidden" name="user_roles" id="mappingField">
+        <h5 id="mappingModalTitle">Add mapping</h5>
+        <input type="hidden" name="original" id="mappingOriginal">
+        <input name="identifier" id="mappingIdentifier">
+        <select name="role" id="mappingRole">${options}</select>
       </form>
-      <script type="application/json" id="mappingData">${
-          JSON.stringify(mappings)}</script>
-      <script type="application/json" id="roleNames">${
-          JSON.stringify(roleNames)}</script>
       </body>`,
       { runScripts: 'outside-only', url: 'http://localhost/admin/config' });
     const w = dom.window;
@@ -548,57 +569,84 @@ function type(w, id, value) {
           `monitors=${JSON.stringify(
               adding.document.getElementById('sourceMonitorPatterns').value)}`);
 
-    // Who gets which role. A select with nothing selected submits its FIRST
-    // option, and the first role is `admin`: a mapping whose role had been
-    // deleted came back as `admin`, and so did a new row nobody chose for.
-    // The next "Save mappings", for any reason, made those people
-    // administrators.
+    // Direct mappings. A select with nothing selected shows, and SUBMITS,
+    // its FIRST option, and the first role is `admin`: a mapping whose role
+    // had been deleted came back as `admin`, and so did a new row nobody
+    // chose for. Both are asked of the modal the table opens, since that is
+    // now the only way a mapping is written.
     console.log('role mappings');
     const ROLES = ['admin', 'developer', 'viewer'];
     const mapped = buildMappings(ROLES, {
         'alice@example.com': 'auditor', 'carol': 'viewer' });
-    const sent = mapped.document.getElementById('mappingField').value;
-    check('a mapping whose role is gone is not sent as admin',
-          sent.includes('alice@example.com = auditor')
-          && !sent.includes('alice@example.com = admin'), sent);
-    check('and the row says the role no longer exists',
-          mapped.document.querySelector('.mapping-role.is-invalid') !== null
-          && mapped.document.querySelector('.mapping-role').textContent
-                   .includes('no longer exists'));
-    check('a mapping to a role that exists is sent unchanged',
-          sent.includes('carol = viewer'), sent);
+    const editors = mapped.document.querySelectorAll('.edit-mapping');
+    const roleField = mapped.document.getElementById('mappingRole');
+    const whoField = mapped.document.getElementById('mappingIdentifier');
 
-    const fresh = buildMappings(ROLES, {});
-    fresh.document.getElementById('addMappingRow').click();
-    const who = fresh.document.querySelector('.mapping-who');
-    who.value = 'bob';
-    who.dispatchEvent(new fresh.Event('input'));
-    const freshSent = fresh.document.getElementById('mappingField').value;
-    check('a new row nobody chose a role for is not sent as admin',
-          freshSent.trim() === 'bob =', JSON.stringify(freshSent));
+    editors[0].dispatchEvent(new mapped.Event('click'));
+    check('editing a mapping whose role is gone does not choose admin',
+          roleField.value === 'auditor', roleField.value);
+    check('and the option it lands on says the role no longer exists',
+          roleField.selectedOptions[0].textContent.includes('no longer exists')
+          && roleField.classList.contains('is-invalid'),
+          roleField.selectedOptions[0].textContent);
+    check('and the identifier comes with it, as what is being replaced',
+          whoField.value === 'alice@example.com'
+          && mapped.document.getElementById('mappingOriginal').value
+             === 'alice@example.com',
+          whoField.value);
 
-    // Inside a <select> the parser drops most tags on its own, so a bare
-    // `<img>` proves nothing: the way out of an option is to close the
-    // select. Both paths — a role that exists and one that does not.
-    const hostile = buildMappings(['x</select><img src=x>'],
-                                  { 'dave': 'y</select><b>gone</b>' });
-    check('role names are text, not markup',
-          hostile.document.querySelector('#mappingRows img') === null
-          && hostile.document.querySelector('#mappingRows b') === null,
-          hostile.document.getElementById('mappingRows').innerHTML);
+    editors[1].dispatchEvent(new mapped.Event('click'));
+    check('editing a mapping whose role exists chooses that role',
+          roleField.value === 'viewer', roleField.value);
+    check('and the role that had gone is no longer offered to anybody else',
+          Array.from(roleField.options).every(o => o.value !== 'auditor'),
+          Array.from(roleField.options).map(o => o.value).join(','));
 
-    // And values, not attributes: a quote in a role name or an identifier
-    // must not end the attribute it is written into.
+    mapped.document.getElementById('addMappingBtn')
+          .dispatchEvent(new mapped.Event('click'));
+    check('adding starts on no role at all, not on the first one',
+          roleField.value === '' && !roleField.classList.contains('is-invalid'),
+          roleField.value);
+    check('adding starts on an empty identifier, replacing nothing',
+          whoField.value === ''
+          && mapped.document.getElementById('mappingOriginal').value === ''
+          && mapped.document.getElementById('mappingModalTitle').textContent
+             === 'Add mapping');
+
+    // The option config.js has to build itself is the one for a role that is
+    // gone. Built with createElement and textContent, a role name that is
+    // markup is a name rather than a tag — by construction, not by escaping.
+    const GONE = 'y</select><b>gone</b> & co';
+    const hostile = buildMappings(['admin'], { 'dave': GONE });
+    hostile.document.querySelector('.edit-mapping')
+           .dispatchEvent(new hostile.Event('click'));
+    const hostileRole = hostile.document.getElementById('mappingRole');
+    check('a role name is text, not markup',
+          hostileRole.querySelector('b') === null
+          && hostileRole.value === GONE,
+          hostileRole.innerHTML);
+    // Character for character, which is the half a parser cannot fake: run
+    // through innerHTML the `<b>` is swallowed and the `&` decoded, so the
+    // name on screen is not the name that is granting.
+    check('and the name on screen is the name that is stored',
+          hostileRole.selectedOptions[0].textContent
+          === `${GONE} — no longer exists`,
+          JSON.stringify(hostileRole.selectedOptions[0].textContent));
+
+    // And values, not attributes: a quote in either one must survive the row
+    // and reach the form unchanged, or the save renames somebody.
     const quoted = buildMappings(['q" data-x="1'], { 'w" data-y="1': 'q" data-x="1' });
-    const quotedRows = quoted.document.getElementById('mappingRows');
+    quoted.document.querySelector('.edit-mapping')
+          .dispatchEvent(new quoted.Event('click'));
     check('a quote cannot end an attribute',
-          quotedRows.querySelector('[data-x],[data-y]') === null,
-          quotedRows.innerHTML);
+          quoted.document.querySelector('#mappingRole [data-x]') === null
+          && quoted.document.querySelector('#mappingForm [data-y]') === null);
     check('and the values survive the round trip exactly',
-          quotedRows.querySelector('.mapping-role').value === 'q" data-x="1'
-          && quoted.document.getElementById('mappingField').value
-             === 'w" data-y="1 = q" data-x="1',
-          quoted.document.getElementById('mappingField').value);
+          quoted.document.getElementById('mappingIdentifier').value
+          === 'w" data-y="1'
+          && quoted.document.getElementById('mappingRole').value
+             === 'q" data-x="1',
+          quoted.document.getElementById('mappingRole').value);
 
     // What a change does, including the two things it used to leave out.
     // The fake server works the change out from what the form SENT, the

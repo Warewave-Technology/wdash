@@ -682,84 +682,65 @@ document.querySelectorAll('.pick-target').forEach(button => {
 /* ------------------------------------------------------------------------
  * Role mappings.
  *
- * The identifier stays free text — an email or username cannot be enumerated
- * from here, and guessing at a list would be worse than a box. The ROLE is
- * chosen, because a role name that does not exist grants nothing and looks
- * configured, which is the same failure the permission catalogue exists to
- * prevent.
+ * A row on the table is a record: the modal edits ONE of them and the server
+ * saves that one. It used to be a stack of input groups written back by a
+ * single "Save mappings" carrying every row, so adding one person
+ * re-submitted everybody — including whatever a half-filled row happened to
+ * hold.
  *
- * Serialised back into the one-per-line form the server already parses and
- * re-validates, so the form is a convenience over the contract rather than a
- * second contract.
+ * The table itself is rendered by the server, which is why nothing here
+ * writes markup. All this does is carry a row's two values into the form,
+ * and the one option the server cannot render in advance: the role a mapping
+ * names that no longer exists. That option is built with createElement and
+ * textContent rather than innerHTML — a role called
+ * `x</select><img src=x>` is then a name, not a tag, by construction rather
+ * than by escaping.
  * --------------------------------------------------------------------- */
 
-(function setUpMappings() {
-    const rows = document.getElementById('mappingRows');
-    if (!rows) return;
+(function setUpMappingModal() {
+    const form = document.getElementById('mappingForm');
+    if (!form) return;
 
-    const roleNames = JSON.parse(
-        document.getElementById('roleNames')?.textContent || '[]');
-    const existing = JSON.parse(
-        document.getElementById('mappingData')?.textContent || '{}');
+    const title = document.getElementById('mappingModalTitle');
+    const identifier = document.getElementById('mappingIdentifier');
+    const original = document.getElementById('mappingOriginal');
+    const role = document.getElementById('mappingRole');
 
-    function serialise() {
-        const lines = [];
-        rows.querySelectorAll('.mapping-row').forEach(row => {
-            const who = row.querySelector('.mapping-who').value.trim();
-            const role = row.querySelector('.mapping-role').value;
-            if (who) lines.push(`${who} = ${role}`);
-        });
-        document.getElementById('mappingField').value = lines.join('\n');
+    function fill(who, chosen) {
+        // Whatever the last edit added. A role that has been deleted is
+        // offered only while editing the mapping that still names it —
+        // left in the list, it would be choosable for everybody else.
+        role.querySelectorAll('option[data-missing]').forEach(option =>
+            option.remove());
+
+        identifier.value = who;
+        original.value = who;
+        title.textContent = who ? 'Edit mapping' : 'Add mapping';
+
+        const known = Array.from(role.options).some(
+            option => option.value === chosen);
+        if (chosen && !known) {
+            const option = document.createElement('option');
+            option.value = chosen;
+            option.textContent = `${chosen} — no longer exists`;
+            option.dataset.missing = '1';
+            role.appendChild(option);
+        }
+        // An unknown role with no option of its own would leave the select on
+        // its first entry, which is the empty one — never somebody's role.
+        role.value = chosen || '';
+        role.classList.toggle('is-invalid', Boolean(chosen) && !known);
     }
 
-    // A select with nothing selected shows, and SUBMITS, its first option —
-    // and the first role is `admin`. A mapping whose role had been deleted
-    // therefore came back as `admin`, and so did every new row nobody got
-    // round to choosing for. Both now carry an option of their own: the
-    // missing name, which the server refuses by name, or no role at all,
-    // which it refuses as not understood. Neither is ever somebody's role.
-    function roleOptions(role) {
-        const known = roleNames.includes(role);
-        const lead = !role
-            ? '<option value="" selected>choose a role…</option>'
-            : known ? ''
-            : `<option value="${escapeHtml(role)}" selected>${
-                  escapeHtml(role)} — no longer exists</option>`;
-        return lead + roleNames.map(name =>
-            `<option value="${escapeHtml(name)}"${
-                name === role ? ' selected' : ''}>${escapeHtml(name)}</option>`
-        ).join('');
-    }
+    document.getElementById('addMappingBtn')?.addEventListener(
+        'click', () => fill('', ''));
 
-    function addRow(who = '', role = '') {
-        const row = document.createElement('div');
-        row.className = 'input-group input-group-sm mb-1 mapping-row';
-        row.innerHTML =
-            `<input type="text" class="form-control mapping-who"
-                    placeholder="alice@example.com" value="${escapeHtml(who)}">
-             <span class="input-group-text">is</span>
-             <select class="form-select mapping-role${
-                 role && !roleNames.includes(role) ? ' is-invalid' : ''}"
-                     style="max-width:11rem">${roleOptions(role)}</select>
-             <button type="button" class="btn btn-outline-danger mapping-remove"
-                     title="Remove">&times;</button>`;
-        rows.appendChild(row);
-
-        row.querySelector('.mapping-remove').addEventListener('click', () => {
-            row.remove();
-            serialise();
+    document.querySelectorAll('.edit-mapping').forEach(button => {
+        button.addEventListener('click', () => {
+            const mapping = JSON.parse(button.dataset.mapping || '{}');
+            fill(mapping.who || '', mapping.role || '');
         });
-        row.querySelectorAll('input, select').forEach(field => {
-            field.addEventListener('input', serialise);
-            field.addEventListener('change', serialise);
-        });
-        serialise();
-    }
-
-    Object.entries(existing).forEach(([who, role]) => addRow(who, role));
-    document.getElementById('addMappingRow')?.addEventListener('click',
-                                                               () => addRow());
-    serialise();
+    });
 })();
 
 

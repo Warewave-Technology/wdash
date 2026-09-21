@@ -1384,6 +1384,15 @@ def save_mappings():
               f"of the roles that do. Nothing was saved.", "error")
         return redirect(url_for("config.config_page"))
 
+    # Absent is not empty. The page's default-role form does not carry the
+    # mappings at all any more — each one is its own record, saved through
+    # `save_mapping` below — and a handler that read a missing field as "no
+    # mappings" would empty the table every time somebody changed the
+    # default. An EMPTY field still means none: that is a submission saying
+    # so, and the bulk form is still how a whole set is replaced at once.
+    if "user_roles" not in request.form:
+        return _save_default_role(store, default_role)
+
     mappings, rejected = {}, []
     for line in _lines(request.form.get("user_roles")):
         if "=" not in line:
@@ -1419,6 +1428,150 @@ def save_mappings():
            state={"default_role": default_role, "user_roles": mappings})
     flash("Role mappings saved.", "success")
     return redirect(url_for("config.config_page"))
+
+
+def _stored_mappings(store):
+    """The mappings as they stand, for a change that touches one of them."""
+    return dict(store.settings.get("rbac.user_roles") or {})
+
+
+def _save_mappings(store, mappings, action, subject, state, message):
+    """Write a changed mapping set, or refuse it as one.
+
+    Every path in and out of the table goes through here, so the lockout
+    check, the cache invalidation and the audit row cannot be remembered on
+    one route and forgotten on the next. The default role is read rather than
+    submitted: it is not on the form that changed a mapping, and taking it
+    from anywhere else would let one form quietly rewrite the other's field.
+    """
+    default_role = store.settings.get("rbac.default_role") or ""
+    refusal = refuses_mapping_save(store.roles.all(), default_role, mappings,
+                                   _actor())
+    if refusal:
+        _audit(f"{action} refused", subject=subject,
+               state=dict(state, reason=refusal))
+        flash(refusal, "error")
+        return redirect(url_for("config.config_page", _anchor="tab-roles"))
+
+    store.settings.set("rbac.user_roles", mappings,
+                       updated_by=current_user.username)
+    store.rbac.invalidate()
+    _audit(action, subject=subject, state=dict(state, user_roles=mappings))
+    flash(message, "success")
+    return redirect(url_for("config.config_page", _anchor="tab-roles"))
+
+
+def _save_default_role(store, default_role):
+    """The default role on its own, from the form that now carries only it.
+
+    The stored mappings are read and passed through the invariant unchanged:
+    the default is what somebody lands on when no mapping names them, so
+    whether this change locks the administrator out is a question about both.
+    """
+    mappings = _stored_mappings(store)
+    refusal = refuses_mapping_save(store.roles.all(), default_role, mappings,
+                                   _actor())
+    if refusal:
+        _audit("default role save refused", subject="rbac:mappings",
+               state={"reason": refusal, "default_role": default_role})
+        flash(refusal, "error")
+        return redirect(url_for("config.config_page", _anchor="tab-roles"))
+
+    store.settings.set("rbac.default_role", default_role,
+                       updated_by=current_user.username)
+    store.rbac.invalidate()
+    _audit("default role updated", subject="rbac:mappings",
+           state={"default_role": default_role})
+    flash(f"Everybody no mapping names now gets '{default_role}'.", "success")
+    return redirect(url_for("config.config_page", _anchor="tab-roles"))
+
+
+@config_bp.route("/mappings/entry", methods=["POST"])
+@login_required
+def save_mapping():
+    """One mapping, added or edited.
+
+    A row on the table is a record. It used to be one line of a textarea's
+    worth of rows that a single save carried in full, so adding one person
+    re-submitted everybody — and a row somebody had half-filled went with
+    them.
+
+    `original` is which mapping this was, so that changing the identifier
+    MOVES it. Without that, editing `alice@example.com` into `alice` leaves
+    the old row in place beside the new one, still granting.
+    """
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    known = {role["name"] for role in store.roles.all()}
+
+    identifier = (request.form.get("identifier") or "").strip()
+    role = (request.form.get("role") or "").strip()
+    original = (request.form.get("original") or "").strip()
+
+    def refuse(message):
+        flash(f"{message} Nothing was saved.", "error")
+        return redirect(url_for("config.config_page", _anchor="tab-roles"))
+
+    if not identifier:
+        return refuse("Type the email address or username this role is for.")
+    # Both are refused rather than defaulted, for the reason the empty option
+    # exists on the form: a select with nothing chosen submits its FIRST
+    # option, and the first role is `admin`.
+    if not role:
+        return refuse(f"Choose a role for '{identifier}'.")
+    if role not in known:
+        return refuse(f"There is no role called '{role}'. A mapping to a role "
+                      f"that does not exist grants nothing, silently.")
+
+    mappings = _stored_mappings(store)
+    replaced = mappings.get(identifier)
+    if original and original != identifier:
+        mappings.pop(original, None)
+    mappings[identifier] = role
+
+    if original and original != identifier:
+        message = f"'{original}' is now '{identifier}', mapped to {role}."
+    elif replaced is not None:
+        message = f"'{identifier}' is now mapped to {role}."
+    else:
+        message = f"'{identifier}' is mapped to {role}."
+
+    return _save_mappings(
+        store, mappings, "mapping updated" if original else "mapping added",
+        f"rbac:mapping:{identifier}",
+        {"identifier": identifier, "role": role,
+         "was": {"identifier": original or identifier, "role": replaced}},
+        message)
+
+
+@config_bp.route("/mappings/delete", methods=["POST"])
+@login_required
+def delete_mapping():
+    """One mapping, removed.
+
+    Through the same invariant as a save: removing the mapping that is what
+    makes you an administrator drops you to the default role, which empties
+    the page you would need to put it back.
+    """
+    denied = _require_admin()
+    if denied:
+        return denied
+
+    store = _store()
+    identifier = (request.form.get("identifier") or "").strip()
+    mappings = _stored_mappings(store)
+    if identifier not in mappings:
+        flash("That mapping is no longer there.", "warning")
+        return redirect(url_for("config.config_page", _anchor="tab-roles"))
+
+    removed = mappings.pop(identifier)
+    return _save_mappings(
+        store, mappings, "mapping removed", f"rbac:mapping:{identifier}",
+        {"identifier": identifier, "was": removed},
+        f"The mapping for '{identifier}' is gone.")
 
 
 # ---------------------------------------------------------------------------

@@ -413,7 +413,8 @@
                       or (account.email and account.email in user_roles) %}
                 <div class="text-muted mt-1" style="font-size:.75rem">
                   <i class="fas fa-circle-info"></i>
-                  &ldquo;Who gets which role&rdquo; also maps this account, to
+                  &ldquo;Direct mappings&rdquo;, under Roles &amp; access, also
+                  names this account, as
                   <code>{{ user_roles.get(account.username)
                            or user_roles.get(account.email) }}</code>.
                   The role chosen here wins: a local account's own role comes
@@ -944,18 +945,18 @@
 
     <div class="col-lg-5">
       <div class="card h-100">
-        <div class="card-header"><h5 class="mb-0">Who gets which role</h5></div>
+        <div class="card-header"><h5 class="mb-0">Default role</h5></div>
         <div class="card-body">
           <form method="POST" action="{{ url_for('config.save_mappings') }}">
             <div class="mb-3">
-              <label class="form-label small">Default role</label>
               {# A default that names no existing role must say so. With no
                  option selected the browser selects the FIRST one, which is
                  `admin`, and the next save made everybody unmapped an
                  administrator. The server refuses the missing name. #}
               {% set default_exists = roles | selectattr('name', 'equalto', default_role) | list %}
               <select class="form-select form-select-sm{% if not default_exists %} is-invalid{% endif %}"
-                      name="default_role" id="defaultRole">
+                      name="default_role" id="defaultRole"
+                      aria-label="Default role">
                 {% if not default_exists %}
                   <option value="{{ default_role }}" selected>{{ default_role }} — no longer exists; choose a role</option>
                 {% endif %}
@@ -964,39 +965,108 @@
                     {% if role.name == default_role %}selected{% endif %}>{{ role.name }}</option>
                 {% endfor %}
               </select>
-              <div class="form-text">Used when nothing else matches.</div>
-            </div>
-            <div class="mb-3">
-              <label class="form-label small">Direct mappings</label>
-              <div id="mappingRows" class="mb-2"></div>
-              <button type="button" class="btn btn-sm btn-outline-secondary"
-                      id="addMappingRow">
-                <i class="fas fa-plus"></i> Add mapping
-              </button>
-              <input type="hidden" name="user_roles" id="mappingField">
               <div class="form-text">
-                <code>email or username</code> paired with a role. These win
-                over group mappings. The role is chosen rather than typed:
-                a name that does not exist grants nothing, silently.
+                What somebody gets when no direct mapping names them and no
+                group of theirs maps to a role.
               </div>
             </div>
-            <script nonce="{{ csp_nonce }}" type="application/json" id="stepKinds">
-              {{ step_kinds | tojson }}
-            </script>
-            <script nonce="{{ csp_nonce }}" type="application/json" id="mappingData">
-              {{ user_roles | tojson }}
-            </script>
-            <script nonce="{{ csp_nonce }}" type="application/json" id="roleNames">
-              {{ roles | map(attribute='name') | list | tojson }}
-            </script>
-            <button class="btn btn-primary btn-sm">Save mappings</button>
+            <button class="btn btn-primary btn-sm">Save default role</button>
           </form>
         </div>
       </div>
     </div>
   </div>
+
+  {# Direct mappings, on a table of their own.
+     They were a stack of input groups inside the card above, edited in place
+     and written back by one "Save mappings" that carried every row — so
+     adding one person re-submitted everybody, and a row left half-filled
+     went to the server with the rest. A row is a record here, saved and
+     removed on its own, and what is on screen is what is stored. #}
+  {% set role_names = roles | map(attribute='name') | list %}
+  <div class="card mt-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="mb-0">Direct mappings</h5>
+      <button class="btn btn-sm btn-primary" id="addMappingBtn"
+              data-bs-toggle="modal" data-bs-target="#mappingModal">
+        <i class="fas fa-plus"></i> Add mapping
+      </button>
+    </div>
+    {% if user_roles %}
+    <div class="card-body p-0">
+      <table class="table table-hover mb-0" id="mappingsTable">
+        {# Widths, because the pair is the row: three unconstrained columns
+           put the role against the far side of a full-width table, with
+           empty space where the reader's eye has to travel. #}
+        <thead><tr>
+          <th style="width:45%">Email or username</th>
+          <th style="width:35%">Role</th>
+          <th></th>
+        </tr></thead>
+        <tbody>
+        {% for who, role in user_roles | dictsort %}
+          <tr>
+            <td>
+              <code>{{ who }}</code>
+              {# A local account's own role is read FIRST — before a mapping
+                 by email, by username, by group, and before the default — so
+                 a mapping naming one does nothing while that account exists.
+                 The accounts table says so from its side; a reader who is
+                 only on this tab would otherwise believe this row. #}
+              {% set owner = local_accounts | selectattr('username', 'equalto', who) | list
+                             or local_accounts | selectattr('email', 'equalto', who) | list %}
+              {% if owner %}
+                <div class="text-muted" style="font-size:.7rem">
+                  a local account — its own role wins, so this does nothing
+                  while it exists
+                </div>
+              {% endif %}
+            </td>
+            <td>
+              {% if role in role_names %}
+                {{ role }}
+              {% else %}
+                <span class="text-danger">{{ role }}</span>
+                <span class="badge bg-danger-subtle text-danger ms-1">no longer exists</span>
+              {% endif %}
+            </td>
+            <td class="text-end text-nowrap">
+              <button class="btn btn-sm btn-outline-secondary edit-mapping"
+                      data-mapping='{{ {"who": who, "role": role} | tojson }}'
+                      data-bs-toggle="modal" data-bs-target="#mappingModal">Edit</button>
+              <form method="POST" class="d-inline"
+                    action="{{ url_for('config.delete_mapping') }}"
+                    data-confirm="Remove the mapping for {{ who }}?">
+                <input type="hidden" name="identifier" value="{{ who }}">
+                <button class="btn btn-sm btn-outline-danger">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="card-body text-muted" style="font-size:.85rem">
+      No direct mappings. Everybody gets the role their group maps to, or
+      <code>{{ default_role }}</code> when no group of theirs does.
+    </div>
+    {% endif %}
+    <div class="card-footer text-muted" style="font-size:.8rem">
+      An email address or a username, paired with a role. These win over the
+      group mappings a role carries. The role is chosen rather than typed: a
+      name that does not exist grants nothing, silently.
+    </div>
+  </div>
 </div>
 </div>
+
+{# The journey editor's verbs, read by id from the check modal's script. It
+   sat inside the role-mapping form, which is a page away from anything that
+   reads it. #}
+<script nonce="{{ csp_nonce }}" type="application/json" id="stepKinds">
+  {{ step_kinds | tojson }}
+</script>
 
 {% include "_config_modals.html" %}
 {% endblock %}
