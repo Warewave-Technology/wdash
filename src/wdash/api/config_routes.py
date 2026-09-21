@@ -287,7 +287,7 @@ def config_page():
     sources = store.sources.all()
     return render_template(
         "config.html",
-        sources=sources,
+        sources=_readable_sources(sources),
         # Two sources of one name inside one signal, as the store stands right
         # now. A collision can arrive after the upgrade that reported the ones
         # it found, and the row it breaks is on this page.
@@ -399,14 +399,37 @@ def _moves_secret(stored, submitted, url_key, verify_key=None):
 
 
 def _without_password(url):
-    """A URL with any password in it replaced, for a row people read."""
-    from urllib.parse import urlsplit, urlunsplit
-    parts = urlsplit(url or "")
-    if parts.password is None:
-        return url
-    netloc = parts.netloc.rsplit("@", 1)
-    return urlunsplit(parts._replace(
-        netloc=f"{parts.username}:***@{netloc[-1]}"))
+    """A URL with any password in it replaced, for a row people read.
+
+    The store's, because the upgrade step that reports these rows has to mask
+    them identically and a second implementation is the one that drifts.
+    """
+    from ..store.sources import without_password
+    return without_password(url)
+
+
+def _readable_sources(sources):
+    """The source rows as the page may show them.
+
+    `validate_url` refuses a password in an address now, so nothing saved
+    from here on has one — but a row written by an older build still does,
+    and this page printed it twice: in the URL cell and inside the edit
+    button's `data-source` JSON, which is the copy an administrator's browser
+    hands to anything that can read the DOM.
+
+    Masking the value is safe in a way it would not have been before: the
+    masked form carries a password too as far as `validate_url` is concerned,
+    so saving the row back is refused for the same reason the real one is,
+    and nobody can turn `***` into their password by pressing Save. Which is
+    also the only way that row gets cleaned — the refusal names the boxes.
+    """
+    out = []
+    for source in sources:
+        config = dict(source.get("config") or {})
+        if config.get("url"):
+            config["url"] = _without_password(config["url"])
+        out.append({**source, "config": config})
+    return out
 
 
 def _source_state(source, **extra):
@@ -638,6 +661,18 @@ def save_source():
         flash(str(exc).split("\n")[0], "error")
     except SourceError as exc:
         flash(str(exc), "error")
+        # The store's refusals leave a trail too. Every refusal written out
+        # in this function already did; these were the ones raised a layer
+        # down — a password in the address, a scheme that is not http, the
+        # metadata address — and they were the refusals worth reading later.
+        # Masked, because one of them is about a credential and the row must
+        # not be the place it finally gets written down.
+        _audit("source save refused",
+               subject=f"source:{source_id}" if source_id else None,
+               state={"name": form.get("name"),
+                      "url": _without_password(config.get("url")
+                                               or form.get("url")),
+                      "reason": str(exc)})
 
     return redirect(url_for("config.config_page"))
 

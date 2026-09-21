@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from sqlalchemy import inspect, select, text
 
 from .schema import metadata, schema_version
+from .sources import without_password
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +469,72 @@ def _signals_of(row):
     return set(value)
 
 
+def _report_source_urls_holding_a_password(connection):
+    """Version 20: name the sources whose address carries a credential.
+
+    `validate_url` refuses `https://reader:secret@es:9200` now. A row saved
+    before it did still holds that password in clear text in the `config`
+    column, where the `secrets` column beside it is the one that is sealed —
+    so a dump or a replica of this database carries a working credential, and
+    the configuration page used to print it.
+
+    The rows are left exactly as they are, for a reason that is not the one
+    migration 16 had. It is not that rewriting them is ambiguous: it is that
+    sealing needs the encryption key, and migrations deliberately run without
+    one. `Store.open` migrates BEFORE it builds a `SecretBox`, because an
+    installation with no key must still be able to start and be given one,
+    and a step that needed the key would take that away. So this cannot move
+    the credential; only the operator can, and the save that used to accept
+    it now refuses it until they do.
+
+    What is left is to make sure nobody has to discover this by reading the
+    database: a log line for whoever is watching the upgrade, and an audit
+    row, which is the copy still there next week. Both masked — the point is
+    that this value has travelled far enough already.
+    """
+    from urllib.parse import urlsplit
+
+    from .schema import audit, sources
+
+    rows = connection.execute(select(
+        sources.c.id, sources.c.name, sources.c.config)).mappings().all()
+
+    for row in rows:
+        url = (row["config"] or {}).get("url") or ""
+        # `urlsplit` on something that is not a URL at all returns a part-less
+        # result rather than raising, which is the answer we want: a row whose
+        # config was hand-written is not a finding.
+        try:
+            password = urlsplit(url).password
+        except ValueError:
+            continue
+        if password is None:
+            continue
+
+        masked = without_password(url)
+        logger.warning(
+            "Source %r (%s) has a password written into its address: %s. It "
+            "is stored in clear text, unlike the password box beside it. "
+            "Open the source on the configuration page, take the credential "
+            "out of the address and type it into the username and password "
+            "boxes — saving it in the address is refused from this version "
+            "on.", row["name"], row["id"], masked)
+        connection.execute(audit.insert().values(
+            at=datetime.now(timezone.utc),
+            actor="migration",
+            action="source password in the address",
+            subject=f"source:{row['id']}",
+            state={
+                "name": row["name"], "url": masked,
+                "consequence": "The password is in the config column in "
+                               "clear text, not in the sealed secrets "
+                               "column, so a dump or a replica of this "
+                               "database carries a working credential.",
+                "remedy": "Re-save the source with the credential in the "
+                          "username and password boxes.",
+            }))
+
+
 MIGRATIONS = [
     (1, "initial schema", _create_everything),
     (2, "authorization audit trail", _add_audit),
@@ -494,6 +561,8 @@ MIGRATIONS = [
     (19, "the built-in roles, default role and claim mappings, for an "
          "installation with no roles",
      _give_an_installation_with_no_roles_the_built_in_ones),
+    (20, "report the sources whose address carries a password",
+     _report_source_urls_holding_a_password),
 ]
 
 

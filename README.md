@@ -438,6 +438,12 @@ Three rules run through it:
   set and offers to replace it; it cannot show it. A settings page that renders
   stored credentials is an exfiltration endpoint for anyone who reaches an
   administrator session, which is a much lower bar than reaching the database.
+
+  Which is why a password written into the address — `https://reader:secret@es:9200`
+  — is refused. It is a credential arriving through the one box that is stored
+  as typed and shown as typed, and it was stored in clear text, printed on this
+  page, and exempt from both rules below. Put the user in the username box and
+  the password in the password box.
 - **A blank credential field means "keep", not "delete".** Otherwise saving the
   page without retyping the password silently breaks the connection.
 - **Every change is logged with who made it.** This is the screen that decides

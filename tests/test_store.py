@@ -711,6 +711,101 @@ class SourcesThatShadowEachOtherAreReportedTest(unittest.TestCase):
                          {"one": "prod", "two": "prod"})
 
 
+class SourceUrlsHoldingAPasswordAreReportedTest(unittest.TestCase):
+    """Migration 20, over rows a build before `validate_url`'s refusal wrote.
+
+    Such a row holds its password in clear text in the `config` column while
+    the `secrets` column beside it — the sealed one — is NULL, so a dump or
+    a replica of the database carries a working credential. The row is left
+    as it is and cannot be anything else: sealing needs the encryption key
+    and `Store.open` migrates before it builds a `SecretBox`, because an
+    installation with no key must still start and be given one. So the
+    upgrade's job is to say which rows they are, in the log and in the trail
+    that is still there next week, without writing the value down a third
+    time.
+    """
+
+    URL = "https://reader:inline-pass-9@es.internal:9200"
+
+    def upgrade_from_nineteen(self, rows):
+        import logging
+        from datetime import datetime, timezone
+
+        from wdash.store import migrations
+        from wdash.store.schema import sources
+
+        engine = build_engine("sqlite:///:memory:")
+        every = migrations.MIGRATIONS
+        migrations.MIGRATIONS = [step for step in every if step[0] <= 19]
+        try:
+            migrations.migrate(engine)
+        finally:
+            migrations.MIGRATIONS = every
+
+        now = datetime.now(timezone.utc)
+        with engine.begin() as connection:
+            for row in rows:
+                connection.execute(sources.insert().values(
+                    kind="elasticsearch", signal="logs", signals=["logs"],
+                    secrets=None, enabled=True, created_at=now,
+                    updated_at=now, **row))
+
+        with self.assertLogs("wdash.store.migrations", "INFO") as caught:
+            migrations.migrate(engine)
+        return engine, [record.getMessage() for record in caught.records
+                        if record.levelno >= logging.WARNING]
+
+    WITH = {"id": "one", "name": "prod", "config": {"url": URL}}
+    WITHOUT = {"id": "two", "name": "eu",
+               "config": {"url": "https://es.internal:9200",
+                          "username": "reader"}}
+
+    def test_the_source_is_named_and_the_password_is_not(self):
+        _, warnings = self.upgrade_from_nineteen([self.WITH])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("prod", warnings[0])
+        self.assertIn("reader:***@es.internal:9200", warnings[0])
+        self.assertNotIn("inline-pass-9", warnings[0])
+
+    def test_it_reaches_the_audit_trail_masked(self):
+        """A log line is gone by the time anybody asks."""
+        import json
+
+        engine, _ = self.upgrade_from_nineteen([self.WITH])
+        from wdash.store.audit import AuditLog
+        rows = [row for row in AuditLog(engine).recent()
+                if row["action"] == "source password in the address"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["subject"], "source:one")
+        self.assertEqual(rows[0]["state"]["url"],
+                         "https://reader:***@es.internal:9200")
+        self.assertNotIn("inline-pass-9", json.dumps(rows[0], default=str))
+
+    def test_an_ordinary_source_is_not_reported(self):
+        """A username in the boxes is the configuration being asked for, and
+        an upgrade that warned about it would teach people to ignore this."""
+        engine, warnings = self.upgrade_from_nineteen([self.WITHOUT])
+        self.assertEqual(warnings, [])
+        from wdash.store.audit import AuditLog
+        self.assertEqual([row for row in AuditLog(engine).recent()
+                          if row["action"] == "source password in the address"],
+                         [])
+
+    def test_the_row_is_left_exactly_as_it_is(self):
+        """It cannot be sealed here, and a migration that emptied the address
+        would take a working source down at upgrade to fix a disclosure."""
+        engine, _ = self.upgrade_from_nineteen([self.WITH])
+        from sqlalchemy import select
+
+        from wdash.store.schema import sources
+        with engine.connect() as connection:
+            row = connection.execute(select(
+                sources.c.config, sources.c.secrets).where(
+                    sources.c.id == "one")).mappings().first()
+        self.assertEqual(row["config"]["url"], self.URL)
+        self.assertIsNone(row["secrets"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

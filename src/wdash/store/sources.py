@@ -12,13 +12,18 @@ whether a password is set, and offers to replace it; it cannot show it. A
 settings screen that renders stored credentials is an exfiltration endpoint for
 anyone who reaches an administrator session, which is a much lower bar than
 reaching the database.
+
+That paragraph was a claim about one box rather than about the module until
+`validate_url` grew its second refusal: the URL is stored as typed and shown
+as typed, so a password written into it was a credential travelling the
+address's road, and everything above was false for it.
 """
 
 import ipaddress
 import socket
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from sqlalchemy import func, select
 
@@ -91,13 +96,44 @@ class SourceError(ValueError):
     """A source definition that cannot be stored or connected to."""
 
 
+def without_password(url):
+    """A URL with any password in it replaced, for a row people read.
+
+    Here rather than beside the one screen that needed it first: the audit
+    trail, the configuration page and the upgrade step all have to mask the
+    same thing the same way, and the second copy of this is the one that
+    drifts.
+    """
+    parts = urlsplit(url or "")
+    if parts.password is None:
+        return url
+    netloc = parts.netloc.rsplit("@", 1)
+    return urlunsplit(parts._replace(
+        netloc=f"{parts.username}:***@{netloc[-1]}"))
+
+
 def validate_url(url, allow_link_local=False):
     """Check a source URL before the server is ever asked to fetch it.
 
-    Two things are refused:
+    Three things are refused:
 
     * anything that is not http or https — `file://` and friends turn "add a
       source" into "read a file off the server"
+    * a password written into the address, `https://reader:secret@es:9200`.
+      It reads like a convenience and it is a credential stored the way an
+      address is stored, which is every way a credential must not be.
+      Measured, one save: the password sat in clear text in the `config`
+      column while the `secrets` column stayed NULL, so a dump or a replica
+      carried a working one; /admin/config printed it twice, once in the
+      table cell and once inside the edit button's JSON; and both rules that
+      protect a stored credential read `has_secret`, which was false, so the
+      source was repointed at another host with the password box blank and
+      saved with certificate checks off — each refused the moment the same
+      password was typed into the password box instead.
+
+      The remedy is two boxes that already exist. The username goes in the
+      username box and the password in the password box, where it is sealed
+      at rest and never shown again.
     * link-local addresses, which is where cloud instance metadata lives.
       169.254.169.254 is the canonical server-side request forgery target: it
       hands out instance credentials to anything that can ask.
@@ -115,6 +151,19 @@ def validate_url(url, allow_link_local=False):
     if parsed.scheme not in ALLOWED_SCHEMES:
         raise SourceError(
             f"Only {' and '.join(ALLOWED_SCHEMES)} URLs are supported.")
+    # Before the host is looked up, so the answer does not depend on DNS: a
+    # credential in an address nobody can resolve is still a credential in an
+    # address. A bare `user@host` is left alone — that is a name, not a
+    # secret, and refusing it would make this a rule about a character.
+    if parsed.password is not None:
+        bare = urlunsplit(urlsplit(url)._replace(
+            netloc=parsed.netloc.rsplit("@", 1)[-1]))
+        raise SourceError(
+            f"Take the password out of the address. A URL is stored as it was "
+            f"typed and shown on this page; a password belongs in the "
+            f"password box, where it is sealed at rest and never shown again. "
+            f"Use {bare} as the address and put the credential in the "
+            f"username and password boxes.")
     if not parsed.hostname:
         raise SourceError("The URL has no host.")
 

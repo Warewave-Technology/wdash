@@ -93,6 +93,21 @@ variables has to do something before it upgrades.
   the way through. Install a private authority in the trust store of the
   host WDash runs on, or tick **Forget the stored password**.
 
+- **A password written into a source's address is refused.**
+  `https://reader:secret@es:9200` used to save. The address is stored as it
+  was typed, so that password sat in the database in clear text — beside the
+  sealed column, not in it — was printed twice on the configuration page,
+  and was invisible to both of the rules that protect a stored one: that
+  source could be repointed at another host with the password box blank, and
+  saved with certificate checks off.
+
+  **If you have one, re-save that source before you trust this fix.** Only
+  you can move it: sealing needs the encryption key, and migrations run
+  before WDash has one, so the upgrade can name the row and not rewrite it.
+  It names it in the log and in the audit trail, masked, as **source
+  password in the address**; the page now masks the value too, and the save
+  refuses until the credential is in the username and password boxes.
+
 - **An LDAP user is named by the directory, not by what they typed.** A
   directory matches `uid` loosely, so `alice`, `Alice` and `ALICE` all
   signed in and became three different people here — three roles, three sets
@@ -102,6 +117,16 @@ variables has to do something before it upgrades.
   `alice` becomes `alice`, which is a different name from the one that owns
   their dashboards; nothing moves them, and a direct mapping written against
   the old spelling should be rewritten.
+
+- **A directory sign-in that resolves to a local account's name is
+  refused.** Falls out of the change above and is the reason it matters: a
+  user filter that matches more than one attribute — `(|(uid={username})
+  (mail={username}))`, the ordinary "username or email" configuration — let
+  a directory principal type their mail address and be handed the local
+  account's name, its role mapping, its dashboards and its rows in the audit
+  trail, while typing the name itself was refused. Such a sign-in now gets
+  401 and an audited refusal. If a directory principal legitimately shares a
+  name with a local account, rename one of them.
 
 ### Added
 

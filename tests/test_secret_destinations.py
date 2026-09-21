@@ -309,10 +309,18 @@ class WhatTheAuditSaysTest(DestinationTestCase):
             self.assertNotIn("lab-password-1", json.dumps(row, default=str))
 
     def test_a_password_written_into_the_url_is_not(self):
+        """That save is refused now — and the refusal is the row that carries
+        the address, so it is the one that has to be masked.
+
+        It used to be a `source created` row with `reader:***@es:9200` in it,
+        which read as a protection and was a record of the credential going
+        into the config column in clear text: the one place the value was
+        masked was the account of the move."""
         self.add_source(name="lab", url="http://reader:inline-pass-9@es:9200")
-        row = self.audited("source created")[0]
+        self.assertEqual(self.audited("source created"), [])
+        row = self.audited("source save refused")[0]
         self.assertNotIn("inline-pass-9", json.dumps(row, default=str))
-        self.assertIn("reader:***@es:9200", row["state"]["config"]["url"])
+        self.assertIn("reader:***@es:9200", row["state"]["url"])
 
     def test_a_provider_save_records_what_it_trusts(self):
         self.client.post("/admin/auth", data={

@@ -486,6 +486,91 @@ class ACredentialNeedsAVerifiedConnectionTest(ConfigTestCase):
         self.assertIn('name="forget_password"', page)
 
 
+class APasswordInTheAddressTest(ConfigTestCase):
+    """`https://reader:secret@es:9200` is a credential stored as an address.
+
+    Measured before this, one save of an Elasticsearch written that way: the
+    password sat in clear text in the `config` column while `secrets` stayed
+    NULL; /admin/config printed it twice, in the URL cell and inside the edit
+    button's `data-source` JSON; and because both protections read
+    `has_secret` — false, since nothing was sealed — the source was repointed
+    at another host with the password box blank, and saved with certificate
+    checks off, neither refused. The same password typed into the password
+    box was refused on both counts, which is what makes this a hole in one
+    box rather than a policy.
+    """
+
+    URL = "https://reader:inline-Zx9-secret@es.internal:9200"
+
+    def test_the_save_is_refused_and_nothing_is_stored(self):
+        response = self.add_source(name="bad", url=self.URL)
+        self.assertEqual(self.app.store.sources.all(), [])
+        self.assertIn(b"Take the password out of the address", response.data)
+
+    def test_the_refusal_names_the_address_to_use_instead(self):
+        """Advice somebody can follow without deleting their own URL."""
+        response = self.add_source(name="bad", url=self.URL)
+        self.assertIn(b"https://es.internal:9200", response.data)
+        self.assertNotIn(b"inline-Zx9-secret", response.data)
+
+    def test_a_token_written_as_a_password_with_no_user_is_refused_too(self):
+        """`https://:t0ken@host/` is how a bearer token gets put in a URL."""
+        response = self.add_source(name="bad",
+                                   url="https://:t0ken-9@es.internal:9200")
+        self.assertEqual(self.app.store.sources.all(), [])
+        self.assertIn(b"Take the password out of the address", response.data)
+
+    def test_a_bare_user_in_the_address_is_still_allowed(self):
+        """A name is not a secret, and refusing it would make this a rule
+        about the `@` character rather than about credentials."""
+        self.add_source(name="named", url="https://reader@es.internal:9200")
+        self.assertEqual(self.app.store.sources.all()[0]["config"]["url"],
+                         "https://reader@es.internal:9200")
+
+    def stored_the_old_way(self):
+        """A row as a build before this one would have written it."""
+        from sqlalchemy import update
+
+        from wdash.store.schema import sources
+        self.add_source(name="legacy", url="https://es.internal:9200")
+        row = self.app.store.sources.all()[0]
+        with self.app.store.engine.begin() as connection:
+            connection.execute(update(sources).where(
+                sources.c.id == row["id"]).values(
+                    config={**row["config"], "url": self.URL}))
+        return row
+
+    def test_a_row_saved_by_an_older_build_is_masked_on_the_page(self):
+        """Both copies. The `data-source` JSON is the one an administrator's
+        browser hands to anything that can read the DOM."""
+        self.stored_the_old_way()
+        page = self.client.get("/admin/config").get_data(as_text=True)
+        self.assertNotIn("inline-Zx9-secret", page)
+        self.assertEqual(page.count("reader:***@es.internal:9200"), 2, page)
+
+    def test_masking_it_cannot_become_the_stored_password(self):
+        """The reason masking is safe here: the masked form carries a
+        password too, so pressing Save on that row is refused for the same
+        reason the real one is. Without this, showing `***` on the page would
+        be a way to set the password to `***`."""
+        row = self.stored_the_old_way()
+        response = self.client.post("/admin/sources", data={
+            "id": row["id"], "name": "legacy", "signal": "logs",
+            "kind": "elasticsearch", "verify_certs": "on", "enabled": "on",
+            "url": "https://reader:***@es.internal:9200"},
+            follow_redirects=True)
+        self.assertIn(b"Take the password out of the address", response.data)
+        self.assertEqual(self.app.store.sources.all()[0]["config"]["url"],
+                         self.URL, "the masked value was stored")
+
+    def test_the_rule_the_url_credential_used_to_walk_past(self):
+        """`holds_secret` read `has_secret`, and nothing was sealed — so the
+        one save this page refuses hardest went through."""
+        response = self.add_source(name="bad", url=self.URL, verify_certs="")
+        self.assertEqual(self.app.store.sources.all(), [])
+        self.assertIn(b"Take the password out of the address", response.data)
+
+
 class DeleteAsksFirstTest(ConfigTestCase):
     """The listener in config.js asks before a form with `data-confirm` is
     sent. The attribute has to be on the forms the page renders, or the
