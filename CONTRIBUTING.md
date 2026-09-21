@@ -99,6 +99,11 @@ They are not style rules; each exists because something went wrong once.
 | `test_contrast.py` | a colour is written outside the palette, a template names a theme, or any theme's text falls below WCAG AA |
 | `test_dependency_licences.py` | a dependency arrives under an unreviewed licence, or is declared and never imported |
 | `test_version.py` | the version in the package, `package.json`, the lockfile or the Kubernetes manifests disagree |
+| `test_release_files.py` | the changelog has no entry for the version being shipped, the third-party notices are stale, or `RELEASING.md` names a command that is not there |
+| `test_csrf.py` | a state-changing route or a POST form escapes the CSRF check |
+| `test_lab_targets.py` | `lab.sh` and the compose file stop describing the same lab |
+| `test_lab_data.py` | the lab-backed tests would measure an empty backend, or a job that promised a lab keeps the promise by skipping |
+| `test_first_run.py` | `docker compose up` or `cp .env.example .env` stops giving a running WDash |
 | `test_ci.py` | the workflow stops running what it claims, or the Python matrix and the packaging classifiers drift apart |
 | `test_no_elasticsearch.py` | the suite can reach a cluster or a database nobody declared |
 | `test_frontend_integrity.py` | `wdash.min.js` is stale, a bundle references a method that does not exist, or a static asset is asked for without a version |

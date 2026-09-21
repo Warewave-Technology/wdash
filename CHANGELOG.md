@@ -1,0 +1,153 @@
+# Changelog
+
+What changed, for the person running it.
+
+Entries are written from the operator's side: what is different on your
+installation, and what you have to do about it. An entry that only makes
+sense with the diff open does not belong here — that is what the commit
+messages are for, and this project's commit messages are long on purpose.
+
+Three rules the sections encode:
+
+- **Needs action comes first.** Anything that stops working, changes what a
+  setting means, or has to be done before the upgrade is at the top, because
+  that is the part somebody is reading this for.
+- **Security changes say what they change, not that they are security.**
+  "CSRF protection is on" is useful; "hardening improvements" is not.
+- **Nothing is listed because it was work.** A refactor that changes no
+  answer is not here at all.
+
+Versions follow semantic versioning. The one number lives in
+`src/wdash/__init__.py`; `/health` reports it on a running instance.
+
+## 3.0.0 — unreleased
+
+The first release of this line, and a major one: a deployment that
+configured its cluster or its identity provider through environment
+variables has to do something before it upgrades.
+
+### Needs action
+
+- **A cluster declared in the environment is no longer read.**
+  `ELASTICSEARCH_URL` and the seven variables around it — the credentials,
+  the timeout, the certificate switch, the CA bundle, and the trace and
+  monitor index patterns — configure nothing now. Sources live in the
+  metadata database and are added on **Configuration → Sources**, where they
+  are in use the moment they are saved.
+
+  Add your cluster there BEFORE upgrading. Without it the logs, traces and
+  monitors pages answer from whatever other sources are stored, or say they
+  have none. A process that still has any of those variables set says so at
+  start-up, as an ERROR naming them and the page, and imports nothing from
+  them: a one-shot import at start-up is the mechanism being removed.
+
+- **The same for OpenID Connect.** `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`,
+  `OIDC_DISCOVERY_URL` and the six around them are not read. Save the
+  provider on the OpenID Connect card before upgrading, or nobody signs in
+  through it until somebody does.
+
+- **`config/rbac.yaml` and `RBAC_CONFIG_FILE` are gone.** Roles are rows in
+  the metadata database. An installation that has none gets `admin`,
+  `developer` and `viewer` — mapped from the groups `wdash-admins`,
+  `wdash-developers` and `wdash-viewers` — written once by a schema
+  migration. An installation that already has roles keeps exactly those,
+  including ones imported from an `rbac.yaml` by an earlier version.
+
+  Check the `developer` role after upgrading if you deployed the Kubernetes
+  manifests. The ConfigMap that used to ship in them granted it
+  `services: ["*"]` where the repository's own `config/rbac.yaml` — and the
+  default a migration writes today — list six application services. A
+  migration does not change a role that exists, so that installation still
+  has the wide one until somebody edits it on **Roles & access**.
+
+- **Every local account needs an authenticator.** A password alone no longer
+  signs anybody in: the first sign-in after the upgrade shows a QR code and
+  asks for a code from it. `WDASH_ENCRYPTION_KEY` must be set BEFORE that
+  happens — the shared secret is sealed with it, and WDash refuses to write
+  a secret as text. `python -m wdash.store.recover --reset-totp <username>`
+  is the way back for a lost phone.
+
+- **Dashboards and saved searches live in the database.**
+  `DASHBOARD_STORAGE=database` is the default, so an installation that never
+  set the variable moves with the upgrade. Nothing is deleted, and the
+  start-up log and the pages themselves name both files and the command
+  until it is run:
+
+  ```bash
+  PYTHONPATH=src python -m wdash.store.migrate_cli --dry-run
+  PYTHONPATH=src python -m wdash.store.migrate_cli
+  ```
+
+  `DASHBOARD_STORAGE=file` keeps reading the JSON, with one worker.
+
+- **A search or a board that names no source now reads every source.** It
+  read whichever was stored first. On a mixed installation that is a
+  different number: measured on a five-source demo, an unpinned board went
+  from 1,115 records to 15,431, and a bare `/api/search` from 5 to 14,353.
+  Pin the boards that should read one source; the rest say on screen which
+  sources answered.
+
+- **A source that holds a credential must verify the certificate.** Over
+  `https`, saving a source with a password and certificate checks off is
+  refused — including when the password is typed again, which used to be
+  the way through. Install a private authority in the trust store of the
+  host WDash runs on, or tick **Forget the stored password**.
+
+- **An LDAP user is named by the directory, not by what they typed.** A
+  directory matches `uid` loosely, so `alice`, `Alice` and `ALICE` all
+  signed in and became three different people here — three roles, three sets
+  of dashboards, three threads through the audit trail. The username now
+  comes from the attribute the user filter looks people up by. Somebody who
+  has been signing in as `Alice` against a directory that holds them as
+  `alice` becomes `alice`, which is a different name from the one that owns
+  their dashboards; nothing moves them, and a direct mapping written against
+  the old spelling should be rewritten.
+
+### Added
+
+- **CSRF protection**, on every state-changing request, with the token in a
+  hidden field for a form and in `X-CSRF-Token` for a `fetch`. The agent API
+  is exempt: it authenticates with a bearer token and no cookie.
+- **Local accounts on the configuration page** — create, change a role,
+  disable, reset a password, delete, and reset an authenticator. The
+  break-glass account used to be the one account no screen could show.
+- **A second factor on every local account**: RFC 6238, implemented out of
+  the standard library, checked against the RFC's own vectors.
+- **One directory at a time.** LDAP or OpenID Connect, never both; the page
+  refuses the second one and says how to switch, and the switch says what
+  the names it hands over already own.
+- **Monitors, certificates, records, traces, counts and alerts as dashboard
+  panels**, beside the log ones. A certificate row is a certificate, with
+  the checks that saw it — an endpoint watched by an agent and by Heartbeat
+  used to be two rows.
+- **Per-monitor TLS trust**: paste the certificate a private endpoint
+  presents, or ask for its expiry only — which verifies nothing and
+  therefore sends nothing.
+- **Synthetic checks from more than one place**, with a row per location.
+- **Browser journeys** through real Chromium, as a step list rather than a
+  script, with a screenshot per step.
+- **Alerting** as its own process, with silences and a history that records
+  what was NOT delivered.
+- **Gruvbox dark, Gruvbox light, or follow the system**, chosen from the
+  navbar.
+
+### Changed
+
+- The root `docker-compose.yml` runs WDash. It ran an Elasticsearch and a
+  Kibana and had the application commented out. It publishes **5001**,
+  because macOS answers 5000 with its own AirPlay receiver.
+- `.env.example` carries `WDASH_ENCRYPTION_KEY=` as a line to fill in rather
+  than as a comment.
+- `two directories configured` is audited once for the installation rather
+  than once per worker per restart.
+- The lab starts and seeds one backend at a time — `./lab.sh up loki`,
+  `./lab.sh seed loki` — and `./lab.sh targets` says what each one holds
+  over the last 24 hours and what to type into WDash to read it.
+
+### Removed
+
+- Flask-WTF, which was installed and never initialised, and the
+  `WTF_CSRF_ENABLED` flag that read as "off for tests, on in production"
+  about something that was never on.
+- The development sign-in door (`/auth/dev-login`).
+- Redis, which was configured, deployed and read by no line of code.

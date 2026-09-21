@@ -34,8 +34,8 @@ limitations below, you will be told which one and why.
 
 | Version | Supported |
 |---|---|
-| 2.5.x | yes |
-| < 2.5 | no |
+| 3.0.x | yes |
+| < 3.0 | no |
 
 There is one maintained line. A fix is released as a patch version on it.
 
