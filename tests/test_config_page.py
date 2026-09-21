@@ -349,6 +349,143 @@ class SourceTest(ConfigTestCase):
         self.assertFalse(response.get_json()["ok"])
 
 
+
+class ACredentialNeedsAVerifiedConnectionTest(ConfigTestCase):
+    """A source that does not verify must not hold one.
+
+    The rule a check has had since the monitor TLS work, arrived at from the
+    other side. Measured before this, on an Elasticsearch at
+    https://es.internal:9200 with a stored password: turning `verify_certs`
+    off was refused while the box was blank — "the stored password is only
+    sent where it was saved for … type the password again to save it" — and
+    ACCEPTED when the password was typed again. WDash then sent that
+    password on every query to whatever answered for that address.
+
+    Retyping is consent, and consent is not protection. The stored-secret
+    rule it borrowed is a different question — may a secret FOLLOW a change
+    — and keeps its retype for a change of address.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_source(name="cluster", url="https://es.internal:9200",
+                        password="hunter2", verify_certs="on")
+        self.source = self.app.store.sources.all()[0]
+
+    def save(self, **overrides):
+        form = {"id": self.source["id"], "name": "cluster", "signal": "logs",
+                "kind": "elasticsearch", "url": "https://es.internal:9200",
+                "enabled": "on"}
+        form.update(overrides)
+        return self.client.post("/admin/sources", data=form,
+                                follow_redirects=True)
+
+    def stored(self):
+        return self.app.store.sources.all()[0]
+
+    def test_turning_verification_off_under_a_credential_is_refused(self):
+        response = self.save()
+        self.assertIn(b"send there on every query", response.data)
+        self.assertTrue(self.stored()["config"]["verify_certs"],
+                        "the switch was saved anyway")
+
+    def test_retyping_the_password_does_not_buy_it(self):
+        """The change. It used to be the way through."""
+        response = self.save(password="hunter2")
+        self.assertIn(b"send there on every query", response.data)
+        self.assertTrue(self.stored()["config"]["verify_certs"])
+
+    def test_a_new_source_cannot_be_created_that_way_either(self):
+        """The refusal is about the state the save would leave behind, not
+        about editing: a first save can arrive in that state too."""
+        response = self.client.post("/admin/sources", data={
+            "name": "second", "signal": "logs", "kind": "elasticsearch",
+            "url": "https://other.internal:9200", "password": "hunter2",
+            "enabled": "on"}, follow_redirects=True)
+        self.assertIn(b"send there on every query", response.data)
+        self.assertEqual([s["name"] for s in self.app.store.sources.all()],
+                         ["cluster"])
+
+    def test_without_a_credential_it_is_allowed(self):
+        """Nothing to leak. A private cluster on a self-signed certificate
+        and no password is a deliberate, common configuration, and refusing
+        it would be a rule about certificates rather than about secrets."""
+        self.save(forget_password="on")          # the credential first
+        response = self.save()                   # now verification off
+        self.assertNotIn(b"send there on every query", response.data)
+        self.assertFalse(self.stored()["config"]["verify_certs"])
+
+    def test_the_remedy_it_names_is_one_that_exists(self):
+        """`clear_secret` was in the store and on no form, so "clear the
+        credential" would have been advice nobody could take."""
+        response = self.save(verify_certs="on", forget_password="on")
+        self.assertNotIn(b"send there on every query", response.data)
+        self.assertFalse(self.stored()["has_secret"])
+        self.assertTrue(self.stored()["config"]["verify_certs"],
+                        "forgetting the password changed the switch")
+
+    def test_forgetting_and_turning_it_off_in_one_save_is_allowed(self):
+        """Read against the state the save would LEAVE, like the check's own
+        rule: one submission can remove the credential and turn verification
+        off, and refusing that would refuse the remedy."""
+        response = self.save(forget_password="on")
+        self.assertNotIn(b"send there on every query", response.data)
+        self.assertFalse(self.stored()["has_secret"])
+        self.assertFalse(self.stored()["config"]["verify_certs"])
+
+    def test_a_password_typed_beside_the_tick_is_a_replacement(self):
+        """Both submitted is somebody replacing it, and throwing away what
+        they just typed would be the worse reading."""
+        self.save(verify_certs="on", forget_password="on",
+                  password="new-password")
+        self.assertTrue(self.stored()["has_secret"])
+        self.assertEqual(self.app.store.sources.credential(self.source["id"]),
+                         "new-password")
+
+    def test_a_plain_http_source_is_not_what_this_rule_is_about(self):
+        """`verify_certs` decides nothing without TLS. A Loki at
+        http://localhost:3100 has no certificate to check, and refusing a
+        password there would be a rule about a box rather than about a
+        connection — it would also have refused every save the lab makes.
+
+        What a credential over plain HTTP costs is a separate question, and
+        this is deliberately not an answer to it.
+        """
+        response = self.client.post("/admin/sources", data={
+            "name": "loki", "signals": ["logs"], "kind": "loki",
+            "url": "http://localhost:3100", "password": "hunter2",
+            "enabled": "on"}, follow_redirects=True)
+        self.assertNotIn(b"send there on every query", response.data)
+        stored = [s for s in self.app.store.sources.all()
+                  if s["name"] == "loki"]
+        self.assertEqual(len(stored), 1)
+        self.assertTrue(stored[0]["has_secret"])
+
+    def test_the_refusal_is_recorded(self):
+        self.save(password="hunter2")
+        refused = [row for row in self.app.store.audit.recent()
+                   if row["action"] == "source save refused"]
+        self.assertEqual(len(refused), 1, "the refusal was not recorded")
+        self.assertIn("certificate checks off", refused[0]["state"]["reason"])
+
+    def test_a_forgotten_credential_is_recorded_as_forgotten(self):
+        self.save(verify_certs="on", forget_password="on")
+        updated = [row for row in self.app.store.audit.recent()
+                   if row["action"] == "source updated"][0]
+        self.assertIs(updated["state"]["secret_forgotten"], True)
+        self.assertIs(updated["state"]["has_secret"], False)
+
+    def test_the_tick_is_offered_only_where_there_is_one_to_forget(self):
+        """It is in the modal, hidden, and `config.js` reveals it for a
+        source that has a password — so what the page ships is the hidden
+        row and the script that shows it."""
+        page = self.client.get("/admin/config").get_data(as_text=True)
+        row = page.split('id="sourceForgetRow"', 1)[1].split(">", 1)[0]
+        self.assertIn("d-none", page.split('id="sourceForgetRow"', 1)[0]
+                      .rsplit("<div", 1)[1] + row)
+        self.assertIn('name="forget_password"', page)
+
+
 class DeleteAsksFirstTest(ConfigTestCase):
     """The listener in config.js asks before a form with `data-confirm` is
     sent. The attribute has to be on the forms the page renders, or the

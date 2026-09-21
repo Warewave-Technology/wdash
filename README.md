@@ -250,9 +250,23 @@ opens.
 Data sources and identity providers are not environment variables. Every
 source — Elasticsearch, Loki, VictoriaLogs, Jaeger, Tempo — is declared on
 the configuration page and stored in the metadata database, with its own
-credentials, index patterns and certificate authority, and is in use the
-moment it is saved; so are OpenID Connect and LDAP, under Authentication.
-The variables below configure the process itself.
+credentials and index patterns, and is in use the moment it is saved; so
+are OpenID Connect and LDAP, under Authentication. The variables below
+configure the process itself.
+
+**A source that holds a credential verifies the certificate.** Over `https`,
+turning that switch off means the source is talking to whatever answered,
+and WDash would send that credential there on every query — so the save is
+refused, and it is refused whether or not the password is typed again.
+Retyping used to be the way through, which confused consent with
+protection. The remedies are on the page: leave verification on — a private
+authority goes in the trust store of the host WDash runs on, which is where
+every other client on it will find it too — or tick **Forget the stored
+password**. A source with no credential may verify or not as you like, and
+a plain `http` source is not what the rule is about, because there is no
+certificate in it to check. A synthetic check has had the same rule since
+its TLS support was written; it carries its own pasted certificate because
+the agent that makes ITS connection runs on somebody else's host.
 
 | Variable | Description | Default |
 |---|---|---|

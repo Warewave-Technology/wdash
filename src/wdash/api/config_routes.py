@@ -510,6 +510,52 @@ def save_source():
             block[field] = value
         config[signal] = block
     password = form.get("password") or None
+    # A blank box means "keep what is stored", so there has to be something
+    # that means "there should be none". Ignored when a password is also
+    # typed: that submission is a replacement, and treating it as a removal
+    # would throw away what somebody just entered.
+    forget = form.get("forget_password") == "on" and not password
+
+    # A source that does not verify is talking to whatever answered, so it
+    # must not hold a credential. The same rule a check has had since the
+    # monitor TLS work, arrived at here from the other side: this used to be
+    # allowed as long as the password was TYPED AGAIN — measured, an
+    # Elasticsearch at https://es.internal:9200 saved with `verify_certs`
+    # off and its password re-entered, and WDash then sent that password on
+    # every query to whatever answered for that address.
+    #
+    # Retyping is consent, and consent is not protection: the connection is
+    # still unverified and the secret still leaves. The stored-secret rule
+    # below is a different question — may a secret FOLLOW a change — and
+    # keeps its retype.
+    #
+    # The remedy is not a box on this form. A check needs its own pasted
+    # certificate because the agent that makes the connection runs on
+    # somebody else's host; this connection is made by the WDash server
+    # itself, so a private authority belongs in that host's trust store,
+    # where every other client on it will also find it.
+    #
+    # Over TLS only, because that is what the switch is about. A Loki at
+    # `http://localhost:3100` has no certificate to check and `verify_certs`
+    # decides nothing there — refusing it would be a rule about a box
+    # rather than about a connection. What a credential over plain HTTP
+    # costs is a different question and this is not an answer to it.
+    over_tls = (config.get("url") or "").strip().lower().startswith("https://")
+    holds_secret = bool(password) or bool(
+        existing and existing["has_secret"] and not forget)
+    if over_tls and holds_secret and not config["verify_certs"]:
+        flash("A source that does not verify the certificate is talking to "
+              "whatever answered, and this one holds a credential it would "
+              "send there on every query. Leave verification on — install a "
+              "private authority in this server's trust store if that is what "
+              "it needs — or clear the credential. Nothing was saved.",
+              "error")
+        _audit("source save refused", subject=f"source:{source_id}"
+               if source_id else None,
+               state={"name": form.get("name"),
+                      "url": _without_password(config.get("url")),
+                      "reason": "a credential with certificate checks off"})
+        return redirect(url_for("config.config_page"))
 
     # A rename must not quietly change what a role reaches. Role patterns
     # name sources — `primary:app-*`, `-primary:secret-*` — and the qualifier
@@ -519,9 +565,14 @@ def save_source():
     # saved, with no preview and nothing in the audit row but the new name.
     if source_id:
         new_name = (form.get("name") or "").strip()
+        # Nothing to move when the credential is being removed. Without
+        # this, the one save that CLEARS a password while turning
+        # verification off was refused for sending a secret it was in the
+        # act of deleting — the remedy refused by the rule it satisfies.
         moved = (_moves_secret(existing["config"], config, "url",
                                "verify_certs")
                  if existing and existing["has_secret"] and not password
+                 and not forget
                  else [])
         if moved:
             flash(f"The stored password is only sent where it was saved for, "
@@ -551,14 +602,15 @@ def save_source():
         if source_id:
             saved = store.sources.update(
                 source_id, name=form.get("name"), config=config,
-                signals=signals or None,
+                signals=signals or None, clear_secret=forget,
                 secret=password, enabled=form.get("enabled") == "on")
             if saved is None:
                 flash("That source no longer exists.", "error")
                 return redirect(url_for("config.config_page"))
             _audit("source updated", subject=f"source:{source_id}",
                    state=_source_state(saved, previous_name=existing["name"],
-                                       secret_replaced=bool(password)))
+                                       secret_replaced=bool(password),
+                                       secret_forgotten=forget))
         else:
             new_name = (form.get("name") or "").strip()
             naming = _roles_naming_source(store, new_name) if new_name else []

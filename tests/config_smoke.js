@@ -85,6 +85,9 @@ function build() {
       <input id="sourceStreamLabel"><input id="sourceStreamField">
       <input type="checkbox" id="sourceEnabled">
       <div id="sourcePasswordHint"></div>
+      <div class="form-check d-none" id="sourceForgetRow">
+        <input type="checkbox" name="forget_password" id="sourceForget">
+      </div>
       <button class="edit-source" data-source='{"id":"1","name":"cluster","kind":"elasticsearch","enabled":true,"has_secret":true,"signals":["logs","monitors"],"config":{"url":"http://cluster:9200","logs":{"index_patterns":["app-*"]},"monitors":{"index_patterns":["synthetics-prod-*"]}}}'></button>
       <button class="edit-source" data-source='{"id":"2","name":"other","kind":"elasticsearch","enabled":true,"has_secret":false,"signals":["logs","monitors"],"config":{"url":"http://other:9200","logs":{"index_patterns":["infra-*"]},"monitors":{"index_patterns":["uptime-*"]}}}'></button>
       <form id="deleteForm" data-confirm="Delete lab-&lt;b&gt;es&lt;/b&gt;?"></form>
@@ -589,6 +592,39 @@ function type(w, id, value) {
               === 'uptime-*',
           `monitors=${JSON.stringify(
               stale.document.getElementById('sourceMonitorPatterns').value)}`);
+
+    // Forgetting a stored password. It is the only way one can be removed —
+    // a blank box means "keep it" — and it is the remedy the refusal names
+    // when a source holds a credential and its certificate checks are off.
+    // Offered only where there IS one: on a source with none, or on a new
+    // one, a tick that deletes a password is a tick with nothing behind it.
+    const withSecret = build().w;
+    sourceButton(withSecret, 'cluster')
+        .dispatchEvent(new withSecret.Event('click'));
+    check('a source with a stored password is offered the forget tick',
+          !withSecret.document.getElementById('sourceForgetRow')
+                     .classList.contains('d-none'));
+
+    sourceButton(withSecret, 'other')
+        .dispatchEvent(new withSecret.Event('click'));
+    check('and a source with none is not',
+          withSecret.document.getElementById('sourceForgetRow')
+                    .classList.contains('d-none'));
+
+    withSecret.document.getElementById('addSourceBtn')
+              .dispatchEvent(new withSecret.Event('click'));
+    check('nor is a source being added',
+          withSecret.document.getElementById('sourceForgetRow')
+                    .classList.contains('d-none'));
+
+    // The modal is one form, reused. A tick left on would delete the
+    // credential of whichever source is opened next.
+    const ticked = build().w;
+    sourceButton(ticked, 'cluster').dispatchEvent(new ticked.Event('click'));
+    ticked.document.getElementById('sourceForget').checked = true;
+    sourceButton(ticked, 'cluster').dispatchEvent(new ticked.Event('click'));
+    check('and a tick does not survive to the next source opened',
+          ticked.document.getElementById('sourceForget').checked === false);
 
     // Add clears it, rather than offering the previous source's patterns as
     // if they were this one's.

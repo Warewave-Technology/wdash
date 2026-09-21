@@ -72,6 +72,20 @@
                 {% if secrets_available %}Stored encrypted and never shown again.
                 {% else %}Needs WDASH_ENCRYPTION_KEY.{% endif %}
               </div>
+              {# The only way a stored credential can be removed. A blank box
+                 means "keep it", which is right for an edit that is about
+                 something else and leaves no way to say "there should be no
+                 password here" — and a source may not hold one while its
+                 certificate checks are off, so that refusal needed a remedy
+                 somebody can reach. Shown only where there is one to
+                 forget. #}
+              <div class="form-check mt-1 d-none" id="sourceForgetRow">
+                <input class="form-check-input" type="checkbox"
+                       name="forget_password" id="sourceForget">
+                <label class="form-check-label small" for="sourceForget">
+                  Forget the stored password
+                </label>
+              </div>
             </div>
             <div class="col-md-6" data-kind="elasticsearch" data-needs="logs">
               <label class="form-label small">Log index patterns</label>

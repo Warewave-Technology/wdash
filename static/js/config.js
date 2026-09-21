@@ -160,6 +160,15 @@ function fillSource(source) {
             ? 'A password is stored. Leave blank to keep it.'
             : 'No password stored.';
     }
+    // Offered only where there is a password to forget, and never ticked
+    // from the last edit: a box left ticked would delete the credential of
+    // the next source somebody opens.
+    const forget = document.getElementById('sourceForget');
+    const forgetRow = document.getElementById('sourceForgetRow');
+    if (forget && forgetRow) {
+        forget.checked = false;
+        forgetRow.classList.toggle('d-none', isNew || !source.has_secret);
+    }
 
     document.getElementById('sourceTestResult').innerHTML = '';
     applyKind(isNew ? 'elasticsearch' : source.kind);
