@@ -13,6 +13,7 @@ from ..models import User
 from ..store.signin import (
     FAILURE, LOCKED, REFUSED, SUCCESS, UNAVAILABLE, client_address)
 from . import totp
+from . import ldap_auth
 from .ldap_auth import DirectoryUnavailable
 from .providers import ldap_settings, oidc_settings, shadow_notice
 
@@ -449,8 +450,18 @@ def login():
     # with the directory unreachable were 60 × 503, the right one was let
     # in, and nothing ever locked; before the directory was asked, the
     # sixth guess was a 429.
-    if (account is None and directory is not None
-            and store.users.by_username(username) is None):
+    def directory_is_down():
+        """The page for an outage. Identical whichever name asked for it."""
+        flash('The directory could not be reached, so the password could '
+              'not be checked. Try again shortly, or sign in with a local '
+              'account.', 'error')
+        return render_template('login.html', oidc_available=oidc_available,
+                               ldap_available=True, local_available=True,
+                               directory_notice=notice,
+                               username=username), 503
+
+    local_name = store.users.by_username(username) is not None
+    if account is None and directory is not None and not local_name:
         try:
             account = _authenticate_directory(directory, username, password)
         except DirectoryUnavailable as exc:
@@ -459,15 +470,36 @@ def login():
             # and the page told them their password was wrong.
             store.signin.record(username, address, UNAVAILABLE)
             current_app.logger.error(f"LDAP could not answer: {exc}")
-            flash('The directory could not be reached, so the password could '
-                  'not be checked. Try again shortly, or sign in with a local '
-                  'account.', 'error')
-            return render_template('login.html', oidc_available=oidc_available,
-                                   ldap_available=True, local_available=True,
-                                   directory_notice=notice,
-                                   username=username), 503
+            return directory_is_down()
 
     if not account:
+        # A local name never reaches the directory, for the reason written
+        # above — so during an outage it fell through to the 401 below while
+        # every other name got the 503 above, and the pair of status codes
+        # sorted a list of candidates into "is a local account here" and "is
+        # not". Measured: 40 names, no session, no valid name, no correct
+        # password and no rate limiting, and the two local accounts came out
+        # exactly.
+        #
+        # So the outage page is shown for this name too, decided by a probe
+        # that carries neither the name nor the password (`reachable`). The
+        # FAILURE is still recorded, which is the whole reason the directory
+        # is not asked with a local name: a guess at the break-glass password
+        # must be counted, and an outage must not be the way out of the
+        # count. What we record and what we show are different questions.
+        if local_name and directory is not None:
+            store.signin.record(username, address, FAILURE)
+            current_app.logger.warning(
+                f"Failed sign-in for {username!r} from {address}")
+            if not ldap_auth.reachable(directory):
+                return directory_is_down()
+            flash('Invalid username or password', 'error')
+            return render_template('login.html',
+                                   oidc_available=oidc_available,
+                                   ldap_available=True, local_available=True,
+                                   directory_notice=notice,
+                                   username=username), 401
+
         # One message for every failure. Saying which half was wrong tells an
         # attacker which usernames exist.
         store.signin.record(username, address, FAILURE)

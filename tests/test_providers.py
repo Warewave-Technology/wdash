@@ -231,19 +231,30 @@ class OneDoorOnTheSignInPageTest(unittest.TestCase):
         self.assertIn(b"Another sign-in method is configured here", page)
 
     def test_the_notice_survives_a_wrong_password(self):
-        """The 401 page is where the person who used the other door lands,
-        and "Invalid username or password" is a failure that looks like their
-        own mistake."""
-        # A local name, so the unreachable directory is never asked and the
-        # 401 page is the one that renders.
-        response = self.client.post("/auth/login",
-                                    data={"username": "owner",
-                                          "password": "wrong-password-here"})
-        self.assertEqual(response.status_code, 401)
-        self.assertIn(b"Another sign-in method is configured here",
-                      response.data)
-        self.assertEqual(self.doors(response.data),
-                         [b"directory accounts both use this form"])
+        """The refusal page is where the person who used the other door
+        lands, and "Invalid username or password" is a failure that looks
+        like their own mistake.
+
+        Both refusals, because a local name gets whichever the directory's
+        own state calls for: 401 when the directory is up, and the outage
+        page when it is not — which is what stops the pair of status codes
+        saying which names are local accounts.
+        """
+        import unittest.mock
+
+        from wdash.auth import ldap_auth
+        for reachable, expected in ((True, 401), (False, 503)):
+            with self.subTest(directory_reachable=reachable):
+                with unittest.mock.patch.object(
+                        ldap_auth, "reachable", lambda settings: reachable):
+                    response = self.client.post(
+                        "/auth/login", data={"username": "owner",
+                                             "password": "wrong-password-here"})
+                self.assertEqual(response.status_code, expected)
+                self.assertIn(b"Another sign-in method is configured here",
+                              response.data)
+                self.assertEqual(self.doors(response.data),
+                                 [b"directory accounts both use this form"])
 
     def test_the_notice_survives_a_lockout(self):
         for _ in range(8):

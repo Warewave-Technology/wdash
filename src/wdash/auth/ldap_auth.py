@@ -238,6 +238,41 @@ def _as_the_directory_has_it(filter_template, attributes, typed):
     return held
 
 
+#: A filter that matches nobody, for `reachable`. Written out rather than
+#: built from a name, so this can never be a way to ask the directory about
+#: a person.
+_NOBODY = "(cn=wdash-reachability-probe-6f2a)"
+
+
+def reachable(settings):
+    """Can the directory be reached and searched right now?
+
+    The service account's bind and a search for nobody. No user's name and
+    no user's password leave this process — which matters, because the one
+    caller is the LOCAL sign-in path, and sending a break-glass password to
+    the directory to find out whether the directory is up would be a worse
+    fault than the one this closes.
+
+    It exists so that a failed sign-in answers the same way whichever kind
+    of account the name belongs to. Measured before it did: with the
+    directory in force and nothing listening, 40 candidate names were sorted
+    into the two local accounts and the 38 others by nothing but the status
+    code — 401 for a local name, 503 for every other — with no session, no
+    valid name, no correct password and no rate limiting.
+    """
+    try:
+        _find_user(settings, _NOBODY)
+    except DirectoryUnavailable:
+        return False
+    except Exception as exc:
+        # Anything else is not evidence that the directory is down, and
+        # reading it as such would show the outage page to everybody whose
+        # password was simply wrong.
+        logger.warning(f"LDAP reachability probe failed oddly: {exc}")
+        return True
+    return True
+
+
 def _find_user(settings, user_filter):
     """Locate the user entry, returning (dn, attributes).
 

@@ -87,6 +87,15 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **A directory outage no longer says which names are local accounts.** A
+  local name skipped the directory and was refused 401 while every other
+  name got the directory's 503, so the pair of status codes sorted a list of
+  candidates into "has an account here" and "does not" — with no session, no
+  valid name, no correct password and no rate limiting. Both answer with the
+  outage page now, decided by a probe that carries neither the name nor the
+  password. A wrong password for a local account is still counted, so
+  guessing at the break-glass account still locks it.
+
 - **The volume chart is back on a board or a search that reads more than one
   source.** The merged page was built without a histogram at all, and the
   Logs page hides the chart when the list is empty — so configuring a second

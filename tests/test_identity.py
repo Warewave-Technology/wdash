@@ -335,6 +335,18 @@ class SignInThrottleTest(IdentityTestCase):
                                 data={"username": "owner", "password": password},
                                 environ_base={"REMOTE_ADDR": address})
 
+    def test_a_wrong_password_with_no_directory_offers_no_directory_door(self):
+        """The local-name branch renders the sign-in page itself, and it is
+        only reached when a directory is in force. Reached without one, it
+        would draw a door to a directory this installation does not have."""
+        response = self.attempt()
+        self.assertEqual(response.status_code, 401)
+        self.assertIn(b"Invalid username or password", response.data)
+        # The two things `ldap_available` renders, and neither is true here.
+        self.assertIn(b"Sign in with a local account", response.data)
+        self.assertNotIn(b"directory accounts both use this form",
+                         response.data)
+
     def test_guessing_is_refused_after_repeated_failures(self):
         for _ in range(6):
             self.attempt()
@@ -524,16 +536,28 @@ class DirectoryTest(IdentityTestCase):
         self.client.get("/auth/logout")
 
     def attempt(self, answer, username="alice", address="10.0.0.9"):
+        """One sign-in against a directory that answers `answer`.
+
+        `reachable` is driven from the SAME knob rather than left to make a
+        real connection: an unreachable directory is one that raises for a
+        sign-in AND says no to the probe, and a working one is one that does
+        neither. Two knobs would let a test describe a directory that cannot
+        exist.
+        """
         from wdash.auth import ldap_auth
 
+        down = isinstance(answer, Exception)
+
         def authenticate(settings, name, password):
-            if isinstance(answer, Exception):
+            if down:
                 raise answer
             return answer
 
         with unittest.mock.patch("wdash.auth.auth.ldap_settings",
                                  return_value=self.SETTINGS), \
-             unittest.mock.patch.object(ldap_auth, "authenticate", authenticate):
+             unittest.mock.patch.object(ldap_auth, "authenticate", authenticate), \
+             unittest.mock.patch.object(ldap_auth, "reachable",
+                                        lambda settings: not down):
             return self.client.post(
                 "/auth/login", data={"username": username, "password": "typed-pw"},
                 environ_base={"REMOTE_ADDR": address})
@@ -628,32 +652,87 @@ class DirectoryTest(IdentityTestCase):
         answer turn every guess at owner's password into an outage no limit
         counts. So the directory is not asked, and a wrong password for a
         local name is a wrong password."""
-        from wdash.auth.ldap_auth import DirectoryUnavailable
-        for answer in ({"username": "owner", "email": None, "groups": []},
-                       DirectoryUnavailable("unreachable")):
-            with self.subTest(answer=answer):
-                response = self.attempt(answer, username="owner")
-                self.assertEqual(response.status_code, 401)
-                self.assertIn(b"Invalid username or password", response.data)
+        response = self.attempt({"username": "owner", "email": None,
+                                 "groups": []}, username="owner")
+        self.assertEqual(response.status_code, 401)
+        self.assertIn(b"Invalid username or password", response.data)
         self.assertEqual(self.client.get("/admin/config").status_code, 302)
-        # The two attempts made here, newest first. The success under them is
-        # the enrolment that finished setUp's sign-in; what matters is that
-        # neither of these was recorded as an outage, which no limit counts.
         self.assertEqual(
             [row["outcome"] for row in self.app.store.signin.recent()
-             if row["username"] == "owner"][:2], ["failure", "failure"])
+             if row["username"] == "owner"][:1], ["failure"])
+
+    def test_an_outage_answers_the_same_for_a_local_name_as_for_any_other(self):
+        """The status code used to sort names into "is a local account here"
+        and "is not": a local name skipped the directory and fell to 401
+        while every other name got 503 from it. Measured against a directory
+        with nothing listening: 40 candidates, no session, no valid name, no
+        correct password, no rate limiting — and the two local accounts came
+        out exactly.
+        """
+        from wdash.auth.ldap_auth import DirectoryUnavailable
+        outage = DirectoryUnavailable("unreachable")
+        local = self.attempt(outage, username="owner", address="7.7.7.7")
+        stranger = self.attempt(outage, username="not-an-account",
+                                address="7.7.7.8")
+        self.assertEqual(local.status_code, stranger.status_code)
+        self.assertEqual(local.status_code, 503)
+        # The sentence, not the whole body: the page carries a CSP nonce
+        # that is different every render and says nothing about the name.
+        for response in (local, stranger):
+            self.assertIn(b"could not be reached", response.data)
+            self.assertNotIn(b"Invalid username or password", response.data)
 
     def test_guesses_at_a_local_account_lock_it_while_the_directory_is_down(self):
         """The measurement, as a test: 60 wrong guesses at `owner` with the
         directory unreachable were 60 x 503 and the right password was let
-        in straight after."""
+        in straight after.
+
+        Still 503 now — that is the point of the test above — but the
+        FAILURE is recorded either way, which is what the limiter counts.
+        What is shown and what is recorded are different questions.
+        """
         from wdash.auth.ldap_auth import DirectoryUnavailable
         codes = [self.attempt(DirectoryUnavailable("unreachable"),
                               username="owner", address="6.6.6.6").status_code
                  for _ in range(8)]
-        self.assertEqual(codes[:5], [401] * 5)
+        self.assertEqual(codes[:5], [503] * 5)
         self.assertEqual(set(codes[5:]), {429})
         self.assertIsNotNone(self.app.store.signin.check("owner", "6.6.6.6"))
+        # The five that were answered, oldest of them last: five failures
+        # and not one outage. An outage is what no limit counts.
+        outcomes = [row["outcome"] for row in self.app.store.signin.recent()
+                    if row["username"] == "owner" and row["address"] == "6.6.6.6"]
+        self.assertEqual([o for o in outcomes if o != "locked"],
+                         ["failure"] * 5)
+
+    def test_the_probe_carries_neither_the_name_nor_the_password(self):
+        """Sending the break-glass password to the directory to find out
+        whether the directory is up would be a worse fault than the one the
+        probe closes."""
+        from wdash.auth import ldap_auth
+        seen = []
+
+        def find_user(settings, user_filter):
+            seen.append(user_filter)
+            raise ldap_auth.DirectoryUnavailable("nothing listening")
+
+        with unittest.mock.patch.object(ldap_auth, "_find_user", find_user):
+            self.assertIs(ldap_auth.reachable(self.SETTINGS), False)
+        self.assertEqual(seen, [ldap_auth._NOBODY])
+        self.assertNotIn("owner", seen[0])
+
+    def test_a_probe_that_fails_oddly_is_not_evidence_of_an_outage(self):
+        """Only `DirectoryUnavailable` means the directory could not say.
+        Reading anything else as an outage would show the outage page to
+        everybody whose password was simply wrong — an outage invented by a
+        bug in the probe."""
+        from wdash.auth import ldap_auth
+
+        def find_user(settings, user_filter):
+            raise TypeError("a bug in the probe, not an outage")
+
+        with unittest.mock.patch.object(ldap_auth, "_find_user", find_user):
+            self.assertIs(ldap_auth.reachable(self.SETTINGS), True)
 
 
 class ProviderIdentityTest(IdentityTestCase):
