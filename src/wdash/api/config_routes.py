@@ -90,6 +90,14 @@ def _reloaded(saved=None):
     if missing:
         return (f", but it is NOT in use: {missing} Until that is fixed, "
                 f"every query naming it fails."), "error"
+    if saved is None:
+        # No row was saved, so there is nothing for the sentence above to be
+        # about. Every branch between here and the top is guarded on `saved`
+        # and falls through to a tail written for a save — so deleting a
+        # source flashed "Source 'lab' deleted and in use now." This is the
+        # failure mode this function's own docstring warns about ("it has to
+        # be TRUE"), one caller further along.
+        return ". Other workers pick it up within a few seconds.", "success"
     return " and in use now. Other workers pick it up within a few seconds.", \
         "success"
 
@@ -505,6 +513,19 @@ def save_source():
     # TLS settings that could drift apart.
     signals = form.getlist("signals") or ([form.get("signal")]
                                           if form.get("signal") else [])
+    # An EDIT with every box unticked used to be a no-op reported as a save.
+    # `update` reads `signals=None` as "leave them alone" — which is what
+    # `signals or None` handed it — so the row was untouched and the page
+    # flashed green. The create path has refused this since it was written
+    # (`normalise_signals`: "A source has to serve at least one signal"), and
+    # the two answering differently is what makes the green one a lie: the
+    # author ticked nothing on purpose and was told it had been saved.
+    if source_id and not signals:
+        flash("A source has to serve at least one signal. Tick at least one "
+              "box under Serves. Nothing was saved.", "error")
+        _audit("source save refused", subject=f"source:{source_id}",
+               state={"name": form.get("name"), "reason": "no signal ticked"})
+        return redirect(url_for("config.config_page"))
 
     config = {
         "url": form.get("url"),

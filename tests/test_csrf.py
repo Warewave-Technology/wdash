@@ -90,6 +90,57 @@ class CsrfTestCase(unittest.TestCase):
         return self.app.store.settings.get("rbac.user_roles") or {}
 
 
+class TheRefusalNamesTheClientTest(CsrfTestCase):
+    """The one refusal an unauthenticated stranger can produce at will, and
+    the log line for it recorded `request.remote_addr` — the last hop, which
+    behind an ingress is the ingress. One address for every refusal on the
+    whole installation.
+
+    The comment above that line argues for the stranger being identifiable;
+    it was the line that stripped them out. `client_address` is what the
+    sign-in throttle and the audit trail already use.
+    """
+
+    def refuse(self, forwarded=None, proxies=1):
+        self.app.config["TRUSTED_PROXY_COUNT"] = proxies
+        headers = {"X-Forwarded-For": forwarded} if forwarded else {}
+        # The app's own logger, whatever Flask named it: `create_logger`
+        # takes the import name, and pinning the string here would make this
+        # test about a module path.
+        with self.assertLogs(self.app.logger, "WARNING") as caught:
+            # `csrf=False`: the suite's client carries a token the way a
+            # browser does, and this test is about what happens without one.
+            self.client.post("/admin/roles", data={"name": "x"},
+                             headers=headers, csrf=False,
+                             environ_base={"REMOTE_ADDR": "10.0.0.1"})
+        return " ".join(caught.output)
+
+    def test_the_client_behind_one_proxy_is_named(self):
+        """One trusted proxy in front: it appends the address it was spoken
+        to from, so the last entry is the client and the socket is the
+        proxy. Counting in from the RIGHT is the whole point of the helper
+        — the leftmost entry is whatever the client typed."""
+        said = self.refuse(forwarded="203.0.113.9")
+        self.assertIn("203.0.113.9", said)
+        self.assertNotIn("10.0.0.1", said)
+
+    def test_and_behind_two(self):
+        said = self.refuse(forwarded="203.0.113.9, 172.16.0.5", proxies=2)
+        self.assertIn("203.0.113.9", said)
+        self.assertNotIn("172.16.0.5", said)
+
+    def test_a_direct_request_still_names_its_own_address(self):
+        said = self.refuse(proxies=0)
+        self.assertIn("10.0.0.1", said)
+
+    def test_a_header_from_an_untrusted_hop_is_not_believed(self):
+        """`TRUSTED_PROXY_COUNT` is 0, so the header is somebody's claim
+        about themselves and the socket is the answer."""
+        said = self.refuse(forwarded="1.2.3.4", proxies=0)
+        self.assertIn("10.0.0.1", said)
+        self.assertNotIn("1.2.3.4", said)
+
+
 class ARequestWithoutTheTokenIsRefusedTest(CsrfTestCase):
     def test_a_form_post_with_no_token_changes_nothing(self):
         response = self.client.post(

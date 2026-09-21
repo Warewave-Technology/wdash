@@ -1218,6 +1218,12 @@ docker run -d wdash-browser \
   later is still a data point; the picture of a login page from a month ago is
   a megabyte nobody will open.
 
+  The results clock is a **ceiling** on the screenshot one: a screenshot
+  whose result row has been pruned is an image no screen can reach, so
+  asking for thirty days of screenshots under seven days of results gets
+  seven. Switching result retention off removes the ceiling rather than the
+  clock — screenshots are still pruned at their own week.
+
 ## Current limitations
 
 Stated plainly, because they affect whether this fits your deployment:

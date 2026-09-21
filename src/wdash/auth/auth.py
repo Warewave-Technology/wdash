@@ -745,7 +745,31 @@ def callback():
                        "unverified_email_trusted": bool(
                            email and settings.get("trust_unverified_email"))})
         current_app.logger.info(f"Sign-in: {username} via oidc")
-        flash(f'Welcome {username}! Role: {user.role}', 'success')
+        # Resolved HERE for the sentence, because `user` has never been
+        # through `apply` at this point: `_start_session` stores identity
+        # only — deliberately, and its docstring says why — and `apply` is
+        # called from `load_user_from_session`, which runs on the NEXT
+        # request. So `user.role` was the `None` that `User.__init__` sets,
+        # and every OIDC sign-in was welcomed with "Role: None".
+        #
+        # The same resolver call the loader makes, with no `explicit`: an
+        # OIDC principal has no stored local role, and its role comes from
+        # the groups the provider asserted. Nothing is written into the
+        # session by this — the object is thrown away with the request, and
+        # the next one resolves again.
+        role = None
+        if store is not None:
+            try:
+                role = store.rbac.resolve(email=email, username=username,
+                                          groups=groups).get("role")
+            except Exception as exc:
+                # A welcome is not worth failing a sign-in for. The next
+                # request resolves the same question and the navbar says it.
+                current_app.logger.warning(
+                    f"OIDC: the role for {username!r} could not be resolved "
+                    f"for the welcome message: {exc}")
+        flash(f'Welcome {username}!'
+              + (f' Role: {role}' if role else ''), 'success')
 
         return redirect(url_for('index'))
 

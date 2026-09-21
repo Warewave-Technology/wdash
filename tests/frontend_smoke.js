@@ -491,6 +491,55 @@ check('saved searches that could not be read do not read as none', async () => {
     assert(/could not be read/.test(list.textContent), list.textContent);
 });
 
+// `_deleteSavedSearch` was `if (response.ok) { ... }` with no else, and the
+// catch below it only fires on a network throw — so a 403 for somebody
+// else's search, or a 503 from a store that could not be written, looked
+// exactly like a click that missed. `_saveCurrentSearch` in the same class
+// reads the body and shows `data.error`.
+check('a refused delete says so', async () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    const said = [];
+    w.__WDash.showNotification = (message, kind) => said.push([kind, message]);
+    w.fetch = async () => ({
+        ok: false, status: 503,
+        json: async () => ({ error: 'Your saved searches could not be '
+                                    + 'written, so none was deleted.' }),
+    });
+    global.fetch = w.fetch;
+
+    await search._deleteSavedSearch('s-1');
+
+    assert(said.length === 1, `it said ${JSON.stringify(said)}`);
+    assert(said[0][0] === 'danger', said[0][0]);
+    assert(/could not be written/.test(said[0][1]), said[0][1]);
+});
+
+check('a delete that works still says that', async () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    const said = [];
+    w.__WDash.showNotification = (message, kind) => said.push([kind, message]);
+    const asked = [];
+    w.fetch = async (url) => {
+        asked.push(String(url));
+        return String(url).includes('/api/saved-searches/')
+            ? { ok: true, status: 204, json: async () => ({}) }
+            : { ok: true, status: 200, json: async () => [] };
+    };
+    global.fetch = w.fetch;
+
+    await search._deleteSavedSearch('s-1');
+    // The reload is started and not awaited, which is what the page wants —
+    // so let its turn come round before reading the counter.
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    assert(said.length === 1 && said[0][0] === 'success',
+           JSON.stringify(said));
+    assert(asked.some(url => url.endsWith('/api/saved-searches')),
+           `the list was not reloaded after the delete: ${JSON.stringify(asked)}`);
+});
+
 check('an empty list still reads as an empty list', async () => {
     const w = makeWindow();
     const search = Object.create(w.__LogSearch.prototype);

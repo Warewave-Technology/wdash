@@ -479,7 +479,20 @@ def create_app(config_class=Config):
     app.store = store
     # Until somebody claims this installation, every route leads to setup.
     register_setup_gate(app)
-    app.logger.info(f"Metadata store: {store.describe()}")
+    # WARNING, not INFO. Flask's default handler sits at WARNING and
+    # nothing here raises it, so both of these lines — this one and the
+    # source count below — were written once at start-up and emitted
+    # nowhere: measured on a deployment, `app.logger.getEffectiveLevel()`
+    # is 30. They appear on a developer laptop only because the repo's own
+    # `.env` sets FLASK_DEBUG and Flask's `create_logger` drops an unset
+    # logger to DEBUG in that case, which is the worst of both — present
+    # where nobody needs them, absent where somebody does.
+    #
+    # They are the two facts a person reads a start-up log FOR: which
+    # database this process opened, and how many sources it built. "Which
+    # database" answers the commonest support question there is, and it is
+    # the one thing no page can be asked because a page needs the database.
+    app.logger.warning(f"Metadata store: {store.describe()}")
     if store.needs_setup:
         app.logger.warning(
             "No local account exists yet — first-run setup is open at /setup")
@@ -666,7 +679,7 @@ def create_app(config_class=Config):
             # honoured rather than shadowed by what was captured here.
             stamp=lambda: store.sources.stamp())
         if hub.configured_count:
-            app.logger.info(
+            app.logger.warning(
                 f"{hub.configured_count} source(s) from configuration")
 
     # Which directory signs people in, and what is being shadowed to make that

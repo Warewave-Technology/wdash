@@ -1586,10 +1586,26 @@ class ResultRepository:
             days = int(settings.get(RETENTION_SETTING, DEFAULT_RETENTION_DAYS))
         except (TypeError, ValueError):
             days = DEFAULT_RETENTION_DAYS
-        if days <= 0:
+        try:
+            shot_days = int(settings.get(SCREENSHOT_RETENTION_SETTING,
+                                         SCREENSHOT_RETENTION_DAYS))
+        except (TypeError, ValueError):
+            shot_days = SCREENSHOT_RETENTION_DAYS
+
+        if days <= 0 and shot_days <= 0:
             # Retention off ON PURPOSE is a choice somebody can make. It is
             # not the default, because a table that grows without bound is
             # noticed when it is already too large to clean up cheaply.
+            #
+            # BOTH clocks, because there are two. This used to return on the
+            # results clock alone, above the screenshot block below, so
+            # switching result retention off switched screenshot retention
+            # off with it — and `prune_screenshots` has exactly one caller,
+            # so nothing removed a journey screenshot ever again. That
+            # contradicts the README ("Failure screenshots are kept for a
+            # week"), and it takes away the shorter clock on the rows the
+            # separate table exists FOR: a hundred times the size per row,
+            # and worth a fraction as much a month later.
             return None
 
         marker = settings.get(PRUNE_MARKER)
@@ -1607,24 +1623,33 @@ class ResultRepository:
         # arrives mid-way, it should skip rather than start a second one over
         # the same rows.
         settings.set(PRUNE_MARKER, now.isoformat())
-        removed = self.prune(days)
-        if removed:
-            logger.info(f"pruned {removed:,} monitor result(s) older than "
-                        f"{days} days")
+        removed = 0
+        if days > 0:
+            removed = self.prune(days)
+            if removed:
+                logger.info(f"pruned {removed:,} monitor result(s) older than "
+                            f"{days} days")
 
         # Screenshots on the same pass, by their own and shorter clock. On the
         # same pass because a second schedule is a second thing that can be
         # off; by their own clock because they are a hundred times the size
         # per row and worth a fraction as much a month later.
-        try:
-            shot_days = int(settings.get(SCREENSHOT_RETENTION_SETTING,
-                                         SCREENSHOT_RETENTION_DAYS))
-        except (TypeError, ValueError):
-            shot_days = SCREENSHOT_RETENTION_DAYS
         if shot_days > 0:
-            gone = self.prune_screenshots(min(shot_days, days))
+            # Never OUTLIVING the result row that points at one: a screenshot
+            # whose result has been pruned is an image no screen can reach,
+            # so the results clock is a ceiling on this one while there is a
+            # results clock at all. With result retention off there is none,
+            # and the screenshot clock stands on its own — which is the case
+            # that used to prune nothing.
+            #
+            # A ceiling and not a replacement: asking for 30 days of
+            # screenshots under 7 days of results gets 7, and this is the
+            # sentence in the README that says so.
+            keep = min(shot_days, days) if days > 0 else shot_days
+            gone = self.prune_screenshots(keep)
             if gone:
-                logger.info(f"pruned {gone:,} journey screenshot(s)")
+                logger.info(f"pruned {gone:,} journey screenshot(s) older "
+                            f"than {keep} days")
         return removed
 
     def count(self, monitor_id=None):

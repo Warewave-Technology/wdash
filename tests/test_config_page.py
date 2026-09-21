@@ -628,6 +628,81 @@ class TheLockoutQuestionIsAskedAboutNowTest(ConfigTestCase):
             self.assertIsNone(_actor()["local_role"])
 
 
+class WhatTheFlashSaysHappenedTest(ConfigTestCase):
+    """Two sentences on this page that were about something else.
+
+    `_reloaded` composes the tail of "Source 'x' saved…", and every branch
+    in it is guarded on there being a saved row. A DELETE calls it with
+    none, so control fell through to the tail written for a save and the
+    page said "Source 'lab' deleted and in use now." That is the failure its
+    own docstring warns about — "it has to be TRUE" — one caller along.
+
+    And an edit with every Serves box unticked was a no-op reported as a
+    save: `update` reads `signals=None` as "leave them alone", which is what
+    `signals or None` handed it. The create path has refused this since it
+    was written.
+    """
+
+    def test_a_delete_does_not_claim_the_source_is_in_use(self):
+        self.add_source(name="lab")
+        source = self.app.store.sources.all()[0]
+        response = self.client.post(f"/admin/sources/{source['id']}/delete",
+                                    follow_redirects=True)
+        self.assertIn(b"deleted", response.data)
+        self.assertNotIn(b"in use now", response.data)
+        self.assertEqual(self.app.store.sources.all(), [])
+
+    def test_a_save_still_says_the_source_is_in_use(self):
+        """The control: the sentence is right where it was written for."""
+        response = self.add_source(name="lab")
+        self.assertIn(b"in use now", response.data)
+
+    def test_unticking_every_signal_is_refused_rather_than_ignored(self):
+        self.add_source(name="lab", signal="logs")
+        source = self.app.store.sources.all()[0]
+        response = self.client.post("/admin/sources", data={
+            "id": source["id"], "name": "lab", "kind": "elasticsearch",
+            "url": "http://elasticsearch:9200", "verify_certs": "on",
+            "enabled": "on"}, follow_redirects=True)
+        self.assertIn(b"at least one signal", response.data)
+        # The flash, not the word: "Save" is on the form and "Saved
+        # searches" is in the navigation.
+        self.assertNotIn(b"Source &#39;lab&#39; saved", response.data)
+        self.assertEqual(self.app.store.sources.all()[0]["signals"], ["logs"])
+
+    def test_the_refusal_is_recorded(self):
+        self.add_source(name="lab", signal="logs")
+        source = self.app.store.sources.all()[0]
+        self.client.post("/admin/sources", data={
+            "id": source["id"], "name": "lab", "kind": "elasticsearch",
+            "url": "http://elasticsearch:9200", "verify_certs": "on",
+            "enabled": "on"}, follow_redirects=True)
+        rows = [row for row in self.app.store.audit.recent()
+                if row["action"] == "source save refused"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"]["reason"], "no signal ticked")
+
+    def test_a_new_source_with_no_signal_is_still_refused_by_the_store(self):
+        """The create path's own refusal, unchanged: this adds a second
+        guard on the edit path, it does not move the first one.
+
+        Told apart by the REASON, because both sentences say "at least one
+        signal": `normalise_signals` is the store's, and it is the one that
+        has to keep answering for a create — a guard in the route that took
+        it over would be a second copy of a rule, which is how the two end
+        up disagreeing.
+        """
+        response = self.add_source(name="bad", signal="")
+        self.assertEqual(self.app.store.sources.all(), [])
+        self.assertIn(b"at least one signal", response.data)
+        reasons = [row["state"].get("reason")
+                   for row in self.app.store.audit.recent()
+                   if row["action"] == "source save refused"]
+        self.assertEqual(len(reasons), 1)
+        self.assertNotEqual(reasons[0], "no signal ticked")
+        self.assertIn("at least one signal", reasons[0])
+
+
 class WhatTheConfigurationPageRefusesIsRecordedTest(ConfigTestCase):
     """Every refusal on this page leaves a row. These left none.
 

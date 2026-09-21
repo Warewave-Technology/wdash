@@ -909,13 +909,82 @@ class RetentionSchedulingTest(StoreTestCase):
         self.store.results.prune_if_due(self.store.settings)
         self.assertIsNotNone(self.store.settings.get(PRUNE_MARKER))
 
+    def _picture(self, days):
+        """A journey screenshot that old, written straight in: the ingest
+        path only keeps one for a FAILED journey step."""
+        from sqlalchemy import insert
+
+        from wdash.store.schema import journey_screenshots
+        with self.store.engine.begin() as connection:
+            connection.execute(insert(journey_screenshots).values(
+                id=f"shot-{days}", monitor_id=self.monitor["id"],
+                captured_at=_now() - timedelta(days=days), image=b"x",
+                bytes=1, content_type="image/jpeg"))
+
+    def _pictures(self):
+        from sqlalchemy import func, select
+
+        from wdash.store.schema import journey_screenshots
+        with self.store.engine.connect() as connection:
+            return connection.execute(select(func.count()).select_from(
+                journey_screenshots)).scalar() or 0
+
+    def _due(self):
+        from wdash.store.monitoring import PRUNE_MARKER
+        self.store.settings.set(
+            PRUNE_MARKER, (_now() - timedelta(days=1)).isoformat())
+
     def test_retention_can_be_turned_off_on_purpose(self):
-        from wdash.store.monitoring import PRUNE_MARKER, RETENTION_SETTING
+        from wdash.store.monitoring import RETENTION_SETTING
         self._old(400)
         self.store.settings.set(RETENTION_SETTING, 0)
-        self.store.settings.set(PRUNE_MARKER, (_now() - timedelta(days=1)).isoformat())
-        self.assertIsNone(self.store.results.prune_if_due(self.store.settings))
+        self._due()
+        self.store.results.prune_if_due(self.store.settings)
         self.assertEqual(self.store.results.count(), 1)
+
+    def test_result_retention_off_does_not_switch_screenshots_off_too(self):
+        """They are two clocks and the README says so. The results one
+        returned early, above the screenshot block, and `prune_screenshots`
+        has exactly one caller — so switching result retention off meant no
+        journey screenshot was ever removed again, on the rows the separate
+        table exists for: a hundred times the size each."""
+        from wdash.store.monitoring import RETENTION_SETTING
+        self._old(400)
+        self._picture(30)
+        self._picture(1)
+        self.store.settings.set(RETENTION_SETTING, 0)
+        self._due()
+
+        self.store.results.prune_if_due(self.store.settings)
+        self.assertEqual(self.store.results.count(), 1, "a result was pruned")
+        self.assertEqual(self._pictures(), 1, "the old picture was kept")
+
+    def test_both_clocks_off_is_still_a_choice_somebody_can_make(self):
+        from wdash.store.monitoring import (
+            RETENTION_SETTING, SCREENSHOT_RETENTION_SETTING,
+        )
+        self._old(400)
+        self._picture(30)
+        self.store.settings.set(RETENTION_SETTING, 0)
+        self.store.settings.set(SCREENSHOT_RETENTION_SETTING, 0)
+        self._due()
+        self.assertIsNone(self.store.results.prune_if_due(self.store.settings))
+        self.assertEqual((self.store.results.count(), self._pictures()), (1, 1))
+
+    def test_the_results_clock_is_a_ceiling_on_the_screenshot_one(self):
+        """A screenshot whose result row has been pruned is an image no
+        screen can reach. Asking for thirty days of them under seven days of
+        results gets seven — which is the sentence the README now carries."""
+        from wdash.store.monitoring import (
+            RETENTION_SETTING, SCREENSHOT_RETENTION_SETTING,
+        )
+        self._picture(10)
+        self._picture(1)
+        self.store.settings.set(RETENTION_SETTING, 7)
+        self.store.settings.set(SCREENSHOT_RETENTION_SETTING, 30)
+        self._due()
+        self.store.results.prune_if_due(self.store.settings)
+        self.assertEqual(self._pictures(), 1)
 
     def test_a_broken_setting_falls_back_to_the_default(self):
         """A typo in a settings row must not switch retention off silently —

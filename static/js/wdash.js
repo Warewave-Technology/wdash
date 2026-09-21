@@ -1015,7 +1015,19 @@ class LogSearch {
             if (response.ok) {
                 WDash.showNotification('Search deleted', 'success');
                 this._loadSavedSearches();
+                return;
             }
+            // A refusal used to do nothing at all — no message, no change,
+            // the row still in the list. `if (response.ok)` with no else,
+            // and the catch below only fires on a network throw. So a 403
+            // for somebody else's search, or a 503 from a store that could
+            // not be written, looked exactly like a click that missed.
+            // `_saveCurrentSearch` in this same class reads the body and
+            // shows `data.error`; this is that.
+            var body = await response.json().catch(() => null);
+            WDash.showNotification(
+                (body && body.error) || 'That saved search could not be '
+                + 'deleted.', 'danger');
         } catch (e) {
             WDash.showNotification('Failed to delete', 'danger');
         }

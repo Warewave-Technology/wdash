@@ -180,9 +180,17 @@ def install_csrf(app):
         # Logged, not audited. An audit row is a write, and this is the one
         # refusal an unauthenticated stranger can produce at will — a rule
         # that hands them a row per request is a way to fill the table.
+        from .store.signin import client_address
+        # The CLIENT's address, through the proxy count this deployment is
+        # configured with — the same helper the sign-in throttle, the audit
+        # trail and every other log line here use. `request.remote_addr` is
+        # the last hop, which behind an ingress is the ingress: one address
+        # for every refusal, on the one rule an unauthenticated stranger can
+        # produce at will. The comment above argues for the stranger being
+        # identifiable; this was the line that stripped them out.
         app.logger.warning(
             f"CSRF token missing or wrong for {request.method} {request.path}"
-            f" from {request.remote_addr}")
+            f" from {client_address(request, app.config.get('TRUSTED_PROXY_COUNT', 0))}")
         if request.accept_mimetypes.best == "application/json" or (
                 request.path.startswith("/api/")):
             return jsonify({"error": "This request did not carry a valid "

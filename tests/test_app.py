@@ -38,6 +38,52 @@ class WDashTestCase(unittest.TestCase):
         """Test that app can be created"""
         self.assertIsNotNone(self.app)
         self.assertTrue(self.app.testing)
+
+    def test_the_start_up_lines_reach_a_handler_that_is_listening(self):
+        """Which database this process opened, and how many sources it
+        built, are the two facts a person reads a start-up log FOR — and
+        "which database" is the one question no page can be asked, because
+        a page needs the database.
+
+        Both were logged at INFO. Flask's default handler sits at WARNING
+        and nothing here raises it, so on a deployment both lines were
+        written and emitted nowhere: measured,
+        `app.logger.getEffectiveLevel()` is 30. They appeared on a
+        developer laptop only because the repository's own `.env` sets
+        FLASK_DEBUG and Flask drops an unset logger to DEBUG in that case,
+        which is the worst of both.
+        """
+        import logging
+
+        with self.assertLogs("wdash.app", logging.WARNING) as caught:
+            created = create_app(TestConfig)
+        said = " ".join(caught.output)
+        self.assertIn("Metadata store:", said)
+        self.assertGreaterEqual(created.logger.getEffectiveLevel(),
+                                logging.WARNING,
+                                "this test would pass on a DEBUG logger "
+                                "whatever level the lines were written at")
+
+    def test_the_source_count_reaches_it_too(self):
+        """The second of the two, and the one that needs a source to exist
+        before the app opens — so it is a second app over the same
+        database."""
+        import logging
+        import tempfile
+
+        folder = tempfile.mkdtemp()
+
+        class Stored(TestConfig):
+            DATABASE_URL = f"sqlite:///{folder}/sources.db"
+
+        first = create_app(Stored)
+        first.store.sources.create(
+            name="lab", signal="logs", kind="elasticsearch",
+            config={"url": "http://elasticsearch:9200", "verify_certs": True})
+
+        with self.assertLogs("wdash.app", logging.WARNING) as caught:
+            create_app(Stored)
+        self.assertIn("1 source(s) from configuration", " ".join(caught.output))
     
     def test_health_endpoint(self):
         """The probe answers at all, in one shape or the other."""

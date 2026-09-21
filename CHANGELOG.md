@@ -316,6 +316,47 @@ variables has to do something before it upgrades.
   401 and an audited refusal. If a directory principal legitimately shares a
   name with a local account, rename one of them.
 
+### Changed
+
+- **A resolved alert says "recovered", not "the check failed".** The detail on
+  a `monitor_down` recovery was a fallback meant for a monitor that IS down,
+  and a healthy monitor has no error text either — so both halves of the pair
+  claimed a failure and only the transition field told them apart. (This one
+  landed separately; it is here because the sentence reaching Alertmanager
+  changed.)
+
+- **Screenshot retention no longer stops when result retention is switched
+  off.** They are documented as two clocks and were one: the early return for
+  "retention off" sat above the screenshot pass, and nothing else prunes a
+  journey screenshot. The results clock is a **ceiling** on the screenshot one
+  — a screenshot whose result row has gone is an image no screen can reach —
+  so thirty days of screenshots under seven days of results is seven, and that
+  is now written down.
+
+- **Unticking every Serves box on an existing source is refused.** It changed
+  nothing and was reported as saved: the store reads "no signals" as "leave
+  them alone". The create path has always refused it.
+
+- **Deleting a source no longer says it is "in use now".** The sentence is
+  composed for a save, and a delete fell through to it.
+
+- **An OpenID Connect sign-in is welcomed with the role it resolved to.** It
+  said "Role: None" — the object holding the message is built before the
+  resolver runs, and the role it carries is the one `User.__init__` sets.
+
+- **A saved search that cannot be deleted says so.** A refusal did nothing at
+  all: no message, no change, the row still in the list.
+
+- **Two start-up lines now reach the log.** Which database this process opened
+  and how many sources it built were written at INFO, below the level Flask's
+  default handler listens at — present on a developer laptop and absent on
+  every deployment.
+
+- **A CSRF refusal names the client, not the proxy.** It logged
+  `request.remote_addr`, which behind an ingress is the ingress: one address
+  for every refusal on the whole installation, on the one rule an
+  unauthenticated stranger can produce at will.
+
 ### Added
 
 - **CSRF protection**, on every state-changing request, with the token in a

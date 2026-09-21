@@ -767,6 +767,43 @@ class ProviderIdentityTest(IdentityTestCase):
     def administers(self):
         return self.client.get("/admin/config").status_code == 200
 
+    def welcome(self, response):
+        """The flash itself, out of the session.
+
+        Read there rather than off the next page: a principal with no role
+        has no permission to open one, and following the redirect is a
+        redirect loop — which is the page telling the truth, and no way to
+        read a sentence.
+        """
+        with self.client.session_transaction() as session:
+            return " ".join(message for _, message
+                            in session.get("_flashes", []))
+
+    def test_the_welcome_names_the_role_the_resolver_gives(self):
+        """It said "Role: None", every time. `_start_session` stores
+        identity only — deliberately — and `User.apply` is called from
+        `load_user_from_session`, which runs on the NEXT request, so the
+        object holding the flash had never been through it."""
+        said = self.welcome(self.sign_in({
+            "sub": "1", "preferred_username": "boss",
+            "email": "boss@corp.example", "email_verified": True}))
+        self.assertIn("Welcome boss!", said)
+        self.assertIn("Role: admin", said)
+        self.assertNotIn("None", said)
+
+    def test_a_principal_with_no_role_is_welcomed_without_one(self):
+        """"Role: " with nothing after it is the same non-answer in a
+        shorter costume. The default role is what a mapping-less principal
+        lands on, and when there is not even one of those the sentence
+        simply ends."""
+        self.app.store.settings.set("rbac.default_role", "")
+        self.app.store.rbac.invalidate()
+        said = self.welcome(self.sign_in({
+            "sub": "1", "preferred_username": "nobody",
+            "email": "nobody@corp.example", "email_verified": True}))
+        self.assertIn("Welcome nobody!", said)
+        self.assertNotIn("Role:", said)
+
     def test_an_unverified_email_is_not_the_person_it_names(self):
         """Measured before the fix: a userinfo of boss@corp.example with
         email_verified false, beside a mapping of that address to admin,
