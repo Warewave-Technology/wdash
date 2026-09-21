@@ -77,6 +77,13 @@ const LEVEL_GROUPS = {
  * and the route answers 400 for the whole board; reachable by whoever adds
  * the next panel type, which is what this table is for.
  */
+//: What the server calls a record with NO value for the field it grouped
+//: by, and what it calls everything past a split's tenth value. Neither is
+//: a value anybody logged, so neither can be looked up as one — see
+//: `fieldFilter`. Written here once because two places read them.
+const UNLABELLED = 'unknown';
+const SPLIT_REST = 'other';
+
 const PANEL_HINTS = Object.assign(Object.create(null), {
     timeseries: 'Click a segment to open those records in the Logs page',
     terms: 'Click a value to open those records in the Logs page',
@@ -1491,7 +1498,7 @@ class AsyncDashboard {
                     const value = panel.split_by
                         ? this.charts[panel.id].data.datasets[datasetIndex].label
                         : null;
-                    this.openLogs({ ...window_, ...this.fieldFilter(panel.split_by, value) });
+                    this.drillInto(panel.split_by, value, window_);
                 },
                 scales: { x: { stacked: true, ...AsyncDashboard.axisStyle() },
                           y: { stacked: true, beginAtZero: true,
@@ -1512,7 +1519,7 @@ class AsyncDashboard {
 
         const click = (e, els) => {
             if (!els.length) return;
-            this.openLogs(this.fieldFilter(panel.field, labels[els[0].index]));
+            this.drillInto(panel.field, labels[els[0].index]);
         };
         const hover = (e, els) => {
             e.native.target.style.cursor = els.length ? 'pointer' : 'default';
@@ -2062,8 +2069,40 @@ class AsyncDashboard {
      * `severity` is the one field whose neutral name differs from the query
      * language's, so it is translated here rather than at every call site.
      */
+    /**
+     * Open the Logs screen for one slice, or refuse to.
+     *
+     * `null` from `fieldFilter` is a REFUSAL and not an empty filter:
+     * spreading an empty object would open the dashboard's own query over
+     * the whole window, which is a wider answer than the bar that was
+     * clicked and reads as one. Both click handlers go through here so
+     * there is one place that knows the difference.
+     */
+    drillInto(field, value, window_ = null) {
+        const filter = this.fieldFilter(field, value);
+        if (filter === null) return false;
+        this.openLogs(window_ ? { ...window_, ...filter } : filter);
+        return true;
+    }
+
     fieldFilter(field, value) {
         if (!field || value === null || value === undefined) return {};
+        // `unknown` and `other` are not values of the field. The server
+        // labels records that have NO value for it `unknown` — the same
+        // label the count panel and the terms panel use — and everything
+        // past a split's tenth value `other`. Both used to be quoted and
+        // sent as if somebody had logged them: measured through the real
+        // adapter against the lab, a terms panel's `unknown` bucket said
+        // 43,636 and the click it invited returned 0, while a real key
+        // round-tripped exactly. A bucket that invites a click has to
+        // answer it.
+        //
+        // `PANEL_HINTS.terms` promises "Click a value to open those records
+        // in the Logs page" without qualification, so the honest answer is
+        // to make the click work where it can and refuse it where it
+        // cannot, rather than to open a query nobody can read as an answer.
+        if (value === UNLABELLED) return { extra: `NOT ${field}:*` };
+        if (value === SPLIT_REST) return null;
         if (field === 'severity') return { level: value };
         if (field === 'service') return { service: value };
         return { extra: `${field}:${quoted(value)}` };

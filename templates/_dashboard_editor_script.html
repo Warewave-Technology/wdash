@@ -26,6 +26,13 @@
  * panel is STORED with: a select that quietly rewrites the panel it was
  * opened to edit is worse than one offering a field that answers nothing. */
 let FIELDS = {{ group_by_fields | tojson }};
+// What a COUNT panel may be saved with, which is narrower: `normalise`
+// refuses a count field outside the four names most sources hold, while a
+// terms or split panel takes whatever the source lists. One select filled
+// from the wider list offered `http_status`, the save refused it, and a
+// refused save re-renders from the STORED panel list — so one unusable
+// option cost the author every panel they had built in that sitting.
+let COUNT_FIELDS = {{ count_by_fields | tojson }};
 let FIELD_REASON = {{ group_by_reason | tojson }};
 const HEIGHTS = {{ panel_heights | tojson }};
 let panels = {{ panels | tojson }};
@@ -87,8 +94,8 @@ const optionsFor = (values, labels, selected) => values.map(v =>
  * changed, which is the author's question replaced by another one with no
  * refusal anywhere. It is marked instead, and the panel's own card says what
  * the source answered. */
-const fieldOptions = (selected, allowNone) => {
-    const values = FIELDS.slice();
+const fieldOptions = (selected, allowNone, from) => {
+    const values = (from || FIELDS).slice();
     const extra = (selected || '').trim() && !values.includes(selected);
     if (extra) values.push(selected);
     return (allowNone ? '<option value="">(total only)</option>' : '')
@@ -123,6 +130,9 @@ function watchSource() {
             .then(body => {
                 if (!body || !Array.isArray(body.fields)) return;
                 FIELDS = body.fields;
+                if (Array.isArray(body.count_fields)) {
+                    COUNT_FIELDS = body.count_fields;
+                }
                 FIELD_REASON = body.reason || '';
                 drawPanels();
             })
@@ -218,7 +228,7 @@ const PANEL_CONTROLS = Object.assign(Object.create(null), {
       <div class="col-md-2">
         <label class="form-label small mb-0">Count by</label>
         <select class="form-select form-select-sm" data-key="field">
-          ${fieldOptions(panel.field, false)}
+          ${fieldOptions(panel.field, false, COUNT_FIELDS)}
         </select>
       </div>
       <div class="col-md-2">

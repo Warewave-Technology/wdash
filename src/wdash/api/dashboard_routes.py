@@ -2359,7 +2359,35 @@ def api_group_by_fields():
     # second answer to the same question that no client read: the editor
     # fills its select from `fields`, and `_group_by_fields` has already
     # fallen back to the standard names when it had to.
-    return jsonify({"source": name, "fields": fields, "reason": reason})
+    return jsonify({"source": name, "fields": fields, "reason": reason,
+                    # The count row is narrower than the others and the
+                    # select has to change with the source too.
+                    "count_fields": _count_by_fields(fields)})
+
+
+def _count_by_fields(offered):
+    """Which of `offered` a COUNT panel may be saved with.
+
+    The editor fills every field select from one list, and the save does
+    not: `normalise` refuses a count panel outside `AGGREGATABLE_FIELDS`
+    while a terms or split panel takes whatever `check_group_by` accepts.
+    So the editor offered `http_status` in the "Count by" row, the save
+    refused it — and a refused save re-renders from the STORED list, taking
+    every other panel the author built in that sitting with it. Measured
+    through the form: three panels built, one count panel on an offered
+    field, save 200, flash "cannot count by 'http_status'", and the form
+    came back holding the board's previous panels.
+
+    `_group_by_fields` already carries the rule for the other selects, and
+    its docstring states the principle this repairs: "A name the SAVE
+    refuses must never be offered."
+
+    Ordered by the offer rather than by the catalogue, so the select reads
+    the way the one above it does.
+    """
+    allowed = set(AGGREGATABLE_FIELDS)
+    return [field for field in offered if field in allowed] or [
+        field for field in AGGREGATABLE_FIELDS]
 
 
 def _editor_context(panels, thresholds, defaulted, source=""):
@@ -2387,6 +2415,9 @@ def _editor_context(panels, thresholds, defaulted, source=""):
             # own fields already in it, and the endpoint above is for the
             # source SELECT changing under the author.
             "group_by_fields": fields,
+            # The count row's own list. Derived from the offer and from the
+            # catalogue the save reads, so the two cannot drift.
+            "count_by_fields": _count_by_fields(fields),
             "group_by_reason": reason,
             "panel_heights": [list(pair) for pair in PANEL_HEIGHTS],
             "thresholds": thresholds}

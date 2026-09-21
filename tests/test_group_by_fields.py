@@ -512,11 +512,40 @@ class EditorOfferRouteTest(unittest.TestCase):
         payload = self.ask("loki-lab").get_json()
         self.assertEqual(payload["fields"], ["service", "severity"])
         self.assertIsNone(payload["reason"])
-        # ONE list on the wire. This asserted a second key, `standard`, that
-        # no client read: the editor builds its select from `fields`, and the
-        # route has already fallen back to the standard names when it had to,
-        # so a second copy of them was an answer to a question nobody asked.
-        self.assertEqual(sorted(payload), ["fields", "reason", "source"])
+        # TWO lists on the wire, and the second one is read. It asserted a
+        # third, `standard`, that no client read: the editor builds its
+        # select from `fields`, and the route has already fallen back to the
+        # standard names when it had to, so a copy of them was an answer to
+        # a question nobody asked. `count_fields` is a different question —
+        # the save refuses a count panel outside the four names most sources
+        # hold, and the count row has to offer only those.
+        self.assertEqual(sorted(payload),
+                         ["count_fields", "fields", "reason", "source"])
+        self.assertEqual(payload["count_fields"], ["service", "severity"])
+
+    def test_a_source_with_nothing_countable_still_fills_the_count_row(self):
+        """An empty select is the same dead end whatever caused it, and the
+        four standard names are what `normalise` accepts from any source.
+        `_group_by_fields` makes the same promise for the wider list."""
+        from wdash.api.dashboard_routes import _count_by_fields
+        from wdash.dashboard.panels import AGGREGATABLE_FIELDS
+        self.assertEqual(_count_by_fields(["http_status", "user_id"]),
+                         list(AGGREGATABLE_FIELDS))
+        self.assertEqual(_count_by_fields([]), list(AGGREGATABLE_FIELDS))
+
+    def test_the_count_row_is_offered_only_what_a_count_can_be_saved_with(self):
+        """`normalise` refuses a count panel outside AGGREGATABLE_FIELDS
+        while a terms panel takes whatever the source lists. The editor
+        filled both selects from one list, so it offered a field the save
+        refused — and a refused save re-renders from the STORED panel list,
+        taking every other panel the author built with it."""
+        from wdash.dashboard.panels import AGGREGATABLE_FIELDS
+        payload = self.ask("").get_json()
+        self.assertTrue(payload["fields"], "the offer was empty")
+        self.assertEqual(
+            [f for f in payload["count_fields"]
+             if f not in AGGREGATABLE_FIELDS], [],
+            "the count row offers a field the save refuses")
 
     def _down_hub(self, message):
         from wdash.hub import Hub

@@ -232,8 +232,14 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
      * first. Only `offered` reaches the page: the server sends ONE list,
      * already fallen back to the standard names when it had to.
      */
+    //: What the save accepts for a COUNT panel — the four names
+    //: `AGGREGATABLE_FIELDS` holds — which is narrower than what the other
+    //: selects offer. The server derives it from the offer and from that
+    //: catalogue; this renders it the way the server would.
+    const COUNTABLE = ['severity', 'service', 'host', 'environment'];
+
     function editor({ panels, fields = ['severity', 'service', 'host', 'environment'],
-                      offered = null, reason = null,
+                      offered = null, countable = null, reason = null,
                       heights = [[180, 'short'], [300, 'standard'],
                                  [450, 'tall'], [600, 'very tall']],
                       defaulted = false } = {}) {
@@ -243,6 +249,11 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
         return found[1]
             .replace('{{ group_by_fields | tojson }}',
                      JSON.stringify(offered === null ? fields : offered))
+            .replace('{{ count_by_fields | tojson }}',
+                     JSON.stringify(countable === null
+                         ? (offered === null ? fields : offered)
+                             .filter(f => COUNTABLE.includes(f))
+                         : countable))
             .replace('{{ group_by_reason | tojson }}', JSON.stringify(reason))
             .replace('{{ panel_heights | tojson }}', JSON.stringify(heights))
             .replace('{{ panels_are_default | tojson }}', JSON.stringify(defaulted))
@@ -294,6 +305,8 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
     }
 
     const stored = (d) => JSON.parse(d.getElementById('panelsField').value || 'null');
+    const optionsOf = (row) => Array.from(
+        row.querySelector('[data-key="field"]').options).map(o => o.value);
     const rows = (d) => d.querySelectorAll('#panelList .list-group-item');
 
     // Both forms must actually pull the one copy in, or "shared" is a claim
@@ -850,6 +863,51 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
         check('a failed ask leaves the select it could not replace',
               groupBy(offline.d).join() === 'severity,service,http_status',
               groupBy(offline.d).join());
+
+        // A COUNT panel is narrower than the others: `normalise` refuses a
+        // count field outside the four names most sources hold, while a
+        // terms panel takes whatever the source lists. One select filled
+        // from the wider list offered `http_status`, the save refused it,
+        // and a refused save re-renders from the STORED panel list — so one
+        // unusable option cost the author every panel they had just built.
+        const counting = editorPage({
+            panels: [{ id: 'c', type: 'count', title: 'Errors',
+                       field: 'severity', value: 'ERROR', width: 6,
+                       height: 300 },
+                     { id: 't', type: 'terms', title: 'Top',
+                       field: 'service', size: 10, width: 6, height: 300 }],
+            offered: ['severity', 'service', 'http_status', 'user_id'],
+            answers: [] });
+        const countRow = rows(counting.d)[0];
+        const termsRow = rows(counting.d)[1];
+        check('the count row offers only what a count can be saved with',
+              optionsOf(countRow).join() === 'severity,service',
+              optionsOf(countRow).join());
+        check('the terms row beside it still offers everything',
+              optionsOf(termsRow).join()
+                  === 'severity,service,http_status,user_id',
+              optionsOf(termsRow).join());
+
+        // And it follows the source select, like the wider list does.
+        const switching = editorPage({
+            panels: [{ id: 'c', type: 'count', title: 'Errors',
+                       field: 'severity', value: 'ERROR', width: 6,
+                       height: 300 }],
+            offered: ['severity', 'service', 'http_status'],
+            answers: [{ fields: ['host', 'environment', 'pod'],
+                        count_fields: ['host', 'environment'], reason: null }],
+        });
+        switching.d.getElementById('source').value = 'loki-lab';
+        switching.d.getElementById('source').dispatchEvent(
+            new switching.w.Event('change'));
+        await settle();
+        // The new source's two, and then the field the panel already had,
+        // kept and marked — which is what `fieldOptions` does for every
+        // select, so a source change does not silently repoint a panel.
+        check('and it follows the source select',
+              optionsOf(rows(switching.d)[0]).join()
+                  === 'host,environment,severity',
+              optionsOf(rows(switching.d)[0]).join());
     }
 
     console.log(failures.length ? `\n${failures.length} failure(s)`

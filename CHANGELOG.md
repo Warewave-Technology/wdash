@@ -87,6 +87,18 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **The panel editor no longer offers a count field the save refuses.** The
+  "Count by" select was filled from the same list as the group-by ones, but
+  a count panel may only be saved with one of the four names most sources
+  hold — and a refused save re-renders from the stored panel list, so one
+  unusable option cost the author every panel they had just built.
+
+- **Clicking the `unknown` slice of a panel opens the records it counted.**
+  `unknown` is the label for records with no value for the field, and it was
+  looked up as though somebody had logged it: measured against the lab, a
+  bucket of 43,636 whose click returned nothing. The new `other` band on a
+  split is not clickable at all — it is not a value.
+
 - **A failed search or a failed dashboard load no longer leaves the last one
   on screen.** A refused search kept the previous search's volume chart,
   source breakdown, warnings and field statistics under a red box about a

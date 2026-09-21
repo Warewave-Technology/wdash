@@ -563,6 +563,58 @@ async function main() {
         });
         check('an ordinary level is written as it always was', () =>
             assert(opened[3] === '(service:payments) AND level:ERROR', opened[3]));
+
+        // `unknown` is the label the server gives records with NO value for
+        // the field, and `other` is everything past a split's tenth value.
+        // Neither is a value anybody logged, and both were quoted and sent
+        // as if they were: measured through the real adapter against the
+        // lab, a terms panel's `unknown` bucket said 43,636 and the click it
+        // invited returned 0, while a real key round-tripped exactly.
+        opened.length = 0;
+        dashboard.openLogs(dashboard.fieldFilter('user_id', 'unknown'));
+        check('the unlabelled bucket opens the records it counted', () =>
+            assert(opened[0] === '(service:payments) AND NOT user_id:*',
+                   opened[0]));
+
+        check('the rest-of-the-split band is not a query at all', () =>
+            assert(dashboard.fieldFilter('user_id', 'other') === null,
+                   JSON.stringify(dashboard.fieldFilter('user_id', 'other'))));
+
+        // And the click honours the refusal. A refusal read as an empty
+        // filter opens the dashboard's own query over the whole window,
+        // which is a WIDER answer than the bar that was clicked and reads
+        // as one.
+        opened.length = 0;
+        const refused = dashboard.drillInto('user_id', 'other',
+                                            { start: 'a', end: 'b' });
+        check('a refused slice opens nothing at all', () =>
+            assert(refused === false && opened.length === 0,
+                   `it opened ${JSON.stringify(opened)}`));
+
+        opened.length = 0;
+        const went = dashboard.drillInto('user_id', 'u-7');
+        check('an ordinary slice still opens', () =>
+            assert(went === true && opened.length === 1, opened[0]));
+
+        // A bar on a SPLIT timeseries carries both: the bucket's window and
+        // the series it was stacked under. Spreading one without the other
+        // opens the whole interval, which is a wider answer than the bar.
+        opened.length = 0;
+        dashboard.drillInto('user_id', 'u-7',
+                            { start: new Date('2026-09-11T10:00:00Z'),
+                              end: new Date('2026-09-11T11:00:00Z') });
+        check('a bar on a split carries its value as well as its window', () =>
+            assert(opened[0] === '(service:payments) AND user_id:"u-7"',
+                   opened[0]));
+
+        // And a field somebody really does log `unknown` into is still a
+        // value: the label collides, and the click that opens "records with
+        // no value" is the honest reading of a bucket the SERVER labelled.
+        opened.length = 0;
+        dashboard.openLogs(dashboard.fieldFilter('service', 'unknown'));
+        check('severity and service keep their own spelling', () =>
+            assert(opened[0] === '(service:payments) AND NOT service:*',
+                   opened[0]));
     }
 
     // A stat card must open the records it counted.
