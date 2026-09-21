@@ -876,6 +876,13 @@ and the id from it for the record views below, and sends the record's
 | `GET` | `/readyz` | Whether the metadata store answers, which decides whether anybody can be served. The readiness probe reads it |
 | `GET` | `/health` | Every backend's reachability and the running version, asked at once and answered within two seconds, then reused for ten. For alerts and people, not probes |
 
+Every backend means logs, traces **and** monitors, each asked once however
+many signals it serves. The report is one flat object keyed by source name,
+so a source whose name is one the report already uses — `store`, `status`,
+`version`, `degraded`, `detail` — is reported under `source:<name>` instead,
+and two different sources sharing a name get one line between them. Only the
+metadata store decides the status code.
+
 Per-panel dashboard endpoints (`/stats`, `/timeline`, `/log-levels`,
 `/services`, `/heatmap`) remain available for API compatibility, but the UI
 uses the combined `/data` endpoint.

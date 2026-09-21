@@ -9,6 +9,7 @@ import os
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
+from wdash import __version__
 from wdash.app import create_app
 from wdash.config import Config
 
@@ -97,8 +98,12 @@ class HealthTest(unittest.TestCase):
             self.name = name
             self._healthy = healthy
             self._detail = detail
+            #: How many times /health probed it. One adapter over one client
+            #: registered for three signals must be asked once.
+            self.asked = 0
 
         def health(self):
+            self.asked += 1
             return self._healthy, self._detail
 
         def containers(self, scope):
@@ -115,11 +120,72 @@ class HealthTest(unittest.TestCase):
             self.pings += 1
             return self.answers
 
-    def _app(self, sources=()):
+    def _app(self, sources=(), monitors=()):
         app = create_app(TestConfig)
         app.hub._logs = {source.name: source for source in sources}
         app.hub._traces = {}
+        app.hub._monitors = {source.name: source for source in monitors}
         return app
+
+    def test_a_monitors_only_backend_is_asked_too(self):
+        """It was not. The endpoint built its own list out of the log and
+        trace registries, so a Heartbeat cluster — a whole screen and every
+        monitor_down alert — could be down while this said healthy, with
+        nothing named. Measured: the source's own `health()` answered
+        `(False, ...)` and /health answered 200 `{"status": "healthy"}`."""
+        app = self._app(monitors=[self._Source('uptime-es', healthy=False)])
+        body = app.test_client().get('/health').get_json()
+        self.assertEqual(body['uptime-es'], 'unreachable')
+        self.assertEqual(body['status'], 'degraded')
+        self.assertEqual(body['degraded'], ['uptime-es'])
+
+    def test_a_monitor_adapter_on_the_same_client_costs_no_extra_ping(self):
+        """Adding the monitor registry must not turn one stored
+        Elasticsearch into three round trips. The report has one slot per
+        name, so one probe per name is what fills it."""
+        source = self._Source('lab-es', healthy=True)
+        app = self._app(sources=[source], monitors=[source])
+        app.hub._traces = {'lab-es': source}
+        self.assertEqual(
+            app.test_client().get('/health').get_json()['lab-es'], 'connected')
+        self.assertEqual(source.asked, 1)
+
+    def test_a_source_called_store_does_not_answer_for_the_store(self):
+        """One flat report and a name an administrator typed. Measured both
+        ways round: a dead metadata store with a healthy source called
+        `store` answered 200 `healthy`, and a healthy store with that source
+        down answered 503."""
+        app = self._app(sources=[self._Source('store', healthy=True)])
+
+        class Broken:
+            def count(self): raise RuntimeError("database is gone")
+        app.store.users = Broken()
+
+        response = app.test_client().get('/health')
+        body = response.get_json()
+        self.assertEqual(body['store'], 'unreachable')
+        self.assertEqual(body['source:store'], 'connected')
+        self.assertEqual(response.status_code, 503)
+
+    def test_a_source_called_store_being_down_does_not_take_it_out(self):
+        """The other way: the store is the only hard dependency, and a
+        source is not it whatever it is called."""
+        app = self._app(sources=[self._Source('store', healthy=False)])
+        response = app.test_client().get('/health')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['store'], 'connected')
+        self.assertEqual(response.get_json()['source:store'], 'unreachable')
+
+    def test_a_source_named_after_a_field_of_the_report_is_not_dropped(self):
+        """`status` and `version` were overwritten by the payload itself, so
+        such a source vanished from the report without a word."""
+        app = self._app(sources=[self._Source('version', healthy=False),
+                                 self._Source('status', healthy=False)])
+        body = app.test_client().get('/health').get_json()
+        self.assertEqual(body['version'], __version__)
+        self.assertEqual(body['status'], 'degraded')
+        self.assertEqual(body['source:version'], 'unreachable')
+        self.assertEqual(body['source:status'], 'unreachable')
 
     def test_a_cluster_that_answers_false_is_not_connected(self):
         """`ping()` does not raise; it returns False. Through the real

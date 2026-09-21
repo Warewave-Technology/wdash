@@ -438,6 +438,17 @@ class Hub:
         self._fresh()
         return list(self._registry("monitors").values())
 
+    @property
+    def sources(self):
+        """Every registered source, once each — logs, traces AND monitors.
+
+        What /health asks. It used to build its own list out of
+        `log_sources + trace_sources`, so a monitors-only backend was never
+        probed and an installation whose only uptime source was down read as
+        healthy.
+        """
+        return self._all()
+
     def _all(self):
         """Every registered source, once each.
 
@@ -461,9 +472,10 @@ class Hub:
             result |= set(source.capabilities)
         return frozenset(result)
 
-    def health(self):
-        report = {}
-        for source in self._all():
-            healthy, detail = source.health()
-            report[source.name] = {"healthy": healthy, "detail": detail}
-        return report
+    # `health()` used to be here: it walked `_all()`, called `source.health()`
+    # in turn and returned {name: {healthy, detail}}. Nothing called it, and
+    # it was the second answer to the question /health asks — one that read
+    # the monitor sources the endpoint did not, and that would have waited on
+    # every backend in turn, which is the thing /health was rewritten to stop
+    # doing. Deleted rather than wired up: a check nobody runs is not
+    # coverage, and two of them is worse than one.

@@ -331,6 +331,26 @@ def variables_left_behind(environ):
     return said
 
 
+#: Keys the /health report owns. A source is called whatever an
+#: administrator typed, the report is one flat object, and these five names
+#: already mean something in it.
+HEALTH_RESERVED = ("store", "status", "version", "degraded", "detail")
+
+
+def _health_key(name):
+    """Where a source's verdict goes in the /health report.
+
+    Its own name, unless that name is one this report already uses, in which
+    case it is qualified. A source called `store` used to be merged into the
+    metadata store's verdict — whichever was written second decided both —
+    and a source called `status` or `version` was dropped from the payload
+    without a word. A source name cannot contain a colon (the configuration
+    page refuses it, because a colon qualifies a role's pattern), so the
+    qualified form is a key no source can ask for.
+    """
+    return name if name not in HEALTH_RESERVED else f"source:{name}"
+
+
 def create_app(config_class=Config):
     """Application factory pattern"""
     app = Flask(__name__, 
@@ -1012,27 +1032,53 @@ def create_app(config_class=Config):
         if cached and time.monotonic() - cached[0] < ttl:
             return jsonify(cached[1]), cached[2]
 
-        checks = {}
         try:
             store.users.count()
-            checks['store'] = 'connected'
+            store_state = 'connected'
         except Exception as exc:
             app.logger.warning(f"health: metadata store: {exc}")
-            checks['store'] = 'unreachable'
+            store_state = 'unreachable'
 
-        # Keyed by name, so one stored source serving logs AND traces — two
-        # adapters over one client — is asked once and reported once.
-        probes = {}
-        for source in list(app.hub.log_sources) + list(app.hub.trace_sources):
-            probes[source.name] = source.health
-        checks.update(_ask_at_once(probes,
-                                   float(app.config['HEALTH_BUDGET_SECONDS'])))
+        # EVERY registered source, monitors included. It used to be the log
+        # and trace registries only, so a monitors-only backend — a Heartbeat
+        # cluster, which is a whole screen and every monitor_down alert — was
+        # never asked, and an installation whose only uptime source was down
+        # answered `{"status": "healthy"}` with nothing named. Measured: the
+        # source's own `health()` said `(False, 'heartbeat cluster down')`
+        # while this endpoint reported healthy.
+        #
+        # Keyed by NAME, which is what this report has one slot per: a stored
+        # Elasticsearch serving logs, traces and monitors is three adapters
+        # over one client, and asking it three times would be three round
+        # trips for one line of output.
+        #
+        # So two DIFFERENT sources sharing a name — a Loki called `eu` and a
+        # Tempo called `eu`, the pair migration 7 left behind on purpose —
+        # get one probe and one verdict between them. That is a known limit
+        # of a flat report keyed by name and not a thing to fix here: there
+        # is nowhere to put the second answer. Migration 16 reports the
+        # collisions that actually shadow each other.
+        probes = {source.name: source.health for source in app.hub.sources}
+        answers = _ask_at_once(probes,
+                               float(app.config['HEALTH_BUDGET_SECONDS']))
+
+        # `store` is written LAST and from its own variable, and a source
+        # that wants one of this report's own keys is qualified rather than
+        # merged into it. The report is one flat object and a source is
+        # called whatever an administrator typed, so a source named `store`
+        # used to land on `checks['store']` — measured both ways round: a
+        # dead metadata store with a healthy source called `store` answered
+        # 200 `healthy`, and a healthy store with that source down answered
+        # 503. `status` and `version` collided the same way, silently, in
+        # `payload` below.
+        checks = {_health_key(name): state for name, state in answers.items()}
+        checks['store'] = store_state
 
         degraded = sorted(name for name, state in checks.items()
                           if state != 'connected')
         # The store is the only hard dependency, so it is the only one that
         # may take the instance out of service.
-        serving = checks['store'] == 'connected'
+        serving = store_state == 'connected'
 
         status = 'healthy' if not degraded else (
             'degraded' if serving else 'unhealthy')

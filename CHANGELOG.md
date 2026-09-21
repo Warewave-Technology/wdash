@@ -87,6 +87,16 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **`/health` asks monitor backends too, and a source cannot take over one
+  of the report's own fields.** It probed the log and trace registries only,
+  so an installation whose uptime backend was down answered `healthy` with
+  nothing named. And the report is one flat object: a source called `store`
+  landed on the metadata store's own line — measured, a dead store with a
+  healthy source called `store` answered 200 `healthy` — while one called
+  `status` or `version` was dropped without a word. Such a source is
+  reported under `source:<name>` now. **If you have a source with one of
+  those names, an alert keyed on it needs the new key.**
+
 - **A trace panel on a dashboard needs `traces:read`.** It filled for any
   role that could open the board, so a shared dashboard handed out the
   service inventory — names, span counts, error counts and error rates — to
