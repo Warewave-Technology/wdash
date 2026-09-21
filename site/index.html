@@ -67,6 +67,8 @@
   .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin-top: 1.5rem; }
   .card { border: 1px solid var(--line); border-radius: 10px; padding: 1.05rem 1.15rem; background: var(--surface); }
   .card h3 { margin: 0 0 .4rem; font-size: 1rem; }
+  .card h3 a { color: var(--ink); text-decoration: none; }
+  .card h3 a:hover { color: var(--accent); }
   .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
 
   pre { background: var(--sunken); border: 1px solid var(--line); border-radius: 10px; padding: .95rem 1.1rem; overflow-x: auto; font-family: var(--mono); font-size: 13.5px; line-height: 1.6; margin: 1.2rem 0; }
@@ -79,6 +81,8 @@
   ul.plain li { padding: .55rem 0 .55rem 1.55rem; position: relative; border-top: 1px solid var(--line-soft); color: var(--muted); }
   ul.plain li:first-child { border-top: 0; }
   ul.plain li::before { content: "→"; position: absolute; left: 0; color: var(--dim); }
+  ul.plain li a { white-space: nowrap; font-size: 13.8px; text-decoration: none; border-bottom: 1px solid var(--line); }
+  ul.plain li a:hover { border-bottom-color: var(--link); }
 
   .not { border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 8px; padding: 1rem 1.2rem; background: var(--surface); margin-top: 1.3rem; }
   .not h3 { margin: 0 0 .5rem; font-size: 1rem; color: var(--warn); }
@@ -150,26 +154,26 @@
 
     <div class="grid">
       <div class="card">
-        <h3>Logs</h3>
+        <h3><a href="docs/#logs">Logs</a></h3>
         <p>Elasticsearch, Grafana Loki, VictoriaLogs. Lucene-style search, a
         volume histogram split by severity, cursor paging, field statistics,
         and the records either side of one you are reading.</p>
       </div>
       <div class="card">
-        <h3>Traces</h3>
+        <h3><a href="docs/#traces">Traces</a></h3>
         <p>Elasticsearch APM, Jaeger, Grafana Tempo. A waterfall with self-time,
         a per-service breakdown, and the log records carrying the same trace
         id. A trace split across two stores is reassembled, not shown as two
         halves.</p>
       </div>
       <div class="card">
-        <h3>Uptime</h3>
+        <h3><a href="docs/#checks">Uptime</a></h3>
         <p>What Elastic Heartbeat writes, and WDash's own agents: HTTP checks
         and multi-step browser journeys through real Chromium, with the TLS
         certificate each check saw.</p>
       </div>
       <div class="card">
-        <h3>Alerts</h3>
+        <h3><a href="docs/#rules">Alerts</a></h3>
         <p>Rules over monitors, agents and expiring certificates, sent to a
         webhook, with silences and a history that records what was
         <em>not</em> delivered as well as what was.</p>
@@ -181,16 +185,20 @@
       trace stores and services are granted separately, because "can read
       <code>app-*</code>" and "can read the payments service's traces" are
       different sentences. Resolved from the database on every request, so
-      revoking a grant takes effect without anyone signing out.</li>
+      revoking a grant takes effect without anyone signing out.
+      <a href="docs/#roles">How a role is written →</a></li>
       <li><strong>One source serves every signal it holds.</strong> An
       Elasticsearch cluster with logs and traces is one entry with one
-      credential — not two rows that drift apart at the next rotation.</li>
+      credential — not two rows that drift apart at the next rotation.
+      <a href="docs/#sources">Adding a source →</a></li>
       <li><strong>Search one source or all of them.</strong> A merged page says
       which source answered each record, and says so when a backend is down
-      rather than quietly returning less.</li>
+      rather than quietly returning less.
+      <a href="docs/#fanout">What a merged answer says →</a></li>
       <li><strong>Everything is configured in the browser.</strong> Sources,
       identity providers and roles, with a connection test before a source is
-      saved and a "what would this reach?" preview before a role is.</li>
+      saved and a "what would this reach?" preview before a role is.
+      <a href="docs/#config">Everything the process reads →</a></li>
     </ul>
   </div>
 </section>
@@ -266,6 +274,10 @@ $ open http://localhost:5001
     <p>Port 5001 rather than 5000, because macOS answers 5000 with its own
     AirPlay receiver. Nothing on your cluster changes: WDash needs a URL and,
     if it is protected, a read credential.</p>
+    <p style="margin-top:.9rem"><a href="docs/#install">The install, step by
+    step</a> · <a href="docs/#first-run">what the first run asks for</a> ·
+    <a href="docs/#lab">a lab with five backends in it</a>, if you have
+    nothing to point at yet.</p>
   </div>
 </section>
 
@@ -284,24 +296,29 @@ $ open http://localhost:5001
         <li><strong>A merged search is first-page only.</strong> Paging a
         time-ordered merge needs every source's cursor advanced together, and
         each backend's cursor means something different — a cursor that
-        silently skips records is worse than no paging.</li>
+        silently skips records is worse than no paging.
+        <a href="docs/#fanout">details</a></li>
         <li><strong>A bare container pattern applies to every source.</strong>
         A role granted <code>app-*</code> reaches <code>app-*</code> in each
         configured source, so adding a source widens what existing roles can
         see. <code>source:pattern</code> avoids it; the default is the wide
-        one.</li>
+        one. <a href="docs/#patterns">details</a></li>
         <li><strong>Loki and VictoriaLogs serve logs only</strong>, and with
         fewer capabilities — no field statistics on Loki, no context view or
         single-record fetch on either. Declared absent rather than answered
-        with something thinner than the name.</li>
+        with something thinner than the name.
+        <a href="docs/#capabilities">the capability table</a></li>
         <li><strong>Jaeger cannot answer "every trace"</strong>, and reports no
         per-service volume without a separate metrics backend. Its service
         list carries names without span counts — zero rather than a number
-        derived from a sample.</li>
+        derived from a sample. <a href="docs/#backends">details</a></li>
         <li><strong>One directory at a time.</strong> LDAP or OpenID Connect,
         never both; the configuration page refuses the second and says how to
-        switch.</li>
+        switch. <a href="docs/#directory">details</a></li>
       </ul>
+      <p style="margin:.9rem 0 0;font-size:14.5px;color:var(--muted)">
+        Every refusal WDash makes, and why, is one table:
+        <a href="docs/#refuses">What WDash refuses</a>.</p>
     </div>
 
     <p style="margin-top:1.3rem">It is also new. Every backend is exercised

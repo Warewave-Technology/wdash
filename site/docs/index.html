@@ -4,78 +4,125 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WDash documentation</title>
-<meta name="description" content="Install WDash, add a source, grant a role, run checks and send alerts. The whole path, in order, with what each step actually changes.">
+<meta name="description" content="Installing, configuring and operating WDash: sources, search, dashboards, roles and identity providers, synthetic monitoring, alerting, and a reference for everything the process reads.">
 <link rel="icon" type="image/svg+xml" href="../wdash-mark.svg">
 <style>
+  /* Postern's docs design system with WDash's accent. One inline stylesheet:
+     the site is three files and a mark, and a build step for that is a thing
+     to keep working for no reader's benefit. */
   :root {
     --bg: #1d2021; --surface: #282828; --raised: #32302f; --sunken: #1b1b1b;
     --line: #3c3836; --line-soft: #32302f;
     --ink: #ebdbb2; --muted: #a89984; --dim: #7c6f64;
     --accent: #fe8019; --warn: #fabd2f; --bad: #fb4934; --link: #83a598;
+    --good: #b8bb26;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
-    font-family: var(--sans); font-size: 16px; line-height: 1.65;
+    font-family: var(--sans); font-size: 16px; line-height: 1.68;
     -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 860px; margin: 0 auto; padding: 0 1.5rem; }
   a { color: var(--link); }
 
-  header.top { border-bottom: 1px solid var(--line); position: sticky; top: 0; background: rgba(29,32,33,.92); backdrop-filter: blur(8px); z-index: 10; }
-  header.top .wrap { display: flex; align-items: center; justify-content: space-between; height: 56px; }
+  header.top { border-bottom: 1px solid var(--line); position: sticky; top: 0; background: rgba(29,32,33,.94); backdrop-filter: blur(8px); z-index: 20; }
+  header.top .bar { max-width: 1180px; margin: 0 auto; padding: 0 1.5rem; display: flex; align-items: center; justify-content: space-between; height: 56px; }
   .brand { display: inline-flex; align-items: center; gap: .55rem; font-weight: 600; letter-spacing: -.01em; color: var(--ink); text-decoration: none; }
+  .brand svg { display: block; }
   nav.top-nav { display: flex; gap: 1.25rem; font-size: 14px; }
-  nav.top-nav a { color: var(--muted); text-decoration: none; }
+  nav.top-nav a { color: var(--muted); text-decoration: none; white-space: nowrap; }
   nav.top-nav a:hover { color: var(--ink); }
-  @media (max-width: 640px) {
-    .top-nav { gap: 1rem; }
-    .top-nav a { white-space: nowrap; }
-    .top-nav a[href^="#"] { display: none; }
+  nav.top-nav a[aria-current] { color: var(--ink); }
+
+  .shell {
+    max-width: 1180px; margin: 0 auto; padding: 0 1.5rem;
+    display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem;
   }
 
-  h1.page { font-size: clamp(2rem, 5vw, 2.6rem); line-height: 1.1; letter-spacing: -.03em; margin: 3.2rem 0 .8rem; }
-  .lede { font-size: 1.1rem; color: var(--muted); margin: 0 0 2.2rem; max-width: 46rem; }
+  aside {
+    position: sticky; top: 56px; align-self: start;
+    max-height: calc(100vh - 56px); overflow-y: auto;
+    padding: 2rem 0 3rem; font-size: 14.5px;
+  }
+  aside h4 { margin: 1.4rem 0 .45rem; font-size: 11.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); font-weight: 600; }
+  aside h4:first-child { margin-top: 0; }
+  aside a { display: block; padding: .16rem 0 .16rem .7rem; color: var(--muted); text-decoration: none; border-left: 2px solid transparent; }
+  aside a:hover { color: var(--ink); }
+  aside a[aria-current] { color: var(--ink); border-left-color: var(--accent); font-weight: 600; }
 
-  /* The table of contents is a LIST of links to this page, so it goes with
-     the in-page nav on a narrow screen: the content is right underneath. */
-  .toc { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 1rem 1.2rem; margin: 0 0 2.4rem; }
-  .toc h2 { font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); margin: 0 0 .6rem; font-weight: 550; }
-  .toc ol { margin: 0; padding-left: 1.2rem; color: var(--muted); font-size: 14.5px; }
-  .toc li { margin: .22rem 0; }
+  main { padding: 2.4rem 0 5rem; min-width: 0; }
+  main section[id] { scroll-margin-top: 72px; }
 
-  section { padding: 2.4rem 0; border-top: 1px solid var(--line); }
-  section h2 { font-size: 1.45rem; margin: 0 0 .5rem; letter-spacing: -.015em; }
-  section h3 { font-size: 1.05rem; margin: 1.8rem 0 .4rem; }
-  section p { color: var(--muted); }
-  section p:first-of-type { margin-top: 0; }
+  h1 { font-size: 2.1rem; letter-spacing: -.025em; margin: 0 0 .6rem; }
+  .lede { color: var(--muted); font-size: 1.08rem; margin: 0 0 1.2rem; max-width: 46rem; }
+  h2 { font-size: 1.5rem; letter-spacing: -.018em; margin: 2.8rem 0 .5rem; padding-top: 1.6rem; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 1.8rem 0 .3rem; }
+  h4.step { font-size: 1rem; margin: 1.6rem 0 .3rem; color: var(--accent); font-family: var(--mono); letter-spacing: -.01em; }
+  p { margin: .7rem 0; }
   p strong, li strong, td strong { color: var(--ink); font-weight: 600; }
+  main p, main li { color: var(--muted); }
 
-  pre { background: var(--sunken); border: 1px solid var(--line); border-radius: 10px; padding: .95rem 1.1rem; overflow-x: auto; font-family: var(--mono); font-size: 13.5px; line-height: 1.6; margin: 1.1rem 0; }
+  pre { background: var(--sunken); border: 1px solid var(--line); border-radius: 10px; padding: .95rem 1.1rem; overflow-x: auto; font-family: var(--mono); font-size: 13.2px; line-height: 1.6; margin: 1rem 0; color: var(--ink); }
   code { font-family: var(--mono); font-size: .92em; }
-  p code, li code, td code { background: var(--raised); border: 1px solid var(--line-soft); border-radius: 5px; padding: .05rem .35rem; }
+  p code, li code, td code, aside code { background: var(--raised); border: 1px solid var(--line-soft); border-radius: 5px; padding: .05rem .35rem; color: var(--ink); }
+  pre code { background: none; border: 0; padding: 0; }
   .c { color: var(--dim); }
   .g { color: var(--accent); }
 
-  ul, ol { color: var(--muted); }
-  ul.plain { list-style: none; padding: 0; margin: 1.1rem 0 0; }
-  ul.plain li { padding: .55rem 0 .55rem 1.55rem; position: relative; border-top: 1px solid var(--line-soft); }
-  ul.plain li:first-child { border-top: 0; }
-  ul.plain li::before { content: "→"; position: absolute; left: 0; color: var(--dim); }
-
-  .note { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: .9rem 1.1rem; background: var(--surface); margin: 1.3rem 0; font-size: 14.5px; color: var(--muted); }
-  .note strong { color: var(--ink); }
+  .note, .warn, .stop {
+    border: 1px solid var(--line); border-left: 3px solid var(--dim); border-radius: 8px;
+    padding: .85rem 1.1rem; background: var(--surface); margin: 1.2rem 0; font-size: 14.8px;
+  }
+  .note { border-left-color: var(--link); }
   .warn { border-left-color: var(--warn); }
+  .stop { border-left-color: var(--bad); }
+  .note b, .warn b, .stop b { display: block; margin-bottom: .15rem; font-size: 12.5px; letter-spacing: .05em; text-transform: uppercase; }
+  .note b { color: var(--link); } .warn b { color: var(--warn); } .stop b { color: var(--bad); }
+  .note p, .warn p, .stop p { margin: .4rem 0 0; color: var(--muted); }
+  .note p:first-of-type, .warn p:first-of-type, .stop p:first-of-type { margin-top: 0; }
 
-  table { width: 100%; border-collapse: collapse; margin-top: 1.2rem; font-size: 14.5px; }
-  th, td { text-align: left; padding: .6rem .7rem; border-bottom: 1px solid var(--line-soft); vertical-align: top; color: var(--muted); }
-  th { color: var(--dim); font-weight: 550; font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; }
+  table { width: 100%; border-collapse: collapse; margin: 1.1rem 0; font-size: 14.5px; display: block; overflow-x: auto; }
+  th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--line-soft); vertical-align: top; color: var(--muted); }
+  th { color: var(--dim); font-weight: 550; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
   td:first-child { color: var(--ink); white-space: nowrap; }
+  .cmp td:first-child { white-space: normal; font-weight: 600; color: var(--ink); min-width: 8.5rem; }
+  .yes { color: var(--good); } .no { color: var(--dim); }
 
-  footer { border-top: 1px solid var(--line); padding: 2.2rem 0 3rem; color: var(--dim); font-size: 14px; }
+  ul, ol { padding-left: 1.2rem; }
+  li { margin: .35rem 0; }
+  .fn { font-size: 13px; color: var(--muted); padding-left: 1.2rem; margin: .3rem 0 0; }
+  .note-src { font-size: 13px; color: var(--dim); border-top: 1px solid var(--line-soft); padding-top: .9rem; margin-top: 1.7rem; }
+
+  .cards { display: grid; gap: .9rem; grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr)); margin: 1.1rem 0; }
+  .cards div { border: 1px solid var(--line); border-radius: 9px; padding: .85rem 1rem; background: var(--surface); }
+  .cards h5 { margin: 0 0 .3rem; font-size: 14.5px; color: var(--ink); }
+  .cards p { margin: 0; font-size: 13.8px; }
+
+  footer { border-top: 1px solid var(--line); padding: 2rem 0 3rem; color: var(--dim); font-size: 14px; margin-top: 3rem; }
+  footer .bar { max-width: 1180px; margin: 0 auto; padding: 0 1.5rem; }
   footer a { color: var(--muted); }
+
+  /* One column, and the contents becomes a box rather than a preamble.
+     Measured at 800 with the sidebar left to its own height: 1,462px of
+     links, and the first word of the page at y=1,519 — a screen and a half
+     of table of contents before anything it is a table of contents FOR.
+     Postern boxes this only below 720 because its list is 27 links; this one
+     is 36, so the box starts where the column collapses. */
+  @media (max-width: 860px) {
+    .shell { grid-template-columns: minmax(0, 1fr); gap: 0; }
+    aside {
+      position: static; max-height: 40vh; overflow-y: auto;
+      padding: 1rem 0; border-bottom: 1px solid var(--line);
+    }
+  }
+  /* At 375 the three header links wrap onto a second row and push the page
+     down by the height of one; scrolling them is the shorter answer. */
+  @media (max-width: 720px) {
+    header.top .bar { overflow-x: auto; gap: 1.25rem; }
+    header.top .bar > * { flex: 0 0 auto; }
+  }
 
   @media (prefers-color-scheme: light) {
     :root:not([data-theme="dark"]) {
@@ -83,15 +130,16 @@
       --line: #d5c4a1; --line-soft: #ebdbb2;
       --ink: #3c3836; --muted: #665c54; --dim: #7c6f64;
       --accent: #af3a03; --warn: #b57614; --bad: #9d0006; --link: #076678;
+      --good: #79740e;
     }
-    :root:not([data-theme="dark"]) header.top { background: rgba(251,241,199,.92); }
+    :root:not([data-theme="dark"]) header.top { background: rgba(251,241,199,.94); }
   }
 </style>
 </head>
 <body>
 
 <header class="top">
-  <div class="wrap">
+  <div class="bar">
     <a class="brand" href="../">
       <svg viewBox="0 0 32 32" width="22" height="22" fill="none" role="img" aria-label="WDash">
         <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -102,351 +150,2485 @@
       WDash
     </a>
     <nav class="top-nav">
-      <a href="#install">Install</a>
-      <a href="#sources">Sources</a>
-      <a href="#roles">Roles</a>
-      <a href="#checks">Checks</a>
-      <a href="../">Home</a>
+      <a href="../">Overview</a>
+      <a href="./" aria-current="page">Docs</a>
       <a href="https://github.com/warewave/wdash">Source</a>
     </nav>
   </div>
 </header>
 
-<div class="wrap">
-  <h1 class="page">Documentation</h1>
-  <p class="lede">The whole path, in the order you walk it: install, claim the
-  installation, add a source, grant a role, run checks, send alerts. Each step
-  says what it actually changes, and what it does not.</p>
+<div class="shell">
 
-  <div class="toc">
-    <h2>On this page</h2>
-    <ol>
-      <li><a href="#install">Install</a></li>
-      <li><a href="#first-run">First run</a></li>
-      <li><a href="#sources">Add a source</a></li>
-      <li><a href="#roles">Roles and who signs in</a></li>
-      <li><a href="#dashboards">Dashboards</a></li>
-      <li><a href="#checks">Checks of your own</a></li>
-      <li><a href="#alerts">Alerts</a></li>
-      <li><a href="#operating">Operating it</a></li>
-      <li><a href="#lab">A lab to try it against</a></li>
-    </ol>
-  </div>
+<aside>
+  <h4>Start here</h4>
+  <a href="#what">What it is</a>
+  <a href="#install">Install</a>
+  <a href="#first-run">First run</a>
+  <a href="#screens">The screens</a>
+
+  <h4>Sources</h4>
+  <a href="#sources">Adding a source</a>
+  <a href="#backends">The five backends</a>
+  <a href="#capabilities">What each one can do</a>
+  <a href="#fanout">Searching across sources</a>
+
+  <h4>Searching</h4>
+  <a href="#query">Query syntax</a>
+  <a href="#logs">The Logs screen</a>
+  <a href="#traces">Traces</a>
+
+  <h4>Dashboards</h4>
+  <a href="#dashboards">Building a dashboard</a>
+  <a href="#panels">The panel catalogue</a>
+  <a href="#thresholds">Thresholds and comparison</a>
+  <a href="#visibility">Who can see which one</a>
+
+  <h4>Access control</h4>
+  <a href="#roles">Roles and three boundaries</a>
+  <a href="#patterns">The pattern language</a>
+  <a href="#permissions">Permissions</a>
+  <a href="#mappings">Who gets which role</a>
+  <a href="#accounts">Local accounts and TOTP</a>
+  <a href="#directory">LDAP and OpenID Connect</a>
+  <a href="#breakglass">Locked out</a>
+
+  <h4>Monitoring and alerts</h4>
+  <a href="#agents">Agents</a>
+  <a href="#checks">HTTP and TCP checks</a>
+  <a href="#journeys">Browser journeys</a>
+  <a href="#rules">Alert rules</a>
+  <a href="#channels">Channels</a>
+  <a href="#silences">Silences and history</a>
+
+  <h4>Operations</h4>
+  <a href="#health">Health and probes</a>
+  <a href="#audit">The audit trail</a>
+  <a href="#retention">Retention</a>
+  <a href="#config">Config reference</a>
+  <a href="#upgrading">Upgrading</a>
+  <a href="#lab">The lab</a>
+  <a href="#refuses">What WDash refuses</a>
+  <a href="#trouble">Troubleshooting</a>
+</aside>
+
+<main>
+
+<h1>WDash documentation</h1>
+<p class="lede">Version 3.0.0. Everything below is behaviour of the shipped
+code — where a number appears it was measured, and where something is a
+limitation it is written as one rather than left for you to find.</p>
+
+<!-- ================================================================ -->
+<section id="what">
+<h2>What it is</h2>
+
+<p>WDash is a web front end for telemetry that already lives somewhere else.
+It reads logs, traces and synthetic checks out of the stores you already run,
+puts one search screen and one dashboard builder over all of them, and puts
+<strong>authorization in front</strong> — because Elasticsearch has no
+row-level security, Loki has no users, and "who may read the payments
+service's traces" is a question none of them answer.</p>
+
+<p>Three things follow from that, and they shape everything else on this
+page.</p>
+
+<div class="cards">
+  <div><h5>It never collects</h5><p>No ingest path, no agent on your
+  application hosts, nothing written into your stores. WDash being down costs
+  you a dashboard, not telemetry.</p></div>
+  <div><h5>It is meant to be the only path</h5><p>Authorization lives in the
+  application, so a cluster that is directly reachable makes it worthless.
+  Put WDash on the network path, not beside one.</p></div>
+  <div><h5>A failure never looks like emptiness</h5><p>A quiet window and a
+  backend that did not answer are different facts, and the screen says which
+  one it is. This is the rule most of the code is organised around.</p></div>
 </div>
 
+<h3>What you end up running</h3>
+
+<table class="cmp">
+<thead><tr><th>Piece</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td>The server</td><td>One Python process behind gunicorn, or the image
+that carries it. The UI, the API and the configuration pages are all of it.</td></tr>
+<tr><td>Metadata store</td><td>SQLite or PostgreSQL. Accounts, roles, source
+definitions, dashboards, saved searches, monitors, alert rules and the audit
+trail. Deliberately not Elasticsearch — that is a data source, it may not even
+be present, and a search index is the wrong home for a password hash.</td></tr>
+<tr><td>Alert evaluator</td><td>Its own process, <code>python -m
+wdash.alerts</code>. Separate because an agent going completely silent
+produces no requests at all, and that is exactly when somebody needs
+telling.</td></tr>
+<tr><td>Agents</td><td>Optional, one per place you want to check from. They
+pull configuration and push results, so they work behind NAT and need no
+inbound port.</td></tr>
+<tr><td>Your stores</td><td>Untouched.</td></tr>
+</tbody>
+</table>
+
+<h3>What it is not</h3>
+
+<ul>
+<li><strong>Not an ingester.</strong> Run an OpenTelemetry Collector and point
+WDash at the storage behind it.</li>
+<li><strong>No metrics signal.</strong> Logs, traces and synthetic monitors.
+Metrics have a genuinely different query model, and a screen that rendered
+Prometheus badly would be worse than not having one.</li>
+<li><strong>Not a superuser tool.</strong> <code>system:admin</code> opens the
+configuration page and grants no access to logs or traces on its own.</li>
+</ul>
+
+<div class="note"><b>Licence</b>
+<p>MIT. The two dependencies that are not permissive — <code>ldap3</code> and
+<code>psycopg</code>, both LGPL v3 — are used as libraries over their
+published interfaces, which is what the LGPL is for, and neither pulls
+WDash's licence with it. <code>tests/test_dependency_licences.py</code>
+refuses anything proprietary or source-available.</p></div>
+</section>
+
+<!-- ================================================================ -->
 <section id="install">
-  <div class="wrap">
-    <h2>1. Install</h2>
-    <p>Python 3.11 or newer if you run it directly; otherwise the image.
-    Two secrets have to exist before the first sign-in.</p>
+<h2>Install</h2>
 
-<pre>$ git clone https://github.com/warewave/wdash &amp;&amp; cd wdash
+<p>Two secrets, one process, one page. Nothing about a data source or an
+identity provider is installed — those are typed into the browser once WDash
+is up, and take effect the moment they are saved.</p>
+
+<h4 class="step">1. Get it</h4>
+
+<p>The container is the short road. It publishes <strong>5001</strong> rather
+than the 5000 the process serves on, because macOS answers 5000 with its own
+AirPlay receiver — measured here as a <code>403</code> from <code>Server:
+AirTunes</code> on a machine where the container was answering 200.</p>
+
+<pre><span class="c"># the image, and an Elasticsearch to point it at</span>
+$ git clone https://github.com/warewave/wdash &amp;&amp; cd wdash
 $ cp .env.example .env
+$ docker compose up -d</pre>
 
-<span class="c"># SECRET_KEY signs the session cookie. Any long random value.</span>
-$ python -c <span class="g">"import secrets; print(secrets.token_urlsafe(48))"</span>
+<h4 class="step">1b. Or from source</h4>
 
-<span class="c"># WDASH_ENCRYPTION_KEY seals every stored credential AND every
-# authenticator secret. Without it NO LOCAL ACCOUNT CAN SIGN IN.</span>
+<pre>$ python3 -m venv venv &amp;&amp; ./venv/bin/pip install -r requirements.txt
+$ cp .env.example .env
+$ ./venv/bin/python main.py          <span class="c"># development server, 127.0.0.1:5001</span></pre>
+
+<p>For anything but a laptop, run it under gunicorn — the shipped image runs
+<code>--workers 4</code>.</p>
+
+<h4 class="step">2. The two keys</h4>
+
+<p>Both are refused rather than defaulted, and both are refused for a reason
+you would otherwise meet later and worse.</p>
+
+<pre>$ python -c <span class="g">"import secrets; print(secrets.token_urlsafe(48))"</span>
+<span class="c"># → SECRET_KEY</span>
+
 $ python -c <span class="g">"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"</span>
+<span class="c"># → WDASH_ENCRYPTION_KEY</span></pre>
 
-$ docker compose up -d
-$ open http://localhost:5001</pre>
+<table class="cmp">
+<thead><tr><th>Key</th><th>What happens without it</th></tr></thead>
+<tbody>
+<tr><td><code>SECRET_KEY</code></td><td>Signs session cookies. WDash
+<em>refuses to start</em> on a published placeholder while
+<code>SESSION_COOKIE_SECURE</code> is true — the development key, and every
+placeholder this repository has ever shipped in <code>.env.example</code> or
+<code>kubernetes/secrets.yaml</code>, is printed in public and would sign the
+administrator's cookie.</td></tr>
+<tr><td><code>WDASH_ENCRYPTION_KEY</code></td><td>Seals every secret at rest:
+source credentials, the OIDC client secret, the LDAP bind password, and every
+local account's authenticator. Without it WDash refuses to write a secret as
+text — so the configuration page cannot save a credential and <em>no local
+account can finish signing in</em>.</td></tr>
+</tbody>
+</table>
 
-    <div class="note warn"><strong>Keep the encryption key.</strong> It seals
-    source passwords, LDAP and OIDC secrets, agent tokens, journey secrets and
-    every local account's authenticator. Change it and those values cannot be
-    read back — WDash says so on the page rather than quietly reconnecting
-    without them. Back it up where you back up the database.</div>
+<div class="stop"><b>Set the encryption key before anybody signs in</b>
+<p>The first administrator's authenticator is sealed with it during enrolment.
+Rotating or losing the key later means re-entering every stored credential and
+resetting every authenticator with <code>python -m wdash.store.recover
+--reset-totp &lt;username&gt;</code>.</p></div>
 
-    <h3>Without Docker</h3>
-<pre>$ python -m venv venv &amp;&amp; ./venv/bin/pip install -r requirements.txt
-$ set -a &amp;&amp; source .env &amp;&amp; set +a
-$ ./venv/bin/gunicorn --bind 0.0.0.0:5000 --workers 4 main:app</pre>
-    <p>The metadata store defaults to SQLite at <code>data/wdash.db</code>.
-    Point <code>DATABASE_URL</code> at PostgreSQL for more than one worker
-    across more than one host; both dialects are exercised by the same test
-    suite on every change.</p>
+<h4 class="step">3. Where state lives</h4>
 
-    <h3>Kubernetes</h3>
-    <p><code>kubernetes/</code> holds the manifests: a Deployment for the
-    server, one for the alert runner, a Service, and a ConfigMap. Liveness and
-    startup read <code>/livez</code>, readiness reads <code>/readyz</code>;
-    <code>/health</code> is the detailed report, for alerts and people rather
-    than for probes.</p>
-  </div>
+<p>SQLite for one node and the lab; PostgreSQL for more than one process. The
+schema is migrated on start-up in either dialect, and the whole test suite
+runs against both.</p>
+
+<pre>DATABASE_URL=<span class="g">sqlite:///data/wdash.db</span>                    <span class="c"># default</span>
+DATABASE_URL=<span class="g">postgresql://wdash:···@db.internal/wdash</span></pre>
+
+<div class="warn"><b>SQLite means one writer</b>
+<p>The Kubernetes manifests ship <code>replicas: 1</code> and
+<code>strategy: Recreate</code> for exactly this reason — it is the SQLite
+file, not caution. Move to Postgres before scaling out;
+<code>kubernetes/README.md</code> says what to change and in which
+order.</p></div>
+
+<h4 class="step">4. Behind a proxy</h4>
+
+<p>Two settings, and one of them is a number rather than a switch.</p>
+
+<pre>SESSION_COOKIE_SECURE=<span class="g">true</span>      <span class="c"># HTTPS-only cookie; also turns on HSTS</span>
+TRUSTED_PROXY_COUNT=<span class="g">1</span>           <span class="c"># how many proxies are actually in front</span></pre>
+
+<p><code>TRUSTED_PROXY_COUNT</code> defaults to <code>0</code>, which ignores
+<code>X-Forwarded-For</code> entirely and uses the socket address. That header
+is written by whatever spoke to the proxy, so trusting it without knowing the
+depth lets a client name its own address and step around the per-address rate
+limit by changing a header. Set the real number and the address is counted in
+<em>from the right</em>.</p>
+
+<h4 class="step">5. The alert evaluator</h4>
+
+<p>Only if you want alerts. Run <strong>one</strong> — two would evaluate the
+same rules and deliver the same notification twice.</p>
+
+<pre>$ python -m wdash.alerts                  <span class="c"># every 30s</span>
+$ python -m wdash.alerts --interval 60
+$ python -m wdash.alerts --once           <span class="c"># evaluate once and exit, for</span>
+                                          <span class="c"># testing a rule without a daemon</span></pre>
+
+<h4 class="step">6. Open it</h4>
+
+<p><code>http://127.0.0.1:5001</code>. The installation has no accounts, so
+every route leads to <code>/setup</code>.</p>
+
+<h3>Kubernetes</h3>
+
+<pre>$ kubectl apply -k kubernetes/</pre>
+
+<p>Installs the server, its database on a volume, the alert evaluator beside
+it and a plain <code>networking.k8s.io/v1</code> Ingress. Read
+<code>kubernetes/README.md</code> first: three values have to change before
+that command and nothing starts until they do. The two Secrets ship
+<em>empty</em> on purpose, so an unfilled one fails with a message rather than
+quietly signing every session cookie with a string printed in this
+repository.</p>
 </section>
 
+<!-- ================================================================ -->
 <section id="first-run">
-  <div class="wrap">
-    <h2>2. First run</h2>
-    <p>Until somebody claims the installation, every page leads to
-    <code>/setup</code>. Serving screens whose authorization has no owner is
-    not useful.</p>
+<h2>First run</h2>
 
-    <ul class="plain">
-      <li>Choose a username and a password of at least twelve characters. Length
-      is the only rule: composition rules push people towards
-      <code>Passw0rd!</code> and add nothing an attacker notices.</li>
-      <li><strong>Enrol an authenticator.</strong> Setup does not sign you in
-      — it hands you a QR code, and the code you type back is what starts the
-      session. A password alone signs nobody in.</li>
-      <li>That account is the <strong>break-glass administrator</strong>. It
-      lives in WDash's own database, so an identity-provider outage is not a
-      lockout. WDash refuses any change that would leave nobody able to
-      administer — including deleting the last local account, and including
-      the one you are signed in as.</li>
-    </ul>
+<p><code>/setup</code> creates one account. It is a <strong>local</strong>
+account, stored in WDash's own database with an Argon2 password hash — not an
+identity-provider account, and it keeps working when the identity provider
+does not.</p>
 
-    <div class="note">Lost the phone?
-    <code>python -m wdash.store.recover --reset-totp &lt;username&gt;</code> on
-    the host. The same tool re-enables a disabled account and switches the
-    directory off.</div>
-  </div>
+<div class="stop"><b>That is the point, and it is also the risk</b>
+<p>This account is the way back in after a bad OIDC change, which also makes
+it a permanent credential to the whole system. Protect it like one, and do not
+share it.</p></div>
+
+<h3>What happens, in order</h3>
+
+<ol>
+<li><strong>You choose a username and password.</strong> Minimum twelve
+characters and no composition rules — length is what actually costs an
+attacker time.</li>
+<li><strong>Setup closes.</strong> Checked against the database on every
+request rather than a flag cached at start-up, so a second worker sees the
+first worker's administrator immediately. The account is created under a
+uniqueness constraint: two people submitting the form at the same moment
+produce one administrator and one clear error, not two owners.</li>
+<li><strong>You are <em>not</em> signed in.</strong> Setup leaves the same
+short hold a correct password leaves, and that hold opens the enrolment page
+and nothing else. It used to sign you in — which with a mandatory second
+factor would have made the account that matters most the one account that
+never enrolled.</li>
+<li><strong>You enrol an authenticator.</strong> A QR code, the same secret in
+typeable groups, and the whole <code>otpauth://</code> link — all three,
+because an authenticator on the same device cannot scan the screen it is
+on.</li>
+</ol>
+
+<p>The shared secret does not reach the database until a code proves you hold
+it. An unconfirmed secret on an account is a half-enrolled account that
+whoever saw the QR may be able to sign in as.</p>
+
+<div class="note"><b>There is no other door</b>
+<p>Setup cannot be reopened from the UI. There is no static password and no
+environment-variable-gated bypass: the old <code>/auth/dev-login</code> has
+been removed, because a guard that is one environment variable deep is the
+guard people forget.</p></div>
+
+<h3>Then: one source</h3>
+
+<p>Sign in and go to <strong>Configuration → Sources → Add source</strong>.
+Nothing is read from the environment, and a source is in use the moment it is
+saved. <a href="#sources">Adding a source</a> is the next section, and
+<a href="#lab">the lab</a> gives you five backends full of data to point at if
+you have none to hand.</p>
 </section>
 
+<!-- ================================================================ -->
+<section id="screens">
+<h2>The screens</h2>
+
+<table class="cmp">
+<thead><tr><th>Screen</th><th>Path</th><th>Needs</th><th>What it answers</th></tr></thead>
+<tbody>
+<tr><td>Logs</td><td><code>/logs</code></td><td><code>logs:read</code></td>
+<td>Search one source or all of them, with a volume histogram, field
+statistics, and the records either side of one you are reading.</td></tr>
+<tr><td>Traces</td><td><code>/traces</code></td><td><code>traces:read</code></td>
+<td>Services by traffic, traces by service, a waterfall with self-time, and
+the log records carrying the same trace id.</td></tr>
+<tr><td>Monitors</td><td><code>/monitors</code></td><td><code>monitors:read</code></td>
+<td>What each synthetic check found, its history, the steps of a browser
+journey, and the TLS certificate it saw.</td></tr>
+<tr><td>Dashboards</td><td><code>/dashboards</code></td><td><code>dashboard:view</code></td>
+<td>Boards of panels over a query and a window, with thresholds and a
+previous-period comparison.</td></tr>
+<tr><td>Alerts</td><td><code>/alerts</code></td><td><code>system:admin</code></td>
+<td>Rules, channels, silences, and a history that records what was
+<em>not</em> delivered as well as what was.</td></tr>
+<tr><td>Configuration</td><td><code>/config</code></td><td><code>system:admin</code></td>
+<td>Sources, identity providers, local accounts, roles, mappings, agents and
+monitors.</td></tr>
+<tr><td>Audit</td><td><code>/audit</code></td><td><code>system:admin</code></td>
+<td>Append-only record of every authorization change, including refused
+ones.</td></tr>
+<tr><td>Advisor</td><td><code>/advisor</code></td><td><code>system:admin</code></td>
+<td>Read-only inspection of a connected Elasticsearch, with concrete
+fixes.</td></tr>
+</tbody>
+</table>
+
+<p class="fn">Every screen opens on the last 24 hours. A store whose newest
+document is older than that is healthy, full, and blank on screen — which is
+the first thing to check when a new source looks empty.</p>
+</section>
+
+<!-- ================================================================ -->
 <section id="sources">
-  <div class="wrap">
-    <h2>3. Add a source</h2>
-    <p><strong>Configuration → Sources.</strong> A source is a URL, optional
-    credentials, and the signals it serves. It is in use the moment it is
-    saved — the worker that handled the save uses it immediately, the others
-    within five seconds.</p>
+<h2>Adding a source</h2>
 
-    <table>
-      <thead><tr><th>Backend</th><th>Serves</th><th>Worth knowing</th></tr></thead>
-      <tbody>
-        <tr><td>Elasticsearch</td><td>logs, traces, monitors</td><td>One entry, one credential, whichever signals you tick. Reads OpenTelemetry and Elastic APM trace schemas, and what Heartbeat writes.</td></tr>
-        <tr><td>Grafana Loki</td><td>logs</td><td>No field statistics, no context view, no single-record fetch — Loki has neither field mappings nor document ids.</td></tr>
-        <tr><td>VictoriaLogs</td><td>logs</td><td>Counts matches and lists field values, so a page total is a real count.</td></tr>
-        <tr><td>Jaeger</td><td>traces</td><td>Cannot answer "every trace", and reports no span counts without a metrics backend.</td></tr>
-        <tr><td>Grafana Tempo</td><td>traces</td><td>Same: no per-service volume without metrics. TraceQL it cannot parse is surfaced, not swallowed.</td></tr>
-      </tbody>
-    </table>
+<p>A source is a connection to somewhere telemetry lives, declared at
+<strong>Configuration → Sources</strong> and stored in the metadata database
+with its own credentials and patterns. One source serves <em>every signal it
+holds</em>: an Elasticsearch with logs and traces in it is one entry with one
+credential, not two rows that drift apart at the next rotation.</p>
 
-    <h3>Two rules the form enforces</h3>
-    <ul class="plain">
-      <li><strong>A password goes in the password box, never in the URL.</strong>
-      The address is stored as it was typed and shown on the page; a password
-      there would be on disk in clear text and on your screen. The form refuses
-      it and names the two boxes to use.</li>
-      <li><strong>A source that holds a credential must verify the
-      certificate.</strong> Over <code>https</code>, saving with a password and
-      certificate checks off is refused — including when the password is typed
-      again. Install a private authority in the trust store of the host WDash
-      runs on, or clear the credential.</li>
-    </ul>
+<h3>The form</h3>
 
-    <p><strong>Test connection</strong> before you save. Testing a saved source
-    without retyping its password sends that password only where it was saved
-    for: change the address and the test is refused until you type it again.</p>
-  </div>
+<table class="cmp">
+<thead><tr><th>Field</th><th>Means</th></tr></thead>
+<tbody>
+<tr><td>Name</td><td>How it is referred to everywhere else: the badge on a
+record, the qualifier in a role's patterns, the key in <code>/health</code>.
+It cannot contain a colon, and it cannot be a name that some role already
+writes before one — that would turn their patterns into rules for it.</td></tr>
+<tr><td>Type</td><td>Elasticsearch, Grafana Loki, VictoriaLogs, Jaeger or
+Grafana Tempo.</td></tr>
+<tr><td>Signals</td><td>Which of logs, traces and monitors this source serves.
+Only the ones its type supports are offered, and a source with none ticked is
+refused — it would answer nothing.</td></tr>
+<tr><td>URL</td><td><code>http</code> or <code>https</code>. Refused if it
+carries a password (see below), if the host does not resolve, or if it
+resolves to a link-local address.</td></tr>
+<tr><td>Username, password</td><td>Optional. The password is sealed with the
+encryption key and never read back out; the form says whether one is set and
+offers to replace it.</td></tr>
+<tr><td>Index patterns</td><td>Elasticsearch only, and <em>per signal</em> —
+one cluster holding logs and traces needs a different pattern for each.
+Flattened into one key, a trace search scans the log indices.</td></tr>
+<tr><td>Exclude patterns</td><td>Elasticsearch only, per signal.</td></tr>
+<tr><td>Stream label, stream field</td><td>Loki and VictoriaLogs. Names what a
+"container" is, so a role has something to be granted. Defaults to
+<code>service_name</code> and <code>service</code>, because that is what most
+pipelines write — and it must be one the data was ingested with, or every
+query becomes a full scan.</td></tr>
+<tr><td>Tenant</td><td>Loki, VictoriaLogs, Jaeger, Tempo. Sent as the tenant
+header where the backend has one.</td></tr>
+<tr><td>Verify certificates</td><td>On by default. See the rule below.</td></tr>
+</tbody>
+</table>
+
+<h3>Test before you save</h3>
+
+<p><strong>Add source</strong> runs a connection test. A source that holds a
+credential cannot be saved until that test has passed — a stored credential
+that has never reached the backend is a configuration that looks finished and
+answers nothing. A refusal is recorded in the <a href="#audit">audit
+trail</a>, including the case where the secret itself could not be read.</p>
+
+<h3>A source that holds a credential verifies the certificate</h3>
+
+<p>Over <code>https</code>, turning verification off means the source is
+talking to whatever answered, and WDash would send that credential there on
+every query. The save is refused, and it is refused <em>whether or not the
+password is typed again</em> — retyping used to be the way through, which
+confused consent with protection.</p>
+
+<p>Two remedies, both on the page:</p>
+
+<ul>
+<li><strong>Leave verification on.</strong> A private authority goes in the
+trust store of the host WDash runs on, which is where every other client on
+that host will find it too. There is no per-source CA field.</li>
+<li><strong>Tick "Forget the stored password".</strong> A source with no
+credential may verify or not as you like.</li>
+</ul>
+
+<p>A plain <code>http</code> source is not what the rule is about — there is
+no certificate in it to check. A synthetic check has had the same rule since
+its TLS support was written, and it <em>does</em> carry its own pasted
+certificate, because the agent that makes its connection runs on somebody
+else's host.</p>
+
+<div class="warn"><b>A password in the address is refused</b>
+<p><code>https://wdash:hunter2@es.internal:9200</code> is rejected by the URL
+validator. The URL is stored as typed and shown as typed, so a password
+written into it would be a credential travelling the address's road — visible
+on the configuration page and in the audit trail. A bare
+<code>user@host</code> with no password is allowed. An installation that
+already stored one is told at upgrade by migration 20, which logs and audits
+the source <em>masked</em>: it cannot seal the value, because migrations run
+before the encryption box exists.</p></div>
+
+<h3>Changing one</h3>
+
+<p>A source saved in the UI is in use within a few seconds: the worker that
+handled the save uses it immediately, and the others notice on their next
+check, at most five seconds later. The stored sources are swapped as a unit
+and the adapters a running query holds are not closed under it, so an edit
+never disturbs a query in flight.</p>
+
+<p>A source cannot be <strong>renamed</strong> while any role's patterns name
+either the old name or the new one. Renaming <code>primary</code> would turn
+<code>-primary:secret-*</code> into an exclusion of nothing; renaming a source
+<em>to</em> <code>staging</code> would hand <code>staging:*</code> everything
+in it.</p>
 </section>
 
-<section id="roles">
-  <div class="wrap">
-    <h2>4. Roles and who signs in</h2>
-    <p><strong>Configuration → Roles &amp; access.</strong> A role is a set of
-    permissions and <em>three</em> boundaries.</p>
+<!-- ================================================================ -->
+<section id="backends">
+<h2>The five backends</h2>
 
-    <table>
-      <thead><tr><th>Boundary</th><th>Grants</th></tr></thead>
-      <tbody>
-        <tr><td>Log containers</td><td>Index patterns, Loki streams, VictoriaLogs streams. <code>app-*</code>, or <code>primary:app-*</code> to mean one source, or <code>-secret-*</code> to exclude.</td></tr>
-        <tr><td>Trace stores</td><td>Which trace indices or which trace source. Separate, because trace data is not log data.</td></tr>
-        <tr><td>Services</td><td>Which services' traces. A team may reach a store and still see only its own services in it.</td></tr>
-      </tbody>
-    </table>
+<h3>Elasticsearch</h3>
 
-    <div class="note"><strong>A bare pattern applies to every source.</strong>
-    A role granted <code>app-*</code> reaches <code>app-*</code> in each
-    configured source, so adding a source widens what existing roles can see.
-    Write <code>source:pattern</code> when you mean one.</div>
+<p>The only one that serves all three signals: logs, traces (its own APM
+schema and OpenTelemetry's) and synthetic monitors — Heartbeat and the Fleet
+Synthetics integration write into the same cluster, and a third index pattern
+is all that separates them from the rest.</p>
 
-    <h3>Permissions</h3>
-    <p><code>logs:read</code>, <code>traces:read</code>,
-    <code>monitors:read</code>, <code>dashboard:view</code> and the
-    create/edit/delete pair, and <code>system:admin</code>. Every dashboard
-    panel is checked against the permission for the data it holds, so a shared
-    board is not a way around any of them — a panel is refused with a sentence
-    and the rest of the board still works.</p>
-    <p><strong><code>system:admin</code> is not a superuser.</strong> It grants
-    no access to logs or traces on its own.</p>
+<p>It is also the one that answers a whole dashboard in <strong>one
+request</strong>, whatever the panel count, because the panels are batched
+into an <code>_msearch</code>. It reports a real match count, ranks
+server-side, and can return the raw stored document and the records
+surrounding one.</p>
 
-    <h3>Who signs in</h3>
-    <ul class="plain">
-      <li><strong>Local accounts</strong>, each with an authenticator. Created
-      and managed on Authentication → Local accounts.</li>
-      <li><strong>LDAP</strong> or <strong>OpenID Connect</strong> — one at a
-      time. The page refuses the second and says how to switch, and the switch
-      says what the names it hands over already own. The directory names the
-      person, not the keyboard: a filter that matches <code>uid</code> loosely
-      would otherwise make <code>alice</code>, <code>Alice</code> and
-      <code>ALICE</code> three different people here.</li>
-      <li>Groups map to roles; a direct mapping by username or address
-      overrides the group. Everything is resolved from the database on every
-      request, so a revocation takes effect in seconds rather than at the next
-      sign-out.</li>
-    </ul>
-  </div>
+<h3>Grafana Loki</h3>
+
+<p>Logs only, and with fewer capabilities than the name suggests: no field
+statistics, no context view, no single-record fetch. Loki has neither field
+mappings nor document ids, and those are <em>declared absent</em> rather than
+answered with something thinner than the name.</p>
+
+<ul>
+<li>A level matches however it was written and wherever it was written:
+<code>level:WARN</code> finds <code>warn</code>, <code>warning</code> and
+<code>WARN</code> in Loki's <code>level</code>, <code>severity</code> or
+<code>detected_level</code> — the same fields, read in the same order, that a
+record's own level is read from.</li>
+<li>A negated group such as <code>NOT (a b)</code> is refused with a warning.
+A chain of line filters cannot say OR, and a query that silently means
+something else is worse than one that is rejected.</li>
+<li>A panel counted by a field that is not a Loki label says so rather than
+drawing an empty chart.</li>
+<li>It does not report an exact total, so a merged page total including Loki
+is reported as a <em>lower bound</em>.</li>
+</ul>
+
+<h3>VictoriaLogs</h3>
+
+<p>Logs only, but with more than Loki: it can count matches and list field
+values, so a page total is a real count and the field-statistics sidebar is
+served by the backend. No context view and no raw document —
+<code>_stream_id</code> names a stream rather than a line, and returning the
+wrong record is worse than returning none.</p>
+
+<h3>Jaeger</h3>
+
+<p>Traces only. Two limits worth knowing before you rely on it:</p>
+
+<ul>
+<li><strong>It cannot answer "every trace".</strong> <code>GET
+/api/traces</code> without a service is an HTTP 400, so an unfiltered search
+is fanned across the service list and bounded at twenty services.</li>
+<li><strong>No per-service volume</strong> without a separate metrics backend
+wired up, so its service list carries names with a span count of zero — rather
+than a number derived from a sample of fetched traces, which would look like a
+measurement and be a guess.</li>
+</ul>
+
+<h3>Grafana Tempo</h3>
+
+<p>Traces only. It returns ids two ways — its search endpoint gives hex, its
+trace endpoint gives OTLP JSON where ids are protobuf <code>bytes</code> and
+therefore base64. Both are handled; read as hex, the base64 form produces
+dangling parents and a flat waterfall that looks like missing
+instrumentation. A TraceQL query it cannot parse is surfaced rather than
+swallowed into an empty result. Like Jaeger it reports no per-service volume
+without a metrics backend.</p>
+
+<div class="warn"><b>"Slowest" is the slowest of a sample on Jaeger and Tempo</b>
+<p>Neither search endpoint takes a sort parameter — both answer newest-first —
+so the ranking happens in WDash, over a pool it asks for: five times the page
+size, between 100 and 500 rows. When that pool comes back full there were more
+traces behind it, and the list says so in a line of its own. Elasticsearch
+ranks server-side, so "Slowest" there is the slowest in the window.</p></div>
+
+<h3>OpenTelemetry</h3>
+
+<p>WDash's internal model follows OpenTelemetry semantic conventions — a log
+message is <code>body</code>, its level is <code>severity</code>, service and
+host live in <code>resource</code> — and adapters translate on read. The lab
+runs a real collector (<code>./lab.sh up otel</code>) so the OTel path is
+exercised rather than assumed, which is how it was found that the schemas had
+been written against a fixture that had itself been written from an
+assumption.</p>
 </section>
 
+<!-- ================================================================ -->
+<section id="capabilities">
+<h2>What each one can do</h2>
+
+<p>Capabilities are explicit. A source declares what it supports and the UI
+does not offer a feature the backend cannot serve — the point of a hub is to
+make the differences visible, not to hide them.</p>
+
+<table>
+<thead><tr><th>Capability</th><th>Elastic</th><th>Loki</th><th>VictoriaLogs</th><th>Jaeger</th><th>Tempo</th></tr></thead>
+<tbody>
+<tr><td>Search</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td></tr>
+<tr><td>Histogram</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td></tr>
+<tr><td>Aggregation</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td></tr>
+<tr><td>Field statistics</td><td class="yes">yes</td><td class="no">—</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td></tr>
+<tr><td>Context (surrounding records)</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="no">—</td></tr>
+<tr><td>Raw document</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="no">—</td></tr>
+<tr><td>Log ↔ trace correlation</td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td></tr>
+<tr><td>Trace lookup</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td><td class="yes">yes</td><td class="yes">yes</td></tr>
+<tr><td>Trace search</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td><td class="yes">yes</td><td class="yes">yes</td></tr>
+<tr><td>Service list</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td><td class="yes">yes</td><td class="yes">yes</td></tr>
+<tr><td>Monitor list and history</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="no">—</td></tr>
+<tr><td>TLS certificates</td><td class="yes">yes</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="no">—</td></tr>
+</tbody>
+</table>
+
+<p class="fn">WDash's own agents are a monitor source too, beside
+Elasticsearch: they serve monitor list, monitor history and TLS certificates
+out of the metadata database, and appear in <code>/health</code> as
+<code>wdash-agents</code>.</p>
+
+<div class="note"><b>Capabilities intersect across a merged search</b>
+<p>"All sources" can only offer what every source in it can do. Configuring a
+Loki therefore removes the field-statistics panel from the merged view — it is
+not hidden as an error, it is genuinely unanswerable. The source breakdown
+beside it does not come from a capability and stays.</p></div>
+</section>
+
+<!-- ================================================================ -->
+<section id="fanout">
+<h2>Searching across sources</h2>
+
+<p>The Logs screen grows a source picker once more than one is configured,
+with <strong>All sources</strong> first. It fans out in parallel and merges by
+time. There is no default source: a search or a board that names none asks all
+of them.</p>
+
+<p>The merge is the easy part. What matters is that a backend being down is
+<em>visible</em>: the page renders from the sources that answered, marks
+itself incomplete, and names the one that failed — because fewer rows looks
+exactly like less data.</p>
+
+<h3>Three things a merged answer says</h3>
+
+<ul>
+<li><strong>Which source each record came from.</strong> A badge on the row —
+but only when more than one source is configured. A badge repeated on every
+row that always says the same thing is noise, and noise is how people stop
+reading the row footer at all.</li>
+<li><strong>That a total is a floor.</strong> Elasticsearch reports a real
+match count and Loki does not, so a merged total including one is reported as
+a lower bound rather than as a number.</li>
+<li><strong>That it is first-page only.</strong> Paging a time-ordered merge
+needs every source's cursor advanced together, and each backend's cursor means
+something different. A cursor that silently skips records is worse than no
+paging, so the merged view stops at the first page — and the pagination line
+names the merge as the reason rather than blaming the source.</li>
+</ul>
+
+<h3>A chart or a terms panel over several sources</h3>
+
+<p>Buckets are merged by key, histograms by timestamp. A terms list is trimmed
+back to the size that was asked for, and when trimming actually dropped
+something the panel says so — a "top 10" assembled from three partial top-10s
+is not the top 10, and the panel that does not say so is the one that gets
+quoted in a postmortem.</p>
+
+<p>To make that less likely each source is asked for more than the page needs
+— half again plus ten — so the merge has something to trim from rather than
+something to guess at. Date buckets are never cut: a histogram missing its
+last hour reads as traffic stopping.</p>
+
+<h3>One record lives in one place</h3>
+
+<p>Fetching a single record, its context or its raw document takes a
+<code>?source=</code>, because those questions have one answer. With one
+source configured that one answers; with several, a request that names none is
+refused, as <code>?source=*</code> is.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="query">
+<h2>Query syntax</h2>
+
+<p>The text you type is parsed into a backend-neutral tree and rendered into
+each backend's own language. Syntax errors are reported with a
+<em>position</em>, before the query leaves the process, and nothing you type
+is injected into a backend's query string.</p>
+
+<pre>*                            <span class="c">everything</span>
+severity:ERROR               <span class="c">field equals value</span>
+body:"connection refused"    <span class="c">exact phrase</span>
+service:payment*             <span class="c">prefix</span>
+duration_ms:[100 TO 500]     <span class="c">range</span>
+_exists_:trace_id            <span class="c">field is present</span>
+a AND b   a OR b   a b       <span class="c">combination (whitespace means AND)</span>
+NOT a     -a                 <span class="c">negation</span>
+(a OR b) AND c               <span class="c">grouping</span>
+free text                    <span class="c">searched in the message body</span></pre>
+
+<h3>Aliases</h3>
+
+<p>Elasticsearch and ECS field names are accepted, so people who know that
+vocabulary keep using it:</p>
+
+<table class="cmp">
+<thead><tr><th>You type</th><th>It means</th></tr></thead>
+<tbody>
+<tr><td><code>level</code>, <code>loglevel</code>, <code>log_level</code></td><td><code>severity</code></td></tr>
+<tr><td><code>message</code>, <code>msg</code></td><td><code>body</code></td></tr>
+<tr><td><code>@timestamp</code>, <code>time</code></td><td><code>timestamp</code></td></tr>
+</tbody>
+</table>
+
+<p>A bare term with no field name is searched in <code>body</code>.</p>
+
+<h3>Severity is normalised both ways</h3>
+
+<p>The internal vocabulary is OpenTelemetry's — <code>TRACE</code>,
+<code>DEBUG</code>, <code>INFO</code>, <code>WARN</code>, <code>ERROR</code>,
+<code>FATAL</code>, and <code>UNSPECIFIED</code> for a level that is missing or
+unrecognised. Backends write other spellings, and the filter knows them all:
+<code>WARNING</code>, <code>ERR</code>, <code>CRIT</code>,
+<code>CRITICAL</code>, <code>SEVERE</code>, <code>PANIC</code>,
+<code>NOTICE</code>, <code>VERBOSE</code> and <code>FINE</code> each map onto
+one of the six.</p>
+
+<p>So on a backend that stores what was written, <code>level:ERROR</code>
+matches <code>error</code> and <code>err</code>, and the sidebar's merged
+<code>WARN</code> row finds <code>warn</code> and <code>warning</code> alike.
+A filter for <code>UNSPECIFIED</code> is "none of the known spellings", because
+nothing writes that word.</p>
+
+<div class="note"><b>What is deliberately missing</b>
+<p>Fuzzy matching, boosting and regular expressions are not supported.
+Unsupported syntax is rejected rather than silently reinterpreted.</p></div>
+
+<h3>Linking into a search</h3>
+
+<p>The Logs screen reads <code>query</code>, <code>time_range</code> and
+<code>start</code>/<code>end</code> from the query string, which is what makes
+every chart elsewhere a link into it:</p>
+
+<pre>/logs?query=level:ERROR AND service:"payment-service"&amp;time_range=24h</pre>
+</section>
+
+<!-- ================================================================ -->
+<section id="logs">
+<h2>The Logs screen</h2>
+
+<p>One query box, one window, and four things around the result.</p>
+
+<h3>The histogram</h3>
+
+<p>Volume over the window, bucketed and split by severity. Click a bar to
+narrow the window to it. The bucket width is derived from the window, and the
+alignment matters more than it sounds: a bucket whose interval starts before
+the window is dropped rather than drawn short, because a first bar a third of
+a bucket wide reads as a quiet period that never happened.</p>
+
+<h3>Field statistics</h3>
+
+<p>The sidebar lists a field's most common values with their share of the
+window, served by the backend where it can be — see
+<a href="#capabilities">capabilities</a>. Click a value to add it to the
+query.</p>
+
+<h3>A record, in three depths</h3>
+
+<table class="cmp">
+<thead><tr><th>View</th><th>Shows</th></tr></thead>
+<tbody>
+<tr><td>The row</td><td>Timestamp, severity, service, body, and the source
+badge.</td></tr>
+<tr><td>Detail</td><td>Every field, in the neutral shape — <code>body</code>,
+<code>severity</code>, <code>resource</code>, <code>attributes</code> — with
+the trace id linked to its waterfall where there is one.</td></tr>
+<tr><td>Context</td><td>The records either side of it in the same container,
+from a source that declares the capability.</td></tr>
+<tr><td>Raw</td><td>The stored document exactly as the backend holds it.
+Diagnostic: this is the one view that is deliberately backend-shaped.</td></tr>
+</tbody>
+</table>
+
+<h3>Saved searches</h3>
+
+<p>A query, a window and a source, saved by name. They live in the metadata
+database beside dashboards — one setting covers both, because leaving the
+searches on a JSON file when dashboards moved made that migration a half-truth
+once already. A save or a delete that fails says what the server said; the list
+does not quietly shorten.</p>
+
+<h3>Scope</h3>
+
+<p>Which containers you can search is your role's business, not the query's. A
+role that reaches nothing in a source is told <em>how many</em> containers
+exist there, not their names — only an administrator is shown the names. A
+drill-down arriving from a dashboard is answered from that dashboard's source,
+and the picker on screen moves to match: the control and the records under it
+used to disagree.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="traces">
+<h2>Traces</h2>
+
+<p>Three questions, in the order people ask them.</p>
+
+<h3>Services by traffic</h3>
+
+<p>Span counts and error rates per service over the window. On Jaeger and
+Tempo the counts are zero unless a metrics backend is wired up — see
+<a href="#backends">the backends</a>.</p>
+
+<h3>Traces for one service</h3>
+
+<p>Slowest, newest, or only the ones that failed. "Errors only" means <em>an
+error in a service you may see</em>, and a trace whose entry point is hidden
+from you is still listed — told through its visible services and timed by them
+— rather than silently dropped.</p>
+
+<h3>One trace</h3>
+
+<p>A waterfall with self-time, a per-service breakdown, and the log records
+carrying the same trace id where a log source declares the correlation
+capability. A trace split across two stores is reassembled into one waterfall,
+not shown as two halves. A trace that lost spans to a role's exclusion says so,
+rather than showing a shorter waterfall that looks like missing
+instrumentation.</p>
+
+<div class="note"><b>A trace panel is checked against <code>traces:read</code></b>
+<p>Not against <code>dashboard:view</code>. A dashboard panel is held to the
+same permission its screen is; otherwise a shared dashboard is a way around
+every one of them, which a trace panel was — it filled for a role without
+<code>traces:read</code> while the trace list beside it on the same board said
+no.</p></div>
+</section>
+
+<!-- ================================================================ -->
 <section id="dashboards">
-  <div class="wrap">
-    <h2>5. Dashboards</h2>
-    <p>A board is a query, a set of index patterns, and a panel list you
-    choose: volume over time (optionally split by a field), top values of a
-    field, a single number, a record table, services from the trace store, a
-    trace list, monitors, certificates and alerts.</p>
+<h2>Building a dashboard</h2>
 
-    <ul class="plain">
-      <li>Every log panel on a board is answered in <strong>one backend round
-      trip</strong>, however many there are.</li>
-      <li>Every count is compared against the preceding window of the same
-      length. If that sub-query fails the comparison is absent — never reported
-      as a real zero, which would render as "traffic has stopped".</li>
-      <li>Every chart and stat card opens the records behind it, inside the
-      board's own patterns and source.</li>
-      <li>Optional <strong>thresholds</strong> say whether the board is outside
-      what its owner calls normal. No thresholds means no badge — and so does
-      an answer that came back short, because "within thresholds" is a claim
-      about numbers.</li>
-      <li>A dashboard link carries its time range and filter, so what you share
-      is the view rather than the page.</li>
-    </ul>
-  </div>
+<p>A dashboard is a <strong>query</strong>, a <strong>window</strong>, a
+<strong>source</strong> and a list of <strong>panels</strong>. A panel is a
+question, not a chart: its type says what is being asked, and how it is drawn
+is the client's business.</p>
+
+<h3>The fields on the form</h3>
+
+<table class="cmp">
+<thead><tr><th>Field</th><th>Means</th></tr></thead>
+<tbody>
+<tr><td>Name, description</td><td>What the list shows.</td></tr>
+<tr><td>Query</td><td>The <a href="#query">same syntax</a> the Logs screen
+takes. Every log panel is filtered by it.</td></tr>
+<tr><td>Time range</td><td>The default window when the board is opened.</td></tr>
+<tr><td>Refresh</td><td>How often it reloads, and the form says what that
+costs — see below.</td></tr>
+<tr><td>Source</td><td><strong>All sources</strong>, or one. Offered only when
+there is something to choose.</td></tr>
+<tr><td>Private</td><td>Author and administrators only, even among colleagues
+with the same access.</td></tr>
+</tbody>
+</table>
+
+<h3>Pinning a board to a source</h3>
+
+<p>A board reads <strong>every source</strong> unless it is pinned. A pin is
+the source for <em>every signal that source serves</em>: pinned to a cluster
+that serves logs, traces and monitors, a board reads all three from it; pinned
+to a Loki, its logs come from the Loki and its traces and monitors from every
+source, because the Loki serves neither. The board's header says which.</p>
+
+<p>A board pinned to a source that is no longer configured reports that
+plainly on every panel, instead of falling back to the rest. Quietly answering
+from a different store is how somebody concludes their data has disappeared.
+An edit that does not carry the field leaves the stored source alone, for the
+same reason — on an installation with nothing to choose the field is not even
+drawn.</p>
+
+<h3>What a refresh costs</h3>
+
+<p>It depends on the sources it reads, and the forms say so where the source
+is chosen. Elasticsearch answers a whole board in one request whatever the
+panel count; Loki and VictoriaLogs are asked once per log panel plus twice for
+the stat cards.</p>
+
+<div class="note"><b>Measured on the lab</b>
+<p>An eight-panel board over 24 hours: <strong>1</strong> request to
+Elasticsearch, <strong>10</strong> to Loki, <strong>10</strong> to
+VictoriaLogs — 21 per refresh across all three, and only its own source's
+share when pinned.</p></div>
+
+<h3>Which sources answered</h3>
+
+<p>The four stat cards print how much each log source gave, and every trace
+and monitor panel names the stores its rows came from. Two stored rows over
+one cluster are two names under one number, rather than a number that is
+quietly double.</p>
 </section>
 
+<!-- ================================================================ -->
+<section id="panels">
+<h2>The panel catalogue</h2>
+
+<p>Ten kinds over four signals. The signal decides which source fills a panel
+and which permission it is checked against.</p>
+
+<table class="cmp">
+<thead><tr><th>Panel</th><th>Signal</th><th>Asks</th><th>Options</th></tr></thead>
+<tbody>
+<tr><td>Volume over time</td><td>logs</td><td>Counts bucketed over the window,
+optionally split by a field.</td><td>split by</td></tr>
+<tr><td>Top values</td><td>logs</td><td>The most common values of a
+field.</td><td>field, size</td></tr>
+<tr><td>Recent records</td><td>logs</td><td>The newest records the query
+matches — timestamp, severity, service, message.</td><td>size, max 25</td></tr>
+<tr><td>A single number</td><td>logs</td><td>How many records in this window
+have one value of one field, under a label of your own.</td><td>field,
+value</td></tr>
+<tr><td>Services by traffic</td><td>traces</td><td>Span counts and error rates
+per service.</td><td>size; sort by spans, errors or error rate</td></tr>
+<tr><td>Traces for one service</td><td>traces</td><td>Individual requests
+through one service.</td><td>service; slowest, recent or errors; size, default
+5</td></tr>
+<tr><td>Monitor status</td><td>monitors</td><td>One cell per check — up now, or
+how much of the window it was up for.</td><td>status or availability</td></tr>
+<tr><td>TLS certificates</td><td>monitors</td><td>What the checks saw on the
+wire, and how long each certificate is still valid.</td><td>—</td></tr>
+<tr><td>Alerts that fired</td><td>alerts</td><td>The rule, what it was about,
+and whether it was delivered.</td><td>size, max 25</td></tr>
+<tr><td>Alerts nobody received</td><td>alerts</td><td>How many of this
+window's alerts never reached a channel.</td><td>—</td></tr>
+</tbody>
+</table>
+
+<p class="fn">"Status" and "availability" come out of the same fetch, which is
+why they are one panel type with a view rather than two. Which one a panel is
+showing is printed <em>on</em> the panel: a grid reading 100% and a grid
+reading "up" look alike and mean different things, and the one that is wrong is
+the one nobody checked the caption of.</p>
+
+<h3>Size and height</h3>
+
+<ul>
+<li>Width is 3–12 columns and the grid flows. There is no drag, no row and no
+position — deliberately not a layout system.</li>
+<li>Height is 120–900 pixels, and the editor offers four named ones: 180
+("short — a few rows"), 300 (standard), 450 (tall), 600 ("very tall — a long
+table"). Any integer in range is accepted, so a stored board is not
+invalidated by that list changing.</li>
+<li>Bucket and term counts go to 50; record and alert lists stop at 25.
+Measured on the lab over <code>app-logs-000001</code> at 24 hours: 381 bytes
+of JSON per record against 41 per terms bucket, so four records panels at 50
+would put 76 kB on the wire for four cards 300 pixels tall.</li>
+</ul>
+
+<h3>Which fields you can group by</h3>
+
+<p>The editor asks the source what it can group by and offers that. Where
+nobody has answered yet — a discovery call that failed, a source that does not
+say — it falls back to <code>severity</code>, <code>service</code>,
+<code>host</code> and <code>environment</code>, so a deployment with one of
+everything still recognises the list.</p>
+
+<p>Two refusals are static, and they are static on purpose:</p>
+
+<ul>
+<li><strong>The log line itself is refused</strong> — <code>body</code>,
+<code>message</code>, <code>_msg</code>, <code>line</code>, <code>log</code>.
+An aggregation on an analysed text field either fails or returns tokenised
+nonsense, one word per bucket.</li>
+<li><strong>A name that is not a field name is refused</strong>: letters,
+digits, underscore and dot, starting with a letter or underscore, up to 64
+characters. Strict because the name is interpolated into a LogQL <code>sum by
+(…)</code> clause and a LogsQL filter, and because this question has to be
+answerable offline — a panel is normalised on every <em>read</em>, and a rule
+that consulted a backend would turn one stale panel into a board that will not
+open.</li>
+</ul>
+
+<p>Whether <em>this</em> source can answer <code>http_status</code> today is
+the source's answer, given per panel at fill time, in a note on the card.</p>
+
+<h3>Click-through</h3>
+
+<p>A bar, a slice or a row is a link into the Logs screen with the field, the
+value and the window already set. An "unlabelled" bucket becomes
+<code>NOT field:*</code>, because "the records with no value here" is a real
+query and an empty string is not.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="thresholds">
+<h2>Thresholds and comparison</h2>
+
+<h3>The previous period</h3>
+
+<p>Every board fetches a baseline window of the same length, immediately
+before the one on screen, batched into the same request. If that sub-query
+fails the comparison is <code>null</code> — it is never reported as a real
+zero, which would render as "−100%, traffic has stopped".</p>
+
+<h3>Thresholds</h3>
+
+<p>Numbers that colour a card: warning and critical, over a panel's value.</p>
+
+<div class="stop"><b>Thresholds are not alerting</b>
+<p>They colour the dashboard. There is no notification, no schedule, no
+silencing and no history behind them. That is <a href="#rules">alert
+rules</a>, which are a different subsystem over different data.</p></div>
+
+<div class="note"><b>A partial answer gets no badge at all</b>
+<p>When a backend returns a result that is short of a shard, the board does
+not print "within thresholds" — that is a claim about numbers, and there are
+none to make it from. The card says the answer was partial instead.
+Elasticsearch reports failed shards, the fan-out propagates it, and the
+threshold evaluation is skipped rather than run on a smaller number.</p></div>
+</section>
+
+<!-- ================================================================ -->
+<section id="visibility">
+<h2>Who can see which dashboard</h2>
+
+<p><strong>You can see a dashboard if you could see its data.</strong> A
+dashboard resolving to no container you may reach is one you could never have
+used, so hiding it costs nothing and stops the list advertising what exists —
+a name like <code>payment-fraud-investigation</code> over <code>fraud-*</code>
+is information whether or not you can read the index.</p>
+
+<p>That rule needs no new concept and cannot drift out of step with the data
+boundary, because it <em>is</em> the data boundary. What it cannot express is
+intent, so a dashboard can also be marked <strong>private</strong>: the author
+and administrators only, even among colleagues with the same access.</p>
+
+<h3>Two exceptions, both deliberate</h3>
+
+<ul>
+<li><strong>Authors always see their own.</strong> Otherwise a dashboard over
+an index that does not exist yet is invisible to the person who just wrote it,
+which reads as "it did not save".</li>
+<li><strong><code>system:admin</code> sees every dashboard</strong>, because
+editing or deleting somebody else's already requires it.</li>
+</ul>
+
+<h3>How it is enforced</h3>
+
+<p>On the list page <em>and</em> every dashboard endpoint. Applied to the list
+alone it would not be a boundary, only a speed bump. An endpoint answers
+<strong>404</strong> rather than 403 for a dashboard you may not see, so the
+URL is not a way to find out which ones exist.</p>
+
+<p>The list says how many are hidden rather than leaving a gap — including
+when that number is all of them, which is the case where an empty page saying
+"create your first dashboard" would be actively misleading.</p>
+
+<p class="fn">Dashboards stored before this existed default to shared, so
+nothing disappears on upgrade. The boundary rule now applies to them, which is
+the change.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="roles">
+<h2>Roles and three boundaries</h2>
+
+<p>A role is a set of <a href="#permissions">permissions</a> and three
+independent boundaries. <strong>A boundary that is not declared grants
+nothing</strong> — access is explicit or absent.</p>
+
+<table class="cmp">
+<thead><tr><th>Boundary</th><th>Unit</th><th>Blank means</th></tr></thead>
+<tbody>
+<tr><td>Log containers</td><td>index or stream</td><td>nothing</td></tr>
+<tr><td>Trace stores</td><td>index; Tempo and Jaeger by source name</td><td>nothing</td></tr>
+<tr><td>Services</td><td>service name</td><td><strong>every service</strong></td></tr>
+</tbody>
+</table>
+
+<p>Services is the one exception and the form says so. The granularity differs
+by signal on purpose: for logs the meaningful unit is the index, for traces it
+is the service. A role given every trace store but restricted to application
+services sees no infrastructure spans at all.</p>
+
+<h3>Tempo and Jaeger have no index to grant</h3>
+
+<p>Each is one trace store matched by its <em>source's name</em>:
+<code>*</code>, <code>lab-tempo</code>, <code>lab-*</code> or
+<code>lab-tempo:*</code> open it, and <code>-lab-tempo</code> beside
+<code>*</code> keeps it closed.</p>
+
+<div class="warn"><b>Changed in 3.0</b>
+<p>2.4.0 and earlier asked only whether a role had <em>any</em> log container,
+so a role granted nothing but Elasticsearch trace indices
+(<code>otel-traces-*</code>) read every trace in Tempo and Jaeger. Such a role
+now needs the store's name added. The three shipped roles use <code>*</code>
+and are unaffected.</p></div>
+
+<h3>The roles an installation starts with</h3>
+
+<table class="cmp">
+<thead><tr><th>Role</th><th>Reaches</th><th>Group</th></tr></thead>
+<tbody>
+<tr><td>admin</td><td>Every permission. Containers <code>*</code>, trace
+stores <code>*</code>, no service restriction.</td><td><code>wdash-admins</code></td></tr>
+<tr><td>developer</td><td>Logs, traces, monitors, and dashboards except
+delete. Containers <code>app-*</code> and <code>service-*</code>; application
+services only, so infrastructure spans — postgres, redis, the payment gateway
+— are not visible.</td><td><code>wdash-developers</code></td></tr>
+<tr><td>viewer</td><td>Read-only: logs, traces, dashboard view. Containers
+<code>app-*</code>, one service.</td><td><code>wdash-viewers</code></td></tr>
+</tbody>
+</table>
+
+<p>The group names are namespaced, and that is a security choice rather than a
+preference: a directory almost certainly already has a group called
+<code>admins</code>, it usually means domain administrators, and mapping it to
+<code>system:admin</code> by default would hand WDash's highest privilege to
+whoever is in it.</p>
+
+<h3>Before you save a role</h3>
+
+<p>Boundary fields stay free text, and that is a decision. Containers rotate:
+a role granted <code>app-logs-000001</code> by name silently loses access the
+day <code>-000002</code> appears, which is a worse failure than a typo and a
+much quieter one. Patterns survive rotation, so patterns stay.</p>
+
+<p>The danger was never typing — it was typing blind. So <strong>every field
+shows what it matches as you type</strong>, against the containers this
+installation actually has, and flags the two outcomes worth flagging:</p>
+
+<ul>
+<li><strong>matches nothing</strong> — a valid choice, and also exactly what a
+typo looks like;</li>
+<li><strong>matches everything</strong> — the dangerous direction.
+<code>*</code> where <code>app-*</code> was meant saves cleanly and grants the
+whole cluster.</li>
+</ul>
+
+<p><strong>browse…</strong> beside each field lists what exists, offering a
+rotation-proof pattern first and the exact name as the deliberate alternative.
+The matching runs on the <em>server</em>: reimplementing the pattern language
+in the browser would give the product two of them under one name, which is a
+bug this codebase has already had once.</p>
+
+<p>When a role is edited the page reports what the change <em>does</em> —
+which containers it starts and stops reaching, which permissions it adds and
+removes, and whether the net effect widens access. An end state is easy to read
+and impossible to review: <code>app-*</code> and <code>ap-*</code> both look
+deliberate and both produce a plausible count.</p>
+
+<h3>Authorization is resolved per request</h3>
+
+<p>The session carries <strong>identity only</strong> — who you are and which
+groups the provider asserted. What you may do is read from the metadata store
+on every request, cached for a few seconds per worker.</p>
+
+<p>Permissions used to be written into the session cookie at sign-in, which
+meant revoking a role saved successfully and changed nothing until the person
+happened to sign out: an administrator shown a revocation that did not happen.
+A role change now reaches every worker within about ten seconds with no
+coordination between them — a bounded window that can be written down,
+replacing "until they sign in again", which is unbounded.</p>
+
+<p>A local account's own role is stored with the account and beats every
+mapping, and it is read per request like everything else. An account that is
+disabled or deleted stops being able to do anything on its <em>next
+request</em>, not at its next sign-in.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="patterns">
+<h2>The pattern language</h2>
+
+<p>Four forms, in every boundary, services included:</p>
+
+<pre>*            <span class="c">everything</span>
+app-*        <span class="c">prefix</span>
+*-audit      <span class="c">suffix</span>
+*payment*    <span class="c">middle</span></pre>
+
+<h3>A bare pattern applies to every source</h3>
+
+<p>A role granted <code>app-*</code> reaches <code>app-*</code> in
+<em>each</em> configured source, so adding a source widens what existing roles
+reach. Write <code>source-name:pattern</code> to hold a rule to one
+source.</p>
+
+<div class="warn"><b>The default is the wide one</b>
+<p>This is stated as a limitation rather than dressed up as a feature. If it is
+not what you want, qualify the rule or exclude what should stay
+closed.</p></div>
+
+<h3>A colon qualifies only when a source has that name</h3>
+
+<p>Names contain colons — OpenTelemetry's default service name is
+<code>unknown_service:java</code> — so a colon that names no source is part of
+the name. <code>unknown_service:java</code> grants that service, and
+<code>-unknown_service:*</code> hides every one of them. The role preview says
+when a rule's colon names no source.</p>
+
+<p>A source's name cannot contain a colon, and a source cannot be created or
+renamed with a name that roles already write before one.</p>
+
+<h3>An exclusion beats every inclusion</h3>
+
+<p>A pattern prefixed with <code>-</code> is an exclusion, and it wins
+regardless of the order rules are written in. A role is a set, not a program,
+and a rule whose meaning depends on typing order is not reviewable in any list
+that displays it.</p>
+
+<pre>app-*  -*-pii-*        <span class="c">the app family, never the sensitive ones —</span>
+                       <span class="c">and it keeps meaning that as new indices appear</span>
+
+*      -payments       <span class="c">every service except payments, in every store</span>
+
+-secret-*              <span class="c">grants NOTHING. An exclusion on its own is a</span>
+                       <span class="c">role with no access, not a role with all of it</span></pre>
+
+<p>Exclusions can be source-qualified too, with the <code>-</code> on either
+side: <code>-primary:secret-*</code> and <code>primary:-secret-*</code> are the
+same rule.</p>
+
+<p>A check made without knowing the source <strong>fails closed both
+ways</strong>: a qualified grant does not apply, and a qualified exclusion
+does.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="permissions">
+<h2>Permissions</h2>
+
+<p>Every permission lives in one catalogue, which is what lets the
+configuration page offer a checked list rather than a text box. A name the
+catalogue does not know is <em>refused</em> rather than stored: a permission
+that grants nothing while looking configured is worse than one that was
+rejected. <code>logs:raed</code> used to save cleanly, grant nothing and say
+nothing — on the one page whose entire job is access control.</p>
+
+<table class="cmp">
+<thead><tr><th>Permission</th><th>Grants</th></tr></thead>
+<tbody>
+<tr><td><code>logs:read</code></td><td>Open the Logs screen, search it, read a
+record with its surrounding lines. <em>Which</em> logs is decided separately,
+by the role's containers.</td></tr>
+<tr><td><code>traces:read</code></td><td>Open the Traces screen, search it,
+open a waterfall, and fill a trace panel on a dashboard. Narrowed by the role's
+trace stores and services.</td></tr>
+<tr><td><code>monitors:read</code></td><td>Open the Monitors screen, and fill a
+monitor or certificate panel. <strong>Not</strong> narrowed by containers — a
+monitor is about an endpoint, not an index, and a role's log patterns say
+nothing about which endpoints somebody may see.</td></tr>
+<tr><td><code>dashboard:view</code></td><td>See the list and open any
+dashboard. Panel data is still filtered by the role's own boundaries.</td></tr>
+<tr><td><code>dashboard:create</code></td><td>Build new dashboards. A dashboard
+cannot reach past its author's own boundaries.</td></tr>
+<tr><td><code>dashboard:edit</code></td><td>Change dashboards you created.
+Somebody else's also needs <code>system:admin</code>.</td></tr>
+<tr><td><code>dashboard:delete</code></td><td>Delete dashboards you created.
+Somebody else's also needs <code>system:admin</code>.</td></tr>
+<tr><td><code>system:admin</code></td><td>The configuration page, the Cluster
+Advisor and the debug endpoints. <strong>Not a superuser</strong> — it grants
+no access to logs or traces on its own.</td></tr>
+</tbody>
+</table>
+
+<p class="fn">A retired name is translated, not dropped:
+<code>logs:search</code> becomes <code>logs:read</code> on the way in, so an
+upgrade does not quietly narrow somebody's access. Splitting those two produced
+roles that could not be used — <code>logs:read</code> alone opened a page where
+every search failed, and <code>logs:search</code> alone worked in the API while
+the page refused to load.</p>
+
+<h3>Nothing can recover from losing <code>system:admin</code></h3>
+
+<p>So four invariants refuse any change that would leave nobody able to
+administer:</p>
+
+<ul>
+<li>editing a role's permissions or its groups,</li>
+<li>deleting a role,</li>
+<li>reassigning yourself through the mappings table,</li>
+<li>demoting, disabling or deleting a local account.</li>
+</ul>
+
+<p>"Would this lock me out?" is answered by the resolver's own rule, groups and
+all, applied to the picture <em>after</em> the change — not by a second,
+shorter copy of the rule, which is what it used to be and which refused edits
+that were harmless while allowing ones that were not.</p>
+
+<p>A role something still points at cannot be deleted: the default role, a role
+a mapping names, or one a local account holds. Deleting the default role used
+to succeed, and the page then showed its first role — <code>admin</code> — as
+the default, so the next save made everybody unmapped an administrator.</p>
+
+<p>A refused attempt is <a href="#audit">recorded</a> alongside the successful
+ones. It is the more interesting row.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="mappings">
+<h2>Who gets which role</h2>
+
+<p>One order, applied in one place, and it is a pure function of the stored
+definitions — so the page can ask it "what would this person be after this
+edit?" rather than carrying a second copy of the rule.</p>
+
+<ol>
+<li><strong>A local account's own role</strong>, stored with the account. This
+is what makes it the way back in.</li>
+<li><strong>A direct mapping by email.</strong></li>
+<li><strong>A direct mapping by username.</strong></li>
+<li><strong>The first group</strong> — groups sorted, roles sorted — that a
+role lists. Sorted so two groups matching two roles resolve the same way every
+time, rather than depending on assertion order.</li>
+<li><strong>The default role.</strong></li>
+</ol>
+
+<p>Mapped roles are chosen from a list and permissions are checkboxes, for the
+same reason the catalogue exists: a name that does not exist grants nothing
+while looking configured.</p>
+
+<div class="warn"><b>Directory usernames are case-sensitive; local ones are folded</b>
+<p>A directory matches <code>uid</code> case-insensitively, so
+<code>alice</code>, <code>Alice</code> and <code>ALICE</code> all sign in — and
+WDash used to keep whatever was typed, making each of those a different person
+with a different role, different dashboards and a separate thread through the
+audit trail. Measured against OpenLDAP with <code>alice</code> mapped to admin,
+typing <code>Alice</code> landed on the default role, silently.</p>
+<p>The username is now read from the attribute the user filter looks people up
+by — <code>uid</code>, <code>sAMAccountName</code>, whatever that filter names
+— and a directory that returns nothing for it leaves the typed name alone.
+OpenID Connect never had this: there the username is a claim the provider
+sends.</p>
+<p><strong>On upgrade:</strong> somebody signing in as <code>Alice</code>
+against a directory holding them as <code>alice</code> becomes
+<code>alice</code> at their next sign-in. That is a different name from the one
+owning their dashboards, and nothing moves them — merging two names is a
+decision about people, not about data. A direct mapping written against the old
+spelling should be rewritten.</p></div>
+
+<h3>If the resolver cannot read the store</h3>
+
+<p>It serves the last good picture. If there is none it falls back to a
+deliberately narrow role — <code>logs:read</code> and
+<code>dashboard:view</code>, no containers, no trace stores, no services — so
+a database blip is not an access-control incident. A resolver that failed open
+would be one.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="accounts">
+<h2>Local accounts and TOTP</h2>
+
+<p>Local accounts live in WDash's own database with Argon2 password hashes.
+They are managed at <strong>Configuration → Authentication → Local
+accounts</strong>: create, set a role, disable, enable, reset a password, reset
+an authenticator, delete.</p>
+
+<h3>Every local account needs a second factor</h3>
+
+<p>A password alone is a shared secret that travels: it is typed on other
+people's machines, reused, and phished. The local account is also the one that
+keeps working when the identity provider does not, which is precisely what
+makes it worth stealing.</p>
+
+<table class="cmp">
+<thead><tr><th>Moment</th><th>What happens</th></tr></thead>
+<tbody>
+<tr><td>First sign-in</td><td>The enrolment page: a QR code, the same secret in
+typeable groups, and the whole <code>otpauth://</code> link. Nothing is stored
+until a code proves you hold the key.</td></tr>
+<tr><td>Every sign-in after</td><td>The code page. One step either side of now
+is accepted for clock drift; a step already used is refused, because a replayed
+code is one somebody read over a shoulder or off a screen share.</td></tr>
+<tr><td>A correct password</td><td>Starts nothing. It puts the sign-in on a
+short hold, and that hold opens those two pages and nothing else.</td></tr>
+<tr><td>A wrong code</td><td>A failure, through the same guard that throttles
+password guessing — so the lockout, the backoff and the audit trail cover it
+too.</td></tr>
+</tbody>
+</table>
+
+<p>RFC 6238: SHA-1, six digits, a thirty-second step — what authenticator
+applications implement. It is about sixty lines in
+<code>src/wdash/auth/totp.py</code> out of the standard library, checked
+against the RFC's own published vectors.</p>
+
+<h3>Lost phone</h3>
+
+<p>An administrator resets it from <strong>Authentication → Local
+accounts</strong>, and the person enrols again at their next sign-in. When
+nobody can open that page:</p>
+
+<pre>$ python -m wdash.store.recover --reset-totp <span class="g">alice</span></pre>
+
+<p>Both are audited, and both say what they cost: until that account enrols
+again, its password alone signs it in.</p>
+
+<div class="note"><b>Directory accounts are untouched</b>
+<p>WDash never sees an LDAP or OIDC password and keeps no row for those
+principals, so a second factor for them belongs at the provider that
+authenticates them.</p></div>
+</section>
+
+<!-- ================================================================ -->
+<section id="directory">
+<h2>LDAP and OpenID Connect</h2>
+
+<p>Configured at <strong>Configuration → Authentication</strong> and nowhere
+else — nothing about a provider is read from the environment. The client is
+built per request, so an administrator can repair a broken provider and try
+again without a restart. A provider switched off is off, even with its settings
+still filled in.</p>
+
+<div class="stop"><b>At most one directory</b>
+<p>Either LDAP or OIDC signs people in, never both. Ownership here is the
+<em>username</em> — a dashboard belongs to <code>created_by</code>, a mapping is
+written against a name — with no provider attached to it. With two directories
+open, a principal at one who can choose <code>preferred_username</code> signs
+in as somebody at the other and gets their dashboards and their role.</p>
+<p>Which one is in force: both stored and enabled, the row saved most recently
+wins and ties go to LDAP, so the answer never depends on row order; one, that
+one; neither, local accounts only.</p>
+<p>Enabling the second is refused on the page, in words that say how to switch —
+turn the first off and save, then enable the other. That second save is the
+confirmation, and it says <em>what those names already own</em>: how many
+dashboards and mappings belong to names that are not local accounts, a few of
+them by name, and that whoever signs in as one of them through the new
+directory inherits them. Nothing is migrated and nothing is scoped by provider:
+a name keeping what it owns is exactly what makes a deliberate switch
+work.</p></div>
+
+<h3>Switching one on takes a card that can sign somebody in</h3>
+
+<table class="cmp">
+<thead><tr><th>Provider</th><th>Required</th><th>Also on the card</th></tr></thead>
+<tbody>
+<tr><td>OpenID Connect</td><td>Client ID, Discovery URL, Client secret</td>
+<td>Redirect URI, Scopes, username / email / groups claims</td></tr>
+<tr><td>LDAP</td><td>Server, Base DN — plus a Bind password wherever a Bind DN
+names a service account to bind as</td><td>User filter, Group attribute, CA
+certificates</td></tr>
+</tbody>
+</table>
+
+<p>A card missing any of those is refused with the fields named, on the server
+and in the browser, and nothing is saved. A card that is switched <em>off</em>
+may be half-filled — that is a draft somebody is coming back to — but what is
+filled in has to be usable either way: a server address without
+<code>ldap://</code> or <code>ldaps://</code>, or a discovery URL that is not
+http(s) or resolves to a link-local address, is refused whether or not the
+switch is on.</p>
+
+<p>An empty card with nothing stored behind it is not saved at all; a card that
+exists may be blanked, which is how a provider is removed.</p>
+
+<p class="fn">Before this, an empty card saved, switched on, reported itself as
+"in force now", and refused the other directory as a second one — while every
+sign-in through it was declined out of sight, in a log line.</p>
+
+<h3>LDAP</h3>
+
+<ul>
+<li><strong>The bind is as the user</strong>, with the password they typed.
+Finding their entry with the service account proves the account exists, not
+that the password is right; treating the search as the check is a complete
+bypass that looks like working code.</li>
+<li><strong><code>ldaps://</code> certificates are checked</strong> against the
+system's CAs, or a CA file named on the page. The bind carries a person's
+password, so a directory whose certificate is not checked hands that password
+to anything that answers in its place. Turning the check off is a switch
+somebody has to choose, and it is logged on <em>every</em> sign-in. A CA file
+that cannot be read is refused when it is saved. An <code>ldaps://</code>
+server may be named by address when its certificate carries that
+address.</li>
+<li><strong><code>ldap://</code> sends passwords in clear text</strong>, and
+the page says so.</li>
+<li><strong>An outage is an outage.</strong> A directory that cannot answer —
+unreachable, certificate refused, service account refused, a search that fails
+— is reported as that and answered with a 503. It is not recorded as a wrong
+password, so an outage cannot lock anybody out. A local account's name is never
+asked of the directory, so an outage cannot stop its wrong guesses being
+counted either. The user's own bind refused <em>for the account</em> — locked
+by a password policy, inactivated — is a wrong password, not an outage.</li>
+<li><code>ldap3</code> is LGPL v3 and kept behind
+<code>src/wdash/auth/ldap_auth.py</code> so it can be replaced in one
+file.</li>
+</ul>
+
+<h3>OpenID Connect</h3>
+
+<ul>
+<li><strong>Scopes default to <code>openid email profile groups</code></strong>
+— <code>groups</code> because roles are mapped from groups, and a provider that
+gates that claim behind a scope sends nothing without it. A provider that
+refuses a scope it does not know needs the list changed on the card.</li>
+<li><strong>A blank Redirect URI</strong> means this WDash's own
+<code>/auth/callback</code> as the browser reached it, which is right on a
+laptop. Behind a proxy that terminates TLS, type the <code>https://</code>
+address and register the same one at the provider.</li>
+<li><strong>An email counts only when <code>email_verified</code> is
+true.</strong> Roles can be mapped to an address, and a provider that lets
+people set their own address would otherwise let them take somebody else's
+mapping. A provider that never sends the claim has to be trusted explicitly,
+and <code>email_verified</code> speaks for the <code>email</code> claim
+only.</li>
+<li><strong>Choose a username claim your users cannot edit.</strong> Ownership
+and name mappings trust it. A dotted name reaches into an object
+(<code>realm_access.roles</code>).</li>
+<li><strong>Without a username</strong>, the fallback is the verified email,
+then <code>sub</code> — unless the provider sent an address it did not verify,
+as ADFS and Entra v1 tokens do. That sign-in is <em>refused</em>, naming the
+setting, rather than signing the person in as an opaque id that owns none of
+their dashboards.</li>
+<li>Named nowhere, the claims are <code>preferred_username</code>,
+<code>email</code> and <code>groups</code>.</li>
+</ul>
+
+<div class="stop"><b>No directory may sign somebody in under a local account's name</b>
+<p>That name owns the break-glass administrator's dashboards. Such a sign-in is
+refused and audited — checked against the name the <em>directory</em> answers
+with as well as the one that was typed, because a filter matching more than one
+attribute makes those two different strings, and the second is the one the
+session would get.</p></div>
+
+<h3>What is said out loud</h3>
+
+<ul>
+<li>A directory configured and not in use gets one neutral line on the sign-in
+page, so somebody whose usual door has gone is not told "Invalid username or
+password" for a reason that is not theirs.</li>
+<li>A directory in force whose settings cannot be read — a rotated encryption
+key, a half-filled row — <em>closes the door</em> rather than handing the
+installation to the other one.</li>
+<li>An installation that already has both gets a start-up warning, one
+<code>two directories configured</code> audit row for the installation (not one
+per worker, and none on later restarts while nothing has changed), and a banner
+on the configuration page. Measured with the four worker processes the shipped
+image runs: four rows before the write lock was taken ahead of the read, one
+after, on SQLite and on Postgres.</li>
+<li>A resolution that changes while WDash is running is audited as
+<code>directory in force changed</code>.</li>
+<li>Turning off the directory you arrived through is refused when no enabled
+local account can administer and no other directory would take over.</li>
+</ul>
+</section>
+
+<!-- ================================================================ -->
+<section id="breakglass">
+<h2>Locked out</h2>
+
+<p>One command, run on the host, against the metadata database. Every action is
+audited.</p>
+
+<pre>$ python -m wdash.store.recover --status
+<span class="c"># who can administer, and through what</span>
+
+$ python -m wdash.store.recover --grant-admin <span class="g">alice</span>
+$ python -m wdash.store.recover --set-role <span class="g">alice viewer</span>
+$ python -m wdash.store.recover --enable <span class="g">alice</span>
+$ python -m wdash.store.recover --disable <span class="g">alice</span>
+$ python -m wdash.store.recover --reset-password <span class="g">alice</span>
+$ python -m wdash.store.recover --reset-totp <span class="g">alice</span>
+$ python -m wdash.store.recover --use-directory <span class="g">ldap</span>|<span class="g">oidc</span>|<span class="g">none</span></pre>
+
+<table class="cmp">
+<thead><tr><th>Flag</th><th>For</th></tr></thead>
+<tbody>
+<tr><td><code>--status</code></td><td>The first thing to run. It answers "can
+anybody administer this installation", which is the question every other flag
+is downstream of.</td></tr>
+<tr><td><code>--grant-admin</code></td><td>Puts one account back. The recovery
+role grants <em>no data access</em>; it exists to reach the configuration
+page.</td></tr>
+<tr><td><code>--enable</code></td><td>Undoes a disabled account.
+<code>--grant-admin</code> never did: a disabled account is refused before its
+password is checked, so granting it a role was a way back that could not be
+taken.</td></tr>
+<tr><td><code>--set-role</code></td><td>Moves a local account to a role that
+exists — the same thing the accounts card does, for when nobody can open
+it.</td></tr>
+<tr><td><code>--reset-totp</code></td><td>After a lost phone, or after the
+encryption key was rotated and every sealed authenticator became
+unreadable.</td></tr>
+<tr><td><code>--use-directory</code></td><td>The one case the page cannot
+reach: an installation that had two directories enabled at once, where the
+losing one held every administrator.</td></tr>
+</tbody>
+</table>
+
+<p><code>--use-directory</code> refuses a directory that cannot be used as it
+stands, naming the field that is blank or the secret that cannot be decrypted,
+rather than putting it in force and turning off the one that worked. A stored
+row holding nothing but <code>enabled: false</code> — which an earlier version
+wrote to switch off a provider read from the environment — is read as the
+off-switch it is, not as a configuration to put in force.</p>
+
+<p><code>--password</code> exists for scripted use; without it the command
+prompts.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="agents">
+<h2>Agents</h2>
+
+<p>WDash probes nothing. An agent runs somewhere a user would be — another
+region, a branch office, a laptop — pulls its configuration from WDash, runs
+checks on <em>its own</em> schedule, and pushes results back. WDash never
+connects to it, so it works behind NAT and needs no inbound port. Restarting
+WDash misses no check, and two WDash replicas do not double every probe.</p>
+
+<pre>$ python -m wdash.agent --server https://wdash.internal --token <span class="g">&lt;token&gt;</span>
+
+<span class="c"># or the image — two of them, and the small one is the default</span>
+$ docker build -t wdash .                              <span class="c"># server, 260MB</span>
+$ docker build -t wdash-browser --target browser .     <span class="c"># + Chromium, 1.77GB</span>
+$ docker run -d wdash-browser --server https://wdash.example.com --token <span class="g">&lt;token&gt;</span></pre>
+
+<p>Create the agent at <strong>Configuration → Agents</strong>; the token is
+shown once. Prefer <code>WDASH_AGENT_TOKEN</code> over <code>--token</code>,
+because an argument is visible in <code>ps</code>. Anybody running a probe for
+http and tcp checks should use the small image — the browser is most of the
+second one and nothing in the first needs it.</p>
+
+<h3>Three failures kept apart</h3>
+
+<p>Conflating any two of them produces a monitoring system that lies.</p>
+
+<table class="cmp">
+<thead><tr><th>What happened</th><th>What WDash shows</th></tr></thead>
+<tbody>
+<tr><td>The target is down</td><td>A result, status <code>down</code>, with a
+reason.</td></tr>
+<tr><td>WDash is unreachable</td><td>Results spool to disk and are sent from
+there. Nothing is reported as down — a check that ran during an outage is the
+most valuable check there is, and exactly the one that cannot be delivered at
+the time.</td></tr>
+<tr><td>The agent is dead</td><td>Its monitors go <code>unknown</code>, never
+<code>down</code>. "Nobody looked" is not "it is broken", and a false outage is
+how a monitoring system trains people to ignore it.</td></tr>
+</tbody>
+</table>
+
+<p>An agent is treated as gone five minutes after its last word — three
+intervals of the slowest sensible schedule, long enough that one missed beat is
+not an alarm and short enough that a dead agent is noticed within minutes.</p>
+
+<h3>Numbers worth knowing</h3>
+
+<table class="cmp">
+<thead><tr><th>Limit</th><th>Value</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>Configuration poll</td><td>60s</td><td>Cheap: the server answers with a
+content hash and the agent reschedules only when it changes.</td></tr>
+<tr><td>Spool flush</td><td>10s</td><td>Backoff when the server cannot be
+reached: 1, 2, 5, 10, 30, 60 seconds.</td></tr>
+<tr><td>Concurrent checks</td><td>16</td><td>A hanging monitor must not hold up
+the others, and an agent with two hundred monitors should not open two hundred
+sockets at the same instant.</td></tr>
+<tr><td>Concurrent browsers</td><td>2</td><td>A Chromium is a few hundred
+megabytes resident; sixteen would be five gigabytes on a host sized for a
+Python process.</td></tr>
+<tr><td>Results per delivery</td><td>500, or 4 MB</td><td>A journey's failure
+screenshot rides along with its result. A batch counted in results alone was
+refused whole by a proxy with a 1 MB limit, the 413 was taken as "never wanted
+these", the down results were dropped, and the monitor stayed green.</td></tr>
+<tr><td>Token hashing</td><td>SHA-256, not Argon2</td><td>An agent token is 256
+bits of machine-generated randomness — there is no dictionary to attack, and
+Argon2 on every result batch would burn CPU for no security while handing
+anybody who can reach the ingest endpoint a way to exhaust the
+server.</td></tr>
+</tbody>
+</table>
+
+<p>Test a configuration without leaving a daemon behind:</p>
+
+<pre>$ python -m wdash.agent --server … --token … --once
+<span class="c"># runs EVERY check once, ignoring the schedule, and reports what was accepted</span></pre>
+</section>
+
+<!-- ================================================================ -->
 <section id="checks">
-  <div class="wrap">
-    <h2>6. Checks of your own</h2>
-    <p>WDash reads what Heartbeat writes, and runs its own. An agent pulls its
-    configuration and pushes results back, so it needs no inbound port.</p>
+<h2>HTTP and TCP checks</h2>
 
-<pre><span class="c"># on the box you want to check from</span>
-$ docker run -d --name wdash-agent \
-    -e WDASH_URL=https://wdash.example \
-    -e WDASH_AGENT_TOKEN=<span class="g">&lt;the token the page printed once&gt;</span> \
-    warewave/wdash-elastic-dashboard:3.0.0 python -m wdash.agent</pre>
+<p>Three kinds: <code>http</code>, <code>tcp</code> and <code>browser</code>.
+ICMP is absent on purpose — it needs a raw socket and so a privileged
+container, which is a decision rather than a type that quietly appears in a
+list.</p>
 
-    <ul class="plain">
-      <li><strong>HTTP checks</strong> with an interval, a timeout, expected
-      status, and optional headers or basic auth. Each records its response
-      time and the TLS certificate it saw.</li>
-      <li><strong>A private certificate</strong> may be pasted and trusted for
-      that check's own origin — or the check can say "expiry only", which
-      verifies nothing and therefore sends no headers, no cookies and no
-      credentials. The page says which, and never guesses.</li>
-      <li><strong>Browser journeys</strong> through real Chromium: a step list
-      rather than a script, each step timed, a failure naming the step and
-      keeping a screenshot. Passwords are encrypted and referred to as
-      <code>{{ secret.name }}</code>, never typed into a step. The browser
-      ships in its own image.</li>
-      <li><strong>A silent agent leaves its monitors <code>unknown</code></strong>,
-      not <code>down</code>. A probe that stopped looking is not a site that
-      stopped answering.</li>
-    </ul>
-  </div>
+<p>Create them at <strong>Configuration → Monitors</strong>, assign each to one
+or more agents, and give each an interval and a timeout. A monitor assigned to
+no agent reports <code>unknown</code>.</p>
+
+<h3>What an HTTP check can carry</h3>
+
+<ul>
+<li>Method, headers, body, and an expected status.</li>
+<li>Credentials, sealed with the encryption key.</li>
+<li>A TLS setting: verify normally, <strong>trust this certificate</strong>
+(pasted on the form — the agent runs on another host, so the host trust store
+argument does not apply here), or <strong>do not verify — expiry
+only</strong>.</li>
+</ul>
+
+<div class="warn"><b>A TLS setting needs an agent new enough to read it</b>
+<p>Both settings are sent to every agent assigned to the check, and an agent
+older than this release ignores them: it verifies against the public roots, so
+the check stays down with the OpenSSL message and no sentence about the box
+that would answer it. Nothing leaks that way — WDash withholds an expiry-only
+check's headers, cookies and credentials before they reach any agent, whatever
+its version — but the setting does nothing until the probe is upgraded. The
+agent's own row reports its version; nothing on the Checks table says so
+yet.</p></div>
+
+<h3>TLS certificates</h3>
+
+<p>Every check that speaks TLS reports the certificate it saw: subject, issuer,
+fingerprint and expiry. The certificate panel and the Monitors screen group
+those rows <strong>by fingerprint</strong> and count the checks — one endpoint
+watched by an agent and by Heartbeat is one certificate watched twice, not two
+certificates. That is what <a href="#rules">a certificate rule</a> alerts
+on.</p>
 </section>
 
-<section id="alerts">
-  <div class="wrap">
-    <h2>7. Alerts</h2>
-    <p>Three rule kinds, because they are three facts with three audiences:
-    <code>monitor_down</code>, <code>agent_silent</code> and
-    <code>certificate_expiring</code>. Each has a threshold ("this many times
-    in a row") and an optional repeat interval.</p>
+<!-- ================================================================ -->
+<section id="journeys">
+<h2>Browser journeys</h2>
 
-<pre>$ python -m wdash.alerts          <span class="c"># its own process</span></pre>
+<p>A multi-step check through a real Chromium: sign in, add to basket, check
+out. It is a <strong>step list, not a script</strong> — nine verbs, and the
+agent never evaluates anything you wrote.</p>
 
-    <ul class="plain">
-      <li>It runs separately because an agent going <em>completely</em> silent
-      produces no requests at all — and that is exactly when somebody needs
-      telling.</li>
-      <li><strong>A recovery is always sent</strong>, silence or not. Somebody
-      silenced the noise of a thing being broken; leaving them believing it
-      still is, is not what they asked for.</li>
-      <li><strong>A subject with no reading holds.</strong> If the monitor goes
-      <code>unknown</code> mid-incident, nothing is sent and the failure count
-      is kept — the alert does not close and then re-open when the probe comes
-      back.</li>
-      <li>The history records what was <strong>not</strong> delivered as well
-      as what was, and a delivery that failed is retried rather than lost.</li>
-      <li>A webhook URL is a credential — for Slack and Teams the path
-      <em>is</em> the credential — so it is sealed at rest and never shown. The
-      page shows the host it goes to and nothing that can authenticate.</li>
-    </ul>
-  </div>
+<table class="cmp">
+<thead><tr><th>Verb</th><th>Takes</th></tr></thead>
+<tbody>
+<tr><td>Go to</td><td>A URL. Must be the first step, and must be
+http(s).</td></tr>
+<tr><td>Click</td><td>A selector.</td></tr>
+<tr><td>Type into</td><td>A selector and text.</td></tr>
+<tr><td>Expect element</td><td>A selector.</td></tr>
+<tr><td>Expect text</td><td>Text.</td></tr>
+<tr><td>Expect no text</td><td>Text.</td></tr>
+<tr><td>Expect URL</td><td>What it should contain.</td></tr>
+</tbody>
+</table>
+
+<p>A journey must start with <em>go to</em> and must contain at least one
+<em>expect</em> — a journey that asserts nothing passes whatever happens. Fifty
+steps maximum; a single step waits at most 60 seconds (10 by default), and the
+whole journey at most 10 minutes.</p>
+
+<h3>Why not a script</h3>
+
+<ul>
+<li><strong>A step list can be rendered.</strong> A journey shows as seven rows
+with seven durations, which is what makes "it got slower at step 4" a sentence
+anybody can read. A script is one number.</li>
+<li><strong>Editing a monitor stops being remote code execution on every probe
+host.</strong> In a tool where twenty people share a configuration page, that
+is not a theoretical distinction.</li>
+<li><strong>The failure names the step.</strong> <em>step 5 (expect_url):
+expected /dashboard, got /login</em> says the login silently failed.
+<em>TimeoutError: waiting for selector</em> says somebody has to go and read
+the script.</li>
+</ul>
+
+<p>It is a real limit: a journey that needs to compute something cannot be
+written.</p>
+
+<h3>Passwords in a journey</h3>
+
+<p><code>{{ secret.name }}</code> is the only interpolation there is. A journey
+that signs in needs a password, and a password typed into the steps column is a
+password in a database column, in a form field and on a screen. Secrets are
+named on the monitor and sealed with the encryption key.</p>
+
+<h3>A journey needs a browser agent</h3>
+
+<p>Assign it to one. An agent without a browser reports nothing for it and says
+so in its own log, so the journey reads <code>unknown</code> — "no agent has
+reported a result for this check" — rather than down. A probe that cannot look
+is not evidence that a checkout is broken.</p>
+
+<h3>Failure screenshots</h3>
+
+<p>The page as the browser saw it when the step failed, kept for seven days
+(<code>monitoring.screenshot_retention_days</code>). At most 512 kB each; the
+agent downscales, and this is the backstop for one that does not.</p>
+
+<div class="note"><b>An Elastic screenshot is reassembled, and can arrive incomplete</b>
+<p>A <code>monitor.type: browser</code> check from Heartbeat or the Synthetics
+integration is read down to the individual step — name, outcome, duration, the
+error on the one that broke, and the page as the browser saw it. That last one
+is not a stored image: Elastic writes a reference to 64 tiles and the tiles
+themselves, addressed by content hash and shared across every run of every
+monitor. WDash fetches the tiles and the browser draws them.</p>
+<p>So whatever prunes <code>synthetics-browser.screenshot-*</code> removes tiles
+that <em>newer</em> screenshots still point at — the screen says how many are
+gone rather than drawing the gap. And a step that never ran has no screenshot at
+all, so no button is offered for one.</p></div>
 </section>
 
-<section id="operating">
-  <div class="wrap">
-    <h2>8. Operating it</h2>
+<!-- ================================================================ -->
+<section id="rules">
+<h2>Alert rules</h2>
 
-    <table>
-      <thead><tr><th>Endpoint</th><th>Answers</th></tr></thead>
-      <tbody>
-        <tr><td><code>/livez</code></td><td>Whether the process answers; asks nothing else. Liveness and startup.</td></tr>
-        <tr><td><code>/readyz</code></td><td>Whether the metadata store answers, which decides whether anybody can be served. Readiness.</td></tr>
-        <tr><td><code>/health</code></td><td>Every backend's reachability and the running version, asked all at once and answered within two seconds. For alerts and people, not probes.</td></tr>
-      </tbody>
-    </table>
+<p>Three kinds, evaluated by <code>python -m wdash.alerts</code> every thirty
+seconds. They are about <em>monitoring</em>, not about log volume — see
+<a href="#thresholds">thresholds</a> for the difference.</p>
 
-    <h3>Retention</h3>
-    <p>Check results are kept thirty days, journey screenshots a week, both on
-    settings you can change. The results clock is a ceiling on the screenshot
-    one — a screenshot whose result row has been pruned is an image no screen
-    can reach. Pruning runs from the ingest path, at most once an hour across
-    the installation.</p>
+<table class="cmp">
+<thead><tr><th>Kind</th><th>Fires when</th><th>Its own settings</th></tr></thead>
+<tbody>
+<tr><td><code>monitor_down</code></td><td>A monitor has been down for
+<em>threshold</em> consecutive evaluations.</td><td>threshold 1–100, default
+3</td></tr>
+<tr><td><code>agent_silent</code></td><td>An agent has not reported for five
+minutes.</td><td>threshold forced to 1 — the staleness window is already the
+delay, and a second one would add evaluation intervals for no benefit</td></tr>
+<tr><td><code>certificate_expiring</code></td><td>A certificate a check saw
+expires within <em>days before</em>.</td><td>days 1–365, default 30; threshold
+forced to 1</td></tr>
+</tbody>
+</table>
 
-    <h3>The audit trail</h3>
-    <p>Every configuration change with who made it, and every <em>refused</em>
-    one too. Append-only, exported from the same screen, and optionally
-    forwarded to a webhook. Secrets never appear in it: a URL carrying a
-    password is masked before the row is written.</p>
+<p>Every rule also takes a <strong>selector</strong> — which monitors or agents
+it is about — a <strong>channel</strong>, and <strong>repeat minutes</strong>
+(0 means notify once per transition).</p>
 
-    <h3>Upgrading</h3>
-    <p>The schema migrates itself at start-up, under a lock every worker takes,
-    so four of them coming up together is one migration. Read
-    <code>CHANGELOG.md</code> first — its <em>Needs action</em> section is at
-    the top because that is the part you are reading it for.</p>
-  </div>
+<h3>A rule reads through the hub</h3>
+
+<p>Which is what makes one rule cover Heartbeat and WDash's own agents alike:
+both are monitor sources, and the rule asks the hub rather than the agent
+table.</p>
+
+<h3>Firing, and not un-firing by accident</h3>
+
+<p>An alert transitions between <code>ok</code> and <code>firing</code>, and
+the transitions are what get delivered. Two rules about that are worth reading
+before you trust it:</p>
+
+<div class="stop"><b>A probe dying mid-outage does not close the incident</b>
+<p>Every observation carries whether it is <em>known</em>. A monitor that goes
+<code>unknown</code> — its agent went silent — is <em>held</em>: the firing
+alert stays firing, and no "resolved" is sent. Previously the sweep saw "this
+subject is no longer bad" and resolved it, so the outage ended on screen
+because the thing watching it died.</p>
+<p>The same holds for a certificate whose remaining life cannot be read. That
+is not "the certificate is fine".</p></div>
+
+<p>A monitor that stops existing does resolve — with the detail "no longer
+being checked", which is a different sentence from "recovered" — and the
+history keeps the label the alert fired under, so the resolution names the same
+thing the alert did.</p>
+
+<p class="fn">Run <strong>one</strong> evaluator. Two would evaluate the same
+rules and send the same alert twice; the state table is shared, so the second
+would usually find the transition already made — and "usually" is not a
+guarantee worth relying on.</p>
 </section>
 
+<!-- ================================================================ -->
+<section id="channels">
+<h2>Channels</h2>
+
+<p>One kind: <strong>webhook</strong>. A URL, optional headers, and a POST per
+transition.</p>
+
+<div class="warn"><b>A credential in the URL is stripped from what is displayed</b>
+<p>A webhook URL often carries a token — that is how Slack and most incident
+tools authenticate. WDash stores it, sends it, and never shows it: the channel
+row displays the host only, and a credential written as
+<code>user:pass@host</code> is removed from that host rather than printed beside
+it. Migration 21 repairs channels stored before this.</p></div>
+
+<p>Headers are sealed with the encryption key like every other secret, so a
+channel cannot be created while no key is configured.</p>
+
+<h3>Delivery is recorded, including when it fails</h3>
+
+<p>Every notification writes a history row with the rule, the subject, the
+transition, the detail, and <em>whether it was delivered</em>. The
+<a href="#panels">"alerts nobody received"</a> panel and the Alerts screen both
+count the undelivered ones, because an alert nobody received reads as nothing
+being wrong.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="silences">
+<h2>Silences and history</h2>
+
+<h3>Silences</h3>
+
+<p>A subject, an expiry and a reason. While a silence is active the state
+machine keeps running — transitions are evaluated as normal — and nothing is
+delivered. Silences expire on their own and are pruned; there is no
+never-ending silence, because the silence nobody remembers is the one that
+hides the next outage.</p>
+
+<h3>History</h3>
+
+<p>The Alerts screen lists transitions newest first, filterable to the
+undelivered ones and to a window. Counting is done by <em>last word</em>: a
+subject that fired and resolved inside the window is one closed incident, not
+two rows of noise — counting every evaluation would be about 2,880 rows a day
+per subject at a thirty-second interval.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="health">
+<h2>Health and probes</h2>
+
+<p>Three endpoints for three different questions. Two are for probes; the third
+is for people and alerts.</p>
+
+<table class="cmp">
+<thead><tr><th>Endpoint</th><th>Answers</th><th>Read by</th></tr></thead>
+<tbody>
+<tr><td><code>/livez</code></td><td>Does this process answer? Asks nothing
+else.</td><td>Liveness and startup probes</td></tr>
+<tr><td><code>/readyz</code></td><td>Does the metadata store answer — which
+decides whether anybody can be served at all.</td><td>Readiness probe</td></tr>
+<tr><td><code>/health</code></td><td>Every backend's reachability and the
+running version.</td><td>People and alerts. <strong>Not</strong> probes.</td></tr>
+</tbody>
+</table>
+
+<pre>$ curl -s localhost:5001/livez
+{"status":"alive","version":"3.0.0"}
+
+$ curl -s localhost:5001/readyz
+{"status":"ready","store":"connected"}
+
+$ curl -s localhost:5001/health
+{"main-elasticsearch": "connected",
+ "status": "healthy",
+ "store": "connected",
+ "version": "3.0.0",
+ "wdash-agents": "connected"}</pre>
+
+<p><code>/health</code> asks every backend <strong>at once</strong> and answers
+within two seconds; one that has not answered by then is reported unreachable.
+The report is then reused for ten seconds, so a poller cannot hold a worker per
+poll on a backend that hangs.</p>
+
+<p>"Every backend" means logs, traces <em>and</em> monitors, each asked once
+however many signals it serves. The report is one flat object keyed by source
+name, so:</p>
+
+<ul>
+<li>a source whose name collides with a key the report already uses —
+<code>store</code>, <code>status</code>, <code>version</code>,
+<code>degraded</code>, <code>detail</code> — is reported under
+<code>source:&lt;name&gt;</code> instead;</li>
+<li>two different sources sharing a name get one line between them, because the
+key is the name;</li>
+<li>only the metadata store decides the status code. A backend being down is
+reported, not returned as a 503 — that would take a whole deployment out of a
+load balancer over an Elasticsearch that is reindexing.</li>
+</ul>
+
+<p class="fn">The failure branch used to return the exception's text to an
+unauthenticated caller, which on a connection error is the backend's address.
+It names the source and says "unreachable" now.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="audit">
+<h2>The audit trail</h2>
+
+<p>Who changed what, in the authorization configuration. Append-only, and not
+deletable from the UI — an audit trail an administrator can edit is not an
+audit trail.</p>
+
+<p>Logging already said that a change happened. What it could not answer is
+<em>"what could this role see last Tuesday"</em> — the question that comes up
+exactly once, after something has gone wrong, by which time the log has rotated
+and the current state is the only state anybody can see. So each row carries
+the resulting state, not just the fact of a change.</p>
+
+<p><strong>Refusals are recorded too.</strong> A refused attempt to grant
+somebody administration is the more interesting row.</p>
+
+<h3>Forwarding it somewhere else</h3>
+
+<p>Two sinks: <strong>Splunk HEC</strong> and <strong>Elasticsearch</strong>.
+Configured at <strong>Audit → Forwarding</strong>, swept in batches of 500.</p>
+
+<p>The database stays authoritative and doubles as the queue: every row carries
+a <code>forwarded_at</code>, and forwarding is a sweep over the rows that do
+not have one yet. That shape buys two things an in-memory queue does not:</p>
+
+<ul>
+<li><strong>History is shippable.</strong> Point WDash at a Splunk today and
+the entries from before today go too, because "not forwarded" is a fact stored
+per row rather than a thing that only existed while the process was up.</li>
+<li><strong>A restart loses nothing.</strong> An in-memory queue drops whatever
+it held, and the rows it dropped look identical to rows that were
+delivered.</li>
+</ul>
+
+<p>Delivery is <strong>at-least-once</strong>, never at-most-once. If a batch
+is written and the process dies before the rows are marked, the batch goes
+again. Duplicated audit entries are a nuisance; missing ones are the failure
+this whole subsystem exists to prevent, so the choice is not close.</p>
+
+<p>The sinks are deliberately small and dependency-free — an HTTP POST each.
+Retry policy, backpressure and batching strategy belong in the collector on the
+other end, which every one of these destinations already has.</p>
+
+<p>Export from the screen as CSV or JSON.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="retention">
+<h2>Retention</h2>
+
+<table class="cmp">
+<thead><tr><th>Data</th><th>Kept</th><th>Setting</th></tr></thead>
+<tbody>
+<tr><td>Monitor results</td><td>30 days</td><td><code>monitoring.retention_days</code></td></tr>
+<tr><td>Failure screenshots</td><td>7 days</td><td><code>monitoring.screenshot_retention_days</code></td></tr>
+<tr><td>Audit rows</td><td>Kept</td><td>—</td></tr>
+<tr><td>Logs, traces</td><td>Your store's business</td><td>—</td></tr>
+</tbody>
+</table>
+
+<p>"Step 4 failed" a month later is still a data point; the picture of a login
+page from a month ago is a megabyte nobody will open. Hence the two clocks.</p>
+
+<div class="note"><b>The results clock is a ceiling on the screenshot one</b>
+<p>A screenshot whose result row has been pruned is an image no screen can
+reach, so asking for thirty days of screenshots under seven days of results
+gets seven. Switching result retention <em>off</em> removes the ceiling rather
+than the clock — screenshots are still pruned at their own week.</p></div>
+</section>
+
+<!-- ================================================================ -->
+<section id="config">
+<h2>Config reference</h2>
+
+<p>Everything the process reads. <strong>No data source and no identity
+provider is here</strong> — those are on the configuration page, stored in the
+metadata database. An installation that still sets one of the old variables is
+told so at start-up as an ERROR naming them, with nothing read from them.</p>
+
+<table class="cmp">
+<thead><tr><th>Variable</th><th>Default</th><th>Means</th></tr></thead>
+<tbody>
+<tr><td><code>SECRET_KEY</code></td><td>the dev key</td><td>Signs session
+cookies. WDash refuses to start on a published placeholder while
+<code>SESSION_COOKIE_SECURE</code> is true.</td></tr>
+<tr><td><code>WDASH_ENCRYPTION_KEY</code></td><td>—</td><td>Seals every secret
+at rest, including every local account's authenticator. Without it secrets
+cannot be saved and no local account can sign in.</td></tr>
+<tr><td><code>DATABASE_URL</code></td><td><code>sqlite:///data/wdash.db</code></td>
+<td>The metadata store. <code>postgresql://…</code> for more than one
+process.</td></tr>
+<tr><td><code>SESSION_COOKIE_SECURE</code></td><td><code>False</code></td>
+<td>HTTPS-only session cookie. Also turns on HSTS.</td></tr>
+<tr><td><code>TRUSTED_PROXY_COUNT</code></td><td><code>0</code></td><td>How
+many reverse proxies are in front. <code>0</code> ignores
+<code>X-Forwarded-For</code> entirely.</td></tr>
+<tr><td><code>DASHBOARD_STORAGE</code></td><td><code>database</code></td>
+<td>Where dashboards <em>and saved searches</em> live: <code>database</code> or
+<code>file</code>. Anything else is refused at start-up rather than quietly
+served from the file store.</td></tr>
+<tr><td><code>DASHBOARD_STORAGE_FILE</code></td><td><code>data/dashboards.json</code></td>
+<td>The JSON file, for <code>DASHBOARD_STORAGE=file</code> and for the start-up
+check that tells an unmigrated installation what it still has.</td></tr>
+<tr><td><code>LOGS_PER_PAGE</code></td><td><code>50</code></td><td>Records per
+page in the log list.</td></tr>
+<tr><td><code>MAX_SEARCH_RESULTS</code></td><td><code>1000</code></td>
+<td>Upper bound on page size.</td></tr>
+<tr><td><code>FLASK_DEBUG</code></td><td><code>False</code></td>
+<td><code>true</code> turns on Flask's debugger and reloader. Not in
+production.</td></tr>
+</tbody>
+</table>
+
+<h3>For the agent</h3>
+
+<table class="cmp">
+<thead><tr><th>Variable</th><th>Means</th></tr></thead>
+<tbody>
+<tr><td><code>WDASH_SERVER</code></td><td>Base URL of the WDash to report
+to.</td></tr>
+<tr><td><code>WDASH_AGENT_TOKEN</code></td><td>The agent token. Prefer this
+over <code>--token</code>: an argument is visible in <code>ps</code>.</td></tr>
+<tr><td><code>WDASH_AGENT_SPOOL</code></td><td>Where undelivered results are
+held. Default <code>agent-spool.jsonl</code>.</td></tr>
+</tbody>
+</table>
+
+<h3>Fixed limits</h3>
+
+<table class="cmp">
+<thead><tr><th>Limit</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td>Largest request body</td><td>16 MiB — what the proxy in the Kubernetes
+manifests accepts, and well above what an agent sends.</td></tr>
+<tr><td><code>/health</code> budget</td><td>2 seconds, reused for 10.</td></tr>
+<tr><td>Role cache</td><td>10 seconds per worker.</td></tr>
+<tr><td>Session cookie</td><td><code>HttpOnly</code>,
+<code>SameSite=Lax</code>, signed, identity only. There is no session
+store.</td></tr>
+</tbody>
+</table>
+
+<h3>CSRF</h3>
+
+<p>On, over the <strong>method</strong> rather than a list of routes — so a
+route written next year is protected before anybody remembers it exists. Every
+POST, PUT, PATCH and DELETE carries a token tied to the session: a hidden field
+in a form, <code>X-CSRF-Token</code> for a <code>fetch</code>. Without it the
+request is refused with a 400 and a page that says what to do.</p>
+
+<p>The one exemption is the agent API, which sends a bearer token and no cookie
+and therefore has no ambient authority to borrow.</p>
+
+<p class="fn">The suite runs with it <em>on</em> — the test client carries the
+token the way a browser does — so the protection is exercised by four thousand
+tests rather than by the handful that are about it. The history is worth
+keeping: Flask-WTF had been installed and never initialised, while five test
+configurations set <code>WTF_CSRF_ENABLED = False</code>, which reads as
+"switched off for tests" and therefore as "on in production". It was never
+on.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="upgrading">
+<h2>Upgrading</h2>
+
+<p>Migrations run on start-up in both dialects. Three upgrades need a decision
+from you rather than a migration.</p>
+
+<h3>From JSON files to the database</h3>
+
+<p>Dashboards and saved searches are in the metadata database by default. An
+installation that predates that has a <code>data/dashboards.json</code>, and
+perhaps a <code>data/saved_searches.json</code> beside it, and has lost nothing
+— but nothing is reading those files.</p>
+
+<pre>$ PYTHONPATH=src python -m wdash.store.migrate_cli --dry-run
+$ PYTHONPATH=src python -m wdash.store.migrate_cli</pre>
+
+<p>WDash says so at start-up, naming both files and how many records in each
+the database does not have, and <em>the pages say it too</em> — the dashboards
+page carries the count instead of "Create your first dashboard", the
+saved-search list says how many are in the file instead of "No saved searches
+yet". Both give the path and the command to an administrator only, and both go
+quiet the moment the migration finishes, without a restart.</p>
+
+<p>With no paths given the tool reads the file the application itself reads,
+prints both absolute paths, and stops with a non-zero exit if a file it is
+about to read is not there — rather than reporting "0 moved". Pass
+<code>--allow-missing-dashboards</code>, <code>--allow-missing-searches</code>
+or <code>--allow-missing</code> for a deployment that really has none. The JSON
+files are left untouched, so the move is reversible.</p>
+
+<p><code>DASHBOARD_STORAGE=file</code> keeps them, unchanged and supported,
+with <strong>one worker</strong>: the file store reads the whole document,
+changes it and writes it back, so two workers editing different dashboards lose
+one of the edits — silently, because both writes succeed.</p>
+
+<div class="note"><b>Measured, three trials each</b>
+<p>4 processes × 8 creates against the JSON file reported 32 successes every
+trial and left <strong>8, 9 and 11</strong> rows. The same 32 into SQLite
+reported 32 and left <strong>32</strong>, every trial. How much is lost varies
+with the timing, which is the point.</p></div>
+
+<h3>From a cluster declared in the environment</h3>
+
+<p>2.5 and earlier registered an Elasticsearch from
+<code>ELASTICSEARCH_URL</code> and the seven variables around it, and an OpenID
+Connect provider from <code>OIDC_CLIENT_ID</code> and the eight around that.
+<strong>Nothing reads them now.</strong></p>
+
+<p>Before upgrading, add that cluster under <strong>Configuration →
+Sources</strong> with the same index patterns, and save the provider on the
+OpenID Connect card. A process that still has any of those variables set says
+so at start-up as an ERROR naming them and the page — it does not import them,
+because a one-shot import at start-up is the mechanism that was removed. Local
+accounts are unaffected either way.</p>
+
+<h3>A board or a search that names no source now reads every source</h3>
+
+<p>It used to read one — whichever was stored first — and on a mixed
+installation that is a different number.</p>
+
+<div class="note"><b>Measured on the demo's five stored sources, rolling 24 hours</b>
+<p>An unpinned board read <strong>1,115</strong> records from the Loki alone
+and now reads <strong>15,431</strong> (13,245 from the cluster, 1,066 from the
+Loki, 1,120 from VictoriaLogs, twenty minutes later). Its trace list for
+<code>api-gateway</code> was <em>empty</em>, because the oldest trace source was
+a Tempo with no such service, and lists ten traces from the cluster now. A bare
+<code>/api/search</code> answered 5 records from the Loki and answers
+<strong>14,353</strong> across all three, with the breakdown.</p>
+<p>The cost moves with it: an unpinned eight-panel board was 10 requests to the
+Loki per refresh and is 1 to the cluster, 10 to the Loki and 10 to
+VictoriaLogs.</p></div>
+
+<p><a href="#dashboards">Pin</a> the boards that should read one source; the
+rest say on screen which sources answered.</p>
+</section>
+
+<!-- ================================================================ -->
 <section id="lab">
-  <div class="wrap">
-    <h2>9. A lab to try it against</h2>
-    <p>The repository ships one. Each backend starts and seeds on its own, so
-    you can bring up only what you want to look at.</p>
+<h2>The lab</h2>
+
+<p>The repository ships a self-contained lab. You do not need an existing
+cluster to try any of this.</p>
 
 <pre>$ cd lab
-$ ./lab.sh demo             <span class="c"># every backend that holds data:
-                            # start, wait, seed, and print what to type
-                            # into WDash</span>
+$ ./lab.sh demo          <span class="c"># start every backend, wait for each, seed it,</span>
+                         <span class="c"># and print what to type into WDash</span>
 
-<span class="c"># or one at a time</span>
-$ ./lab.sh up loki          <span class="c"># or: elasticsearch, victorialogs,
-                            #     jaeger, tempo, identity, otel, …</span>
-$ ./lab.sh seed loki        <span class="c"># 24 hours of data to search</span>
-$ ./lab.sh targets          <span class="c"># what each one holds, and the URL
-                            # to type into WDash</span></pre>
+$ ./lab.sh up loki       <span class="c"># one target and nothing else</span>
+$ ./lab.sh seed loki     <span class="c"># 2,000 lines over the last 24 hours</span>
+$ ./lab.sh targets       <span class="c"># every target: up or not, what is in it,</span>
+                         <span class="c"># and the exact form to fill in</span>
+$ ./lab.sh status
+$ ./lab.sh down
+$ ./lab.sh reset</pre>
 
-    <p><code>./lab.sh up</code> with no target starts the cluster. Seeding is
-    what makes the lab-backed tests meaningful: they ask about the last
-    24 hours and skip with the command in the message when there is nothing
-    there, because a run full of skips is a run that measured nothing.</p>
-  </div>
+<table class="cmp">
+<thead><tr><th>Target</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td><code>elasticsearch</code></td><td>Logs, traces and Heartbeat monitors
+in one cluster.</td></tr>
+<tr><td><code>loki</code>, <code>victorialogs</code></td><td>Logs.</td></tr>
+<tr><td><code>jaeger</code>, <code>tempo</code></td><td>Traces.</td></tr>
+<tr><td><code>synthetics</code></td><td>Heartbeat, writing into the cluster. No
+source of its own — the Monitors page fills in as soon as that cluster is added
+with the monitors signal ticked.</td></tr>
+<tr><td><code>identity</code></td><td>OpenLDAP and Dex. Users alice, bob, carol
+and dave, password <code>hunter2</code>.</td></tr>
+<tr><td><code>postgres</code></td><td>A metadata store to run WDash
+against.</td></tr>
+<tr><td><code>otel</code></td><td>A real OpenTelemetry Collector, so the OTel
+path is exercised rather than assumed.</td></tr>
+<tr><td><code>kibana</code>, <code>cluster</code></td><td>For comparing
+against, and for the Advisor.</td></tr>
+</tbody>
+</table>
+
+<div class="warn"><b>Seed before you measure</b>
+<p><code>./lab.sh targets</code> reports what each target holds <strong>over
+the last 24 hours</strong>, which is the window every page opens on. A lab
+seeded last week is healthy, full of documents, and blank on screen — and that
+looks exactly like a broken adapter.</p></div>
+
+<h3>The Cluster Advisor</h3>
+
+<p><code>/advisor</code> inspects a connected Elasticsearch read-only and
+reports misconfigurations with concrete fixes: shard sizing and density,
+mapping problems, cache effectiveness, index lifecycle, JVM and disk pressure,
+security settings. It runs headless too, which makes it usable in CI:</p>
+
+<pre>$ PYTHONPATH=src python -m wdash.advisor --url http://localhost:9200
+$ PYTHONPATH=src python -m wdash.advisor --url https://es.example:9200 \
+      --username wdash --password-file /run/secrets/es \
+      --ca-certs /etc/ssl/ca.pem --fail-on critical</pre>
+
+<p>Nothing is read from the environment. <code>--password-file</code> takes a
+path or <code>-</code> for standard input — never an argument, which
+<code>ps</code> shows. The cluster's certificate is always checked;
+<code>--insecure</code> turns that off and the credentials then go to whoever
+answers. With <code>--fail-on</code> it exits 2 when it could not look at
+everything, and exits 2 in any case when nothing could be evaluated.</p>
+
+<p>Two checks are specific to how WDash queries data: <strong>MAP001</strong>
+flags fields WDash aggregates on that are mapped as analysed text — the cause
+of dashboard panels that render empty — and <strong>QRY001</strong> flags a
+near-zero shard request cache hit rate, which usually means query time bounds
+are generated at sub-second precision and every request produces a unique cache
+key.</p>
 </section>
 
+<!-- ================================================================ -->
+<section id="refuses">
+<h2>What WDash refuses</h2>
+
+<p>Collected in one place, because a refusal met for the first time in
+production reads as a bug.</p>
+
+<table class="cmp">
+<thead><tr><th>It refuses</th><th>Because</th></tr></thead>
+<tbody>
+<tr><td>To start on a published <code>SECRET_KEY</code> with
+<code>SESSION_COOKIE_SECURE=true</code></td><td>Every placeholder this
+repository has shipped is printed in public and signs the administrator's
+cookie.</td></tr>
+<tr><td>To start on a <code>DASHBOARD_STORAGE</code> that is neither
+<code>database</code> nor <code>file</code></td><td>A transposed letter used to
+show an empty dashboard list for data sitting in the database.</td></tr>
+<tr><td>To write any secret without an encryption key</td><td>Writing it as
+text is the wrong failure.</td></tr>
+<tr><td>To save a source URL containing a password</td><td>The URL is stored
+and shown as typed.</td></tr>
+<tr><td>To save an https source that holds a credential with verification
+off</td><td>The credential would go to whatever answered — and retyping the
+password is consent, not protection.</td></tr>
+<tr><td>To save a source that has never connected</td><td>A stored credential
+that has never reached the backend is a configuration that looks finished and
+answers nothing.</td></tr>
+<tr><td>To save a source with no signals ticked</td><td>It would answer
+nothing.</td></tr>
+<tr><td>To rename a source that roles name</td><td>It would silently rewrite
+their rules.</td></tr>
+<tr><td>To enable a second directory</td><td>A username at one becomes a
+username at the other.</td></tr>
+<tr><td>To enable a provider that cannot sign anybody in</td><td>It used to
+save, report itself in force, and decline every sign-in out of sight.</td></tr>
+<tr><td>To sign a directory user in under a local account's name</td><td>That
+name owns the break-glass administrator's dashboards.</td></tr>
+<tr><td>Any change leaving nobody able to administer</td><td>Nothing can
+recover from losing <code>system:admin</code> inside the UI.</td></tr>
+<tr><td>To delete a role something points at</td><td>The next save would make
+everybody unmapped an administrator.</td></tr>
+<tr><td>A permission name the catalogue does not know</td><td>One that grants
+nothing while looking configured is worse than one rejected.</td></tr>
+<tr><td>A group-by on the log line</td><td>It returns tokenised nonsense, one
+word per bucket.</td></tr>
+<tr><td>A journey with no assertion, or one not starting at a URL</td><td>It
+would pass whatever happened.</td></tr>
+<tr><td>A <code>NOT (a b)</code> on Loki</td><td>A chain of line filters cannot
+say OR, and a query that silently means something else is worse.</td></tr>
+<tr><td>Query syntax it does not support</td><td>Silently reinterpreting it is
+worse.</td></tr>
+<tr><td>A state-changing request with no CSRF token</td><td>400, with a page
+that says what to do.</td></tr>
+</tbody>
+</table>
+</section>
+
+<!-- ================================================================ -->
+<section id="trouble">
+<h2>Troubleshooting</h2>
+
+<h3>A new source is configured and every page is empty</h3>
+
+<p>Check the window before anything else. Every screen opens on the last 24
+hours, and a store whose newest document is older than that is healthy, full,
+and blank. On the lab, <code>./lab.sh targets</code> reports what each backend
+holds over exactly that window; against your own store, widen the time range
+first.</p>
+
+<p>If the window is right, the next question is the boundary: a role that
+reaches no container in that source is shown a sentence about its role rather
+than an empty table, and an administrator is shown the container names. If
+neither says anything, <code>/health</code> says whether the backend answered at
+all.</p>
+
+<h3>"No local account can sign in"</h3>
+
+<p><code>WDASH_ENCRYPTION_KEY</code> is missing or has changed. The
+authenticator every local account needs is sealed with it. A key that was
+rotated makes every enrolled secret unreadable; the way back is <code>python -m
+wdash.store.recover --reset-totp &lt;username&gt;</code> per account, and
+re-entering every stored credential.</p>
+
+<h3>A role was revoked and the person still has access</h3>
+
+<p>Wait ten seconds. Authorization is read from the store per request and cached
+briefly per worker; the window is bounded and there is no coordination between
+processes. If it survives that, the person is resolving through a path you did
+not change — <a href="#mappings">the order</a> is the local account's own role,
+then email, then username, then groups, then the default, and the local
+account's own role beats every mapping.</p>
+
+<h3>Nobody can administer</h3>
+
+<pre>$ python -m wdash.store.recover --status</pre>
+
+<p>That answers whether it is true before you change anything. Then
+<code>--grant-admin</code>, <code>--enable</code>, or — if the cause is two
+directories where the losing one held the administrators —
+<code>--use-directory</code>. See <a href="#breakglass">Locked out</a>.</p>
+
+<h3>A monitor reads <code>unknown</code> rather than up or down</h3>
+
+<p>Nobody looked. Either no agent is assigned to it, or the agent assigned has
+not reported for five minutes, or it is a journey assigned to an agent with no
+browser. All three are deliberate: a probe that cannot look is not evidence
+about the target. The agent's own row on the Agents page says when it was last
+heard from, and its version.</p>
+
+<h3>A TLS setting on a check seems to do nothing</h3>
+
+<p>The agent is older than the release that added it. "Trust this certificate"
+and "do not verify — expiry only" are sent to every assigned agent, and an older
+one ignores them and verifies against the public roots — so the check stays down
+with the OpenSSL message. The agent's row reports its version; nothing on the
+Checks table says so yet.</p>
+
+<h3>A dashboard panel is empty while the rest of the board works</h3>
+
+<p>Three different causes, and the card says which:</p>
+
+<ul>
+<li><strong>A permission.</strong> A trace or monitor panel is checked against
+<code>traces:read</code> or <code>monitors:read</code>, not against
+<code>dashboard:view</code>.</li>
+<li><strong>A field this source cannot group by</strong> — a Loki asked to
+count by something that is not a label, for instance.</li>
+<li><strong>A field mapped as analysed text.</strong> The Advisor's
+<code>MAP001</code> names them; that is the classic cause of a panel that
+renders empty against Elasticsearch.</li>
+</ul>
+
+<h3>A merged search will not page</h3>
+
+<p>It is first-page only, by design, and the pagination line names the merge
+rather than the source. Pick one source in the picker to page through it.</p>
+
+<h3>"Slowest" looks wrong on Jaeger or Tempo</h3>
+
+<p>It is the slowest of a sample — neither search endpoint sorts. The list says
+so in a line of its own when the sample came back full, which means there were
+more traces behind it. Narrow the window or the service.</p>
+
+<h3>A dashboard shows no "within thresholds" badge</h3>
+
+<p>The answer was partial — a shard did not report. That is deliberate: a
+threshold verdict is a claim about numbers, and a short answer has none to make
+it from. The card says the answer was partial instead.</p>
+
+<h3>An alert resolved and the outage had not ended</h3>
+
+<p>It should not, and the 3.0 evaluator holds rather than resolves when the
+monitor goes <code>unknown</code>. If you see it on an older version, that is
+the bug: the sweep read "this subject is no longer bad" from an observation
+that was only unknown. Upgrade the evaluator, which is the same image as the
+server.</p>
+
+<h3>Which version am I running?</h3>
+
+<pre>$ curl -s localhost:5001/livez
+{"status":"alive","version":"3.0.0"}</pre>
+
+<p><code>/livez</code> asks nothing else, so it answers even when every backend
+and the metadata store are unreachable.</p>
+
+<p class="note-src">Everything on this page is behaviour of WDash 3.0.0. Where
+a number appears — request counts, record counts, retention windows, limits —
+it was measured against the lab or the demo rather than estimated. The
+repository's <code>README.md</code> carries the same facts in more detail, and
+<code>ROADMAP.md</code> says what is planned and what is missing on
+purpose.</p>
+</section>
+
+</main>
+</div>
+
 <footer>
-  <div class="wrap">
-    WDash 3.0.0 · <a href="../">Home</a> ·
+  <div class="bar">
+    WDash — a small observability front-end with access control in front of
+    your store. <a href="../">Overview</a> ·
     <a href="https://github.com/warewave/wdash">Source</a> ·
-    <a href="https://github.com/warewave/wdash/blob/main/CHANGELOG.md">Changelog</a> ·
     <a href="https://github.com/warewave/wdash/blob/main/SECURITY.md">Security</a> ·
     MIT
   </div>
 </footer>
+
+<script>
+/* Marking the section you are reading. The page works without this — every
+   link is a plain anchor and the content is all there; this only moves a
+   highlight, which is why it is allowed to be the page's one script.
+
+   Direct measurement rather than IntersectionObserver: the question is "which
+   heading did I last pass", and an observer answers "what is visible", which
+   is a different question with two answers whenever two sections share the
+   screen. It never writes to the URL — a scroll is not navigation, and a
+   history entry per section makes the back button useless. */
+(function () {
+  var aside = document.querySelector('aside');
+  if (!aside) return;
+  var links = Array.prototype.slice.call(aside.querySelectorAll('a[href^="#"]'));
+  var sections = links.map(function (a) {
+    return document.getElementById(decodeURIComponent(a.getAttribute('href').slice(1)));
+  });
+  if (!sections.length || sections.indexOf(null) !== -1) return;
+
+  var LINE = 80;              /* just below the 56px header */
+  var current = -1, queued = false;
+
+  /* getBoundingClientRect, not offsetTop: `position: sticky` makes the aside
+     the offsetParent of its own links, so offsetTop is measured against a box
+     that moves with the page — the arithmetic silently reads as "already
+     visible" and the marked row scrolls out of the sidebar. */
+  function keepVisible(link) {
+    var box = aside.getBoundingClientRect(), row = link.getBoundingClientRect();
+    if (row.top < box.top) aside.scrollTop -= (box.top - row.top) + 8;
+    else if (row.bottom > box.bottom) aside.scrollTop += (row.bottom - box.bottom) + 8;
+  }
+
+  function mark() {
+    queued = false;
+    var index = 0;
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].getBoundingClientRect().top <= LINE) index = i;
+    }
+    /* The last section is shorter than the viewport, so its top never crosses
+       the line and it could never be marked. Reaching the bottom IS reading it. */
+    if (window.innerHeight + window.scrollY >=
+        document.documentElement.scrollHeight - 2) {
+      index = sections.length - 1;
+    }
+    if (index === current) return;
+    if (current >= 0) links[current].removeAttribute('aria-current');
+    current = index;
+    links[current].setAttribute('aria-current', 'true');
+    keepVisible(links[current]);
+  }
+
+  function schedule() {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(mark);
+  }
+
+  addEventListener('scroll', schedule, {passive: true});
+  addEventListener('resize', schedule);
+  mark();
+})();
+</script>
 
 </body>
 </html>
