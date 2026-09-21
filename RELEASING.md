@@ -44,7 +44,7 @@ list of what to run locally until it does.
 4. **Run both suites, on both dialects.**
 
    ```bash
-   cd lab && ./lab.sh up && ./lab.sh seed && cd ..
+   cd lab && ./lab.sh demo && cd ..
    ./venv/bin/python -m tests.run
    WDASH_TEST_POSTGRES=postgresql://wdash:wdash-lab@localhost:55432/wdash \
        ./venv/bin/python -m tests.run

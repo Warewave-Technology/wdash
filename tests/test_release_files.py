@@ -179,8 +179,16 @@ class TheReleaseProcessTest(unittest.TestCase):
 
     def test_it_says_to_seed_the_lab_before_measuring(self):
         """A suite run against a stale lab is a run full of skips, and a run
-        full of skips is a release measured by nothing."""
-        self.assertIn("lab.sh seed", self.text)
+        full of skips is a release measured by nothing.
+
+        Either command: `demo` starts and seeds every data backend in one
+        step, `seed` does the seeding half on a lab that is already up. What
+        must not happen is a process with neither, which is a process that
+        runs the suite against whatever the lab happens to hold.
+        """
+        seeds = [command for command in ("lab.sh demo", "lab.sh seed")
+                 if command in self.text]
+        self.assertTrue(seeds, "the process never seeds the lab")
 
     def test_it_is_honest_about_what_it_does_not_do(self):
         """Signing and an SBOM are not here. A process that lists only what
