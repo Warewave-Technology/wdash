@@ -551,6 +551,32 @@ class DirectoryTest(IdentityTestCase):
                                   "groups": []})
         self.assertEqual(signed_in.status_code, 302)
 
+    def test_the_session_holds_the_name_the_directory_gave(self):
+        """What the directory answered, not what was typed — and it is the
+        name everything downstream is keyed by: the role a mapping names,
+        the `created_by` on a dashboard, the actor on an audit row.
+
+        `ldap_auth.authenticate` is where the two are reconciled, against a
+        real directory in tests/test_ldap_auth.py and
+        tests/test_identity_lab.py. This is the other half: that the answer
+        reaches the session rather than being replaced by the form field on
+        the way.
+        """
+        self.app.store.settings.set("rbac.user_roles", {"alice": "admin"})
+        self.app.store.rbac.invalidate()
+
+        response = self.attempt({"username": "alice", "email": "alice@corp",
+                                 "groups": []}, username="Alice")
+        self.assertEqual(response.status_code, 302)
+        with self.client.session_transaction() as session:
+            self.assertEqual(session["user_data"]["username"], "alice")
+
+        # And the mapping written for that name applies, which is the
+        # symptom the whole change is about: typed as Alice, it did not.
+        page = self.client.get("/admin/config")
+        self.assertEqual(page.status_code, 200,
+                         "the mapping for the directory's name did not apply")
+
     def test_any_failure_of_the_directory_code_is_an_outage_too(self):
         response = self.attempt(RuntimeError("socket closed"))
         self.assertEqual(response.status_code, 503)

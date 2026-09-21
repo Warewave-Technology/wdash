@@ -328,6 +328,27 @@ has, since enabling the second one is refused. Where it does refuse,
 `--enable <username>` and `--grant-admin <username>` are the way back from
 outside the application.
 
+**The directory names the person, not the keyboard.** A directory matches
+`uid` with caseIgnoreMatch, so `alice`, `Alice` and `ALICE` all sign in.
+WDash used to keep whatever was typed, and each of those was a different
+person: a different role, because a mapping is compared exactly; different
+dashboards, because ownership is `created_by`; and a separate thread
+through the audit trail. Measured against OpenLDAP with `alice` mapped to
+admin, typing `Alice` landed on the default role, silently. The username is
+now read from the attribute the user filter looks people up by — `uid`, or
+`sAMAccountName`, or whatever that filter names — and a directory that
+returns nothing for it leaves the typed name alone. OpenID Connect never
+had this: there the username is a claim the provider sends.
+
+**Upgrading:** somebody who has been signing in as `Alice` against a
+directory that holds them as `alice` becomes `alice` on their next
+sign-in. That is a different name from the one that owns their dashboards
+and saved searches, and nothing moves them: merging two names is a
+decision about people rather than about data. A direct mapping written
+against the old spelling stops applying and should be rewritten — which is
+the same fix as before, since it was not applying to the other spelling
+either.
+
 LDAP authentication binds **as the user** with the password they typed. Finding
 their entry with the service account proves the account exists, not that the
 password is right; treating the search as the check is a complete bypass that

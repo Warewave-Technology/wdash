@@ -152,6 +152,19 @@ def _bind(connection, who, the_person=False):
         f"{who} could not bind: {(connection.result or {}).get('description')}")
 
 
+#: The attribute a user filter looks the typed name up by. `(uid={username})`
+#: means uid; `(sAMAccountName={username})` means sAMAccountName; and it is
+#: found inside a longer filter too, since a real one is usually
+#: `(&(objectClass=person)(uid={username}))`.
+_LOOKED_UP_BY = re.compile(r"([A-Za-z][\w.;-]*)\s*=\s*\{username\}")
+
+
+def naming_attribute(filter_template):
+    """Which attribute the filter identifies somebody by, or None."""
+    found = _LOOKED_UP_BY.search(filter_template or "")
+    return found.group(1) if found else None
+
+
 def authenticate(settings, username, password):
     """Returns {username, email, groups} on success, None on failure.
 
@@ -187,10 +200,42 @@ def authenticate(settings, username, password):
 
     group_attribute = settings.get("group_attribute") or "memberOf"
     return {
-        "username": username,
+        "username": _as_the_directory_has_it(filter_template, attributes,
+                                             username),
         "email": _first(attributes.get("mail")),
         "groups": _group_names(attributes.get(group_attribute)),
     }
+
+
+def _as_the_directory_has_it(filter_template, attributes, typed):
+    """The name the DIRECTORY holds, falling back to what was typed.
+
+    It was the typed string, always. A directory matches `uid` with
+    caseIgnoreMatch, so alice, Alice and ALICE all sign in — and each became
+    a different person here: a different role, because a mapping is compared
+    exactly; different dashboards, because ownership is `created_by`; and a
+    separate thread in the audit trail. Measured against the lab's OpenLDAP,
+    with `alice` mapped to admin: typing `alice` landed on admin and typing
+    `Alice` on the default role, silently.
+
+    OpenID Connect never had this — the username is a claim the provider
+    sends — so this is the LDAP side arriving at the same rule: the
+    directory names the person, not the keyboard.
+
+    The attribute is whichever one the filter looks people up by, so an
+    installation searching `sAMAccountName` gets that. Where the directory
+    returns nothing for it, the typed name stands: a person signing in is
+    not the moment to refuse over a missing attribute.
+    """
+    attribute = naming_attribute(filter_template)
+    held = _first(attributes.get(attribute)) if attribute else None
+    held = (str(held).strip() if held is not None else "")
+    if not held:
+        return typed
+    if held != typed:
+        logger.info(f"LDAP: {typed!r} signed in; the directory has this "
+                    f"entry as {held!r}, which is the name WDash uses")
+    return held
 
 
 def _find_user(settings, user_filter):
@@ -213,10 +258,17 @@ def _find_user(settings, user_filter):
                                        "its password was refused")
 
         group_attribute = settings.get("group_attribute") or "memberOf"
+        # The attribute the filter matched on comes back too: it is the name
+        # the directory holds for this person, and what WDash calls them.
+        wanted = ["mail", "cn", group_attribute]
+        naming = naming_attribute(settings.get("user_filter")
+                                  or "(uid={username})")
+        if naming and naming not in wanted:
+            wanted.append(naming)
         try:
             found = connection.search(
                 search_base=settings["base_dn"], search_filter=user_filter,
-                search_scope=SUBTREE, attributes=["mail", "cn", group_attribute],
+                search_scope=SUBTREE, attributes=wanted,
                 size_limit=2)
         except LDAPException as exc:
             raise DirectoryUnavailable(f"the search failed: {exc}") from exc

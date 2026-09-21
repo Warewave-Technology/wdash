@@ -106,6 +106,24 @@ class DirectorySignInTest(unittest.TestCase):
                 self.assertEqual(result["username"], username)
                 self.assertEqual(result["email"], email)
 
+    def test_however_it_is_typed_it_is_one_person(self):
+        """OpenLDAP matches `uid` with caseIgnoreMatch, so all three of
+        these sign in. Each used to become a different person: WDash kept
+        the string that was typed, and a mapping written `alice`, the
+        dashboards `alice` owns and the audit rows under that name all
+        belonged to one of the three.
+
+        Measured here rather than against a fake, because whether the
+        directory matches loosely at all is the directory's business — and
+        this one does.
+        """
+        for typed in ("alice", "Alice", "ALICE", "aLiCe"):
+            with self.subTest(typed=typed):
+                result = authenticate(SETTINGS, typed, PASSWORD)
+                self.assertIsNotNone(result, "the directory refused it")
+                self.assertEqual(result["username"], "alice")
+                self.assertEqual(result["email"], "alice@lab.local")
+
     def test_the_groups_come_back_as_names(self):
         """`memberOf` yields full DNs. Both forms are returned on purpose, so
         a role mapping written either way matches — this checks the names are

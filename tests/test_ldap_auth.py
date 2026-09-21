@@ -37,10 +37,15 @@ SETTINGS = {"server": "ldap://directory.invalid:389", "base_dn": "dc=corp",
 
 
 class FakeEntry:
-    def __init__(self, dn):
+    def __init__(self, dn, attributes=None):
+        #: What a directory returns for an entry. `uid` is absent unless a
+        #: test asks for it, because a directory returns only the attributes
+        #: the search asked for — which is the thing that has to be right.
+        values = {"mail": ["alice@corp"], "memberOf": ["cn=admins,dc=corp"]}
+        values.update(attributes or {})
         self.entry_dn = dn
-        self.entry_attributes = ["mail", "memberOf"]
-        self._values = {"mail": ["alice@corp"], "memberOf": ["cn=admins,dc=corp"]}
+        self.entry_attributes = list(values)
+        self._values = values
 
     def __getitem__(self, name):
         class Attribute:
@@ -59,13 +64,18 @@ class FakeConnection:
     """
 
     def __init__(self, bind=True, bind_code=0, raises=None, search=True,
-                 search_code=0, entries=1, search_raises=False):
+                 search_code=0, entries=1, search_raises=False,
+                 attributes=None):
         self._bind, self._bind_code, self._raises = bind, bind_code, raises
         self._search_raises = search_raises
         self._search, self._search_code = search, search_code
-        self.entries = [FakeEntry(f"uid=alice{i or ''},dc=corp")
+        self.entries = [FakeEntry(f"uid=alice{i or ''},dc=corp", attributes)
                         for i in range(entries)]
         self.result = {}
+        #: What the search asked the directory for. A directory returns only
+        #: what it was asked for, so an attribute nobody requested is one
+        #: that silently is not there.
+        self.asked_for = None
 
     def bind(self):
         if self._raises:
@@ -80,6 +90,7 @@ class FakeConnection:
         if self._search_raises:
             from ldap3.core.exceptions import LDAPSessionTerminatedByServerError
             raise LDAPSessionTerminatedByServerError("session terminated")
+        self.asked_for = kw.get("attributes")
         self.result = {"result": self._search_code,
                        "description": {32: "noSuchObject", 4: "sizeLimitExceeded"}
                        .get(self._search_code, "success")}
@@ -164,6 +175,108 @@ class OutcomeTest(unittest.TestCase):
         self.assertIsNone(self.authenticate(
             FakeConnection(search_code=4, entries=2), user))
         self.assertIsNone(user.result.get("result"), "the first match was tried")
+
+
+class TheDirectoryNamesThePersonTest(unittest.TestCase):
+    """Who somebody IS, when the directory matches their name loosely.
+
+    It was whatever they typed. A directory matches `uid` with
+    caseIgnoreMatch, so alice, Alice and ALICE all sign in — and each was a
+    different person here: a different role, because a mapping is compared
+    exactly; different dashboards, because ownership is `created_by`; and a
+    separate thread through the audit trail. Measured against the lab's
+    OpenLDAP with `alice` mapped to admin: typing `alice` landed on admin,
+    typing `Alice` on the default role, silently, with nothing on screen
+    and nothing in the log.
+
+    OpenID Connect never had it — there the username is a claim the
+    provider sends — so this is the LDAP side arriving at the same rule.
+    """
+
+    def authenticate(self, typed="Alice", settings=None, **connection):
+        service = FakeConnection(**connection)
+        connections = iter([service, FakeConnection(**connection)])
+        original = ldap_auth._connection
+        ldap_auth._connection = lambda *a, **k: next(connections)
+        try:
+            return ldap_auth.authenticate({**SETTINGS, **(settings or {})},
+                                          typed, "typed"), service
+        finally:
+            ldap_auth._connection = original
+
+    def test_the_name_the_directory_holds_is_the_name_wdash_uses(self):
+        result, _ = self.authenticate("Alice", attributes={"uid": ["alice"]})
+        self.assertEqual(result["username"], "alice")
+
+    def test_the_typed_name_stands_where_the_directory_offers_none(self):
+        """A person signing in is not the moment to refuse over a missing
+        attribute — a directory that does not return it leaves them as they
+        typed, which is what every installation had before."""
+        result, _ = self.authenticate("Alice")
+        self.assertEqual(result["username"], "Alice")
+
+    def test_an_empty_attribute_is_not_a_name(self):
+        for value in ([""], ["   "], []):
+            with self.subTest(value=value):
+                result, _ = self.authenticate("Alice",
+                                              attributes={"uid": value})
+                self.assertEqual(result["username"], "Alice")
+
+    def test_the_attribute_is_whichever_one_the_filter_looks_people_up_by(self):
+        """An installation searching sAMAccountName gets that one, not uid."""
+        result, _ = self.authenticate(
+            "ALICE", settings={"user_filter": "(sAMAccountName={username})"},
+            attributes={"sAMAccountName": ["alice"], "uid": ["someone-else"]})
+        self.assertEqual(result["username"], "alice")
+
+    def test_it_is_found_inside_a_longer_filter(self):
+        """A real filter is usually a conjunction."""
+        result, _ = self.authenticate(
+            "Alice",
+            settings={"user_filter": "(&(objectClass=person)(uid={username}))"},
+            attributes={"uid": ["alice"]})
+        self.assertEqual(result["username"], "alice")
+
+    def test_the_search_asks_the_directory_for_it(self):
+        """A directory returns the attributes the search named and no
+        others, so one nobody asked for is one that is silently absent —
+        and the fallback would then be the answer every time."""
+        _, service = self.authenticate("Alice", attributes={"uid": ["alice"]})
+        self.assertIn("uid", service.asked_for)
+        for wanted in ("mail", "memberOf"):
+            self.assertIn(wanted, service.asked_for)
+
+    def test_it_asks_for_the_one_the_filter_names(self):
+        _, service = self.authenticate(
+            "Alice", settings={"user_filter": "(sAMAccountName={username})"})
+        self.assertIn("sAMAccountName", service.asked_for)
+
+    def test_a_filter_that_looks_nobody_up_leaves_the_typed_name(self):
+        """`user_filter` is meant to carry `{username}`. One that does not
+        is a misconfiguration, and it must not become a crash on the sign-in
+        path."""
+        result, _ = self.authenticate(
+            "Alice", settings={"user_filter": "(objectClass=person)"},
+            attributes={"uid": ["alice"]})
+        self.assertEqual(result["username"], "Alice")
+
+    def test_what_the_filter_looks_people_up_by(self):
+        self.assertEqual(ldap_auth.naming_attribute("(uid={username})"), "uid")
+        self.assertEqual(
+            ldap_auth.naming_attribute("(sAMAccountName={username})"),
+            "sAMAccountName")
+        self.assertEqual(
+            ldap_auth.naming_attribute("(&(objectClass=person)(uid={username}))"),
+            "uid")
+        self.assertEqual(ldap_auth.naming_attribute("(mail={username})"), "mail")
+        self.assertIsNone(ldap_auth.naming_attribute("(objectClass=person)"))
+        self.assertIsNone(ldap_auth.naming_attribute(""))
+        self.assertIsNone(ldap_auth.naming_attribute(None))
+
+    def test_the_rest_of_the_answer_is_unchanged(self):
+        result, _ = self.authenticate("Alice", attributes={"uid": ["alice"]})
+        self.assertEqual(result["email"], "alice@corp")
+        self.assertIn("admins", result["groups"])
 
 
 def _certificate(directory, names=("localhost",), addresses=()):
