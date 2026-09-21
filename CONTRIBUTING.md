@@ -49,6 +49,15 @@ Some tests only run when something real is there — a browser, a cluster —
 and they name what is missing when they skip. CI closes all of them; see
 [.github/workflows/tests.yml](.github/workflows/tests.yml).
 
+**Seed it, and seed it again.** The lab-backed tests ask about the last
+twenty-four hours, because that is the window every screen opens on, so a
+lab left running for a week holds plenty and answers nothing. They skip
+rather than fail there, and the skip names the command — `./lab.sh seed
+<target>`. `./lab.sh targets` says what each backend holds right now.
+`tests/lab.py` is the guard; `WDASH_REQUIRE_LAB=1` turns those skips into
+failures, which is what CI sets, because a job that promised a lab must not
+keep the promise by skipping.
+
 ## What a change is expected to come with
 
 ### A test that would have failed before it

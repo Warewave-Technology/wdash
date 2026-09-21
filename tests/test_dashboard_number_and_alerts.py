@@ -769,21 +769,14 @@ class AlertHistoryWindowTest(unittest.TestCase):
 # The number, against the real backends
 # ---------------------------------------------------------------------------
 
-def _reachable(url, path):
-    try:
-        import requests
-        return requests.get(f"{url}{path}", timeout=3).status_code < 500
-    except Exception:
-        return False
+# Data, not ports: the number these ask for is a count over a window, and a
+# lab that is up and a week old counts nothing. See tests/lab.py.
+from tests import lab  # noqa: E402
 
+LAB_ES, LAB_LOKI, LAB_VL = lab.ES, lab.LOKI, lab.VICTORIALOGS
 
-LAB_ES = os.environ.get("WDASH_LAB_URL") or "http://localhost:9200"
-LAB_LOKI = os.environ.get("WDASH_LAB_LOKI") or "http://localhost:3100"
-LAB_VL = os.environ.get("WDASH_LAB_VICTORIALOGS") or "http://localhost:9428"
-
-LOGS_UP = (_reachable(LAB_ES, "/") and _reachable(LAB_LOKI, "/ready")
-           and _reachable(LAB_VL, "/health"))
-_NO_LOGS = f"needs the lab's three log backends ({LAB_ES}, {LAB_LOKI}, {LAB_VL})"
+LOGS_UP, _NO_LOGS = lab.ready("es-logs", "loki", "victorialogs")
+VL_UP, _NO_VL = lab.ready("victorialogs")
 
 
 @unittest.skipUnless(LOGS_UP, _NO_LOGS)
@@ -1070,8 +1063,7 @@ class CountBelowTheCutOnASourceThatCutsRowsTest(unittest.TestCase):
         self.assertEqual(panel["number"], 0)
 
 
-@unittest.skipUnless(_reachable(LAB_VL, "/health"),
-                     f"needs the lab's VictoriaLogs ({LAB_VL})")
+@unittest.skipUnless(VL_UP, _NO_VL)
 class NumberBelowTheCutAgainstVictoriaLogsTest(unittest.TestCase):
     """The same claim against the running server, not against its rows.
 

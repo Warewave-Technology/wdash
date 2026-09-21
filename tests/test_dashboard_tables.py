@@ -960,27 +960,17 @@ class PanelDefinitionTest(unittest.TestCase):
 # The same two questions against the real backends
 # ---------------------------------------------------------------------------
 
-def _reachable(url, path):
-    try:
-        import requests
-        return requests.get(f"{url}{path}", timeout=3).status_code < 500
-    except Exception:
-        return False
+# Whether these may run is a question about DATA, not about ports: every
+# window below is twenty-four hours, and a lab that is up and a week old
+# answers nothing at all. Measured on 2026-09-20 — fourteen tests red on an
+# untouched tree, saying the adapters returned nothing. See tests/lab.py.
+from tests import lab  # noqa: E402
 
+LAB_ES, LAB_LOKI, LAB_VL = lab.ES, lab.LOKI, lab.VICTORIALOGS
+LAB_TEMPO, LAB_JAEGER = lab.TEMPO, lab.JAEGER
 
-LAB_ES = os.environ.get("WDASH_LAB_URL") or "http://localhost:9200"
-LAB_LOKI = os.environ.get("WDASH_LAB_LOKI") or "http://localhost:3100"
-LAB_VL = os.environ.get("WDASH_LAB_VICTORIALOGS") or "http://localhost:9428"
-LAB_TEMPO = os.environ.get("WDASH_LAB_TEMPO") or "http://localhost:3200"
-LAB_JAEGER = os.environ.get("WDASH_LAB_JAEGER") or "http://localhost:16686"
-
-LOGS_UP = (_reachable(LAB_ES, "/") and _reachable(LAB_LOKI, "/ready")
-           and _reachable(LAB_VL, "/health"))
-TRACES_UP = (_reachable(LAB_ES, "/") and _reachable(LAB_TEMPO, "/ready")
-             and _reachable(LAB_JAEGER, "/api/services"))
-
-_NO_LOGS = f"needs the lab's three log backends ({LAB_ES}, {LAB_LOKI}, {LAB_VL})"
-_NO_TRACES = f"needs the lab's three trace backends ({LAB_ES}, {LAB_TEMPO}, {LAB_JAEGER})"
+LOGS_UP, _NO_LOGS = lab.ready("es-logs", "loki", "victorialogs")
+TRACES_UP, _NO_TRACES = lab.ready("es-traces", "tempo", "jaeger")
 
 
 @unittest.skipUnless(LOGS_UP, _NO_LOGS)

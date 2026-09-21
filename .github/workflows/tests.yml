@@ -179,8 +179,12 @@ jobs:
       - name: Seed both trace schemas
         run: python lab/seed/seed.py --logs 3000 --traces 400 --days 2
 
+      # test_lab_data first, and it is not decoration: under
+      # WDASH_REQUIRE_LAB this job PROMISES a seeded cluster, and a seed
+      # step that silently wrote nothing would leave every measurement
+      # below reading as an adapter that answers nothing.
       - name: The parts that need a cluster
-        run: python -m unittest tests.test_hub -v
+        run: python -m unittest tests.test_lab_data tests.test_hub -v
 
   postgres:
     name: the suite on postgres

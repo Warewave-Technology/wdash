@@ -35,6 +35,9 @@ REQUIRED = os.environ.get("WDASH_REQUIRE_LAB") == "1"
 ES_PATTERN = "app-logs-*"
 
 
+from tests import lab  # noqa: E402
+
+
 def _reachable(url, path="/"):
     try:
         return requests.get(url + path, timeout=3).status_code < 500
@@ -59,11 +62,28 @@ def _skip_unless(reachable, what):
     raise unittest.SkipTest(f"{what} is not running")
 
 
+def _needs(kind, hours=24):
+    """Reachable AND holding something over the window this file asks about.
+
+    Reachability was the whole guard, and the two are not the same question:
+    a lab that is up and a week old answers every query here with nothing,
+    which reads as an adapter that has stopped working. Measured on
+    2026-09-20, when it did. See tests/lab.py.
+    """
+    _skip_unless(lab.volume(kind, hours) is not None,
+                 f"{kind} at {lab.BACKENDS[kind][0]}")
+    reason = lab.why_not(kind, hours=hours)
+    if reason:
+        if REQUIRED:
+            raise AssertionError(f"WDASH_REQUIRE_LAB=1 but {reason}")
+        raise unittest.SkipTest(reason)
+
+
 class LokiSplitLabTest(unittest.TestCase):
     """D16 against the server that decides it."""
 
     def setUp(self):
-        _skip_unless(_reachable(LOKI_URL, "/ready"), f"Loki at {LOKI_URL}")
+        _needs("loki")
         from wdash.hub.adapters.loki import LokiLogSource
         self.source = LokiLogSource(LOKI_URL, name="lab-loki")
 
@@ -182,18 +202,17 @@ class GroupByOfferLabTest(unittest.TestCase):
     """D12: what each backend really offers, and how they differ."""
 
     def loki(self):
-        _skip_unless(_reachable(LOKI_URL, "/ready"), f"Loki at {LOKI_URL}")
+        _needs("loki")
         from wdash.hub.adapters.loki import LokiLogSource
         return LokiLogSource(LOKI_URL, name="lab-loki")
 
     def victorialogs(self):
-        _skip_unless(_reachable(VL_URL, "/select/logsql/query?query=*&limit=1"),
-                     f"VictoriaLogs at {VL_URL}")
+        _needs("victorialogs")
         from wdash.hub.adapters.victorialogs import VictoriaLogsSource
         return VictoriaLogsSource(VL_URL, name="lab-vl")
 
     def elasticsearch(self):
-        _skip_unless(_reachable(ES_URL), f"Elasticsearch at {ES_URL}")
+        _needs("es-logs")
         from elasticsearch import Elasticsearch
         from wdash.hub.adapters import ElasticsearchLogSource
         client = Elasticsearch(hosts=[ES_URL], request_timeout=10)
