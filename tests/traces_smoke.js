@@ -207,6 +207,42 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
         }
     }
 
+    // "Slowest" over a backend that cannot rank server-side is the slowest
+    // of the page that backend returned. That is not a failure, so it does
+    // not belong under `missing()`, whose fixed opening is "Part of this
+    // could not be loaded".
+    {
+        const NOTE = 'Tempo cannot rank by duration, so these are the '
+            + 'slowest of the 100 most recent traces in this window.';
+        const noted = build({ services: [], total_spans: 0 }, {
+            traces: [{ trace_id: 't1', service: 'api', name: 'GET /',
+                       start: '2026-09-11T10:00:00.000Z', duration_us: 1000,
+                       has_error: false, span_count: 2 }],
+            partial: false, warnings: [], notes: [NOTE] });
+        await settle();
+        const said = noted.document.getElementById('traceList').textContent;
+        check('a ranking over a sample says so', said.includes(NOTE), said);
+        check('and does not call it a failure',
+              !said.includes('could not be loaded'), said);
+
+        const plain = build({ services: [], total_spans: 0 }, {
+            traces: [{ trace_id: 't1', service: 'api', name: 'GET /',
+                       start: '2026-09-11T10:00:00.000Z', duration_us: 1000,
+                       has_error: false, span_count: 2 }],
+            partial: false, warnings: [], notes: [] });
+        await settle();
+        check('a list with nothing to caveat carries no line',
+              !plain.document.getElementById('traceList').textContent
+                  .includes('cannot rank'),
+              plain.document.getElementById('traceList').textContent);
+
+        const hostileNote = build({ services: [] }, {
+            traces: [], notes: ['<img src=x id=plantedNote>'] });
+        await settle();
+        check('and the line is text, not markup',
+              !hostileNote.document.getElementById('plantedNote'));
+    }
+
     const hostile = build({ services: [] },
                           { traces: [], suggestion: '<img src=x id=planted>' });
     await settle();

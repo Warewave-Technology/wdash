@@ -1286,6 +1286,12 @@ Stated plainly, because they affect whether this fits your deployment:
   reaches `app-*` in each configured source, so adding a source widens what
   existing roles can see. Writing `source-name:pattern` or excluding with
   `-pattern` avoids it, but the default is the wide one.
+- **"Slowest" is the slowest of a sample on Jaeger and Tempo.** Neither
+  search endpoint takes a sort parameter — both answer newest-first — so the
+  ranking happens in WDash, over a pool it asks for (five times the page,
+  between 100 and 500 rows). When that pool comes back full there were more
+  traces behind it, and the list says so in a line of its own. Elasticsearch
+  ranks server-side, so "Slowest" there is the slowest in the window.
 - **Tempo returns ids two ways.** Its search endpoint gives hex; its trace
   endpoint gives OTLP JSON, where ids are protobuf `bytes` and therefore
   base64. Both are handled — read as hex, the base64 form produces dangling

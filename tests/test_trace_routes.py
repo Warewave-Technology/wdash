@@ -846,6 +846,27 @@ class FailureReachesThePageTest(_SameApp):
             body = self.client.get(path).get_json()
             self.assertFalse(body["partial"], path)
             self.assertEqual(body["warnings"], [], path)
+            self.assertEqual(body["notes"], [], path)
+
+    def test_a_note_about_what_was_ranked_reaches_the_page(self):
+        """A third field, and not a failure: "Slowest" over a backend that
+        cannot rank server-side is the slowest of the page it returned. It
+        travels beside `partial`/`warnings` rather than inside them, because
+        the page's line for those opens "Part of this could not be loaded"
+        and nothing failed."""
+        from wdash.hub.models import PartialList
+
+        self.login("admin")
+        source = self.app.hub.traces()
+        original = source.search
+        source.search = lambda query, scope: PartialList(
+            original(query, scope), notes=("ranked over a sample",))
+        self.addCleanup(setattr, source, "search", original)
+
+        body = self.client.get("/api/traces").get_json()
+        self.assertEqual(body["notes"], ["ranked over a sample"])
+        self.assertFalse(body["partial"], "a caveat was called a failure")
+        self.assertEqual(body["warnings"], [])
 
     def test_a_split_trace_with_a_backend_down_says_so(self):
         self._beside_a_live_source()

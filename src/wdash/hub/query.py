@@ -109,6 +109,30 @@ class LogQuery:
 SORT_RECENT = "recent"
 SORT_SLOWEST = "slowest"
 
+#: The most rows to pull back when ranking by duration in this process.
+#:
+#: Elasticsearch ranks by duration server-side, so "Slowest" there is the
+#: slowest in the WINDOW. Jaeger and Tempo have no such parameter: their
+#: search endpoints answer newest-first, and the ranking happens here — so
+#: "Slowest" over those is the slowest of whatever page came back, which is
+#: a different sentence and was not being said.
+#:
+#: Fetching more makes the sample bigger and does not make it the window.
+#: Both things, then: the reach below, and a note on the answer naming what
+#: was actually ranked.
+MAX_RANKING_SAMPLE = 500
+
+
+def sample_for_ranking(limit):
+    """How many rows to ask for when the caller wants the slowest `limit`.
+
+    Five times, with a floor and a ceiling: a floor because the default
+    twenty is far too small a pool to pick five slow traces from, and a
+    ceiling because every row costs the backend work and an unbounded
+    multiplier turns one page of a trace list into a scan.
+    """
+    return min(max(int(limit or 20) * 5, 100), MAX_RANKING_SAMPLE)
+
 
 @dataclass
 class TraceQuery:

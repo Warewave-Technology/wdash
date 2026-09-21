@@ -511,6 +511,27 @@ class JaegerSpecificTest(unittest.TestCase):
                          [(TRACE["traceID"], 120001),
                           (PAYMENTS_TRACE["traceID"], 50000)])
 
+    def test_the_slowest_list_asks_for_a_pool_to_rank_over(self):
+        """Jaeger's search takes no sort parameter and answers newest-first,
+        so the ranking happens in this process. Asking each service for the
+        caller's two and ranking those is "the slowest of the two most
+        recent" — which is not what the control says."""
+        from wdash.hub.query import SORT_SLOWEST, sample_for_ranking
+        self._search(limit=2, sort=SORT_SLOWEST)
+        asked = {int(r["params"]["limit"]) for r in self._sent()}
+        self.assertEqual(asked, {sample_for_ranking(2)})
+
+    def test_the_recent_list_asks_for_exactly_what_it_shows(self):
+        self._search(limit=2)
+        self.assertEqual({int(r["params"]["limit"]) for r in self._sent()},
+                         {2})
+
+    def test_a_short_pool_is_the_window_and_says_nothing(self):
+        """A caveat on every list is one nobody reads."""
+        from wdash.hub.query import SORT_SLOWEST
+        found = self._search(limit=2, sort=SORT_SLOWEST)
+        self.assertEqual(getattr(found, "notes", ()), ())
+
     def test_the_row_kept_is_the_one_with_most_spans(self):
         """The same trace asked about twice can come back grown by a span
         that landed between the two requests."""

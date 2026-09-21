@@ -62,7 +62,11 @@ def _completeness(answer):
     "these are the traces the stores that answered hold".
     """
     return {"partial": bool(getattr(answer, "partial", False)),
-            "warnings": list(getattr(answer, "warnings", ()) or ())}
+            "warnings": list(getattr(answer, "warnings", ()) or ()),
+            # Not a failure: what the answer IS, when that is narrower than
+            # the control that asked for it. A whole list can still be the
+            # slowest of one page rather than of the window.
+            "notes": list(getattr(answer, "notes", ()) or ())}
 
 
 def _services_narrowed(scope, sources):

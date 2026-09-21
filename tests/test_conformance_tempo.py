@@ -102,6 +102,10 @@ class FakeTempo(Harness):
         self._trace_found = True
         self._reject_query = False
         self._not_found = False
+        #: The search's rows. None means the one canned trace; a list is
+        #: what `/api/search` answers with, so a test can hand back a pool
+        #: as long as the adapter asked for.
+        self.traces = None
 
     # --- harness contract ---
 
@@ -177,6 +181,8 @@ class FakeTempo(Harness):
                 return FakeResponse(
                     status_code=400,
                     text="invalid TraceQL query: parse error at line 1, col 3")
+            if self.traces is not None:
+                return FakeResponse(dict(SEARCH, traces=self.traces))
             return FakeResponse(SEARCH)
 
         return FakeResponse({})
@@ -612,6 +618,58 @@ class TempoSpecificTest(unittest.TestCase):
                                                    tz=dt.timezone.utc))
         visible_root = self._search(scope=self._role())[0]
         self.assertEqual(visible_root.duration_us, 120_000)
+
+    def test_the_slowest_list_asks_for_a_pool_to_rank_over(self):
+        """Tempo answers newest-first and takes no sort parameter, so the
+        ranking happens in this process. Asking for the caller's twenty and
+        ranking those is "the slowest of the twenty most recent"."""
+        from wdash.hub.query import SORT_SLOWEST, sample_for_ranking
+        self._search(limit=20, sort=SORT_SLOWEST)
+        search = next(r for r in reversed(self.harness._requests)
+                      if r["path"].endswith("/api/search"))
+        self.assertEqual(search["params"]["limit"], sample_for_ranking(20))
+
+    def test_the_pool_has_a_ceiling(self):
+        """Five times a page is the rule; an unbounded multiplier turns one
+        page of a trace list into a scan, and every row costs Tempo work."""
+        from wdash.hub.query import (
+            MAX_RANKING_SAMPLE, SORT_SLOWEST, sample_for_ranking,
+        )
+        self.assertEqual(sample_for_ranking(10_000), MAX_RANKING_SAMPLE)
+        self._search(limit=10_000, sort=SORT_SLOWEST)
+        search = next(r for r in reversed(self.harness._requests)
+                      if r["path"].endswith("/api/search"))
+        self.assertEqual(search["params"]["limit"], MAX_RANKING_SAMPLE)
+
+    def test_the_recent_list_asks_for_exactly_what_it_shows(self):
+        """Newest-first IS Tempo's own order, so there is nothing to rank
+        and nothing to over-fetch for."""
+        self._search(limit=20)
+        search = next(r for r in reversed(self.harness._requests)
+                      if r["path"].endswith("/api/search"))
+        self.assertEqual(search["params"]["limit"], 20)
+
+    def test_a_full_pool_says_it_was_a_pool(self):
+        """A pool that came back FULL had more behind it, so the slowest of
+        the window may not be in it."""
+        from wdash.hub.query import SORT_SLOWEST, sample_for_ranking
+        reach = sample_for_ranking(20)
+        # A pool as long as the reach: `traces` on the harness replaces the
+        # one canned row, so the adapter sees a FULL page.
+        self.harness.traces = [
+            dict(SEARCH["traces"][0], traceID=f"{n:032x}", durationMs=n + 1)
+            for n in range(reach)]
+        found = self._search(limit=20, sort=SORT_SLOWEST)
+        said = " ".join(getattr(found, "notes", ()))
+        self.assertIn("cannot rank by duration", said)
+        self.assertIn(str(reach), said)
+        self.assertFalse(found.partial, "a caveat is not a failure")
+
+    def test_a_short_pool_is_the_window_and_says_nothing(self):
+        """A caveat on every list is one nobody reads."""
+        from wdash.hub.query import SORT_SLOWEST
+        found = self._search(limit=20, sort=SORT_SLOWEST)
+        self.assertEqual(getattr(found, "notes", ()), ())
 
     def test_an_older_tempo_s_single_spanset_times_it_too(self):
         from wdash.hub.adapters.tempo import _extent

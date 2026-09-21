@@ -39,8 +39,8 @@ from datetime import datetime, timezone
 import requests
 
 from ..models import (
-    STATUS_ERROR, STATUS_OK, STATUS_UNSET, Service, SourceRef, Span, Trace,
-    TraceSummary,
+    STATUS_ERROR, STATUS_OK, STATUS_UNSET, PartialList, Service, SourceRef,
+    Span, Trace, TraceSummary,
 )
 from .. import patterns
 from ..source import Capability, TraceSource
@@ -423,13 +423,22 @@ class TempoTraceSource(TraceSource):
         # log containers: a role with trace stores and no log index — a
         # trace-only role — got an empty page from Tempo and no error.
         if not self._granted(scope) or scope.services == ():
-            return []
+            return PartialList()
         names = self._selectable(query, scope)
         if names == []:
-            return []
+            return PartialList()
 
+        from ..query import SORT_SLOWEST, sample_for_ranking
+
+        asked = getattr(query, "limit", 20) or 20
+        ranking = getattr(query, "sort", None) == SORT_SLOWEST
+        # Tempo answers newest-first and takes no sort parameter, so the
+        # ranking below happens over whatever came back. Pull a larger pool
+        # when the caller wants the slowest — and say, on the answer, that
+        # it is a pool.
+        reach = sample_for_ranking(asked) if ranking else asked
         params = {"q": self._traceql(query, names),
-                  "limit": getattr(query, "limit", 20) or 20,
+                  "limit": reach,
                   # The matched spans are how a row whose root is hidden is
                   # timed; three, the default, is a guess at a service's
                   # extent rather than a measurement of it.
@@ -454,15 +463,24 @@ class TempoTraceSource(TraceSource):
             if summary is not None and not (only_errors and not summary.has_error):
                 summaries.append(summary)
 
-        from ..query import SORT_SLOWEST
-        if getattr(query, "sort", None) == SORT_SLOWEST:
+        if ranking:
             summaries.sort(key=lambda s: s.duration_us, reverse=True)
         else:
             summaries.sort(key=lambda s: s.start or datetime.min.replace(
                 tzinfo=timezone.utc), reverse=True)
 
-        limit = getattr(query, "limit", None)
-        return summaries[:limit] if limit else summaries
+        # A full pool means there were more traces than the pool, so the
+        # slowest of the window may not be in it. Said only then: a pool
+        # that came back short IS the window, and a caveat on every list is
+        # one nobody reads.
+        notes = []
+        if ranking and len(summaries) >= reach:
+            notes.append(
+                f"Tempo cannot rank by duration, so these are the slowest of "
+                f"the {reach} most recent traces in this window, not of the "
+                f"window. Narrow the range or the service to make the two "
+                f"the same.")
+        return PartialList(summaries[:asked], notes=notes)
 
     def _to_summary(self, entry, scope):
         """One row, told only through the services this scope may see.

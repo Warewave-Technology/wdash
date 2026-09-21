@@ -355,10 +355,19 @@ class PartialList(list):
     the two things a LogPage carries for the same reason.
     """
 
-    def __init__(self, rows=(), partial=False, warnings=()):
+    #: And a third thing, which is not a failure.
+    #:
+    #: `partial` means something could not be read, and the page prints
+    #: "Part of this could not be loaded" above the rows. A list that IS
+    #: whole can still be narrower than the control that asked for it —
+    #: "Slowest" over a backend that cannot sort is the slowest of the page
+    #: that backend returned, not of the window — and saying that under a
+    #: warning about an outage would be a second untrue sentence.
+    def __init__(self, rows=(), partial=False, warnings=(), notes=()):
         super().__init__(rows)
         self.partial = bool(partial)
         self.warnings = tuple(warnings)
+        self.notes = tuple(notes)
 
 
 @dataclass

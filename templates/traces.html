@@ -120,6 +120,23 @@
             (said ? ':<br>' + said : '.') + '</div>';
     }
 
+    /** What the answer IS, when that is narrower than the control that
+     * asked for it — and not a failure.
+     *
+     * "Slowest" over a backend that cannot rank server-side is the slowest
+     * of the page that backend returned. `missing()` above is the wrong
+     * place to say it: its fixed opening is "Part of this could not be
+     * loaded", and nothing failed. Different fact, different line, and a
+     * quieter colour.
+     */
+    function ranked(data) {
+        const said = (data.notes || []).map(esc).join('<br>');
+        if (!said) return '';
+        return '<div class="alert alert-secondary py-1 px-2 m-2 mb-0" ' +
+            'style="font-size:0.78rem"><i class="fas fa-circle-info"></i> ' +
+            said + '</div>';
+    }
+
     /** The line for an empty list: the server's reason when it gave one;
      * when a store did not answer, that the others had nothing — not that
      * nothing happened; otherwise the quiet line. */
@@ -237,11 +254,13 @@
                 return;
             }
             if (!data.traces.length) {
-                box.innerHTML = missing(data) + nothing(data, 'No traces match.');
+                box.innerHTML = missing(data) + ranked(data)
+                    + nothing(data, 'No traces match.');
                 return;
             }
 
-            box.innerHTML = missing(data) + '<table class="table table-hover table-dense mb-0">' +
+            box.innerHTML = missing(data) + ranked(data)
+                + '<table class="table table-hover table-dense mb-0">' +
                 '<tbody>' + data.traces.map(t =>
                     '<tr class="trace-row" style="cursor:pointer" data-trace="' + esc(t.trace_id) + '"' +
                         (t.source ? ' data-source="' + esc(t.source) + '"' : '') + '>' +

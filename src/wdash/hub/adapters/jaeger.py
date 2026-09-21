@@ -65,6 +65,23 @@ class JaegerError(RuntimeError):
     """Jaeger could not answer."""
 
 
+def _sample(query):
+    """How many traces to ask ONE service for.
+
+    The caller's limit, or a larger pool when it wants the slowest: Jaeger's
+    search takes no sort parameter and answers newest-first, so the ranking
+    happens in this process and a pool of twenty is far too small to pick
+    five slow traces from. `sample_for_ranking` bounds it, because every
+    trace costs Jaeger work and a fan-out multiplies that by the service
+    count.
+    """
+    from ..query import SORT_SLOWEST, sample_for_ranking
+
+    limit = getattr(query, "limit", 20) or 20
+    return (sample_for_ranking(limit)
+            if getattr(query, "sort", None) == SORT_SLOWEST else limit)
+
+
 def _microseconds(moment):
     """Jaeger's unit. Nanoseconds are a thousand times too large and produce
     an empty window rather than an error, which is the worst kind of wrong."""
@@ -348,7 +365,8 @@ class JaegerTraceSource(TraceSource):
         # own slice.
         from ..query import SORT_SLOWEST
         summaries = list(by_trace.values())
-        if getattr(query, "sort", None) == SORT_SLOWEST:
+        ranking = getattr(query, "sort", None) == SORT_SLOWEST
+        if ranking:
             summaries.sort(key=lambda s: s.duration_us, reverse=True)
         else:
             summaries.sort(key=lambda s: s.start or datetime.min.replace(
@@ -358,11 +376,23 @@ class JaegerTraceSource(TraceSource):
         # The bound belongs beside the failures: both mean the same thing to
         # a reader — these are not all the rows there are.
         notes = failures + ([short_by] if short_by else [])
+        # And a third thing, which is not a failure: Jaeger has no sort
+        # parameter either, so a ranking here is over what each service's
+        # search returned — newest-first, and bounded. A pool that came back
+        # FULL had more behind it, so the slowest of the window may not be
+        # in it; a short pool is the window and needs no caveat.
+        said = []
+        if ranking and len(summaries) >= _sample(query):
+            said.append(
+                f"Jaeger cannot rank by duration, so these are the slowest "
+                f"of the {_sample(query)} traces it returned for this "
+                f"window, not of the window. Narrow the range or name a "
+                f"service to make the two the same.")
         return PartialList(summaries[:limit] if limit else summaries,
-                           partial=bool(notes), warnings=notes)
+                           partial=bool(notes), warnings=notes, notes=said)
 
     def _search_one(self, service, query, scope):
-        params = {"service": service, "limit": getattr(query, "limit", 20) or 20}
+        params = {"service": service, "limit": _sample(query)}
         window = getattr(query, "window", None)
         if window is not None:
             params["start"] = _microseconds(window.start)

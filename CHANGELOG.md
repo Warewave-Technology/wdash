@@ -352,6 +352,14 @@ variables has to do something before it upgrades.
   default handler listens at — present on a developer laptop and absent on
   every deployment.
 
+- **"Slowest" over Jaeger or Tempo says what it ranked.** Neither search
+  endpoint takes a sort parameter, so the ranking happens in WDash over
+  whatever page the backend returned — which used to be the page you asked
+  for. It now pulls a pool of five times that (100 to 500 rows) and, when
+  that pool comes back full, says in a line of its own that these are the
+  slowest of the pool rather than of the window. Elasticsearch ranks
+  server-side and is unchanged.
+
 - **A record in the second cluster of a kind gets its raw document and its
   neighbours.** Both were routed by backend TYPE and answered from the first
   source of that type, so with two Elasticsearch sources a record held by the
