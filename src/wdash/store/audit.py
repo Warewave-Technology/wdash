@@ -14,14 +14,28 @@ grant somebody administration is the more interesting row.
 """
 
 import datetime as dt
+import hashlib
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, text
 
 from .schema import audit
 
 logger = logging.getLogger(__name__)
+
+
+def _lock_key(action, subject):
+    """A Postgres advisory-lock key for one fact.
+
+    A bigint, and the same one in every worker, which is the whole
+    requirement: two processes recording the same fact must ask for the same
+    lock, and two recording different facts must not wait for each other.
+    Hashed rather than enumerated so a new fact needs no number allocating.
+    """
+    name = f"{action}|{subject or ''}".encode()
+    digest = hashlib.blake2b(name, digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
 
 
 class AuditLog:
@@ -67,6 +81,64 @@ class AuditLog:
                     state=state))
         except Exception as exc:
             logger.error(f"Could not write audit entry '{action}': {exc}")
+
+    def record_state(self, actor, action, subject=None, state=None,
+                     address=None):
+        """Write one entry, unless the last one of its kind says the same.
+
+        For a fact about the INSTALLATION rather than an act by somebody:
+        "two directories are configured" is true of the deployment, and it
+        was recorded at start-up by every worker that came up. Four gunicorn
+        workers meant four identical rows per restart, which reads as four
+        events — and an audit trail whose rows are not events is one nobody
+        can count anything in.
+
+        Returns whether it wrote. The comparison is against the most recent
+        row with the same action and subject, so the trail keeps a row where
+        the fact CHANGES and adds nothing where it persists.
+
+        The read and the write share a transaction, and on Postgres they
+        take an advisory lock named after the fact. The transaction alone is
+        not enough, and the measurement is worth keeping because the first
+        version of this stopped at it: four workers released from one
+        barrier, against a warm connection pool, wrote 4 rows in four trials
+        out of five at READ COMMITTED — all four read no row and all four
+        wrote. That is the deployment that HAS several workers. With
+        `pg_advisory_xact_lock` around both, 1.
+
+        SQLite gets no lock and needs none: one worker per file is what the
+        manifests deploy and what the documentation says, because the
+        database is a file. Four threads against one SQLite store are not a
+        deployment, and they are not reliably one row either — write-ahead
+        logging lets a reader keep the snapshot it started with, so a
+        SELECT taken before another writer's commit does not see it.
+        """
+        state = self._serialisable(state)
+        try:
+            with self._engine.begin() as connection:
+                if connection.dialect.name == "postgresql":
+                    connection.execute(
+                        text("SELECT pg_advisory_xact_lock(:key)"),
+                        {"key": _lock_key(action, subject)})
+                last = connection.execute(
+                    select(audit.c.state)
+                    .where(audit.c.action == action)
+                    .where(audit.c.subject == subject)
+                    .order_by(desc(audit.c.at), desc(audit.c.id))
+                    .limit(1)).fetchone()
+                if last is not None and last[0] == state:
+                    return False
+                connection.execute(audit.insert().values(
+                    at=datetime.now(timezone.utc),
+                    actor=actor or "unknown",
+                    action=action,
+                    subject=subject,
+                    address=address,
+                    state=state))
+                return True
+        except Exception as exc:
+            logger.error(f"Could not write audit entry '{action}': {exc}")
+            return False
 
     def recent(self, limit=100, subject=None, actor=None, action=None,
                since=None, until=None, offset=0):

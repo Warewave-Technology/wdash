@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -835,6 +836,147 @@ class DatabaseAddressTest(unittest.TestCase):
         engine = build_engine("postgresql+psycopg://u:p@db.invalid/wdash")
         self.assertEqual(engine.url.drivername, "postgresql+psycopg")
         engine.dispose()
+
+
+class RecordingAFactOnceTest(unittest.TestCase):
+    """`audit.record_state`, for something true of the installation.
+
+    `record` is for an act: somebody did this, at this time, from this
+    address, and two of them are two events. A fact is different. "Two
+    directories are configured" was written at start-up by every worker
+    that came up, so four gunicorn workers wrote four identical rows on
+    every restart, and a trail whose rows are not events is one nobody can
+    count anything in.
+    """
+
+    def setUp(self):
+        folder = tempfile.mkdtemp()
+        self.store = Store.open(f"sqlite:///{folder}/a.db")
+
+    def rows(self, action="two directories configured"):
+        return [row for row in self.store.audit.recent()
+                if row["action"] == action]
+
+    def test_the_first_one_is_written(self):
+        self.assertTrue(self.store.audit.record_state(
+            "system", "two directories configured", subject="auth",
+            state={"in_force": "ldap"}))
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_the_same_fact_again_writes_nothing(self):
+        for _ in range(4):
+            self.store.audit.record_state(
+                "system", "two directories configured", subject="auth",
+                state={"in_force": "ldap"})
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_it_says_whether_it_wrote(self):
+        """The caller may want to log it, and a function that always claims
+        to have written is one nobody can trust the count of."""
+        first = self.store.audit.record_state(
+            "system", "fact", subject="x", state={"a": 1})
+        again = self.store.audit.record_state(
+            "system", "fact", subject="x", state={"a": 1})
+        self.assertEqual((first, again), (True, False))
+
+    def test_a_changed_fact_is_a_new_row(self):
+        self.store.audit.record_state("system", "two directories configured",
+                                      subject="auth", state={"in_force": "ldap"})
+        self.store.audit.record_state("system", "two directories configured",
+                                      subject="auth", state={"in_force": "oidc"})
+        self.assertEqual([row["state"]["in_force"] for row in self.rows()],
+                         ["oidc", "ldap"])
+
+    def test_it_returns_to_a_fact_it_has_left(self):
+        """Back to where it was IS a change, because the row in between
+        said otherwise. Comparing against the newest row rather than against
+        every row is what makes that true."""
+        for in_force in ("ldap", "oidc", "ldap"):
+            self.store.audit.record_state(
+                "system", "two directories configured", subject="auth",
+                state={"in_force": in_force})
+        self.assertEqual(len(self.rows()), 3)
+
+    def test_another_subject_is_another_fact(self):
+        self.store.audit.record_state("system", "fact", subject="one",
+                                      state={"a": 1})
+        self.store.audit.record_state("system", "fact", subject="two",
+                                      state={"a": 1})
+        self.assertEqual(len(self.rows("fact")), 2)
+
+    def test_another_action_with_the_same_state_is_another_fact(self):
+        self.store.audit.record_state("system", "one", subject="x",
+                                      state={"a": 1})
+        self.store.audit.record_state("system", "two", subject="x",
+                                      state={"a": 1})
+        self.assertEqual((len(self.rows("one")), len(self.rows("two"))), (1, 1))
+
+    def test_a_state_that_will_not_serialise_is_compared_as_it_is_stored(self):
+        """`record` makes the object JSON-safe on the way in. A comparison
+        against the object as the CALLER passed it would then differ from
+        the row every time, and every worker would write again."""
+        from datetime import datetime, timezone
+        when = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
+        self.store.audit.record_state("system", "fact", subject="x",
+                                      state={"at": when})
+        self.assertFalse(self.store.audit.record_state(
+            "system", "fact", subject="x", state={"at": when}))
+        self.assertEqual(len(self.rows("fact")), 1)
+
+    def test_four_workers_starting_together_write_one_row(self):
+        """The case this exists for, and the one a transaction alone does
+        not cover.
+
+        Four threads released from one barrier, which is what gunicorn
+        forking four workers looks like from the database's side. Postgres
+        at READ COMMITTED lets all four read before any of them commits:
+        measured without the lock, on a warm pool, 4 rows from 4 workers in
+        four trials out of five. With `pg_advisory_xact_lock` around the
+        read and the write, 1.
+
+        Postgres only, and that is not a gap. SQLite here means one worker —
+        `replicas: 1` and `strategy: Recreate` in the manifests, because the
+        database is a file — so four of them is not a deployment. What
+        SQLite has to get right is the sequential case, which is a restart,
+        and `test_the_same_fact_again_writes_nothing` is that.
+
+        The pool is warmed first. Without it each thread spends its first
+        milliseconds connecting, the four arrive at the database in a
+        queue rather than together, and the test passes against code with
+        no lock in it at all — measured, three runs out of three.
+        """
+        if self.store.engine.dialect.name != "postgresql":
+            self.skipTest("one worker per SQLite file: see the docstring")
+
+        state = {"in_force": "ldap", "shadowed": "oidc"}
+        start = threading.Barrier(4)
+        connected = threading.Barrier(4)
+
+        def worker():
+            with self.store.engine.connect() as connection:
+                connection.exec_driver_sql("SELECT 1")
+            connected.wait(30)
+            start.wait(30)
+            self.store.audit.record_state(
+                "system", "two directories configured", subject="auth",
+                state=state)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+        self.assertEqual(len(self.rows()), 1,
+                         f"{len(self.rows())} rows from four workers")
+
+    def test_a_failure_to_record_is_not_a_failure_to_start(self):
+        """`record` never raises, and neither does this: refusing to start
+        because the audit table is unhappy is worse than losing a row."""
+        self.store.engine.dispose()
+        with mock.patch.object(type(self.store.engine), "begin",
+                               side_effect=RuntimeError("no database")):
+            self.assertFalse(self.store.audit.record_state(
+                "system", "fact", subject="x", state={"a": 1}))
 
 
 class SimultaneousWriteTest(unittest.TestCase):

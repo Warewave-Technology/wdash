@@ -315,7 +315,9 @@ told "Invalid username or password" for a reason that is not theirs — and a
 directory in force whose settings cannot be read (a rotated encryption key, a
 half-filled row) closes the door rather than handing the installation to the
 other one. An installation that already has both gets a warning in the log at
-startup, a `two directories configured` audit row, and a banner on
+startup, one `two directories configured` audit row — one for the
+installation, not one per worker, and none at all on the restarts
+after it while nothing has changed — and a banner on
 `/admin/config`; a resolution that changes while WDash is running is audited
 as `directory in force changed`. Turning off the directory you arrived through
 is refused when no enabled local account can administer and no other directory

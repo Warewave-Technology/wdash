@@ -662,7 +662,13 @@ def create_app(config_class=Config):
         app.logger.warning(_resolution["reason"])
     if store is not None and _resolution["shadowed"]:
         try:
-            store.audit.record(
+            # Once per FACT, not once per process. This runs in every worker
+            # that comes up, so four gunicorn workers wrote four identical
+            # rows on every restart — and four rows in the trail read as
+            # four events. The conflict is a property of the installation,
+            # and `record_state` adds a row where it changes and nothing
+            # where it persists.
+            store.audit.record_state(
                 "system", "two directories configured", subject="auth",
                 state={"in_force": _resolution["in_force"],
                        "shadowed": _resolution["shadowed"],

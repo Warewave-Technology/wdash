@@ -1005,6 +1005,56 @@ class TwoDirectoriesAreReportedTest(unittest.TestCase):
         self.assertIn("LDAP is in force", page)
         self.assertIn("--use-directory", page)
 
+    def test_every_worker_coming_up_adds_one_row_between_them(self):
+        """It is a fact about the installation, not an act by a process.
+
+        Measured before this: `create_app` records at start-up and gunicorn
+        runs it per worker, so four workers wrote four identical rows on
+        every restart — and a trail whose rows are not events is one nobody
+        can count anything in. The demo runs two workers and had two.
+        """
+        first = self.build()
+        support.set_up(first.test_client(), username="owner",
+                       password=PASSWORD)
+        first.store.settings.set("auth.oidc", {
+            "client_id": "wdash", "enabled": True,
+            "discovery_url": "https://idp/.well-known/openid-configuration"})
+        first.store.settings.set("auth.ldap", {
+            "server": "ldaps://ldap:636", "base_dn": "dc=x", "enabled": True})
+
+        workers = [self.build() for _ in range(4)]
+        rows = [row for row in workers[-1].store.audit.recent()
+                if row["action"] == "two directories configured"]
+        self.assertEqual(len(rows), 1, f"{len(rows)} rows for one conflict")
+
+    def test_a_conflict_that_changes_is_a_new_row(self):
+        """Silence is for a fact that persists. A conflict whose shape
+        changes — the other directory now in force — is a different fact,
+        and a trail that swallowed it would show the first arrangement for
+        ever."""
+        first = self.build()
+        support.set_up(first.test_client(), username="owner",
+                       password=PASSWORD)
+        first.store.settings.set("auth.oidc", {
+            "client_id": "wdash", "enabled": True,
+            "discovery_url": "https://idp/.well-known/openid-configuration"})
+        first.store.settings.set("auth.ldap", {
+            "server": "ldaps://ldap:636", "base_dn": "dc=x", "enabled": True})
+        self.build()
+
+        # OIDC saved last now, so it is the one in force and LDAP is the
+        # one being shadowed: the same conflict the other way round.
+        first.store.settings.set("auth.oidc", {
+            "client_id": "wdash", "enabled": True,
+            "discovery_url": "https://idp/.well-known/openid-configuration"})
+        latest = self.build()
+
+        rows = [row for row in latest.store.audit.recent()
+                if row["action"] == "two directories configured"]
+        self.assertEqual(len(rows), 2, [row["state"] for row in rows])
+        self.assertEqual(rows[0]["state"]["in_force"], "oidc")
+        self.assertEqual(rows[1]["state"]["in_force"], "ldap")
+
     def test_one_directory_alone_says_nothing(self):
         app = self.build()
         client = app.test_client()
