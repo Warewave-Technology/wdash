@@ -206,9 +206,12 @@ build.
   not page somebody twice for one incident. Binding a rule to a SAVED SEARCH
   rather than to a query string keeps the query language from being
   implemented a second time.
-* **A monitor panel on a dashboard.** Panels cover logs (`timeseries`,
-  `terms`) and traces (`trace_services`); the third signal is missing from the
-  one screen whose job is putting signals side by side.
+* ~~**A monitor panel on a dashboard.**~~ Done, and wider than this said:
+  the board carries checks (status and availability), TLS certificates,
+  records, a trace list, a count and the alert store beside the log panels.
+  A certificate row is a CERTIFICATE, with the checks that saw it — an
+  endpoint watched by WDash's own agent and by Heartbeat had been two rows
+  on a card that answers "what renews next".
 * **API tokens for people.** Agents have tokens, hashed and rotatable, and
   every use is audited. A person has no way to reach WDash without a browser,
   so anything scripted has to borrow an agent's token or a session cookie.
@@ -219,14 +222,20 @@ build.
 
 ### Reach
 
-* **A demo that runs out of the box.** The lab has data; getting to a WDash
-  with monitors, journeys, dashboards and alert rules in it is a sequence of
-  manual steps that was done by hand to take the screenshots in
-  [docs/logo](docs/logo/). One `./lab.sh demo` is the difference between
+* **A demo that runs out of the box.** Half done. `docker compose up -d`
+  now starts WDash itself rather than an Elasticsearch and a Kibana with the
+  product commented out, and `./lab.sh targets` says what every backend
+  holds and what to type into the page to read it. What is still manual is
+  the rest: monitors, journeys, dashboards and alert rules are a sequence of
+  steps somebody follows. One `./lab.sh demo` is the difference between
   trying WDash and reading about it.
-* **A release line behind the tag.** `v2.4.0` exists and nothing stands behind
-  it: no published image, no changelog, and a tag message doing the work of
-  release notes.
+* ~~**A release line behind the tag.**~~ Done as far as this repository can
+  take it: `CHANGELOG.md` written from the operator's side, `RELEASING.md`
+  with the commands and with what it deliberately does not do,
+  `THIRD-PARTY-NOTICES.md` generated from installed metadata, and
+  `tests/test_release_files.py` holding all three to the version. What is
+  still missing is outside the repository — there is no remote, so the five
+  CI jobs have never run, and no image has been published.
 
 ### Honesty
 
