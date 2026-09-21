@@ -521,6 +521,29 @@ def current_version(connection):
 _LOCK_TABLE = "wdash_migration_lock"
 
 
+def serialise_writes(connection, dialect, postgres_key):
+    """Take the lock that makes a read-then-write atomic for other workers.
+
+    Public, and shared with `audit.record_state`: the two have the same
+    problem exactly — decide from a read, then write — and solving it twice
+    means solving it differently the second time. `postgres_key` names the
+    lock so that two callers doing different work do not wait for each
+    other; SQLite has one writer for the whole database, so the table below
+    serves everybody.
+    """
+    if dialect == "postgresql":
+        # Released when the transaction ends, however it ends.
+        connection.execute(text("SELECT pg_advisory_xact_lock(:key)"),
+                           {"key": postgres_key})
+        return
+
+    if dialect == "sqlite":
+        connection.execute(text(
+            f"CREATE TABLE IF NOT EXISTS {_LOCK_TABLE} (id INTEGER PRIMARY KEY)"))
+        connection.execute(text(
+            f"INSERT OR REPLACE INTO {_LOCK_TABLE} (id) VALUES (1)"))
+
+
 def _serialise(connection, dialect):
     """Make every other worker wait until this one has finished.
 
@@ -545,17 +568,9 @@ def _serialise(connection, dialect):
     statements — unlike `PRAGMA journal_mode`, which is its own story in
     database.py.
     """
-    if dialect == "postgresql":
-        # The number is arbitrary but must stay constant; it identifies this
-        # lock. Released when the transaction ends, however it ends.
-        connection.execute(text("SELECT pg_advisory_xact_lock(724301)"))
-        return
-
-    if dialect == "sqlite":
-        connection.execute(text(
-            f"CREATE TABLE IF NOT EXISTS {_LOCK_TABLE} (id INTEGER PRIMARY KEY)"))
-        connection.execute(text(
-            f"INSERT OR REPLACE INTO {_LOCK_TABLE} (id) VALUES (1)"))
+    # The number is arbitrary but must stay constant; it identifies this
+    # lock.
+    serialise_writes(connection, dialect, 724301)
 
 
 def migrate(engine):

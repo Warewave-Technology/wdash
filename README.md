@@ -345,8 +345,10 @@ half-filled row) closes the door rather than handing the installation to the
 other one. An installation that already has both gets a warning in the log at
 startup, one `two directories configured` audit row — one for the
 installation, not one per worker, and none at all on the restarts
-after it while nothing has changed — and a banner on
-`/admin/config`; a resolution that changes while WDash is running is audited
+after it while nothing has changed. Measured with four worker
+processes, which is what the shipped image runs: four rows before
+the write lock was taken ahead of the read, one after, on SQLite
+and on Postgres. And a banner on `/admin/config`; a resolution that changes while WDash is running is audited
 as `directory in force changed`. Turning off the directory you arrived through
 is refused when no enabled local account can administer and no other directory
 would take over — a handover to one that is configured and works is the switch

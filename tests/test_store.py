@@ -838,6 +838,21 @@ class DatabaseAddressTest(unittest.TestCase):
         engine.dispose()
 
 
+def _record_one_fact(url, barrier):
+    """One worker coming up: open the store, then record the fact.
+
+    Module level because a spawned process has to import it. It opens its
+    OWN store, which is the point — four gunicorn workers are four
+    processes with four connections and no pool between them.
+    """
+    from wdash.store import Store
+    store = Store.open(url)
+    barrier.wait(30)
+    store.audit.record_state("system", "two directories configured",
+                             subject="auth",
+                             state={"in_force": "ldap", "shadowed": "oidc"})
+
+
 class RecordingAFactOnceTest(unittest.TestCase):
     """`audit.record_state`, for something true of the installation.
 
@@ -934,11 +949,12 @@ class RecordingAFactOnceTest(unittest.TestCase):
         four trials out of five. With `pg_advisory_xact_lock` around the
         read and the write, 1.
 
-        Postgres only, and that is not a gap. SQLite here means one worker —
-        `replicas: 1` and `strategy: Recreate` in the manifests, because the
-        database is a file — so four of them is not a deployment. What
-        SQLite has to get right is the sequential case, which is a restart,
-        and `test_the_same_fact_again_writes_nothing` is that.
+        Threads, and Postgres only, because that is where threads prove
+        anything: each gets its own pooled connection. On SQLite four
+        threads share a pool and serialise themselves, which is how the
+        first version of this came to report that SQLite needed no lock —
+        `test_four_worker_processes_write_one_row` is the one that measures
+        it there.
 
         The pool is warmed first. Without it each thread spends its first
         milliseconds connecting, the four arrive at the database in a
@@ -946,7 +962,7 @@ class RecordingAFactOnceTest(unittest.TestCase):
         no lock in it at all — measured, three runs out of three.
         """
         if self.store.engine.dialect.name != "postgresql":
-            self.skipTest("one worker per SQLite file: see the docstring")
+            self.skipTest("threads prove nothing on SQLite: see the docstring")
 
         state = {"in_force": "ldap", "shadowed": "oidc"}
         start = threading.Barrier(4)
@@ -968,6 +984,43 @@ class RecordingAFactOnceTest(unittest.TestCase):
             thread.join(60)
         self.assertEqual(len(self.rows()), 1,
                          f"{len(self.rows())} rows from four workers")
+
+    def test_four_worker_processes_write_one_row(self):
+        """What the shipped image actually runs.
+
+        `gunicorn --workers 4` on `sqlite:////app/data/wdash.db` — the
+        Dockerfile's CMD, which neither the compose file nor the manifests
+        override, and which kubernetes/README.md states in words. Four
+        PROCESSES, not threads: threads share a connection pool and
+        serialise themselves, which is why the first version of this
+        believed SQLite needed no lock.
+
+        Measured before the lock: 4 rows in ten trials out of ten.
+        `engine.begin()` opens a DEFERRED transaction and pysqlite emits no
+        BEGIN of its own, so the write lock is not taken until the INSERT —
+        by which time all four have read and decided.
+        """
+        if self.store.engine.dialect.name != "sqlite":
+            self.skipTest("the fork-four-workers case is the SQLite one")
+
+        import multiprocessing
+
+        folder = tempfile.mkdtemp()
+        url = f"sqlite:///{folder}/workers.db"
+        Store.open(url)                      # migrate once, as a restart does
+
+        barrier = multiprocessing.Barrier(4)
+        workers = [multiprocessing.Process(target=_record_one_fact,
+                                           args=(url, barrier))
+                   for _ in range(4)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(60)
+
+        rows = [row for row in Store.open(url).audit.recent()
+                if row["action"] == "two directories configured"]
+        self.assertEqual(len(rows), 1, f"{len(rows)} rows from four workers")
 
     def test_a_failure_to_record_is_not_a_failure_to_start(self):
         """`record` never raises, and neither does this: refusing to start

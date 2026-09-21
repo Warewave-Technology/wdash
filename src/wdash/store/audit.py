@@ -18,7 +18,7 @@ import hashlib
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import desc, select, text
+from sqlalchemy import desc, select
 
 from .schema import audit
 
@@ -97,29 +97,37 @@ class AuditLog:
         row with the same action and subject, so the trail keeps a row where
         the fact CHANGES and adds nothing where it persists.
 
-        The read and the write share a transaction, and on Postgres they
-        take an advisory lock named after the fact. The transaction alone is
-        not enough, and the measurement is worth keeping because the first
-        version of this stopped at it: four workers released from one
-        barrier, against a warm connection pool, wrote 4 rows in four trials
-        out of five at READ COMMITTED — all four read no row and all four
-        wrote. That is the deployment that HAS several workers. With
-        `pg_advisory_xact_lock` around both, 1.
+        The read and the write share a transaction AND the lock that
+        `migrations.serialise_writes` takes — the same one migrations use,
+        for the same reason: a transaction is not enough when the decision
+        is made from a read.
 
-        SQLite gets no lock and needs none: one worker per file is what the
-        manifests deploy and what the documentation says, because the
-        database is a file. Four threads against one SQLite store are not a
-        deployment, and they are not reliably one row either — write-ahead
-        logging lets a reader keep the snapshot it started with, so a
-        SELECT taken before another writer's commit does not see it.
+        Both halves measured, four workers released from one barrier:
+
+          * Postgres at READ COMMITTED, warm pool: all four read no row and
+            all four wrote. 4 rows in four trials out of five. With
+            `pg_advisory_xact_lock`, 1.
+          * SQLite, four PROCESSES as gunicorn forks them: 4 rows in ten
+            trials out of ten. `engine.begin()` opens a DEFERRED
+            transaction and pysqlite emits no BEGIN of its own, so the
+            write lock is not taken until the INSERT — by which time all
+            four have read and decided. Writing to the lock table first
+            moves the lock ahead of the decision, and it is 1.
+
+        The first version of this said SQLite needed no lock, because one
+        worker per file is what the deployment does. It is not: the shipped
+        image is `gunicorn --workers 4` on `sqlite:////app/data/wdash.db`,
+        kubernetes/README.md says four workers in words, and
+        `migrations._serialise` was written for exactly that. The earlier
+        measurement used four THREADS in one process, which share a
+        connection pool and serialise themselves.
         """
         state = self._serialisable(state)
         try:
             with self._engine.begin() as connection:
-                if connection.dialect.name == "postgresql":
-                    connection.execute(
-                        text("SELECT pg_advisory_xact_lock(:key)"),
-                        {"key": _lock_key(action, subject)})
+                from .migrations import serialise_writes
+                serialise_writes(connection, connection.dialect.name,
+                                 _lock_key(action, subject))
                 last = connection.execute(
                     select(audit.c.state)
                     .where(audit.c.action == action)
