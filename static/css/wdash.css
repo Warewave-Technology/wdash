@@ -1226,6 +1226,18 @@ a:not([class]):hover {
 
 /* Row states. `!important` because Bootstrap's own `.table-*` variables sit
    on `<tr>` with higher specificity than a plain class. */
+/* A certificate's checks, on the dashboard's certificate panel. One row is
+   one certificate and the checks that saw it are stacked in its last cell;
+   each opens that check, so each has to look like something to click. */
+.cert-check {
+    cursor: pointer;
+}
+.cert-check + .cert-check {
+    margin-top: .35rem;
+    padding-top: .35rem;
+    border-top: 1px solid var(--border);
+}
+
 tr.monitor-row-down,
 tr.monitor-row-critical {
     background: color-mix(in srgb, var(--hue-red) 9%, transparent) !important;

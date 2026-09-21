@@ -105,7 +105,7 @@ const PANEL_HINTS = Object.assign(Object.create(null), {
     trace_services: 'Click a service to open it in the Traces page',
     trace_list: 'Click a trace to open its waterfall in this window',
     monitors: 'Click a check to open it in the Monitors page',
-    monitor_certificates: 'Click a row to open that check in the Monitors page',
+    monitor_certificates: 'One row per certificate. Click a check to open it in the Monitors page',
 });
 
 
@@ -1976,7 +1976,7 @@ class AsyncDashboard {
         container.innerHTML =
             '<table class="table table-hover table-dense mb-0">' +
             '<thead><tr><th style="width:6rem">Expires in</th>' +
-            '<th>Common name</th><th>Endpoint</th></tr></thead><tbody>' +
+            '<th>Common name</th><th>Seen by</th></tr></thead><tbody>' +
             rows.map(row => {
                 // `expired` is not "very soon": it has already happened, and
                 // it is not another number in the same series.
@@ -1986,23 +1986,48 @@ class AsyncDashboard {
                         ? '<span class="text-muted">unknown</span>'
                         : `<span class="expiry-chip ${escapeHtml(row.state)}">${
                             row.days_remaining}d</span>`);
+                // A row is a certificate; the checks that saw it are the
+                // third column. It was a row per check, so an endpoint
+                // watched by WDash's own agent and by Heartbeat was the
+                // same certificate twice on a card that answers "what
+                // renews next".
+                //
+                // The chips stay per CHECK: whether a handshake verified,
+                // and whether this check verifies at all, are answers about
+                // the connection rather than about the certificate.
                 // `verified` is true, false or null, and null means the
                 // source did not say — Heartbeat never does. Only an
                 // explicit false earns the chip; rendering null as "not
                 // verified" would put a finding on every row on day one.
-                const chips =
-                    (row.tls_mode === 'expiry_only'
-                        ? '<span class="badge target-chip" title="This check does not verify the certificate. The expiry is all it can vouch for.">expiry only</span>'
-                        : row.verified === false
-                        ? '<span class="badge target-chip" title="This check verifies the certificate and its last run did not complete a verified handshake with this endpoint.">not verified</span>'
-                        : '');
-                return `<tr class="monitor-row-${escapeHtml(row.state)}"
-                            role="button" data-monitor="${escapeHtml(row.id)}">
+                const checks = (row.checks || []);
+                const seen = checks.map(check => {
+                    const chips =
+                        (check.tls_mode === 'expiry_only'
+                            ? ' <span class="badge target-chip" title="This check does not verify the certificate. The expiry is all it can vouch for.">expiry only</span>'
+                            : check.verified === false
+                            ? ' <span class="badge target-chip" title="This check verifies the certificate and its last run did not complete a verified handshake with this endpoint.">not verified</span>'
+                            : '');
+                    // The check's NAME first. It was the endpoint, because
+                    // a row used to be a check; on a row that is a
+                    // certificate the endpoint usually repeats the common
+                    // name above it — and where it does not, which is a
+                    // certificate covering several hosts, it is the detail
+                    // rather than the subject.
+                    return `<div class="cert-check" role="button"
+                                 data-monitor="${escapeHtml(check.id)}">
+                        ${escapeHtml(check.name)}${chips}
+                        <div><small class="text-muted"><code>${
+                            escapeHtml(check.location || '—')}</code></small></div>
+                        </div>`;
+                }).join('');
+                return `<tr class="monitor-row-${escapeHtml(row.state)}">
                     <td>${chip}</td>
-                    <td><code>${escapeHtml(row.common_name || '—')}</code> ${chips}</td>
-                    <td><code class="text-muted">${escapeHtml(row.location)}</code>
-                        <div><small class="text-muted">${
-                            escapeHtml(row.name)}</small></div></td></tr>`;
+                    <td><code>${escapeHtml(row.common_name || '—')}</code>${
+                        checks.length > 1
+                            ? ` <span class="badge target-chip" title="One certificate, watched by ${
+                                checks.length} checks.">${checks.length} checks</span>`
+                            : ''}</td>
+                    <td>${seen}</td></tr>`;
             }).join('') + '</tbody></table>' +
             `<div class="text-muted mt-2" style="font-size:.7rem">Warning below ${
                 panel.warning_days} days, urgent below ${

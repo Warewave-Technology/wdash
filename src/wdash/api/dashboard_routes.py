@@ -878,28 +878,78 @@ def _monitor_row(monitor, view):
     return row
 
 
-def _certificate_row(monitor):
-    certificate = monitor.certificate
-    return {
-        "id": monitor.id,
-        "name": monitor.name or monitor.id,
-        "location": monitor.location,
-        "common_name": certificate.common_name,
-        "issuer": certificate.issuer,
-        "not_after": (certificate.not_after.isoformat()
-                      if certificate.not_after else None),
-        "days_remaining": certificate.days_remaining,
-        "expired": certificate.expired,
-        # Computed here, exactly as the Monitors page computes it, so the
-        # dashboard cannot grow a second set of expiry bands.
-        "state": monitor_routes._certificate_state(certificate),
-        "key": certificate.key_description,
-        # Tri-state, and `None` means the source did not say — Heartbeat
-        # never does. The renderer must print nothing for it: rendered as
-        # "not verified" it would be a finding invented on every row.
-        "verified": certificate.verified,
-        "tls_mode": monitor.tls_mode,
-    }
+def _certificate_identity(certificate):
+    """What makes two readings the same certificate.
+
+    The fingerprint, where the source gives one — it is a hash of the whole
+    certificate, which is exactly the question. Where it does not, the
+    issuer and serial number identify it (a serial is unique within an
+    issuer), and failing that the three fields every source does report.
+    Falling back rather than requiring a fingerprint, because Heartbeat
+    reports one and an agent behind an expiry-only check may not.
+    """
+    if certificate.fingerprint:
+        return ("fingerprint", certificate.fingerprint.lower())
+    if certificate.serial_number:
+        return ("serial", certificate.issuer, certificate.serial_number)
+    return ("fields", certificate.common_name, certificate.issuer,
+            certificate.not_after.isoformat() if certificate.not_after else "")
+
+
+def _certificate_rows(monitors):
+    """One row per certificate, and the checks that saw it.
+
+    It was one row per MONITOR. An endpoint watched by WDash's own agent and
+    by Heartbeat — which is what the demo had, and what any installation
+    migrating from Heartbeat has — appeared twice: the same common name, the
+    same issuer, the same expiry, once per check. On a card that answers
+    "what renews next", two rows are two things to renew.
+
+    Two checks that see DIFFERENT certificates for one endpoint stay two
+    rows, which is the case worth keeping apart: a host mid-rotation, or one
+    that answers a verified and an unverified connection differently.
+
+    What belongs to the certificate is on the row; what belongs to the
+    CHECK — where it ran from, whether its handshake verified, whether it
+    verifies at all — is per check, because those are answers about the
+    connection rather than about the certificate.
+    """
+    grouped = {}
+    for monitor in monitors:
+        certificate = monitor.certificate
+        if not certificate:
+            continue
+        key = _certificate_identity(certificate)
+        row = grouped.get(key)
+        if row is None:
+            row = grouped[key] = {
+                "common_name": certificate.common_name,
+                "issuer": certificate.issuer,
+                "not_after": (certificate.not_after.isoformat()
+                              if certificate.not_after else None),
+                "days_remaining": certificate.days_remaining,
+                "expired": certificate.expired,
+                # Computed here, exactly as the Monitors page computes it,
+                # so the dashboard cannot grow a second set of expiry bands.
+                "state": monitor_routes._certificate_state(certificate),
+                "key": certificate.key_description,
+                "fingerprint": certificate.fingerprint,
+                "checks": [],
+            }
+        row["checks"].append({
+            "id": monitor.id,
+            "name": monitor.name or monitor.id,
+            "location": monitor.location,
+            # Tri-state, and `None` means the source did not say — Heartbeat
+            # never does. The renderer must print nothing for it: rendered
+            # as "not verified" it would be a finding invented on every row.
+            "verified": certificate.verified,
+            "tls_mode": monitor.tls_mode,
+        })
+    for row in grouped.values():
+        row["checks"].sort(key=lambda check: (check["name"] or "",
+                                              check["location"] or ""))
+    return list(grouped.values())
 
 
 def _monitor_panels(panels, scope, window, dashboard=None):
@@ -1019,7 +1069,7 @@ def _monitor_panels(panels, scope, window, dashboard=None):
                 # read in. A monitor whose expiry the source did not give
                 # sorts last rather than as "expires today".
                 rows = sorted(
-                    (_certificate_row(m) for m in seen if m.certificate),
+                    _certificate_rows(seen),
                     key=lambda r: (r["days_remaining"] is None,
                                    r["days_remaining"] or 0))
                 # The fan-out keeps a member that could not be asked out of

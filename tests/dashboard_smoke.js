@@ -989,38 +989,106 @@ async function main() {
             id: 'c1', title: 'Certificates', type: 'monitor_certificates',
             width: 6, warning_days: 30, critical_days: 7,
             rows: [
-                { id: 'gone', name: 'TLS endpoint (expiring)',
-                  common_name: 'expiring.lab.local', location: 'lab:8443',
-                  days_remaining: -25, expired: true, state: 'expired',
-                  verified: null, tls_mode: '' },
-                { id: 'soon', name: 'Payments', common_name: 'pay.lab.local',
-                  location: 'lab:9443', days_remaining: 3, expired: false,
-                  state: 'critical', verified: false, tls_mode: '' },
-                { id: 'fine', name: 'TLS endpoint (valid)',
-                  common_name: 'healthy.lab.local', location: 'lab:8444',
-                  days_remaining: 328, expired: false, state: 'ok',
-                  verified: null, tls_mode: '' },
+                { common_name: 'expiring.lab.local', days_remaining: -25,
+                  expired: true, state: 'expired',
+                  checks: [{ id: 'gone', name: 'TLS endpoint (expiring)',
+                             location: 'lab:8443', verified: null,
+                             tls_mode: '' }] },
+                { common_name: 'pay.lab.local', days_remaining: 3,
+                  expired: false, state: 'critical',
+                  checks: [{ id: 'soon', name: 'Payments',
+                             location: 'lab:9443', verified: false,
+                             tls_mode: '' }] },
+                { common_name: 'healthy.lab.local', days_remaining: 328,
+                  expired: false, state: 'ok',
+                  checks: [{ id: 'fine', name: 'TLS endpoint (valid)',
+                             location: 'lab:8444', verified: null,
+                             tls_mode: '' }] },
+                // One certificate, two probes. It was two rows: the same
+                // common name, the same expiry, once per check.
+                { common_name: 'gateway.lab.local', days_remaining: 40,
+                  expired: false, state: 'ok',
+                  // The FIRST check is clean and the second is not. A chip
+                  // taken from the row — or from checks[0] — would print
+                  // nothing here while one of the two really did fail its
+                  // handshake.
+                  checks: [{ id: 'gw-agent', name: 'Gateway (agent)',
+                             location: 'gateway.lab.local', verified: true,
+                             tls_mode: '' },
+                           { id: 'gw-beat', name: 'Gateway (heartbeat)',
+                             location: 'gateway.lab.local', verified: false,
+                             tls_mode: '' },
+                           // NOT named for its mode: the assertion below
+                           // looks for the chip's words, and a check whose
+                           // NAME carries them passes without one.
+                           { id: 'gw-expiry', name: 'Gateway (third probe)',
+                             location: 'gateway.lab.local', verified: null,
+                             tls_mode: 'expiry_only' }] },
             ],
         }],
     });
+    /** The row a check sits on. A row is a certificate now. */
+    const certRow = (document, monitor) =>
+        document.querySelector(`[data-monitor="${monitor}"]`).closest('tr');
+    /** How many checks the shared certificate's row lists. */
+    const row3Checks = document =>
+        certRow(document, 'gw-agent').querySelectorAll('.cert-check').length;
+
     check('an expired certificate says expired, not a negative number', () => {
-        const row = certificates.document.querySelector('[data-monitor="gone"]');
+        const row = certRow(certificates.document, 'gone');
         assert(/expired/i.test(row.textContent), row.textContent);
         assert(!/-25/.test(row.textContent),
                `it printed the raw day count: "${row.textContent}"`);
     });
+    check('one certificate on two checks is one row', () => {
+        const rows = certificates.document
+            .querySelectorAll('tbody tr');
+        assert(rows.length === 4, `${rows.length} rows for four certificates`);
+        assert(row3Checks(certificates.document) === 3,
+               'the gateway row lost a check');
+        const shared = certRow(certificates.document, 'gw-agent');
+        assert(shared === certRow(certificates.document, 'gw-beat'),
+               'the two checks are on different rows');
+        assert(/gateway\.lab\.local/.test(shared.textContent), shared.textContent);
+    });
+    check('and it says both checks saw it', () => {
+        const row = certRow(certificates.document, 'gw-agent');
+        assert(/Gateway \(agent\)/.test(row.textContent)
+               && /Gateway \(heartbeat\)/.test(row.textContent),
+               row.textContent);
+        assert(/3 checks/.test(row.textContent),
+               `it did not count them: "${row.textContent}"`);
+    });
+    check('a chip belongs to the check that earned it', () => {
+        // One of the two checks failed its handshake and the other did
+        // not. A chip on the certificate would be a claim about both, and
+        // one taken from the first check would print nothing at all.
+        const row = certRow(certificates.document, 'gw-agent');
+        const failed = row.querySelector('[data-monitor="gw-beat"]');
+        const clean = row.querySelector('[data-monitor="gw-agent"]');
+        const partial = row.querySelector('[data-monitor="gw-expiry"]');
+        assert(/not verified/i.test(failed.textContent), failed.textContent);
+        assert(!/not verified/i.test(clean.textContent), clean.textContent);
+        // And the third one verifies nothing at all, which is a different
+        // sentence: a chip read off the row would give this one's setting
+        // to the two checks that do verify.
+        const chip = partial.querySelector('.target-chip');
+        assert(chip && /expiry only/i.test(chip.textContent),
+               partial.innerHTML);
+        assert(!clean.querySelector('.target-chip'), clean.innerHTML);
+    });
     check('the band comes from the server, not from the day count', () => {
-        const chip = certificates.document
-            .querySelector('[data-monitor="soon"] .expiry-chip');
+        const chip = certRow(certificates.document, 'soon')
+            .querySelector('.expiry-chip');
         assert(chip.classList.contains('critical'),
                `chip classes were "${chip.className}"`);
     });
     check('a certificate nobody measured a verdict for carries no verdict', () => {
-        const row = certificates.document.querySelector('[data-monitor="fine"]');
+        const row = certRow(certificates.document, 'fine');
         assert(!/not verified/i.test(row.textContent), row.textContent);
     });
     check('a handshake that really failed does say so', () => {
-        const row = certificates.document.querySelector('[data-monitor="soon"]');
+        const row = certRow(certificates.document, 'soon');
         assert(/not verified/i.test(row.textContent), row.textContent);
     });
     check('the thresholds the bands came from are printed under them', () => {
@@ -1039,10 +1107,11 @@ async function main() {
             width: 6, warning_days: 30, critical_days: 7,
             partial: true, warnings: ['region-b: connection refused'],
             rows: [
-                { id: 'fine', name: 'TLS endpoint (valid)',
-                  common_name: 'healthy.lab.local', location: 'lab:8444',
-                  days_remaining: 328, expired: false, state: 'ok',
-                  verified: null, tls_mode: '' },
+                { common_name: 'healthy.lab.local', days_remaining: 328,
+                  expired: false, state: 'ok',
+                  checks: [{ id: 'fine', name: 'TLS endpoint (valid)',
+                             location: 'lab:8444', verified: null,
+                             tls_mode: '' }] },
             ],
         }],
     });

@@ -300,11 +300,165 @@ class CertificatePanelTest(MonitorPanelTest):
     def rows(self):
         return self.panel(self.data().get_json(), "tls-1")["rows"]
 
+    @staticmethod
+    def named(row):
+        """The checks on a row, as one name.
+
+        A row is a CERTIFICATE now and a certificate has no name of its own
+        — these fixtures give every check its own, so the one check on each
+        row is how the tests below still say which is which.
+        """
+        return ", ".join(check["name"] for check in row["checks"])
+
+    def test_one_certificate_on_two_checks_is_one_row(self):
+        """A row per MONITOR, on a list whose subject is the certificate.
+
+        Seen on the demo: the lab's TLS endpoint was watched by WDash's own
+        agent and by Heartbeat, and the panel listed the same certificate
+        twice — the same common name, the same issuer, the same expiry,
+        once per check. On a card that answers "what renews next" that
+        reads as two things to renew.
+        """
+        # Two probes, as the demo had: WDash's own agent, and a second one
+        # standing in for the Heartbeat that watches the same endpoint.
+        here = self.agent("here")
+        there = self.agent("there")
+        first = self.monitor("Gateway (agent)", "https://gateway.example/")
+        second = self.monitor("Gateway (heartbeat)", "https://gateway.example/")
+        shared = {"common_name": "gateway.example", "issuer": "Lab CA",
+                  "not_after": (_now() + timedelta(days=40)).isoformat(),
+                  "fingerprint": "ab" * 32,
+                  "key_algorithm": "RSA", "key_size": 2048}
+        for agent, monitor in ((here, first), (there, second)):
+            self.report(agent["id"], monitor["id"], "up", tls=dict(shared))
+
+        rows = [row for row in self.rows()
+                if row["common_name"] == "gateway.example"]
+        self.assertEqual(len(rows), 1, f"{len(rows)} rows for one certificate")
+        self.assertEqual(
+            sorted(check["name"] for check in rows[0]["checks"]),
+            ["Gateway (agent)", "Gateway (heartbeat)"])
+
+    def test_two_readings_that_differ_stay_two_rows(self):
+        """The case worth keeping apart. A host mid-rotation, or one that
+        answers a verified and an unverified connection differently, is two
+        certificates on one endpoint — and merging them would hide the one
+        that expires first behind the one that does not."""
+        here, there = self.agent("a"), self.agent("b")
+        first = self.monitor("Edge (old)", "https://edge.example/")
+        second = self.monitor("Edge (new)", "https://edge.example/")
+        # Everything a reader can see is identical — the name, the issuer,
+        # the expiry to the second. Only the fingerprint differs, which is
+        # the whole reason identity is the fingerprint: two hosts behind one
+        # address answering with two certificates is not one certificate.
+        expiry = (_now() + timedelta(days=45)).isoformat()
+        for agent, monitor, fingerprint in ((here, first, "11" * 32),
+                                            (there, second, "22" * 32)):
+            self.report(agent["id"], monitor["id"], "up", tls={
+                "common_name": "edge.example", "issuer": "Lab CA",
+                "not_after": expiry, "fingerprint": fingerprint,
+                "key_algorithm": "RSA", "key_size": 2048})
+
+        rows = [row for row in self.rows()
+                if row["common_name"] == "edge.example"]
+        self.assertEqual(len(rows), 2, "two certificates became one row")
+        self.assertEqual(sorted(row["fingerprint"] for row in rows),
+                         ["11" * 32, "22" * 32])
+
+    def test_a_certificate_with_no_fingerprint_is_still_one_row(self):
+        """Heartbeat reports one; an agent behind an expiry-only check may
+        not. Without a fingerprint the issuer and serial identify it, and
+        without those the three fields every source reports."""
+        here, there = self.agent("c"), self.agent("d")
+        first = self.monitor("Shop (agent)", "https://shop.example/")
+        second = self.monitor("Shop (heartbeat)", "https://shop.example/")
+        shared = {"common_name": "shop.example", "issuer": "Lab CA",
+                  "not_after": (_now() + timedelta(days=90)).isoformat(),
+                  "key_algorithm": "RSA", "key_size": 2048}
+        for agent, monitor in ((here, first), (there, second)):
+            self.report(agent["id"], monitor["id"], "up", tls=dict(shared))
+
+        rows = [row for row in self.rows()
+                if row["common_name"] == "shop.example"]
+        self.assertEqual(len(rows), 1, f"{len(rows)} rows for one certificate")
+
+    def test_each_check_keeps_its_own_verdict(self):
+        """Whether a handshake verified is an answer about the CONNECTION.
+        One row for two checks must not hand one check's verdict to the
+        other — the certificate is the same and the connections are not.
+        """
+        here, there = self.agent("e"), self.agent("f")
+        first = self.monitor("Api (verifying)", "https://api.example/")
+        second = self.monitor("Api (expiry only)", "https://api.example/")
+        shared = {"common_name": "api.example", "issuer": "Lab CA",
+                  "not_after": (_now() + timedelta(days=60)).isoformat(),
+                  "fingerprint": "33" * 32,
+                  "key_algorithm": "RSA", "key_size": 2048}
+        self.report(here["id"], first["id"], "up", tls=dict(shared),
+                    handshake_verified=True)
+        self.report(there["id"], second["id"], "up", tls=dict(shared),
+                    handshake_verified=False)
+
+        row = [r for r in self.rows() if r["common_name"] == "api.example"][0]
+        verdicts = {check["name"]: check["verified"] for check in row["checks"]}
+        self.assertEqual(verdicts, {"Api (verifying)": True,
+                                    "Api (expiry only)": False})
+
+    def test_the_checks_on_a_row_are_in_a_settled_order(self):
+        """Two checks arriving in whichever order the source listed them
+        would make the row move under a reader between refreshes.
+
+        Asked of the grouping directly, in the order a source might hand
+        them over: the store adapter happens to return monitors by name, so
+        a test through it would pass whether or not anything sorted.
+        """
+        from datetime import datetime, timezone
+
+        from wdash.api.dashboard_routes import _certificate_rows
+        from wdash.hub.models import Certificate, Monitor
+
+        certificate = Certificate(
+            common_name="cdn.example", issuer="Lab CA",
+            not_after=datetime.now(timezone.utc) + timedelta(days=70),
+            fingerprint="44" * 32)
+        monitors = [Monitor(id="z", name="Zeta", url="https://cdn.example/",
+                            certificate=certificate),
+                    Monitor(id="a", name="Alpha", url="https://cdn.example/",
+                            certificate=certificate)]
+        rows = _certificate_rows(monitors)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual([check["name"] for check in rows[0]["checks"]],
+                         ["Alpha", "Zeta"])
+
+    def test_a_check_that_saw_no_certificate_is_not_a_row(self):
+        """A plain HTTP check reports none. A row for it would have no
+        expiry and nothing to renew — an empty line on a list of things to
+        renew.
+
+        Both ways round. The two adapters that exist drop them before the
+        panel is filled, so through the source this measures their
+        behaviour; the grouping is asked directly as well, because it
+        merges what several sources hand over and a source that kept one is
+        a panel that raises rather than a panel with a blank line.
+        """
+        agent = self.agent("plain")
+        monitor = self.monitor("Status page", "http://status.example/")
+        self.report(agent["id"], monitor["id"], "up")
+        names = [check["name"] for row in self.rows()
+                 for check in row["checks"]]
+        self.assertNotIn("Status page", names)
+
+        from wdash.api.dashboard_routes import _certificate_rows
+        from wdash.hub.models import Monitor
+        self.assertEqual(
+            _certificate_rows([Monitor(id="p", name="Status page",
+                                       url="http://status.example/")]), [])
+
     def test_the_bands_are_the_monitors_pages_own(self):
         """Borrowed rather than re-derived. A dashboard that decided its own
         'expiring soon' would give the product two thresholds, and the one
         nobody remembers is the second one."""
-        states = {row["name"]: row["state"] for row in self.rows()}
+        states = {self.named(row): row["state"] for row in self.rows()}
         self.assertEqual(states["Already expired"], "expired")
         self.assertEqual(states["Expiring soon"], "critical",
                          f"3 days is inside "
@@ -336,7 +490,7 @@ class CertificatePanelTest(MonitorPanelTest):
         with patch.object(monitor_routes, "EXPIRY_WARNING_DAYS", 400), \
                 patch.object(monitor_routes, "EXPIRY_CRITICAL_DAYS", 100):
             panel = self.panel(self.data().get_json(), "tls-1")
-        states = {row["name"]: row["state"] for row in panel["rows"]}
+        states = {self.named(row): row["state"] for row in panel["rows"]}
         self.assertEqual(panel["warning_days"], 400)
         self.assertEqual(panel["critical_days"], 100)
         # 328 days is comfortably "ok" under the shipped bands and a warning
@@ -361,11 +515,11 @@ class CertificatePanelTest(MonitorPanelTest):
                          {"asked-the-monitors-page"})
 
     def test_what_expires_first_comes_first(self):
-        self.assertEqual([row["name"] for row in self.rows()],
+        self.assertEqual([self.named(row) for row in self.rows()],
                          ["Already expired", "Expiring soon", "Healthy"])
 
     def test_days_remaining_is_rounded_not_truncated(self):
-        days = {row["name"]: row["days_remaining"] for row in self.rows()}
+        days = {self.named(row): row["days_remaining"] for row in self.rows()}
         self.assertEqual(days["Expiring soon"], 3)
         self.assertEqual(days["Already expired"], -25)
 
@@ -374,7 +528,8 @@ class CertificatePanelTest(MonitorPanelTest):
         rendered as 'not verified' would be a finding invented on every row
         on day one."""
         for row in self.rows():
-            self.assertIsNone(row["verified"], row["name"])
+            for check in row["checks"]:
+                self.assertIsNone(check["verified"], check["name"])
 
     def test_a_source_that_cannot_report_certificates_refuses_that_panel(self):
         """What the Monitors page already does rather than showing an empty
