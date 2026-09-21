@@ -314,6 +314,15 @@
             // A failure is said as one. Every answer but a list of records
             // came out as "no record carries this trace id — logs need a
             // trace_id field", a cluster that was down included.
+            // The counter FIRST, and on every road out of here: it was
+            // written on the last line of the happy path alone, so a
+            // refused search and an empty one both left the previous
+            // trace's number beside a box saying there are no records.
+            el('logCount').textContent =
+                (res.ok && Array.isArray(data.records))
+                    ? data.records.length + ' of ' + data.total
+                    : '';
+
             if (!res.ok || (data.partial && !data.records.length)) {
                 box.innerHTML = '<div class="p-3 text-danger"><small>' +
                     logFailure(res, data) + '</small></div>';
@@ -335,7 +344,6 @@
                   '<i class="fas fa-exclamation-triangle"></i> Part of the log search failed:<br>' +
                   (data.warnings || []).map(esc).join('<br>') + '</div>'
                 : '';
-            el('logCount').textContent = data.records.length + ' of ' + data.total;
             box.innerHTML = short + '<table class="table table-dense mb-0"><tbody>' +
                 data.records.map(r =>
                     '<tr>' +

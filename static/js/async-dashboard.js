@@ -901,10 +901,22 @@ class AsyncDashboard {
      * Clear every panel when loading fails.
      */
     showLoadError(message, payload = {}) {
-        ['totalHits', 'errorCount', 'warnCount', 'infoCount'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.textContent = '-';
-        });
+        // Everything the last load drew, not the four counts alone. The
+        // threshold badge, the error rate, both deltas, the baseline note,
+        // the source breakdown and the window are all written by
+        // `updateStats` and `renderWindow`, and none of them was touched —
+        // so a board whose reload failed kept a green "Within thresholds",
+        // an error rate of 10.49%, "277% vs 120", "Counted from lab-es
+        // 4,311" and the window those numbers came from, under a red box
+        // saying the panels could not be loaded. Measured through the
+        // shipped bundle on the 502 the route answers when the search
+        // fails, which is the ordinary path for a log-backend outage.
+        //
+        // `clearBoard` has done it this way since it was written. Calling
+        // the same two methods rather than listing ids is the point: the
+        // list was four ids long and the page has eleven.
+        this.updateStats({});
+        this.renderWindow(null);
 
         // Mark the filter box when the filter is what was rejected: otherwise
         // a typo there reads as "the dashboard is broken".
@@ -1254,16 +1266,13 @@ class AsyncDashboard {
             `Asked over ${from.toLocaleString()} → ${to.toLocaleString()}`;
     }
 
-    showStatsError() {
-        ['totalHits', 'errorCount', 'warnCount', 'infoCount'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.textContent = '-';
-            const delta = document.getElementById(`${id}Delta`);
-            if (delta) delta.innerHTML = '&nbsp;';
-        });
-        const rate = document.getElementById('errorRate');
-        if (rate) rate.textContent = '-';
-    }
+    // `showStatsError` used to be here: the four counts, their deltas and
+    // the error rate, blanked. Nothing called it — grep over static/,
+    // templates/, tests/ and src/ found the definition and no caller — and
+    // it was a third answer to a question `updateStats({})` already
+    // answers completely, which is what `showLoadError` calls now. A
+    // cleanup nobody runs is not a cleanup, and three of them is how the
+    // one that runs ends up being the shortest.
 
     // ---------------------------------------------------------------
     // Click-through: every number on this page is a question, and the

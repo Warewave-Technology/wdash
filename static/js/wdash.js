@@ -499,19 +499,8 @@ class LogSearch {
             // And what the last search drew beside its rows: the chart, the
             // sources, its warnings and its field statistics stayed on
             // screen, describing a search that was no longer there.
-            this.clearHistogram();
-            ['sourceBreakdownCard', 'searchWarnings'].forEach(id => {
-                const el = document.getElementById(id);
-                if (el) el.classList.add('d-none');
-            });
-            const warnings = document.getElementById('searchWarnings');
-            if (warnings) warnings.innerHTML = '';
-            const stats = document.getElementById('fieldStatsContent');
-            if (stats) {
-                stats.innerHTML = '<div class="text-center py-3 text-muted"><small>' +
-                    'Run a search to see field stats</small></div>';
-            }
-            
+            this.clearLastAnswer();
+
             // Hide error display
             this.hideError();
             
@@ -920,6 +909,24 @@ class LogSearch {
         try {
             var response = await fetch('/api/saved-searches');
             var searches = await response.json();
+            if (!response.ok) {
+                // The server composes a sentence for this — "Your saved
+                // searches could not be read, so none can be listed" — and
+                // it reached nobody. `searches` is then an error OBJECT,
+                // `searches.length` is undefined, undefined is falsy, and
+                // every answer landed in the empty branch below: a 503 that
+                // could not read the file and a 403 the role may not have
+                // both drew "No saved searches yet".
+                //
+                // The comment below is about exactly this distinction on
+                // the server's side. It has one here too now.
+                listEl.innerHTML = '<span class="dropdown-item-text text-danger">' +
+                    '<small>' + WDash.escapeHtml(
+                        (searches && searches.error)
+                        || 'Your saved searches could not be listed.') +
+                    '</small></span>';
+                return;
+            }
             if (!searches.length) {
                 // "No saved searches yet" and "they are in a file this
                 // installation stopped reading" are different answers, and
@@ -1062,6 +1069,42 @@ class LogSearch {
         document.getElementById('logEntries').innerHTML = '';
         document.getElementById('resultsInfo').innerHTML = '';
         document.getElementById('pagination').innerHTML = '';
+        // And everything else the last search drew. Three of the ids above
+        // were cleared and four were not, so a refused search left the
+        // previous one's histogram, source breakdown, warnings and field
+        // statistics on screen — under a red box about a search that never
+        // ran. Measured through the shipped bundle: a good search, then one
+        // the server answered `invalid_query`, and the chart still read
+        // "4,311 records across 2 intervals" with "lab-loki: did not
+        // answer" beside it.
+        //
+        // `clearSearch` has done this since it was written and carries the
+        // sentence naming this exact fault. Reused rather than copied: two
+        // lists of ids drift, and this is what drifting looks like.
+        this.clearLastAnswer();
+    }
+
+    /**
+     * Everything a search drew apart from its rows.
+     *
+     * The chart, the per-source breakdown, the warnings and the field
+     * statistics. Called from `clearSearch`, which empties the page on
+     * purpose, and from `showError`, where leaving them is a description of
+     * a search that is no longer there.
+     */
+    clearLastAnswer() {
+        this.clearHistogram();
+        ['sourceBreakdownCard', 'searchWarnings'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.classList.add('d-none');
+        });
+        const warnings = document.getElementById('searchWarnings');
+        if (warnings) warnings.innerHTML = '';
+        const stats = document.getElementById('fieldStatsContent');
+        if (stats) {
+            stats.innerHTML = '<div class="text-center py-3 text-muted"><small>' +
+                'Run a search to see field stats</small></div>';
+        }
     }
 
     hideError() {

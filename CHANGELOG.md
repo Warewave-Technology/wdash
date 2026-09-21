@@ -87,6 +87,24 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **A failed search or a failed dashboard load no longer leaves the last one
+  on screen.** A refused search kept the previous search's volume chart,
+  source breakdown, warnings and field statistics under a red box about a
+  search that never ran; a dashboard whose reload failed kept a green
+  "Within thresholds", its error rate, both deltas and the window they came
+  from. Both pages already had a method that sweeps all of it, and both now
+  call it.
+
+- **Saved searches that could not be read say so.** The list read the
+  response body and never the status, so a 503 and a 403 both drew "No saved
+  searches yet" — and the sentence the server composes for exactly this
+  reached nobody.
+
+- **The span and log counters on the trace pages clear with their lists.**
+  Each was written only when there was something to list, so switching to a
+  quiet window left the previous window's number beside "No spans in this
+  time range."
+
 - **"Would this lock me out?" is asked about the account, not the cookie.**
   The lockout invariants read the role that was written into the session at
   sign-in, which is never rewritten — so an account whose role had changed

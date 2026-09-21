@@ -68,6 +68,7 @@ function makeDashboard(responder) {
         <small id="refreshNote"></small>
         <small id="resolvedWindow"></small>
         <input id="dashboardFilter" value="">
+        <span class="badge d-none" id="statusBadge"></span>
         <div id="dashboardMessage" class="alert d-none"></div>
         <div id="panelGrid"></div>
         <template id="panelTemplate">
@@ -255,6 +256,54 @@ async function main() {
         const filter = rejected.document.getElementById('dashboardFilter');
         assert(filter.classList.contains('is-invalid'),
                'the filter box was not marked, so a typo reads as a broken dashboard');
+    });
+
+    // A load that FAILS after one that worked. `showLoadError` blanked four
+    // ids and nothing else, so the threshold badge, the error rate, both
+    // deltas, the baseline note, the source breakdown and the window all
+    // went on describing the previous answer — under a red box saying the
+    // panels could not be loaded. Measured through the shipped bundle on the
+    // 502 the route answers when the search fails, which is the ordinary
+    // path for a log-backend outage.
+    const GOOD = {
+        total_hits: 4311, error_count: 452, warn_count: 12, info_count: 3847,
+        error_rate: 0.1049,
+        status: { level: 'ok', breaches: [] },
+        thresholds: { error_rate: { warning: 0.5 } },
+        previous_period: { total_hits: 3086, error_count: 120 },
+        sources: [{ name: 'lab-es', total: 4311, failed: false }],
+        window: { start: '2026-09-20T19:00:00Z', end: '2026-09-20T20:00:00Z' },
+        panels: [{ ...PANEL, buckets: [{ key: '10:00', count: 7 }] }],
+    };
+    const stale = makeDashboard(jsonResponse(GOOD, true, 200));
+    {
+        const dashboard = new stale.AsyncDashboard('d1');
+        await settle(dashboard);
+        await dashboard.load();
+        await settle(dashboard);
+        const badge = stale.document.getElementById('statusBadge');
+        check('the control: a good load paints the badge', () =>
+            assert(!badge.classList.contains('d-none') && badge.textContent,
+                   `the badge read "${badge.textContent}"`));
+
+        stale.fetch = jsonResponse({ error: 'the log source is unreachable' },
+                                   false, 502);
+        await dashboard.load();
+        await settle(dashboard);
+    }
+    check('a failed reload takes the last answer down with it', () => {
+        const badge = stale.document.getElementById('statusBadge');
+        assert(badge.classList.contains('d-none'),
+               `"Within thresholds" survived the outage: "${badge.textContent}"`);
+        const rate = stale.document.getElementById('errorRate').textContent;
+        assert(rate === '—' || rate === '-' || rate === '',
+               `errorRate still read "${rate}"`);
+        for (const id of ['totalHitsDelta', 'errorCountDelta', 'baselineNote',
+                          'sourcesNote', 'resolvedWindow']) {
+            const text = stale.document.getElementById(id).textContent.trim();
+            assert(text === '' || text === '\u00a0',
+                   `${id} still read "${text}"`);
+        }
     });
 
     // The REASON, which never reached the reader. showLoadError handed the

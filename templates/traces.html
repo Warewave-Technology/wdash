@@ -154,6 +154,18 @@
             const res = await fetch('/api/traces/services?' + serviceParams.toString());
             const data = await res.json();
 
+            // The badge FIRST, and on every road out of here. It was
+            // written only on a non-empty answer, and there are three ways
+            // past that line — a refused request, an empty window, and an
+            // answer carrying no `total_spans` at all (the role with no
+            // trace stores) — so it kept the previous window's number.
+            // Measured through the page's own change handlers: 12,845 spans
+            // still on the badge beside "No spans in this time range."
+            el('spanTotal').textContent =
+                typeof data.total_spans === 'number'
+                    ? data.total_spans.toLocaleString() + ' spans'
+                    : '';
+
             if (!res.ok) {
                 box.innerHTML = failed(data, 'Unable to load services.');
                 return;
@@ -163,7 +175,6 @@
                 return;
             }
 
-            el('spanTotal').textContent = data.total_spans.toLocaleString() + ' spans';
             const max = Math.max(...data.services.map(s => s.span_count));
 
             box.innerHTML = missing(data) + '<table class="table table-hover table-dense mb-0">' +

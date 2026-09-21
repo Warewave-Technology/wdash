@@ -21,9 +21,26 @@ const { JSDOM } = require('jsdom');
 const ROOT = path.join(__dirname, '..');
 const failures = [];
 
+//: Checks whose body returned a promise. Awaited before the summary.
+//:
+//: `check` used to call `fn()` inside a try/catch and nothing else, so an
+//: `async` body logged "ok" the moment it suspended and a rejection landed
+//: nowhere: an async check passed whatever it asserted. Found by writing
+//: one.
+const pending = [];
+
 function check(name, fn) {
     try {
-        fn();
+        const answer = fn();
+        if (answer && typeof answer.then === 'function') {
+            pending.push(answer.then(
+                () => console.log(`  ok    ${name}`),
+                (e) => {
+                    failures.push(`${name}: ${e.message}`);
+                    console.log(`  FAIL  ${name}\n        ${e.message}`);
+                }));
+            return;
+        }
         console.log(`  ok    ${name}`);
     } catch (e) {
         failures.push(`${name}: ${e.message}`);
@@ -65,6 +82,11 @@ function makeWindow(fetchImpl) {
         <div id="searchResults"></div>
         <div class="card d-none" id="sourceBreakdownCard">
           <div id="sourceBreakdownContent"></div>
+        </div>
+        <div id="searchWarnings" class="d-none"></div>
+        <div class="card d-none" id="histogramCard">
+          <small id="histogramSummary"></small>
+          <canvas id="logHistogram"></canvas>
         </div>
         <div id="fieldStatsContent"></div>
         <div class="modal fade" id="logModal">
@@ -412,6 +434,73 @@ check('a role that may not see the index names is told how many', () => {
     search.showError('none', 'no_accessible_containers', { total_containers: 3 });
     const text = w.document.getElementById('errorContent').textContent;
     assert(text.includes('3 exist that your role cannot read'), text);
+});
+
+// A refused search left the PREVIOUS search's chart, source breakdown,
+// warnings and field statistics on screen — three ids were cleared and four
+// were not. `clearSearch` has swept all seven since it was written and
+// carries the sentence naming this fault; `showError` now calls the same
+// method rather than keeping a second list of ids.
+check('a refused search takes the last one off the screen with it', () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    search.charts = {};
+
+    // What a good search leaves behind.
+    const card = w.document.getElementById('sourceBreakdownCard');
+    const warnings = w.document.getElementById('searchWarnings');
+    const stats = w.document.getElementById('fieldStatsContent');
+    card.classList.remove('d-none');
+    warnings.classList.remove('d-none');
+    warnings.innerHTML = 'lab-loki: did not answer';
+    stats.innerHTML = '<b>Service</b> payments 4,311';
+
+    search.showError('that query cannot be parsed', 'invalid_query', {});
+
+    assert(card.classList.contains('d-none'),
+           'the source breakdown of a search that never ran stayed up');
+    assert(warnings.classList.contains('d-none') && warnings.innerHTML === '',
+           `warnings left on screen: ${warnings.innerHTML}`);
+    assert(/Run a search to see field stats/.test(stats.innerHTML),
+           `field statistics left on screen: ${stats.innerHTML}`);
+});
+
+// `_loadSavedSearches` read the body and never the status. An error body has
+// no `.length`, undefined is falsy, so a 503 that could not read the file
+// and a 403 the role may not have both drew "No saved searches yet" — and
+// the sentence the server composes for exactly this reached nobody.
+check('saved searches that could not be read do not read as none', async () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    w.fetch = async () => ({
+        ok: false,
+        status: 503,
+        json: async () => ({
+            error: 'Your saved searches could not be read, so none can be '
+                   + 'listed. Check the server logs.',
+            error_type: 'saved_searches_unavailable',
+        }),
+    });
+    global.fetch = w.fetch;
+
+    await search._loadSavedSearches();
+
+    const list = w.document.getElementById('savedSearchList');
+    assert(!/No saved searches yet/.test(list.textContent),
+           `an outage read as an empty list: ${list.textContent}`);
+    assert(/could not be read/.test(list.textContent), list.textContent);
+});
+
+check('an empty list still reads as an empty list', async () => {
+    const w = makeWindow();
+    const search = Object.create(w.__LogSearch.prototype);
+    w.fetch = async () => ({ ok: true, status: 200, json: async () => [] });
+    global.fetch = w.fetch;
+
+    await search._loadSavedSearches();
+
+    const list = w.document.getElementById('savedSearchList');
+    assert(/No saved searches yet/.test(list.textContent), list.textContent);
 });
 
 check("Elasticsearch's numbers are shown as numbers", () => {
@@ -1142,6 +1231,8 @@ check('Clear takes away the chart, the sources, the warnings and the stats', () 
                                     'utf8'));
         check('a page with no token leaves fetch alone', () => assert(bare.w.fetch === before));
     }
+
+    await Promise.all(pending);
 
     console.log(failures.length
         ? `\n${failures.length} failure(s)`

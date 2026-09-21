@@ -145,6 +145,68 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
           quiet.document.getElementById('traceList').textContent
               .includes('No traces match.'));
 
+    // The span counter was written on the last line of the happy path, so
+    // the three ways out above it — a refused request, an empty window, and
+    // an answer with no `total_spans` at all — all left the PREVIOUS
+    // window's number on the badge. Measured through the page's own change
+    // handlers: "12,845 spans" beside "No spans in this time range."
+    const busy = build({ services: [{ name: 'api', span_count: 12845,
+                                      error_count: 0, error_rate: 0 }],
+                         total_spans: 12845 },
+                       { traces: [] });
+    await settle();
+    check('the control: a busy window fills the span counter',
+          busy.document.getElementById('spanTotal').textContent
+              .includes('12,845'),
+          busy.document.getElementById('spanTotal').textContent);
+
+    for (const [name, services] of [
+            ['an empty window', { services: [], total_spans: 0 }],
+            ['a source the role reaches nothing in',
+             { services: [], error_type: 'no_accessible_trace_stores',
+               suggestion: explained }],
+            ['a refused request', { status: 503, body: { services: [] } }]]) {
+        const w = build(services, { traces: [] });
+        // The counter starts where a real page's does: filled by the window
+        // before this one.
+        w.document.getElementById('spanTotal').textContent = '12,845 spans';
+        w.document.getElementById('timeRange').dispatchEvent(
+            new w.Event('change'));
+        await settle();
+        const said = w.document.getElementById('spanTotal').textContent;
+        check(`${name} leaves no span count behind`, !said.includes('12,845'),
+              `the badge still read "${said}"`);
+    }
+
+    // The same fault on the trace DETAIL page, where the counter is "N of
+    // M" beside the correlated logs: written on the last line of the happy
+    // path, so a refused search and an empty one both left the previous
+    // trace's number beside a box saying there are no records.
+    {
+        const filled = buildDetail(TRACE, { records: [{
+            timestamp: '2026-09-11T10:00:00.000Z', severity: 'INFO',
+            service: 'api-gateway', body: 'one' }], total: 1, partial: false,
+            warnings: [] });
+        await settle();
+        check('the control: a trace with logs fills the log counter',
+              text(filled, 'logCount').includes('1 of 1'),
+              text(filled, 'logCount'));
+
+        for (const [name, logs] of [
+                ['an empty log answer', { records: [], total: 0,
+                                          partial: false, warnings: [] }],
+                ['a refused log search',
+                 { status: 503, body: { records: [], total: 0,
+                                        error_type: 'log_source_error' } }]]) {
+            const w = buildDetail(TRACE, logs);
+            w.document.getElementById('logCount').textContent = '42 of 9,001';
+            await settle();
+            check(`${name} leaves no log count behind`,
+                  !text(w, 'logCount').includes('9,001'),
+                  `the badge still read "${text(w, 'logCount')}"`);
+        }
+    }
+
     const hostile = build({ services: [] },
                           { traces: [], suggestion: '<img src=x id=planted>' });
     await settle();
