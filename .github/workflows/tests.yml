@@ -161,7 +161,13 @@ jobs:
       # cluster address from the environment — sources are stored — and the
       # integration tests in tests/test_hub.py, and the seeder, read this.
       WDASH_LAB_URL: http://localhost:9200
-      WDASH_REQUIRE_LAB: "1"
+      # The backends this job actually starts, named. `1` means every one of
+      # them, and this job runs an Elasticsearch and nothing else — so under
+      # `1` it promised a Loki and a VictoriaLogs it never started, and the
+      # modules that need those turned their skip into a failure. Nine
+      # errors on the first CI run this repository ever had, all of them
+      # about a backend the job had never claimed.
+      WDASH_REQUIRE_LAB: es-logs,es-traces
 
     steps:
       - uses: actions/checkout@v4

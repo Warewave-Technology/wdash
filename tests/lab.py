@@ -20,9 +20,13 @@ An adapter returning nothing while the backend holds records is the failure
 these tests exist to catch, and it must not be able to hide behind the same
 sentence that means "go and seed the lab".
 
-`WDASH_REQUIRE_LAB=1` turns a skip into a failure, because a job that
-promised a seeded lab must not pass by skipping. `tests/test_lab_is_seeded
-.py` is where that promise is kept.
+`WDASH_REQUIRE_LAB` turns a skip into a failure, because a job that
+promised a seeded lab must not pass by skipping. It names the backends
+that were promised — `es-logs,es-traces` for a job that starts an
+Elasticsearch and nothing else, `1` for one that starts them all — because
+the all-or-nothing form made every job promise every backend, and a job
+fails on a backend it never claimed to run. `tests/test_lab_data.py` is
+where the promise is kept.
 """
 
 import datetime as dt
@@ -52,8 +56,6 @@ TEMPO = _url("WDASH_LAB_TEMPO", "WDASH_LAB_TEMPO_URL",
 JAEGER = _url("WDASH_LAB_JAEGER", "WDASH_LAB_JAEGER_URL",
               default="http://localhost:16686")
 
-REQUIRED = os.environ.get("WDASH_REQUIRE_LAB") == "1"
-
 #: name -> (address, the `./lab.sh seed` target behind it)
 BACKENDS = {
     "es-logs": (ES, "elasticsearch"),
@@ -63,6 +65,59 @@ BACKENDS = {
     "tempo": (TEMPO, "tempo"),
     "jaeger": (JAEGER, "jaeger"),
 }
+
+
+def parse_promise(raw):
+    """(promised backends, names that are not backends at all).
+
+    `WDASH_REQUIRE_LAB` was all-or-nothing, and that was survivable while
+    the only job setting it started every backend. The live-schema job
+    starts an Elasticsearch and nothing else, so `=1` had it promising a
+    Loki and a VictoriaLogs it never ran — and the modules that need those
+    turned their skip into a failure and took the job red. Measured on the
+    first CI run this repository ever had, 2026-09-21: nine errors, every
+    one of them "WDASH_REQUIRE_LAB=1 but loki at http://localhost:3100 is
+    not there", on a job that had never claimed to run a Loki.
+
+    So a job says WHICH backends it promised. `1` and `all` still mean
+    every one of them, for a job that really does start them all.
+
+    An unknown name is carried rather than raised: this module is imported
+    by most of the suite, and a typo in a workflow should fail one named
+    test — `ThePromisedLabIsSeededTest` — instead of making every module in
+    the run uninterpretable.
+
+    Takes the value rather than reading the environment, because
+    `tests/test_ci.py` asks the same question of the workflow FILE — and a
+    second reading of one variable is how two readings come to disagree.
+    """
+    raw = (raw or "").strip()
+    if not raw or raw.lower() in ("0", "no", "false", "off"):
+        return frozenset(), frozenset()
+    if raw.lower() in ("1", "all"):
+        return frozenset(BACKENDS), frozenset()
+    named = frozenset(part.strip() for part in raw.split(",") if part.strip())
+    return named & frozenset(BACKENDS), named - frozenset(BACKENDS)
+
+
+PROMISED, PROMISED_BUT_UNKNOWN = parse_promise(
+    os.environ.get("WDASH_REQUIRE_LAB"))
+
+#: Whether ANY lab was promised. What the three readers used to each keep
+#: their own copy of, and the question a "did a job promise this" check is
+#: no longer allowed to ask on its own — see `promised()`.
+REQUIRED = bool(PROMISED or PROMISED_BUT_UNKNOWN)
+
+
+def promised(kind):
+    """Did the job running this promise THIS backend?
+
+    The question every guard should have been asking. "Some lab was
+    promised" is not a reason to fail on a backend nobody said they would
+    start.
+    """
+    return kind in PROMISED
+
 
 TIMEOUT = 5
 

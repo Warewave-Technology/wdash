@@ -727,7 +727,13 @@ LAB_URL = os.environ.get("WDASH_LAB_URL") or "http://localhost:9200"
 
 #: Set by CI. A job that exists to run these tests and reports success
 #: because it skipped them is worse than no job.
-LAB_REQUIRED = os.environ.get("WDASH_REQUIRE_LAB") == "1"
+#:
+#: Asked of the backend these tests need — the Elasticsearch — rather than
+#: of the flag: `WDASH_REQUIRE_LAB` names which backends a job promised, and
+#: "some lab was promised" is not a claim about this one.
+from tests import lab  # noqa: E402
+
+LAB_REQUIRED = lab.promised("es-logs")
 
 
 def _lab_client():

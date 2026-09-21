@@ -152,19 +152,30 @@ class ThePromisedLabIsSeededTest(unittest.TestCase):
         # this class fails rather than skips.
         if not lab.REQUIRED:
             self.skipTest("only where a job promised a lab: "
-                          "WDASH_REQUIRE_LAB=1")
+                          "WDASH_REQUIRE_LAB names the backends")
 
-    def test_every_backend_that_is_up_holds_something_in_the_window(self):
-        """The ones that are RUNNING. Which backends a job starts is the
-        job's shape — the live-schema job runs an Elasticsearch and nothing
-        else — and a module that needs one that is absent fails on its own
-        guard. What this refuses is the other thing: a backend that is up,
-        answering, and empty, which every test behind it would read as an
-        adapter that has stopped working."""
-        running = [kind for kind in lab.BACKENDS
-                   if lab.volume(kind) is not None]
-        self.assertTrue(running, "WDASH_REQUIRE_LAB=1 and no backend is up")
-        reason = lab.why_not(*running, hours=24)
+    def test_a_promised_name_is_a_backend_that_exists(self):
+        """A typo in a workflow otherwise promises nothing, silently, on the
+        one variable whose whole job is to stop a promise being kept by
+        skipping. Carried to here rather than raised at import: this module
+        is imported by most of the suite."""
+        self.assertEqual(sorted(lab.PROMISED_BUT_UNKNOWN), [],
+                         f"WDASH_REQUIRE_LAB names something that is not a "
+                         f"lab backend; the backends are "
+                         f"{sorted(lab.BACKENDS)}")
+
+    def test_every_promised_backend_is_up_and_holds_something(self):
+        """The promise, asked of exactly what was promised.
+
+        It used to ask about whatever happened to be RUNNING, which is a
+        different claim and a weaker one: a job that started an
+        Elasticsearch and promised the world passed this as long as the
+        Elasticsearch was seeded. Now a job names its backends and this
+        holds it to those, so a promised backend that never came up is a
+        failure here rather than nine errors in three other modules.
+        """
+        self.assertTrue(lab.PROMISED, "the promise names no backend")
+        reason = lab.why_not(*sorted(lab.PROMISED), hours=24)
         self.assertIsNone(reason, reason)
 
 
@@ -192,21 +203,43 @@ class TheModulesThatStandOnItTest(unittest.TestCase):
                 "tests.test_dashboard_number_and_alerts": 2}
 
     def against_an_empty_lab(self, *names):
-        """Those modules, in a process of their own, with every backend
-        answering zero. Not in this one: their guards are module-level, so
-        importing them here would fix the answer for the rest of the run."""
+        """Those modules, in a process of their own, with every backend UP
+        and answering zero. Not in this one: their guards are module-level,
+        so importing them here would fix the answer for the rest of the run.
+
+        Both halves are patched, and the missing half is what took the first
+        CI run red. `_count` alone only reaches the empty branch on a
+        machine where the lab is actually running: `volume` asks `reachable`
+        first and returns None — "not running" — before `_count` is ever
+        called. On this developer's machine the lab is always up, so the
+        simulation matched its name; on a runner with nothing listening it
+        produced the OTHER state, and the assertion below about `./lab.sh
+        seed` met a sentence about `./lab.sh up`. The state that is not
+        simulated here is the one `WhatItAnswersWhenNothingIsThereTest`
+        above covers, against a closed port.
+        """
         import subprocess
         code = (
             "import sys, unittest; sys.path.insert(0, '.');"
             "from unittest import mock; from tests import lab;"
+            "mock.patch.object(lab, 'reachable', return_value=True).start();"
             "p = mock.patch.object(lab, '_count', return_value=0); p.start();"
             f"s = unittest.TestLoader().loadTestsFromNames({list(names)!r});"
             "r = unittest.TextTestRunner(verbosity=0, "
             "stream=open('/dev/null', 'w')).run(s);"
             "print(len(r.failures), len(r.errors), len(r.skipped), "
             "r.skipped[0][1].replace(chr(10), ' ') if r.skipped else '')")
+        # Without the promise, whatever this run was started with. The
+        # question here is what those modules do on a LAPTOP whose lab is
+        # empty — they skip — and under an inherited WDASH_REQUIRE_LAB the
+        # same shortfall is a failure by design, which is the other half of
+        # the guard and `ThePromisedLabIsSeededTest`'s subject, not this
+        # one's. Inherited, it turned this into a failure inside the very
+        # job that promises a lab.
+        environment = dict(os.environ)
+        environment.pop("WDASH_REQUIRE_LAB", None)
         done = subprocess.run([sys.executable, "-c", code], text=True,
-                              capture_output=True,
+                              capture_output=True, env=environment,
                               cwd=os.path.join(os.path.dirname(__file__), ".."),
                               timeout=600)
         self.assertEqual(done.returncode, 0, done.stderr[-2000:])
@@ -263,39 +296,87 @@ class ThePromiseIsKeptLoudlyTest(unittest.TestCase):
     exactly like a laptop with no lab on it.
     """
 
-    def run_promise(self, required, held):
+    def run_promise(self, promised, held):
         suite = unittest.TestLoader().loadTestsFromTestCase(
             ThePromisedLabIsSeededTest)
-        with mock.patch.object(lab, "REQUIRED", required), \
+        with mock.patch.object(lab, "PROMISED", frozenset(promised)), \
+                mock.patch.object(lab, "REQUIRED", bool(promised)), \
                 mock.patch.object(lab, "volume",
                                   side_effect=lambda kind, hours=24: held):
             return unittest.TextTestRunner(
                 verbosity=0, stream=open(os.devnull, "w")).run(suite)
 
     def test_a_promised_lab_that_is_empty_fails(self):
-        result = self.run_promise(required=True, held=0)
+        result = self.run_promise(promised=["loki"], held=0)
         self.assertEqual(len(result.failures), 1, "it skipped, or it passed")
         self.assertIn("./lab.sh seed", result.failures[0][1])
 
     def test_a_promised_lab_that_is_seeded_passes(self):
-        result = self.run_promise(required=True, held=7)
+        result = self.run_promise(promised=["loki"], held=7)
         self.assertEqual((len(result.failures), len(result.errors)), (0, 0))
 
+    def test_a_backend_nobody_promised_is_not_held_to_the_promise(self):
+        """The fault the first CI run found, from the other side. The
+        live-schema job starts an Elasticsearch; under the old flag it
+        promised every backend, and a Loki that was never going to be there
+        failed it. Promising `loki` and nothing else must say nothing about
+        the Elasticsearch, and vice versa."""
+        held = {"loki": 7}
+        suite = unittest.TestLoader().loadTestsFromTestCase(
+            ThePromisedLabIsSeededTest)
+        with mock.patch.object(lab, "PROMISED", frozenset({"loki"})), \
+                mock.patch.object(lab, "REQUIRED", True), \
+                mock.patch.object(
+                    lab, "volume",
+                    side_effect=lambda kind, hours=24: held.get(kind)):
+            result = unittest.TextTestRunner(
+                verbosity=0, stream=open(os.devnull, "w")).run(suite)
+        self.assertEqual((len(result.failures), len(result.errors)), (0, 0),
+                         result.failures + result.errors)
+
     def test_the_promise_is_read_from_the_environment(self):
-        """`WDASH_REQUIRE_LAB=1` is how a job makes the promise. Read at
-        import, so this reloads rather than trusting the constant."""
+        """How a job makes it. Read at import, so this reloads rather than
+        trusting the constant."""
         import importlib
-        with mock.patch.dict(os.environ, {"WDASH_REQUIRE_LAB": "1"}):
-            self.assertTrue(importlib.reload(lab).REQUIRED)
-        with mock.patch.dict(os.environ, {"WDASH_REQUIRE_LAB": "0"}):
-            self.assertFalse(importlib.reload(lab).REQUIRED)
+        for value, expected in (("1", frozenset(lab.BACKENDS)),
+                                ("all", frozenset(lab.BACKENDS)),
+                                ("es-logs,es-traces",
+                                 frozenset({"es-logs", "es-traces"})),
+                                ("loki", frozenset({"loki"})),
+                                ("0", frozenset()),
+                                ("", frozenset())):
+            with self.subTest(value=value), \
+                    mock.patch.dict(os.environ,
+                                    {"WDASH_REQUIRE_LAB": value}):
+                reloaded = importlib.reload(lab)
+                self.assertEqual(reloaded.PROMISED, expected)
+                self.assertEqual(reloaded.REQUIRED, bool(expected))
+        importlib.reload(lab)
+
+    def test_a_name_that_is_not_a_backend_is_carried_not_swallowed(self):
+        """It has to reach a test. Dropped quietly, a workflow that means
+        `es-logs` and says `es_logs` promises nothing and reports
+        success."""
+        import importlib
+        with mock.patch.dict(os.environ,
+                             {"WDASH_REQUIRE_LAB": "es_logs,loki"}):
+            reloaded = importlib.reload(lab)
+            self.assertEqual(reloaded.PROMISED, frozenset({"loki"}))
+            self.assertEqual(reloaded.PROMISED_BUT_UNKNOWN,
+                             frozenset({"es_logs"}))
+            self.assertTrue(reloaded.REQUIRED)
         importlib.reload(lab)
 
     def test_without_the_promise_it_is_a_skip(self):
-        """On a laptop with no lab, this file says nothing."""
-        result = self.run_promise(required=False, held=0)
-        self.assertEqual(len(result.skipped), 1)
-        self.assertEqual(len(result.failures), 0)
+        """On a laptop with no lab, this file says nothing.
+
+        Every test in that class, counted against how many it has rather
+        than against a number written here: pinning one would make adding a
+        check to it somebody else's failure.
+        """
+        result = self.run_promise(promised=[], held=0)
+        self.assertEqual(len(result.skipped), result.testsRun)
+        self.assertEqual((len(result.failures), len(result.errors)), (0, 0))
 
 
 if __name__ == "__main__":

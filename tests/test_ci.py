@@ -105,6 +105,17 @@ class JobsStillDoWhatTheyAreForTest(unittest.TestCase):
         return "\n".join(step.get("run", "")
                          for step in self.jobs[job]["steps"])
 
+    def _promised(self, job):
+        """The lab backends `job` claims, as a set of names.
+
+        Parsed the way `tests/lab.py` parses it and not by hand — a second
+        reading of the same variable is how the two come to disagree.
+        """
+        from tests import lab
+        known, unknown = lab.parse_promise(
+            (self.jobs[job].get("env") or {}).get("WDASH_REQUIRE_LAB"))
+        return set(known) | set(unknown)
+
     def test_the_suite_job_runs_the_suite(self):
         self.assertIn("unittest discover", self._steps("suite"))
 
@@ -147,8 +158,38 @@ class JobsStillDoWhatTheyAreForTest(unittest.TestCase):
         """Without this the job runs, skips all six tests for want of a
         cluster, and reports success — which is the exact shape of the fault
         it exists to catch."""
-        self.assertEqual(
-            self.jobs["live-schema"]["env"].get("WDASH_REQUIRE_LAB"), "1")
+        from tests import lab
+        promised = self._promised("live-schema")
+        self.assertTrue(promised, "the live job promises no backend")
+        self.assertEqual(sorted(promised - set(lab.BACKENDS)), [],
+                         f"it names something that is not a lab backend; "
+                         f"they are {sorted(lab.BACKENDS)}")
+
+    def test_no_job_promises_a_backend_it_does_not_start(self):
+        """The first CI run this repository ever had went red on this.
+
+        `WDASH_REQUIRE_LAB: "1"` meant every backend, and the live-schema
+        job starts an Elasticsearch and nothing else — so it promised a Loki
+        and a VictoriaLogs, and the three modules that need those failed
+        instead of skipping. Nine errors, none of them about the job's own
+        subject.
+
+        Checked against the `services:` the job declares, in the same file,
+        so the promise and the containers cannot drift apart again.
+        """
+        from tests import lab
+        for name, job in self.jobs.items():
+            promised = self._promised(name)
+            if not promised:
+                continue
+            started = set((job.get("services") or {}).keys())
+            wanted = {lab.BACKENDS[kind][1] for kind in promised
+                      if kind in lab.BACKENDS}
+            with self.subTest(job=name):
+                self.assertEqual(
+                    sorted(wanted - started), [],
+                    f"{name} promises a backend it does not start; it "
+                    f"starts {sorted(started) or 'nothing'}")
 
     def test_the_live_job_names_the_lab_under_a_variable_of_its_own(self):
         """The application reads no cluster address from the environment —

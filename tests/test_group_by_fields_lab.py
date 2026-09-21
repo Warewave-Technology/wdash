@@ -10,8 +10,10 @@ Loki and VictoriaLogs actually do.
     cd lab && ./lab.sh up          # Elasticsearch, Loki, VictoriaLogs
 
 Read-only: every request here is a query. Skipped when a backend is absent,
-and REQUIRED when `WDASH_REQUIRE_LAB=1` says a job promised one — a test that
-exists to measure this and passes by skipping is the fault it is looking for.
+and REQUIRED when `WDASH_REQUIRE_LAB` says a job promised THAT backend — a
+test that exists to measure this and passes by skipping is the fault it is
+looking for, and a test that fails over a backend nobody promised is the
+same fault pointed the other way.
 """
 
 import datetime as dt
@@ -28,7 +30,6 @@ from wdash.hub import DateHistogram, LogQuery, Scope, Terms, TimeWindow  # noqa:
 ES_URL = os.environ.get("WDASH_LAB_URL") or "http://localhost:9200"
 LOKI_URL = os.environ.get("WDASH_LAB_LOKI_URL") or "http://localhost:3100"
 VL_URL = os.environ.get("WDASH_LAB_VICTORIALOGS_URL") or "http://localhost:9428"
-REQUIRED = os.environ.get("WDASH_REQUIRE_LAB") == "1"
 
 #: The lab's log index. Named rather than wildcarded, so this measures the
 #: mapping the numbers in the comments came from.
@@ -54,11 +55,12 @@ def _query(window=None):
     return LogQuery(window=window or _window(), text="*", limit=10)
 
 
-def _skip_unless(reachable, what):
+def _skip_unless(reachable, kind, what):
     if reachable:
         return
-    if REQUIRED:
-        raise AssertionError(f"WDASH_REQUIRE_LAB=1 but {what} is not there")
+    if lab.promised(kind):
+        raise AssertionError(
+            f"WDASH_REQUIRE_LAB promised {kind} but {what} is not there")
     raise unittest.SkipTest(f"{what} is not running")
 
 
@@ -69,13 +71,18 @@ def _needs(kind, hours=24):
     a lab that is up and a week old answers every query here with nothing,
     which reads as an adapter that has stopped working. Measured on
     2026-09-20, when it did. See tests/lab.py.
+
+    Per BACKEND, not per run: the promise used to be one flag for the whole
+    suite, so a job that started an Elasticsearch failed here over a Loki it
+    had never said it would run.
     """
-    _skip_unless(lab.volume(kind, hours) is not None,
+    _skip_unless(lab.volume(kind, hours) is not None, kind,
                  f"{kind} at {lab.BACKENDS[kind][0]}")
     reason = lab.why_not(kind, hours=hours)
     if reason:
-        if REQUIRED:
-            raise AssertionError(f"WDASH_REQUIRE_LAB=1 but {reason}")
+        if lab.promised(kind):
+            raise AssertionError(
+                f"WDASH_REQUIRE_LAB promised {kind} but {reason}")
         raise unittest.SkipTest(reason)
 
 
