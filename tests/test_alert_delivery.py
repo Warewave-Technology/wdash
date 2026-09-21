@@ -378,6 +378,94 @@ class RunnerTest(AlertingTestCase):
         self.assertEqual(sorted(transitions), ["firing", "resolved"])
 
 
+class AnOutageThatLosesItsProbeTest(AlertingTestCase):
+    """down -> unknown -> down -> up, which is how an outage actually goes.
+
+    An agent dies, or a check goes overdue, in the middle of one. Measured
+    before this, against a real runner and a real receiver:
+
+        pass 1  firing   | Payments API | could not connect: connection refused
+        pass 2  resolved | Payments API | agent 'dublin' has not reported since 11:38
+        pass 3  firing   | Payments API | could not connect: connection refused
+
+    One outage, three notifications, and the middle one told Alertmanager
+    the incident was over while the target was still down. `alert_state` was
+    left at ok/0, so the failure count that makes a threshold mean "three
+    times in a row" restarted as well.
+
+    Five minutes is all it takes: `AGENT_STALE_AFTER`, an overdue check from
+    a healthy agent, a token rotation.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.rule = self.store.rules.create(
+            name="API down", kind="monitor_down", threshold=1,
+            channel_id=self._channel()["id"])
+        self.monitor = Monitor(id="m1", name="Payments API", status=DOWN,
+                               error="could not connect: connection refused")
+
+    def pass_(self, status, error=None):
+        self.monitor.status = status
+        if error is not None:
+            self.monitor.error = error
+        return AlertRunner(self.store, self._hub(self.monitor)).evaluate_once()
+
+    def stored(self):
+        return self.store.alert_state.load(self.rule["id"]).get("m1")
+
+    def transitions(self):
+        return [row["transition"]
+                for row in reversed(self.store.alert_history.recent())]
+
+    def test_the_probe_going_quiet_sends_nothing(self):
+        self.assertEqual(self.pass_(DOWN), 1)
+        self.assertEqual(self.pass_(UNKNOWN, "agent 'dublin' has not reported"),
+                         0, "a recovery was announced mid-outage")
+        self.assertEqual(self.transitions(), ["firing"])
+
+    def test_the_alert_is_still_firing_afterwards(self):
+        """Not only unnotified — still recorded as broken, with the detail
+        the alert is carrying and the failure count it was keeping."""
+        self.pass_(DOWN)
+        self.pass_(UNKNOWN, "agent 'dublin' has not reported")
+        held = self.stored()
+        self.assertEqual(held.state, "firing")
+        self.assertEqual(held.failures, 1)
+        self.assertEqual(held.detail, "could not connect: connection refused")
+
+    def test_the_whole_outage_is_two_notifications(self):
+        self.pass_(DOWN)
+        self.pass_(UNKNOWN, "agent 'dublin' has not reported")
+        self.assertEqual(
+            self.pass_(DOWN, "could not connect: connection refused"), 0,
+            "the probe coming back re-fired an alert that never stopped")
+        self.assertEqual(self.pass_(UP, ""), 1)
+        self.assertEqual(self.transitions(), ["firing", "resolved"])
+
+    def test_a_recovery_during_the_silence_is_still_a_recovery(self):
+        """Holding is not latching. The next real reading decides."""
+        self.pass_(DOWN)
+        self.pass_(UNKNOWN, "agent 'dublin' has not reported")
+        self.assertEqual(self.pass_(UP, ""), 1)
+        self.assertEqual(self.transitions(), ["firing", "resolved"])
+
+    def test_a_monitor_that_was_never_firing_is_not_woken_by_it(self):
+        """The other direction, which has been right since the rule was
+        written: `unknown` does not fire."""
+        self.assertEqual(self.pass_(UNKNOWN, "agent 'dublin' is quiet"), 0)
+        self.assertIsNone(self.stored())
+
+    def test_a_monitor_deleted_while_down_is_still_resolved(self):
+        """The disappearance sweep is a different question and must keep
+        working: a rule complaining about a monitor nobody can delete the
+        complaint for is one nobody can silence."""
+        self.assertEqual(self.pass_(DOWN), 1)
+        runner = AlertRunner(self.store, self._hub())
+        self.assertEqual(runner.evaluate_once(), 1)
+        self.assertEqual(self.transitions(), ["firing", "resolved"])
+
+
 class ObservationTest(AlertingTestCase):
     """What each rule kind counts as bad."""
 
@@ -395,6 +483,56 @@ class ObservationTest(AlertingTestCase):
             Monitor(id="c", status=UP))
         self.assertEqual({o.subject: o.bad for o in observations},
                          {"a": True, "b": False, "c": False})
+
+    def test_an_unknown_monitor_carries_no_reading_at_all(self):
+        """`bad=False` was the whole of it, and `bad=False` means "looked at
+        and fine" to the state machine — which resolved it."""
+        observations = self._observe(
+            {"kind": "monitor_down"},
+            Monitor(id="a", status=DOWN), Monitor(id="b", status=UNKNOWN),
+            Monitor(id="c", status=UP))
+        self.assertEqual({o.subject: o.known for o in observations},
+                         {"a": True, "b": False, "c": True})
+
+    def test_a_status_this_version_cannot_read_is_not_good_news(self):
+        """Same reasoning as the unknown RULE KIND: a word we cannot read is
+        not evidence that a thing is well."""
+        observations = self._observe({"kind": "monitor_down"},
+                                     Monitor(id="a", status="degraded"))
+        self.assertEqual([(o.bad, o.known) for o in observations],
+                         [(False, False)])
+
+    def test_a_live_probe_speaks_over_a_dead_one_whichever_is_listed_first(self):
+        """One monitor, two agents: Dublin quiet, Frankfurt saying `up`.
+
+        The row that survived used to be decided by list order — the
+        comparison was "is this row down and the kept one not" — so the
+        monitor was held or resolved depending on which agent the source
+        listed first. Somebody looked and the answer was good.
+        """
+        for order in ((UNKNOWN, UP), (UP, UNKNOWN)):
+            with self.subTest(order=order):
+                observations = self._observe(
+                    {"kind": "monitor_down"},
+                    Monitor(id="m1", name="API", status=order[0],
+                            tags=("agent=dublin",)),
+                    Monitor(id="m1", name="API", status=order[1],
+                            tags=("agent=frankfurt",)))
+                self.assertEqual([(o.bad, o.known) for o in observations],
+                                 [(False, True)])
+
+    def test_one_probe_seeing_a_failure_still_counts_over_a_quiet_one(self):
+        """`down` stays the worst of the three: the rule that one location
+        seeing a failure is a failure is not weakened by adding a third
+        word to the vocabulary."""
+        for order in ((UNKNOWN, DOWN), (DOWN, UNKNOWN)):
+            with self.subTest(order=order):
+                observations = self._observe(
+                    {"kind": "monitor_down"},
+                    Monitor(id="m1", name="API", status=order[0], error="a"),
+                    Monitor(id="m1", name="API", status=order[1], error="b"))
+                self.assertEqual([(o.bad, o.known) for o in observations],
+                                 [(True, True)])
 
     def test_a_certificate_rule_only_sees_checks_that_have_one(self):
         now = datetime.now(timezone.utc)

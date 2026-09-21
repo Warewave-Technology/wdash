@@ -82,6 +82,12 @@ The two things it had to get right, and did:
   Paging somebody because an agent restarted is how a monitoring system gets
   muted, and a muted one is worse than none.
 
+  That sentence was only half done for most of this line's life: `unknown`
+  did not fire, and it RESOLVED — so a probe dying in the middle of an
+  outage sent "resolved" while the target was still down. It is neither
+  now. A subject with no reading holds everything stored about it and
+  produces no notification in either direction.
+
 ### Browser checks
 
 Multi-step journeys through a real browser: sign in, add to basket, check out.

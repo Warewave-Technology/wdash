@@ -45,19 +45,32 @@ class Observation:
     down", "this agent has gone quiet", "this certificate expires inside the
     window". The evaluator does not re-derive it, because what counts as bad
     differs per rule kind and the state machine should not know.
+
+    `known` is whether there is a judgement to make at all. `bad=False` says
+    the subject was looked at and was fine; `known=False` says nobody looked,
+    which is a third thing and used to be spelled as the second. What that
+    cost is written out at the top of `_one`.
+
+    This is `Observed.complete` one subject at a time. That flag says the
+    LISTING could not be read; this says one row in a listing that was read
+    whole carries no reading. Both exist because a monitoring system's worst
+    failure is announcing that something is fine when what happened is that
+    it stopped being watched.
     """
 
-    __slots__ = ("subject", "bad", "detail", "label")
+    __slots__ = ("subject", "bad", "detail", "label", "known")
 
-    def __init__(self, subject, bad, detail="", label=""):
+    def __init__(self, subject, bad, detail="", label="", known=True):
         self.subject = subject
         self.bad = bool(bad)
         self.detail = detail
         #: Human name, for the message. The subject is an id.
         self.label = label or subject
+        self.known = bool(known)
 
     def __repr__(self):
-        return f"<Observation {self.subject} bad={self.bad}>"
+        return (f"<Observation {self.subject} bad={self.bad}>" if self.known
+                else f"<Observation {self.subject} no reading>")
 
 
 class State:
@@ -129,6 +142,16 @@ def evaluate(rule, previous, observations, now, silenced=(), complete=True):
 
     decisions = []
     for observation in observations:
+        if not observation.known:
+            # No reading for this subject. No decision, so the caller writes
+            # nothing and sends nothing and everything stored about it stands
+            # — the state, the failure count and the detail the alert is
+            # carrying. See `_one` for what the alternatives cost.
+            #
+            # It is still an observation, so the subject is in `seen` below
+            # and the disappearance sweep leaves it alone. Dropping it from
+            # the list instead would resolve it by the other road.
+            continue
         before = previous.get(observation.subject) or State()
         decisions.append(_one(observation, before, threshold, repeat, now,
                               observation.subject in silenced
@@ -156,6 +179,25 @@ def evaluate(rule, previous, observations, now, silenced=(), complete=True):
 
 
 def _one(observation, before, threshold, repeat, now, is_silenced):
+    """Only ever called for an observation that HAS a reading.
+
+    `evaluate` filters the rest out above, and this is where the reason is
+    worth writing down, because "not bad" reaching here is how the fault
+    happened: a `monitor_down` alert that was firing saw its monitor go
+    `unknown` — the agent stopped reporting, the check went overdue — and
+    `unknown` is not `down`, so `bad` was False and `_recovered` sent
+    "resolved" to Alertmanager while the target was still down. Measured
+    end to end against a real runner and a real receiver: pass 1
+    `firing | Payments API | could not connect: connection refused`, pass 2
+    `resolved | Payments API | agent 'dublin' has not reported since 11:38`,
+    and with the probe back and the target still down, pass 3 firing again —
+    one outage, three notifications, the middle one a lie.
+
+    The failure count went with it, so the threshold that means "three times
+    in a row" restarted. The other direction has been guarded since the rule
+    was written (`unknown` never FIRES; a restarting probe must not page
+    anybody) and nothing anywhere claimed the asymmetry on purpose.
+    """
     if not observation.bad:
         return _recovered(observation, before, now)
 

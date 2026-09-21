@@ -87,6 +87,18 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **A `monitor_down` alert no longer resolves when the probe goes quiet.**
+  It used to send `resolved` to your channel the moment the monitor went
+  `unknown` — an agent five minutes silent, a check running late, a rotated
+  token — while the target was still down, and then fire again when the
+  probe came back. One outage, three notifications, the middle one wrong.
+  Such a subject now holds: the alert stays firing with the detail and the
+  failure count it had, and nothing is sent until there is a real reading
+  again. `unknown` still does not fire; that half was always right.
+
+  If you have dashboards or runbooks counting alert transitions, they will
+  see fewer of them.
+
 - **A source that holds a credential must verify the certificate.** Over
   `https`, saving a source with a password and certificate checks off is
   refused — including when the password is typed again, which used to be

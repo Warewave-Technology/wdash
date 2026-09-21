@@ -15,6 +15,7 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
+from ..hub.models import DOWN, UP
 from .channels import DeliveryError, payload, send
 from .evaluate import (
     AGENT_SILENT, CERTIFICATE_EXPIRING, MONITOR_DOWN, NOTIFY_RESOLVED,
@@ -78,9 +79,11 @@ def observe(rule, source, store, window, now):
     monitors = [m for m in monitors if _selected(rule, m)]
 
     if kind == MONITOR_DOWN:
-        # `unknown` is NOT down. An agent that stopped reporting says nothing
-        # about the target, and paging somebody because a probe restarted is
-        # how a channel gets muted. That case has its own rule kind.
+        # `unknown` is NOT down, and it is not up either. An agent that
+        # stopped reporting says nothing about the target: paging somebody
+        # because a probe restarted is how a channel gets muted — that case
+        # has its own rule kind — and telling them it RECOVERED because a
+        # probe died is worse, which is what `known=False` is for.
         #
         # One observation per monitor: the worst of its rows. The agents'
         # store lists a monitor once per agent, and with both rows keyed on
@@ -88,11 +91,11 @@ def observe(rule, source, store, window, now):
         # from Dublin and up from Frankfurt counted no failure at all.
         worst = {}
         for m in monitors:
-            if m.id not in worst or (m.status == "down"
-                                     and worst[m.id].status != "down"):
+            if m.id not in worst or _rank(m) < _rank(worst[m.id]):
                 worst[m.id] = m
-        return Observed([Observation(m.id, m.status == "down",
-                                     m.error or "the check failed", m.name)
+        return Observed([Observation(m.id, m.status == DOWN,
+                                     m.error or "the check failed", m.name,
+                                     known=m.status in (UP, DOWN))
                          for m in worst.values()], complete, warnings)
 
     if kind == CERTIFICATE_EXPIRING:
@@ -128,6 +131,27 @@ def observe(rule, source, store, window, now):
     # nothing is not "everything this rule watched has recovered".
     return Observed([], False, (f"{kind!r} is not a rule kind this version "
                                 f"knows how to evaluate",))
+
+
+def _rank(monitor):
+    """Which of a monitor's rows decides its verdict. Lowest wins.
+
+    `down` over `up`, which is the rule this has always had: one location
+    seeing a failure is a failure, and averaging it away with a location that
+    is fine is how an outage in one region goes unreported.
+
+    `up` over `unknown` is the part that was decided by list order. The
+    comparison was "is this row down and the kept one not", so a monitor
+    whose Dublin probe had gone quiet and whose Frankfurt probe said `up`
+    resolved or held depending on which row the source listed first —
+    `unknown` first held it, `up` first resolved it. Somebody looked and the
+    answer was good; a dead probe beside a live one must not speak for it.
+
+    Anything this version does not recognise ranks with `unknown`, for the
+    same reason the unknown RULE KIND observes nothing: a word we cannot
+    read is not evidence that a thing is well.
+    """
+    return {UP: 1, DOWN: 0}.get(monitor.status, 2)
 
 
 def _agents(store, now):
