@@ -87,6 +87,19 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **An alert channel's stored host no longer carries its credential.** A
+  webhook saved as `https://user:password@hooks.example.com/...` kept the
+  whole `user:password@host` in the clear part of the row, so the password
+  was on disk unencrypted, on the configuration page under the words "the
+  full URL is encrypted and not shown", in the `channel added` audit row and
+  in the log. The upgrade repairs every stored channel — the complete URL
+  was already in the sealed column, so nothing changes about where alerts go
+  — and names each one it repaired.
+
+  **Rotate any webhook credential you wrote into a URL.** Taking it off disk
+  does not unsay the screens and audit rows it was already on, and those are
+  not rewritten: an append-only trail is the point of one.
+
 - **`/health` asks monitor backends too, and a source cannot take over one
   of the report's own fields.** It probed the log and trace registries only,
   so an installation whose uptime backend was down answered `healthy` with

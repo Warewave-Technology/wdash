@@ -139,6 +139,38 @@ class ChannelSecrecyTest(AlertingTestCase):
         with self.assertRaises(AlertingError):
             self.store.channels.create("bad", url="hooks.slack.com/x")
 
+    #: A webhook behind basic auth. `urlparse(url).netloc` carries the
+    #: userinfo, and the netloc was what went into the clear `config` column.
+    AUTHENTICATED = ("https://alerts:s3cr3t-webhook-pw@hooks.example.com"
+                     "/services/T/B/xxTOKENxx")
+
+    def test_a_credential_in_the_url_does_not_become_the_stored_host(self):
+        channel = self.store.channels.create("corp", url=self.AUTHENTICATED)
+        self.assertEqual(channel["host"], "hooks.example.com")
+
+    def test_it_is_not_on_disk_in_clear_either(self):
+        """The same assertion as the path token, for the half that was."""
+        self.store.channels.create("corp", url=self.AUTHENTICATED)
+        with self.store.engine.connect() as connection:
+            row = connection.exec_driver_sql(
+                "SELECT * FROM wdash_alert_channels").fetchone()
+        self.assertNotIn("s3cr3t-webhook-pw", " ".join(str(v) for v in row))
+
+    def test_the_whole_url_is_still_what_gets_sent(self):
+        """Dropping it from `config` must not drop it from the request: the
+        sealed copy is the one `send()` reads, and it is unchanged."""
+        channel = self.store.channels.create("corp", url=self.AUTHENTICATED)
+        self.assertEqual(
+            self.store.channels.credentials(channel["id"])["url"],
+            self.AUTHENTICATED)
+
+    def test_a_bare_user_goes_too(self):
+        """Not a secret, but "where alerts go" is the host, and half a
+        credential on a screen invites somebody to complete it."""
+        channel = self.store.channels.create(
+            "corp", url="https://alerts@hooks.example.com/x")
+        self.assertEqual(channel["host"], "hooks.example.com")
+
 
 class DeliveryTest(AlertingTestCase):
     def _send(self, status=200, body=b"ok"):

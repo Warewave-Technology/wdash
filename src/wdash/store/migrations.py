@@ -535,6 +535,50 @@ def _report_source_urls_holding_a_password(connection):
             }))
 
 
+def _take_the_credential_out_of_the_channel_host(connection):
+    """Version 21: drop `user:password@` from every stored channel host.
+
+    `ChannelRepository.create` used to store `urlparse(url).netloc` verbatim
+    in the clear `config` column, and a netloc carries the userinfo. So a
+    webhook saved as `https://alerts:s3cr3t@hooks.example.com/...` had that
+    password on disk unencrypted, on the configuration page under the words
+    "the full URL is encrypted and not shown", in its `channel added` audit
+    row and in the application log.
+
+    Unlike the source URLs migration 20 can only report, these rows CAN be
+    repaired here, and for a reason worth saying out loud: nothing is lost.
+    The whole URL, credential and all, is already in the sealed `secrets`
+    column — `config.host` was only ever a duplicate for the screen to read,
+    and `send()` uses the sealed copy. So this needs no encryption key,
+    which migrations do not have, and no channel changes where it delivers.
+
+    The audit rows and log lines already written are not rewritten. An
+    append-only trail is the point of one, and a migration that edited it to
+    hide a disclosure would be a worse thing than the disclosure.
+    """
+    from .alerting import where_it_goes
+    from .schema import alert_channels
+
+    rows = connection.execute(select(
+        alert_channels.c.id, alert_channels.c.name,
+        alert_channels.c.config)).mappings().all()
+
+    for row in rows:
+        config = dict(row["config"] or {})
+        host = config.get("host") or ""
+        if "@" not in host:
+            continue
+        config["host"] = where_it_goes(f"https://{host}")
+        connection.execute(alert_channels.update().where(
+            alert_channels.c.id == row["id"]).values(config=config))
+        logger.warning(
+            "Channel %r had a credential in its stored host; it has been "
+            "reduced to %r. The credential is still in the sealed column, "
+            "so the channel delivers exactly as before — but it was on the "
+            "configuration page and in the audit trail, so rotate it.",
+            row["name"], config["host"])
+
+
 MIGRATIONS = [
     (1, "initial schema", _create_everything),
     (2, "authorization audit trail", _add_audit),
@@ -563,6 +607,8 @@ MIGRATIONS = [
      _give_an_installation_with_no_roles_the_built_in_ones),
     (20, "report the sources whose address carries a password",
      _report_source_urls_holding_a_password),
+    (21, "take the credential out of every stored alert channel host",
+     _take_the_credential_out_of_the_channel_host),
 ]
 
 

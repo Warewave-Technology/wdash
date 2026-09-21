@@ -806,6 +806,93 @@ class SourceUrlsHoldingAPasswordAreReportedTest(unittest.TestCase):
         self.assertIsNone(row["secrets"])
 
 
+class ChannelHostsLoseTheirCredentialTest(unittest.TestCase):
+    """Migration 21, over rows a build before `where_it_goes` wrote.
+
+    `config.host` held `urlparse(url).netloc`, and a netloc carries
+    `user:password@`. Unlike the source URLs migration 20 can only report,
+    these are repaired here because nothing is lost: the whole URL is
+    already in the sealed `secrets` column, `config.host` was a duplicate
+    for the screen to read, and `send()` uses the sealed copy. So it needs
+    no encryption key, and no channel changes where it delivers.
+    """
+
+    def upgrade_from_twenty(self, rows):
+        import logging
+        from datetime import datetime, timezone
+
+        from wdash.store import migrations
+        from wdash.store.schema import alert_channels
+
+        engine = build_engine("sqlite:///:memory:")
+        every = migrations.MIGRATIONS
+        migrations.MIGRATIONS = [step for step in every if step[0] <= 20]
+        try:
+            migrations.migrate(engine)
+        finally:
+            migrations.MIGRATIONS = every
+
+        now = datetime.now(timezone.utc)
+        with engine.begin() as connection:
+            for row in rows:
+                connection.execute(alert_channels.insert().values(
+                    kind="webhook", secrets="sealed", enabled=True,
+                    created_at=now, **row))
+
+        with self.assertLogs("wdash.store.migrations", "INFO") as caught:
+            migrations.migrate(engine)
+        return engine, [record.getMessage() for record in caught.records
+                        if record.levelno >= logging.WARNING]
+
+    WITH = {"id": "one", "name": "corp hook",
+            "config": {"host": "alerts:s3cr3t-webhook-pw@hooks.example.com",
+                       "headers": {}}}
+    WITHOUT = {"id": "two", "name": "plain hook",
+               "config": {"host": "hooks.example.com", "headers": {}}}
+
+    def stored(self, engine, channel_id):
+        from sqlalchemy import select
+
+        from wdash.store.schema import alert_channels
+        with engine.connect() as connection:
+            return connection.execute(select(alert_channels.c.config).where(
+                alert_channels.c.id == channel_id)).scalar()
+
+    def test_the_credential_is_taken_out_of_the_stored_host(self):
+        engine, _ = self.upgrade_from_twenty([self.WITH])
+        self.assertEqual(self.stored(engine, "one")["host"],
+                         "hooks.example.com")
+
+    def test_the_rest_of_the_row_is_untouched(self):
+        """Including `secrets`, which is where the credential belongs and
+        stays — the channel must deliver exactly as it did."""
+        engine, _ = self.upgrade_from_twenty([self.WITH])
+        from sqlalchemy import select
+
+        from wdash.store.schema import alert_channels
+        with engine.connect() as connection:
+            row = connection.execute(select(alert_channels).where(
+                alert_channels.c.id == "one")).mappings().first()
+        self.assertEqual(row["secrets"], "sealed")
+        self.assertEqual(row["name"], "corp hook")
+        self.assertEqual(row["config"]["headers"], {})
+
+    def test_it_says_which_channel_and_tells_you_to_rotate(self):
+        """The value was on a screen and in the audit trail before this ran,
+        so taking it off disk is not the end of it."""
+        _, warnings = self.upgrade_from_twenty([self.WITH])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("corp hook", warnings[0])
+        self.assertIn("rotate", warnings[0])
+        self.assertNotIn("s3cr3t-webhook-pw", warnings[0])
+
+    def test_an_ordinary_channel_is_left_alone_and_unreported(self):
+        engine, warnings = self.upgrade_from_twenty([self.WITHOUT])
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.stored(engine, "two")["host"],
+                         "hooks.example.com")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

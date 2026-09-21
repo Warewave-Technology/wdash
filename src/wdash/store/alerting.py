@@ -34,6 +34,29 @@ def _aware(value):
     return value.replace(tzinfo=timezone.utc)
 
 
+def where_it_goes(url):
+    """The host part of a webhook URL, and nothing that can authenticate.
+
+    `urlparse(url).netloc` INCLUDES `user:password@`, and this is the value
+    stored in the clear `config` column while the URL beside it is sealed.
+    Measured on a channel saved as
+    `https://alerts:s3cr3t@hooks.example.com/services/...`: the password was
+    in the raw `config` column, rendered on the configuration page under the
+    caption "the full URL is encrypted and not shown", written into the
+    `channel added` audit row, and logged at WARNING — four copies of a
+    credential whose fifth copy, the sealed one, is the only one anybody
+    meant to make.
+
+    Nothing is lost by dropping it here. `config.host` is read by the page
+    and by the audit row and by nothing else; `send()` uses the sealed URL,
+    which still carries the whole thing. The username goes with it: it is
+    not a secret, but "where alerts go" is the host, and half a credential
+    on a screen invites somebody to complete it.
+    """
+    from urllib.parse import urlparse
+    return (urlparse(url or "").netloc or "").rsplit("@", 1)[-1]
+
+
 class ChannelRepository:
     def __init__(self, engine, secret_box=None):
         self._engine = engine
@@ -59,12 +82,10 @@ class ChannelRepository:
         # credential — so it is sealed rather than stored beside the name. The
         # host is kept in the clear so a screen can say where alerts go
         # without being able to send one.
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
         row = {
             "id": str(uuid.uuid4()),
             "name": name, "kind": kind,
-            "config": {"host": parsed.netloc, "headers": headers or {}},
+            "config": {"host": where_it_goes(url), "headers": headers or {}},
             "secrets": self._seal({"url": url,
                                    "headers": secret_headers or {}}),
             "enabled": True,
