@@ -1101,7 +1101,21 @@ class NumberBelowTheCutAgainstVictoriaLogsTest(unittest.TestCase):
             self.skipTest(f"{LAB_VL} reports {len(whole)} values of host in "
                           f"this window, too few to cut at {self.CUT}")
 
-        wanted = str(below[0].key)
+        # The RAREST value, and only if it is strictly rarer than the last
+        # one inside the cut. "Ranked below the cut" and "outside the top N"
+        # are different sets when the boundary is a TIE, and which members
+        # of a tie a backend returns for `size=N` is its own business: the
+        # lab's three busiest hosts sit on the same count, so this picked
+        # the third of them and the cut then included it. Measured before
+        # this, against the seeded lab: three failures in three runs, each
+        # naming a host holding exactly the count of the two above it.
+        if below[-1].count >= whole[self.CUT - 1].count:
+            self.skipTest(
+                f"{LAB_VL} reports every value of host at "
+                f"{whole[self.CUT - 1].count} records in this window, so "
+                f"no value is unambiguously outside the top {self.CUT}")
+
+        wanted = str(below[-1].key)
         panel = normalise({"id": "p1", "type": "count", "field": "host",
                            "value": wanted, "title": "That host"})
         with mock.patch.object(routes, "COUNT_VALUES", self.CUT):
@@ -1111,8 +1125,10 @@ class NumberBelowTheCutAgainstVictoriaLogsTest(unittest.TestCase):
 
         self.assertNotIn(
             "number", answered,
-            f"{LAB_VL} holds {below[0].count} records with host {wanted} and "
-            f"the panel answered {answered.get('number')!r}")
+            f"{LAB_VL} holds {below[-1].count} records with host {wanted} — "
+            f"outside a top {self.CUT} whose last member holds "
+            f"{whole[self.CUT - 1].count} — and the panel answered "
+            f"{answered.get('number')!r}")
         self.assertIn(wanted, answered["error"])
 
 
