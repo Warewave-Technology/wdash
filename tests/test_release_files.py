@@ -104,6 +104,93 @@ class TheThirdPartyNoticesTest(unittest.TestCase):
         self.assertEqual(self.text, self.generator().render(),
                          "run: python tools/third_party_notices.py")
 
+    def test_the_version_comes_from_the_pin_and_not_from_the_machine(self):
+        """What made this file a description of whoever last ran it.
+
+        The versions used to be read from installed metadata. Every pin is
+        an exact `==`, so on a machine with everything installed the two
+        agree and nothing showed — and on one missing a package they do
+        not, which is every CI job but the browser one.
+        """
+        tool = self.generator()
+        pins = tool.pins()
+        self.assertTrue(pins, "the generator found nothing pinned")
+        for name, version in pins.items():
+            with self.subTest(package=name):
+                self.assertIsNotNone(
+                    version, f"{name} is installed without an exact pin, so "
+                             f"the notices cannot state a version for it")
+                self.assertRegex(
+                    self.text,
+                    re.compile(rf"^## \S+ {re.escape(version)}$", re.M),
+                    f"no entry at the pinned version of {name}")
+
+    def test_the_pin_wins_over_the_version_that_happens_to_be_installed(self):
+        """Asked where the two differ, because everywhere else they agree.
+
+        Every pin is an exact `==`, so on a healthy machine "the pin" and
+        "what is installed" are the same string and a generator reading
+        either one looks right. The difference only appears where the
+        environment is not what the image installs — which is the case this
+        whole change is about, and the case nothing could see.
+        """
+        from unittest import mock
+
+        from tests import test_dependency_licences as dependencies
+        tool = self.generator()
+        moved = dict(tool.pins(), flask="9.9.9")
+        with mock.patch.object(dependencies, "_pins", return_value=moved):
+            written = tool.render(self.text)
+        self.assertRegex(written, re.compile(r"^## Flask 9\.9\.9$", re.M),
+                         "the generator ignored the pin")
+
+    def test_a_package_that_is_absent_keeps_what_the_file_already_says(self):
+        """Regeneration has to be idempotent on a machine missing one of
+        them, or the file cannot be checked anywhere but here.
+
+        Measured: CI's `suite` job installs requirements.txt and not
+        Playwright — only the browser stage needs it — and regenerating
+        there wrote "Not installed in the environment this was generated
+        from" over an entry that said `playwright 1.62.0`. That is what took
+        the first CI run this repository ever had red.
+        """
+        tool = self.generator()
+        absent = self._without("playwright", tool)
+        self.assertEqual(absent, self.text,
+                         "a machine without Playwright rewrites the file")
+
+    def test_but_not_when_the_pin_has_moved_under_it(self):
+        """The other direction, and the reason this is not just "keep
+        whatever was there". The licence of 1.62.0 is not evidence about
+        9.9.9, so the entry says so instead of carrying the old text
+        forward under a new number."""
+        tool = self.generator()
+        moved = self._without("playwright", tool, pinned="9.9.9")
+        entry = moved.split("## playwright", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("9.9.9", entry)
+        self.assertIn("Regenerate where it is installed", entry)
+        self.assertNotIn("Apache", entry, "it carried the old licence over")
+
+    def _without(self, package, tool, pinned=None):
+        """`render()` as it would run where `package` is not installed."""
+        import importlib.metadata as metadata
+        from unittest import mock
+
+        real = metadata.distribution
+
+        def absent(name):
+            if name.lower() == package:
+                raise metadata.PackageNotFoundError(name)
+            return real(name)
+
+        from tests import test_dependency_licences as dependencies
+        pins = dict(dependencies._pins())
+        if pinned:
+            pins[package] = pinned
+        with mock.patch.object(tool.metadata, "distribution", absent), \
+                mock.patch.object(dependencies, "_pins", return_value=pins):
+            return tool.render(self.text)
+
     def test_its_check_flag_says_no_when_it_should(self):
         """The half RELEASING.md tells somebody to run. Driven against a
         file that is deliberately wrong, because a check nobody has seen

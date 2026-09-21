@@ -36,27 +36,53 @@ REFUSED = ("sspl", "elastic license", "elastic-2", "proprietary",
            "commercial", "business source", "busl")
 
 
-def _requirements():
-    """Everything that ends up installed in a published image.
+def _split(requirement):
+    """("flask", "2.3.3") from `flask==2.3.3`, or a version of None.
+
+    None is "declared without an exact pin", which nothing here does today —
+    every line of requirements.txt is `==` — and which
+    `tools/third_party_notices.py` has to be able to tell apart from a
+    version it simply could not read.
+    """
+    name = re.split(r"[<>=!\[]", requirement)[0].strip().lower()
+    match = re.search(r"==\s*([A-Za-z0-9][A-Za-z0-9._+!-]*)", requirement)
+    return name, (match.group(1) if match else None)
+
+
+def _pins():
+    """Everything installed in a published image: name -> pinned version.
 
     requirements.txt AND the Dockerfile. The browser agent installs Playwright
     in its own stage rather than through requirements.txt — it is 400MB of
     browser that the server has no use for — and reading only the one file let
     a dependency into a published image without passing the rule this whole
     module exists to enforce.
+
+    The VERSION is here, beside the name, because the notices file needs
+    both and reading them from two places is how two places come to
+    disagree. It used to take the name from here and the version from
+    whatever happened to be installed, which made the file a description of
+    the machine that generated it — see `tools/third_party_notices.py`.
     """
-    names = set()
+    pins = {}
     with open(os.path.join(ROOT, "requirements.txt")) as handle:
         for line in handle:
             line = line.split("#")[0].strip()
             if line:
-                names.add(re.split(r"[<>=!\[]", line)[0].strip().lower())
-    names |= _dockerfile_installs()
-    return names
+                name, version = _split(line)
+                pins[name] = version
+    pins.update(_dockerfile_installs())
+    return pins
+
+
+def _requirements():
+    """Just the names, for the rule this module enforces."""
+    return set(_pins())
 
 
 def _dockerfile_installs():
-    """Packages a `pip install` in the Dockerfile names directly.
+    """Packages a `pip install` in the Dockerfile names directly, and the
+    version it pins them to.
 
     Continuations are joined and comments dropped first, then each shell
     command is taken on its own. Without the split on `&&` the first version
@@ -65,13 +91,13 @@ def _dockerfile_installs():
     """
     path = os.path.join(ROOT, "Dockerfile")
     if not os.path.exists(path):
-        return set()
+        return {}
     with open(path) as handle:
         lines = [line for line in handle
                  if not line.lstrip().startswith("#")]
     script = "".join(lines).replace("\\\n", " ")
 
-    names = set()
+    pins = {}
     for line in script.split("\n"):
         for command in line.split("&&"):
             command = command.strip()
@@ -82,8 +108,9 @@ def _dockerfile_installs():
                 if (word.startswith("-") or word == "."
                         or word.startswith("requirements")):
                     continue
-                names.add(re.split(r"[<>=!\[]", word)[0].strip().lower())
-    return names
+                name, version = _split(word)
+                pins[name] = version
+    return pins
 
 
 def _licence(name):
