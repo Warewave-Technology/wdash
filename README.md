@@ -125,12 +125,26 @@ cd lab
 # 2. Run the application
 cd ..
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
-cp .env.example .env   # then set WDASH_ENCRYPTION_KEY in it
+cp .env.example .env   # then fill in the two keys it asks for
 ./venv/bin/python main.py
 ```
 
 Open <http://127.0.0.1:5001>. The installation has no accounts yet, so every
 route leads to `/setup`, where you create the administrator.
+
+In a container instead, with the same two keys in the same `.env`:
+
+```bash
+cp .env.example .env   # SECRET_KEY and WDASH_ENCRYPTION_KEY
+docker compose up -d   # WDash on 5001, and an Elasticsearch to point it at
+```
+
+Both keys are refused rather than defaulted: with neither, WDash comes up
+and no local account can finish signing in, so `docker compose up` stops
+and names the line to fill in. It publishes **5001**, not the 5000 the
+container serves on, because macOS answers 5000 with its own AirPlay
+receiver — measured here as a `403` from `Server: AirTunes` on a machine
+where the container was answering 200.
 
 Then give it the lab: **Configuration → Sources → Add source**, an
 Elasticsearch at `http://localhost:9200` serving logs, traces and monitors.

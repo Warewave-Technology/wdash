@@ -1,20 +1,60 @@
-version: '3.8'
+# WDash, and something to point it at.
+#
+#   cp .env.example .env     # fill in the two keys it asks for
+#   docker compose up -d
+#   open http://localhost:5001
+#
+# The `wdash` service was commented out in this file, so the one command a
+# new reader types — `docker compose up` — started an Elasticsearch and a
+# Kibana and not the product. What was behind the comment would not have
+# worked either: it published port 5000 as the image does and set
+# `FLASK_ENV`, which Flask removed in 2.3, and it passed neither of the two
+# keys a first sign-in needs.
+#
+# `version:` is gone too. Compose stopped reading it and warns about it,
+# and a warning on the first command somebody runs is a bad first sentence.
 
 services:
-  # wdash:
-  #   build: .
-  #   ports:
-  #     - "5000:5000"
-  #   environment:
-  #     - FLASK_ENV=production
-  #     # The cluster below is added on the configuration page, as
-  #     # http://elasticsearch:9200, once the application is up.
-  #   volumes:
-  #     - ./data:/app/data
-  #   depends_on:
-  #     - elasticsearch
-  #   restart: unless-stopped
+  wdash:
+    build:
+      context: .
+      # The server. `--target browser` is the same tree plus Chromium, for
+      # the agent that runs browser journeys: 1.77GB against 260MB, and
+      # nothing in here needs it.
+      target: server
+    ports:
+      # 5001 on this machine, 5000 in the container. Not a whim: macOS has
+      # shipped an AirPlay receiver listening on 5000 since Monterey, and it
+      # answers before anything you started. Measured on this one — `curl
+      # localhost:5000/livez` returned `403 Forbidden` from
+      # `Server: AirTunes/960.13.1` while the container answered 200 to the
+      # same path from inside. A first command that returns 403 is a first
+      # command that reads as "the product is broken".
+      #
+      # 5001 is what `python main.py` and the README's quick start already
+      # use. The container port stays 5000, which is what the image exposes
+      # and what the Kubernetes manifests probe.
+      - "5001:5000"
+    environment:
+      # Both are read from `.env`, which compose reads from this directory
+      # on its own. `:?` rather than a default: WDash refuses to store a
+      # secret without an encryption key, and no local account can finish
+      # signing in without one — so an unset key is a container that comes
+      # up and cannot be used, which is worse than a command that stops
+      # and says which line to fill in.
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env — see .env.example}
+      WDASH_ENCRYPTION_KEY: ${WDASH_ENCRYPTION_KEY:?set WDASH_ENCRYPTION_KEY in .env — no local account can sign in without one}
+      DATABASE_URL: sqlite:////app/data/wdash.db
+    volumes:
+      # WDash's own state: accounts, roles, sources, dashboards. On the
+      # container's layer instead, every restart reopens first-run setup.
+      - wdash_data:/app/data
+    restart: unless-stopped
 
+  # Something for WDash to read. NOT a dependency: no source is configured
+  # at start-up and none is read from the environment, so WDash comes up
+  # with no cluster, no Loki and nothing to show until somebody adds one on
+  # the configuration page — where this one is http://elasticsearch:9200.
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.19.9
     environment:
@@ -40,3 +80,4 @@ services:
 
 volumes:
   elasticsearch_data:
+  wdash_data:
