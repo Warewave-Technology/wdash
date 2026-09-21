@@ -580,6 +580,127 @@ class AggregationMergeTest(unittest.TestCase):
         self.assertTrue(buckets.get("t")[0].key_text)
 
 
+class TwoClustersOfOneKindTest(unittest.TestCase):
+    """`SourceRef.backend` is a TYPE, and two Elasticsearch sources both say
+    "elasticsearch".
+
+    `fetch` has always tried each of them in turn and kept going while one
+    answered None. `raw` and `context` returned INSIDE the first match — so
+    on an installation with two clusters, a record held by the second had no
+    raw document and no neighbours. The record itself opened fine, which is
+    what made it look like the feature was simply absent rather than
+    misrouted.
+    """
+
+    class Holder(LogSource):
+        """One cluster of a shared backend type, holding one document."""
+
+        capabilities = frozenset({Capability.SEARCH, Capability.RAW_DOCUMENT,
+                                  Capability.CONTEXT})
+        backend = "elasticsearch"
+
+        def __init__(self, name, holds):
+            self.name, self.holds = name, holds
+            self.asked = []
+
+        def health(self):
+            return True, "ok"
+
+        def containers(self, scope):
+            return [self.name]
+
+        def search(self, query, scope):
+            return LogPage(records=[], containers=(self.name,))
+
+        def fetch(self, ref, scope):
+            self.asked.append(("fetch", ref.id))
+            return (f"record-{ref.id}-from-{self.name}"
+                    if ref.id == self.holds else None)
+
+        def raw(self, ref, scope):
+            self.asked.append(("raw", ref.id))
+            # Naming the cluster, because "the wrong one answered" and "the
+            # right one answered" are otherwise the same dictionary.
+            return ({"_id": ref.id, "from": self.name}
+                    if ref.id == self.holds else None)
+
+        def context(self, ref, scope, before=10, after=10, correlate_by=None):
+            self.asked.append(("context", ref.id))
+            return ([f"neighbour-of-{ref.id}-from-{self.name}"]
+                    if ref.id == self.holds else [])
+
+    def setUp(self):
+        self.first = self.Holder("primary", holds="doc-1")
+        self.second = self.Holder("archive", holds="doc-2")
+        # A member of a DIFFERENT kind, which must never be asked about an
+        # Elasticsearch handle: a Loki `ref.id` means something else
+        # entirely, and a source that answered one would be answering a
+        # different question.
+        self.other = self.Holder("lab-loki", holds="doc-2")
+        self.other.backend = "loki"
+        # FIRST in the list, and holding the same id: a router that ignores
+        # the backend type asks it before either cluster and answers from
+        # it, which is what these assertions are for.
+        self.fan = FanOutLogSource([self.other, self.first, self.second],
+                                   name="*")
+
+    def ref(self, document):
+        return SourceRef(backend="elasticsearch", container="app-logs",
+                         id=document)
+
+    def test_a_record_in_the_second_cluster_still_opens(self):
+        """The control, and the behaviour `raw` and `context` did not have."""
+        self.assertEqual(self.fan.fetch(self.ref("doc-2"),
+                                        Scope.unrestricted()),
+                         "record-doc-2-from-archive")
+
+    def test_its_raw_document_comes_back_too(self):
+        self.assertEqual(self.fan.raw(self.ref("doc-2"),
+                                      Scope.unrestricted()),
+                         {"_id": "doc-2", "from": "archive"})
+        self.assertEqual(self.first.asked, [("raw", "doc-2")],
+                         "the first cluster was not asked first")
+
+    def test_and_so_do_its_neighbours(self):
+        self.assertEqual(self.fan.context(self.ref("doc-2"),
+                                          Scope.unrestricted()),
+                         ["neighbour-of-doc-2-from-archive"])
+
+    def test_the_first_cluster_is_still_answered_from(self):
+        """And the second is not asked once the first has answered."""
+        self.assertEqual(self.fan.raw(self.ref("doc-1"),
+                                      Scope.unrestricted()),
+                         {"_id": "doc-1", "from": "primary"})
+        self.assertEqual(self.second.asked, [])
+
+    def test_a_source_of_another_kind_is_never_asked(self):
+        """The handle names a backend TYPE, and a Loki id means something
+        else entirely. A source that answered one would be answering a
+        different question with a confident face."""
+        for call in (lambda: self.fan.raw(self.ref("doc-2"),
+                                          Scope.unrestricted()),
+                     lambda: self.fan.fetch(self.ref("doc-2"),
+                                            Scope.unrestricted()),
+                     lambda: self.fan.context(self.ref("doc-2"),
+                                              Scope.unrestricted())):
+            self.other.asked = []
+            call()
+            self.assertEqual(self.other.asked, [])
+
+    def test_a_document_nobody_holds_is_none_rather_than_a_guess(self):
+        self.assertIsNone(self.fan.raw(self.ref("doc-9"),
+                                       Scope.unrestricted()))
+        self.assertIsNone(self.fan.fetch(self.ref("doc-9"),
+                                         Scope.unrestricted()))
+
+    def test_a_record_with_nothing_around_it_is_an_empty_list(self):
+        """Context answers with a LIST, so "nobody holds it" and "it is
+        there and nothing surrounds it" are both falsy — the last handler's
+        answer is the only one that can be the second, and it is kept."""
+        self.assertEqual(self.fan.context(self.ref("doc-9"),
+                                          Scope.unrestricted()), [])
+
+
 class AShortAnswerTravelsTest(unittest.TestCase):
     """One member's half-answer makes the merge a half-answer.
 

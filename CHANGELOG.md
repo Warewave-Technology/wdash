@@ -352,6 +352,16 @@ variables has to do something before it upgrades.
   default handler listens at — present on a developer laptop and absent on
   every deployment.
 
+- **A record in the second cluster of a kind gets its raw document and its
+  neighbours.** Both were routed by backend TYPE and answered from the first
+  source of that type, so with two Elasticsearch sources a record held by the
+  second had neither — while the record itself opened fine, which made it look
+  like the feature was simply absent.
+
+- **`DASHBOARD_STORAGE_FILE` may be a bare filename again.** With no directory
+  in the path, every saved-search *write* was a 500 while the read answered
+  200 with an empty list.
+
 - **A CSRF refusal names the client, not the proxy.** It logged
   `request.remote_addr`, which behind an ingress is the ingress: one address
   for every refusal on the whole installation, on the one rule an

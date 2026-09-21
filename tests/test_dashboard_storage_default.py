@@ -217,6 +217,32 @@ class AFileInstallationIsUnchangedTest(_Installation):
         self.assertEqual(store.saved_searches.all_for("owner"), [],
                          "the database was written to as well")
 
+    def test_a_storage_path_with_no_directory_can_still_be_written(self):
+        """`DASHBOARD_STORAGE_FILE=dashboards.json` — a relative name with no
+        directory, which is a reasonable thing to write.
+
+        `os.path.dirname` of it is "", and `os.makedirs("")` RAISES rather
+        than being a no-op. Every saved-search WRITE was a 500 — at the lock
+        and again at the save — while the read path never reached either and
+        answered 200 with an empty list, so the feature looked present and
+        empty rather than broken.
+        """
+        here = os.getcwd()
+        os.chdir(self.directory)
+        self.addCleanup(os.chdir, here)
+
+        app, client = self.build(DASHBOARD_STORAGE_FILE="dashboards.json")
+        response = client.post("/api/saved-searches",
+                               json={"name": "Bare", "query": "*",
+                                     "time_range": "24h"})
+        self.assertEqual(response.status_code, 201, response.get_data(True))
+
+        listed = client.get("/api/saved-searches").get_json()
+        self.assertEqual([row["name"] for row in listed], ["Bare"])
+        with open(os.path.join(self.directory, "saved_searches.json")) as handle:
+            self.assertEqual([row["name"] for row in json.load(handle)],
+                             ["Bare"])
+
     def test_what_is_already_in_the_files_is_still_listed(self):
         """The upgrade path for somebody who does not want to move."""
         self.write_dashboards([self.a_dashboard(name="Existing")])

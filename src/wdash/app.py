@@ -54,6 +54,22 @@ class SavedSearchesUnavailable(RuntimeError):
     """
 
 
+def _make_room_for(path):
+    """Create the directory a file is about to be written into.
+
+    `os.makedirs("")` RAISES rather than being a no-op, and the directory of
+    a bare filename is "". `DASHBOARD_STORAGE_FILE=dashboards.json` — a
+    relative path with no directory, which is a reasonable thing to write —
+    therefore made every saved-search WRITE a 500, at the lock and again at
+    the save, while the read path never reached either and answered 200 with
+    an empty list. So the feature looked present and empty rather than
+    broken.
+    """
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+
 def saved_searches_beside(dashboards_file):
     """Where the JSON saved searches live, given the dashboards file.
 
@@ -612,7 +628,7 @@ def create_app(config_class=Config):
         # directory it did not create should hear that rather than have one
         # made behind it.
         if isolated:
-            os.makedirs(os.path.dirname(storage_file), exist_ok=True)
+            _make_room_for(storage_file)
         dashboard_manager = DashboardManager(storage_file)
     else:
         # A value nobody recognises used to fall through to the JSON file
@@ -770,7 +786,7 @@ def create_app(config_class=Config):
         if fcntl is None:               # pragma: no cover - not our platforms
             yield
             return
-        os.makedirs(os.path.dirname(SAVED_SEARCHES_FILE), exist_ok=True)
+        _make_room_for(SAVED_SEARCHES_FILE)
         handle = open(f"{SAVED_SEARCHES_FILE}.lock", "a+")
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -823,7 +839,7 @@ def create_app(config_class=Config):
         another worker reading at that instant saw an empty or half-written
         file, and a crash mid-write left one behind.
         """
-        os.makedirs(os.path.dirname(SAVED_SEARCHES_FILE), exist_ok=True)
+        _make_room_for(SAVED_SEARCHES_FILE)
         temp_path = (f"{SAVED_SEARCHES_FILE}.tmp."
                      f"{os.getpid()}.{threading.get_ident()}")
         try:

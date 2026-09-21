@@ -298,26 +298,42 @@ class FanOutLogSource(LogSource):
             cursor=None,
         )
 
+    #: Sources whose backend TYPE matches a handle's.
+    #:
+    #: A type, not a name: `SourceRef.backend` is "elasticsearch", and two
+    #: configured Elasticsearch clusters both say that. So this is a list
+    #: and not one source, and every caller has to try them in turn —
+    #: `fetch` always did, and `raw` and `context` returned inside the first
+    #: match, so on an installation with two clusters a record in the second
+    #: one had no raw document and no neighbours. The record itself opened
+    #: fine, which is what made it look like the feature was simply absent.
+    def _handlers(self, ref):
+        return [source for source in self._sources
+                if getattr(source, "backend", None) == ref.backend]
+
     def fetch(self, ref, scope):
         """Route by the handle's own backend.
 
         The ref already says where it came from, which is what made it worth
         carrying an opaque handle rather than a bare id.
         """
-        for source in self._sources:
-            if getattr(source, "backend", None) == ref.backend:
-                record = source.fetch(ref, scope)
-                if record is not None:
-                    return record
+        for source in self._handlers(ref):
+            record = source.fetch(ref, scope)
+            if record is not None:
+                return record
         return None
 
     def raw(self, ref, scope):
         if Capability.RAW_DOCUMENT not in self.capabilities:
             raise NotImplementedError(
                 f"{self.name} does not expose raw documents: not every source can")
-        for source in self._sources:
-            if getattr(source, "backend", None) == ref.backend:
-                return source.raw(ref, scope)
+        for source in self._handlers(ref):
+            # The same fall-through `fetch` has had all along. A cluster that
+            # does not hold this document answers None, and the next one is
+            # asked; only when nobody holds it is the answer None.
+            document = source.raw(ref, scope)
+            if document is not None:
+                return document
         return None
 
     # ---------- aggregation ----------
@@ -567,9 +583,16 @@ class FanOutLogSource(LogSource):
         if Capability.CONTEXT not in self.capabilities:
             raise NotImplementedError(
                 f"{self.name} cannot serve context: not every source can")
-        for source in self._sources:
-            if getattr(source, "backend", None) == ref.backend:
-                return source.context(ref, scope, before, after, correlate_by)
+        handlers = self._handlers(ref)
+        for index, source in enumerate(handlers):
+            answer = source.context(ref, scope, before, after, correlate_by)
+            # Context answers with a LIST, so "nobody holds it" and "it is
+            # there and nothing surrounds it" are both falsy. The last
+            # handler's answer is the one to keep: it is the only one that
+            # can be the second of the two, and trying the rest after it
+            # would be asking a cluster about a record it does not have.
+            if answer or index == len(handlers) - 1:
+                return answer
         raise NotImplementedError(f"no source handles '{ref.backend}' handles")
 
 
