@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WDash — logs, traces and uptime, with access control in front</title>
+<meta name="description" content="A small observability front-end for logs, traces and synthetic monitoring, with role-based access control that lives in the application rather than in the data store.">
+<link rel="icon" type="image/svg+xml" href="wdash-mark.svg">
+<style>
+  /* The same design system postern.warewave.tech uses, with WDash's own
+     accent: Gruvbox's orange rather than its green. One stylesheet, inline,
+     because this page is two files and a mark — a build step for that is a
+     thing to keep working for no reader's benefit. */
+  :root {
+    --bg: #1d2021; --surface: #282828; --raised: #32302f; --sunken: #1b1b1b;
+    --line: #3c3836; --line-soft: #32302f;
+    --ink: #ebdbb2; --muted: #a89984; --dim: #7c6f64;
+    --accent: #fe8019; --warn: #fabd2f; --bad: #fb4934; --link: #83a598;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); font-size: 16px; line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 1.5rem; }
+  a { color: var(--link); }
+
+  header.top { border-bottom: 1px solid var(--line); position: sticky; top: 0; background: rgba(29,32,33,.92); backdrop-filter: blur(8px); z-index: 10; }
+  header.top .wrap { display: flex; align-items: center; justify-content: space-between; height: 56px; }
+  .brand { display: inline-flex; align-items: center; gap: .55rem; font-weight: 600; letter-spacing: -.01em; color: var(--ink); text-decoration: none; }
+  .brand svg { display: block; }
+  nav.top-nav { display: flex; gap: 1.25rem; font-size: 14px; }
+  nav.top-nav a { color: var(--muted); text-decoration: none; }
+  nav.top-nav a:hover { color: var(--ink); }
+
+  /* Postern measured this one and the note is worth keeping: at 375px the
+     in-page links push the nav past the 56px header. They are scroll
+     targets on THIS page and the content is just below; the two links that
+     leave the page stay. */
+  @media (max-width: 640px) {
+    .top-nav { gap: 1rem; }
+    .top-nav a { white-space: nowrap; }
+    .top-nav a[href^="#"] { display: none; }
+  }
+
+  .hero { padding: 5rem 1.5rem 3.5rem; max-width: 860px; margin: 0 auto; }
+  .hero h1 { font-size: clamp(2.4rem, 6vw, 3.6rem); line-height: 1.08; margin: 0 0 1.1rem; letter-spacing: -.03em; }
+  .hero .lede { font-size: 1.2rem; color: var(--muted); margin: 0 0 1rem; max-width: 46rem; }
+  .hero .lede strong { color: var(--ink); font-weight: 600; }
+  .status { display: inline-flex; align-items: center; gap: .5rem; margin-bottom: 1.6rem; padding: .2rem .6rem; border: 1px solid var(--line); border-radius: 999px; font-size: 12.5px; color: var(--muted); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+
+  .cta { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: 1.8rem; }
+  .btn { display: inline-block; padding: .6rem 1.1rem; border-radius: 8px; text-decoration: none; font-size: 14.5px; font-weight: 550; border: 1px solid var(--line); color: var(--ink); }
+  .btn.primary { background: var(--accent); color: #1d2021; border-color: var(--accent); }
+  .btn:hover { border-color: var(--muted); }
+  .btn.primary:hover { filter: brightness(1.08); }
+
+  section { padding: 2.6rem 0; border-top: 1px solid var(--line); }
+  section h2 { font-size: 1.45rem; margin: 0 0 .5rem; letter-spacing: -.015em; }
+  section > .wrap > p { color: var(--muted); margin-top: 0; }
+  section p strong, li strong { color: var(--ink); font-weight: 600; }
+
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin-top: 1.5rem; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 1.05rem 1.15rem; background: var(--surface); }
+  .card h3 { margin: 0 0 .4rem; font-size: 1rem; }
+  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+  pre { background: var(--sunken); border: 1px solid var(--line); border-radius: 10px; padding: .95rem 1.1rem; overflow-x: auto; font-family: var(--mono); font-size: 13.5px; line-height: 1.6; margin: 1.2rem 0; }
+  code { font-family: var(--mono); font-size: .92em; }
+  p code, li code, td code { background: var(--raised); border: 1px solid var(--line-soft); border-radius: 5px; padding: .05rem .35rem; }
+  .c { color: var(--dim); }
+  .g { color: var(--accent); }
+
+  ul.plain { list-style: none; padding: 0; margin: 1.1rem 0 0; }
+  ul.plain li { padding: .55rem 0 .55rem 1.55rem; position: relative; border-top: 1px solid var(--line-soft); color: var(--muted); }
+  ul.plain li:first-child { border-top: 0; }
+  ul.plain li::before { content: "→"; position: absolute; left: 0; color: var(--dim); }
+
+  .not { border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 8px; padding: 1rem 1.2rem; background: var(--surface); margin-top: 1.3rem; }
+  .not h3 { margin: 0 0 .5rem; font-size: 1rem; color: var(--warn); }
+  .not ul { margin: 0; padding-left: 1.1rem; color: var(--muted); font-size: 14.5px; }
+  .not li { margin: .3rem 0; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 1.2rem; font-size: 14.5px; }
+  th, td { text-align: left; padding: .6rem .7rem; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  th { color: var(--dim); font-weight: 550; font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; }
+  td:first-child { color: var(--ink); white-space: nowrap; }
+
+  footer { border-top: 1px solid var(--line); padding: 2.2rem 0 3rem; color: var(--dim); font-size: 14px; }
+  footer a { color: var(--muted); }
+
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #fbf1c7; --surface: #f9f5d7; --raised: #f2e5bc; --sunken: #f2e5bc;
+      --line: #d5c4a1; --line-soft: #ebdbb2;
+      --ink: #3c3836; --muted: #665c54; --dim: #7c6f64;
+      --accent: #af3a03; --warn: #b57614; --bad: #9d0006; --link: #076678;
+    }
+    :root:not([data-theme="dark"]) header.top { background: rgba(251,241,199,.92); }
+    :root:not([data-theme="dark"]) .btn.primary { color: #fbf1c7; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/">
+      <svg class="wdash-mark" viewBox="0 0 32 32" width="22" height="22" fill="none" role="img" aria-label="WDash">
+        <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M11.5 5.5H7v21h4.5"/><path d="M20.5 5.5H25v21h-4.5"/>
+        </g>
+        <path d="M3.5 16h6.6l2.6-7.4 3.1 15 2.3-7.6h6.4" stroke="var(--accent)" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      WDash
+    </a>
+    <nav class="top-nav">
+      <a href="#what">What it does</a>
+      <a href="#empty">Emptiness</a>
+      <a href="#isnt">What it isn't</a>
+      <a href="docs/">Docs</a>
+      <a href="https://github.com/warewave/wdash">Source</a>
+    </nav>
+  </div>
+</header>
+
+<div class="hero">
+  <span class="status"><span class="dot"></span> 3.0.0 · logs, traces, uptime</span>
+  <h1>Your cluster has no row-level security. Put one in front of it.</h1>
+  <p class="lede">WDash is a small observability front-end for logs, traces and
+  synthetic monitoring. Every query it issues carries an <strong>explicit
+  authorization scope</strong> — log containers, trace stores and services, three
+  boundaries per role, resolved on every request. It is designed to be the only
+  path to the store behind it.</p>
+  <div class="cta">
+    <a class="btn primary" href="docs/#install">Install</a>
+    <a class="btn" href="docs/">Read the docs</a>
+  </div>
+</div>
+
+<section id="what">
+  <div class="wrap">
+    <h2>One front end, four things behind it</h2>
+    <p>None of the backends is required. Declare the ones you have on the
+    configuration page, and only those.</p>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Logs</h3>
+        <p>Elasticsearch, Grafana Loki, VictoriaLogs. Lucene-style search, a
+        volume histogram split by severity, cursor paging, field statistics,
+        and the records either side of one you are reading.</p>
+      </div>
+      <div class="card">
+        <h3>Traces</h3>
+        <p>Elasticsearch APM, Jaeger, Grafana Tempo. A waterfall with self-time,
+        a per-service breakdown, and the log records carrying the same trace
+        id. A trace split across two stores is reassembled, not shown as two
+        halves.</p>
+      </div>
+      <div class="card">
+        <h3>Uptime</h3>
+        <p>What Elastic Heartbeat writes, and WDash's own agents: HTTP checks
+        and multi-step browser journeys through real Chromium, with the TLS
+        certificate each check saw.</p>
+      </div>
+      <div class="card">
+        <h3>Alerts</h3>
+        <p>Rules over monitors, agents and expiring certificates, sent to a
+        webhook, with silences and a history that records what was
+        <em>not</em> delivered as well as what was.</p>
+      </div>
+    </div>
+
+    <ul class="plain">
+      <li><strong>Roles are three boundaries, not one.</strong> Log containers,
+      trace stores and services are granted separately, because "can read
+      <code>app-*</code>" and "can read the payments service's traces" are
+      different sentences. Resolved from the database on every request, so
+      revoking a grant takes effect without anyone signing out.</li>
+      <li><strong>One source serves every signal it holds.</strong> An
+      Elasticsearch cluster with logs and traces is one entry with one
+      credential — not two rows that drift apart at the next rotation.</li>
+      <li><strong>Search one source or all of them.</strong> A merged page says
+      which source answered each record, and says so when a backend is down
+      rather than quietly returning less.</li>
+      <li><strong>Everything is configured in the browser.</strong> Sources,
+      identity providers and roles, with a connection test before a source is
+      saved and a "what would this reach?" preview before a role is.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="empty">
+  <div class="wrap">
+    <h2>A failure must never look like emptiness</h2>
+    <p>This is the rule the codebase is organised around, and most of the work
+    is in the difference between two things that look identical on a screen.</p>
+
+    <div class="grid">
+      <div class="card">
+        <h3>"Nothing matched" and "nobody looked"</h3>
+        <p>A quiet window and a backend that did not answer are different
+        facts. A panel that cannot be filled says why, in its own card, and the
+        rest of the board still works.</p>
+      </div>
+      <div class="card">
+        <h3>A silent probe is not a healthy site</h3>
+        <p>An agent that stops reporting leaves its checks <code>unknown</code>,
+        never <code>up</code> and never <code>down</code> — and a firing alert
+        HOLDS rather than resolving, so a probe dying mid-outage does not close
+        the incident.</p>
+      </div>
+      <div class="card">
+        <h3>A number says what it measured</h3>
+        <p>A merged total that cannot be counted exactly is reported as a floor.
+        A board whose answer came back short of a shard gets no "within
+        thresholds" badge at all: that is a claim about numbers, and there are
+        none to make it from.</p>
+      </div>
+      <div class="card">
+        <h3>A boundary says it is a boundary</h3>
+        <p>A role that reaches no trace store sees a sentence about its role,
+        not an empty table. Refusals are named, and recorded in an append-only
+        audit trail along with the changes that were accepted.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="holds">
+  <div class="wrap">
+    <h2>What an operator actually holds</h2>
+    <table>
+      <thead><tr><th>Piece</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr><td>The server</td><td>One Python process behind gunicorn, or the image that carries it. The web UI, the API and the configuration pages are all of it.</td></tr>
+        <tr><td>State</td><td>SQLite or PostgreSQL. Accounts, roles, sources, dashboards, monitors, alerts and the audit trail — in a schema you can read.</td></tr>
+        <tr><td>The alert runner</td><td>Its own process (<code>python -m wdash.alerts</code>), because an agent going completely silent produces no requests at all — and that is exactly when somebody needs telling.</td></tr>
+        <tr><td>Agents</td><td>Optional. One per location you want to check from; they pull their configuration and push results back. Browser journeys use a second, larger image so nobody pulls Chromium to run uptime checks.</td></tr>
+        <tr><td>Your stores</td><td>Untouched. WDash reads them; it writes nothing into them and collects no telemetry of its own.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <h2>Fifteen minutes, honestly</h2>
+    <p>Two keys, one file, one command. The rest is done on the page.</p>
+<pre><span class="c"># 1. the two secrets. Without the encryption key no local account can sign in.</span>
+$ cp .env.example .env
+$ python -c <span class="g">"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"</span>
+<span class="c">#    that value goes in WDASH_ENCRYPTION_KEY; put anything long in SECRET_KEY</span>
+
+<span class="c"># 2. start it</span>
+$ docker compose up -d
+$ open http://localhost:5001
+
+<span class="c"># 3. first-run setup creates the break-glass administrator and enrols
+#    an authenticator. Then add a source on Configuration → Sources.</span></pre>
+    <p>Port 5001 rather than 5000, because macOS answers 5000 with its own
+    AirPlay receiver. Nothing on your cluster changes: WDash needs a URL and,
+    if it is protected, a read credential.</p>
+  </div>
+</section>
+
+<section id="isnt">
+  <div class="wrap">
+    <h2>What it isn't</h2>
+    <p>3.0.0 is deliberately narrow. If you need something below, WDash is the
+    wrong tool today.</p>
+
+    <div class="not">
+      <h3>Not in this release</h3>
+      <ul>
+        <li><strong>Not an ingester.</strong> WDash reads stores somebody else
+        writes. Run an OpenTelemetry Collector and point WDash at the storage
+        behind it.</li>
+        <li><strong>A merged search is first-page only.</strong> Paging a
+        time-ordered merge needs every source's cursor advanced together, and
+        each backend's cursor means something different — a cursor that
+        silently skips records is worse than no paging.</li>
+        <li><strong>A bare container pattern applies to every source.</strong>
+        A role granted <code>app-*</code> reaches <code>app-*</code> in each
+        configured source, so adding a source widens what existing roles can
+        see. <code>source:pattern</code> avoids it; the default is the wide
+        one.</li>
+        <li><strong>Loki and VictoriaLogs serve logs only</strong>, and with
+        fewer capabilities — no field statistics on Loki, no context view or
+        single-record fetch on either. Declared absent rather than answered
+        with something thinner than the name.</li>
+        <li><strong>Jaeger cannot answer "every trace"</strong>, and reports no
+        per-service volume without a separate metrics backend. Its service
+        list carries names without span counts — zero rather than a number
+        derived from a sample.</li>
+        <li><strong>One directory at a time.</strong> LDAP or OpenID Connect,
+        never both; the configuration page refuses the second and says how to
+        switch.</li>
+      </ul>
+    </div>
+
+    <p style="margin-top:1.3rem">It is also new. Every backend is exercised
+    against a real one — Elasticsearch, Loki, VictoriaLogs, Jaeger, Tempo,
+    OpenLDAP and Dex in a lab that ships with the repository — on both SQLite
+    and PostgreSQL. But 3.0.0 means "we think this is right", not "this has
+    run in twenty companies for three years".</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    WDash — a small observability front-end with access control in front of
+    your store. <a href="docs/">Documentation</a> ·
+    <a href="https://github.com/warewave/wdash">Source</a> ·
+    <a href="https://github.com/warewave/wdash/blob/main/SECURITY.md">Security</a> ·
+    MIT
+  </div>
+</footer>
+
+</body>
+</html>
