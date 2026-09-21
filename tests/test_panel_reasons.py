@@ -90,12 +90,17 @@ class _Board(unittest.TestCase):
             self.app, Dashboard("b1", "Board", "", "*", "u",
                                 index_patterns=["app-*"]))
         self.client = self.app.test_client()
-        grant(self.app, "u", permissions=["dashboard:view"], indices=["*"],
-              trace_indices=["*"], services=["*"])
+        # `traces:read`, because the boards here carry trace panels and the
+        # panel checks it now. What these tests measure is that a failure on
+        # the LOG side does not take a trace panel down with it, which needs
+        # the trace panel to be fillable in the first place.
+        grant(self.app, "u", permissions=["dashboard:view", "traces:read"],
+              indices=["*"], trace_indices=["*"], services=["*"])
         with self.client.session_transaction() as session:
             session["user_data"] = {
                 "id": "1", "email": "u@x", "username": "u", "groups": [],
-                "role": "admin", "permissions": ["dashboard:view"],
+                "role": "admin",
+                "permissions": ["dashboard:view", "traces:read"],
                 "allowed_indices": ["*"], "allowed_trace_indices": ["*"],
                 "allowed_services": ["*"]}
             session["_user_id"] = "1"

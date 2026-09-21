@@ -583,10 +583,18 @@ rejected.
 | Permission | Grants |
 |---|---|
 | `logs:read` | Open the Logs screen, search it, read a record with its context |
-| `traces:read` | Open the Traces screen, search it, open a waterfall |
+| `traces:read` | Open the Traces screen, search it, open a waterfall, and fill a trace panel on a dashboard |
+| `monitors:read` | Open the Monitors screen, and fill a monitor or certificate panel on a dashboard |
 | `dashboard:view` | See and open dashboards |
 | `dashboard:create` / `dashboard:edit` / `dashboard:delete` | Manage your own dashboards |
 | `system:admin` | The configuration page, the Cluster Advisor, debug endpoints, and editing others' dashboards |
+
+**A dashboard panel is checked against the same permission its screen is.**
+`dashboard:view` opens the board; each panel is filled — or refused with a
+sentence, leaving the rest of the board alone — under the permission for the
+data it holds. Otherwise a shared dashboard is a way around every one of
+them, which a trace panel was: it filled for a role without `traces:read`
+while the trace list beside it on the same board said no.
 
 **`system:admin` is not a superuser.** It grants no access to logs or traces on
 its own. That has a consequence worth knowing: nothing else can recover from

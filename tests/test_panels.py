@@ -161,11 +161,18 @@ class TracePanelTest(unittest.TestCase):
             self.app, Dashboard("t1", "Traces", "", "*", "u",
                                 index_patterns=["app-*"]))
         self.client = self.app.test_client()
-        grant(self.app, "u", permissions=["dashboard:view"], indices=["*"], trace_indices=["*"], services=["*"])
+        # `traces:read`, because these boards carry trace panels and the
+        # panel checks it now — the same permission `/api/traces/services`
+        # has always wanted. What is under test here is sorting, partial
+        # answers and the shape of a row, so the role holds it and the
+        # permission itself is measured in test_dashboard_monitors.
+        grant(self.app, "u", permissions=["dashboard:view", "traces:read"],
+              indices=["*"], trace_indices=["*"], services=["*"])
         with self.client.session_transaction() as session:
             session["user_data"] = {
                 "id": "1", "email": "u@x", "username": "u", "groups": [],
-                "role": "admin", "permissions": ["dashboard:view"],
+                "role": "admin",
+                "permissions": ["dashboard:view", "traces:read"],
                 "allowed_indices": ["*"], "allowed_trace_indices": ["*"],
                 "allowed_services": ["*"]}
             session["_user_id"] = "1"

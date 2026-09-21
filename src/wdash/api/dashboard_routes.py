@@ -470,25 +470,61 @@ def _trace_panels(panels, window, scope, dashboard=None):
 
     Read from the board's own source where it serves traces, and from every
     trace source otherwise (`_signal_source`).
+
+    `traces:read` is checked HERE, the same shape `_monitor_panels` and
+    `_trace_list_panels` use. It was not, and that was a boundary this
+    codebase enforces everywhere else: measured against the lab's
+    Elasticsearch trace indices, a role holding `dashboard:view` and nothing
+    more read nine services off a shared board — names, span counts, error
+    counts and error rates, `api-gateway 842 spans 64 errors` among them —
+    while the `trace_list` panel BESIDE IT on the same board answered
+    "Traces need the traces:read permission" and `/api/traces/services`
+    answered the same role with 403. Three answers to one question, two of
+    them the same and one of them the way in.
+
+    The scope boundaries were enforced on this path all along — every bucket
+    goes through `scope.allows_service` — so what escaped was the service
+    inventory for services the role's scope already permitted, and not span
+    contents. That is what makes it a permission bypass rather than a data
+    leak, and it is still a bypass: `traces:read` is the permission that
+    says whether a role may read traces AT ALL, and a panel is not a
+    different question from the route that fills it.
+
+    The panel is refused, never the dashboard, so a colleague without the
+    permission still reads the rest of the board.
     """
     wanted = [p for p in panels if p["type"] == "trace_services"]
     if not wanted:
         return {}
 
+    def refuse(reason):
+        return {p["id"]: {"error": reason} for p in wanted}
+
+    if not scope.has("traces:read"):
+        return refuse("Traces need the traces:read permission, which this "
+                      "role does not have. The rest of this dashboard is "
+                      "unaffected.")
+
     try:
         traces = _signal_source(dashboard, "traces")
     except SourceMissing as exc:
-        return {p["id"]: {"error": str(exc)} for p in wanted}
+        return refuse(str(exc))
     if traces is None or not traces.supports(Capability.SERVICE_LIST):
-        return {p["id"]: {"error": "No trace backend is configured."}
-                for p in wanted}
+        return refuse("No trace backend is configured.")
+
+    if scope.trace_is_empty:
+        # The store boundary, which this panel also shipped without.
+        # `containers(scope)` answers [] for such a role, so the panel drew
+        # an empty service list: a role boundary rendered as a cluster where
+        # nothing is running. Its sibling has said this in words since the
+        # trace-list work.
+        return refuse(trace_routes.NO_STORES_ASSIGNED)
 
     try:
         services = traces.services(window, scope)
     except Exception as exc:
         current_app.logger.warning(f"Trace panel failed: {exc}")
-        return {p["id"]: {"error": "Trace data could not be loaded."}
-                for p in wanted}
+        return refuse("Trace data could not be loaded.")
 
     # A service list with one backend missing from it is not a shorter list,
     # it is a list nobody can read as one: the services that store held are

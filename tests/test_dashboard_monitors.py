@@ -1068,16 +1068,22 @@ class TracingES(FakeES):
 class TracePanelsOnTheFailurePathsTest(MonitorPanelTest):
     """`_without_log_containers` routes every non-log panel, not only monitors.
 
-    Both paths it covers now reach the trace panel as well, and nothing
-    pinned that: a later edit narrowing `needs_logs` to the monitor signal
-    would take the trace panel back down with the log source and every test
-    would still pass. The reach is real either way — a role holding
-    dashboard:view alone has always been able to fill a trace panel on the
-    ordinary path, because no dashboard route has ever checked traces:read —
-    so this measures what that filter now covers rather than changing it.
+    Both paths it covers reach the trace panel as well, and nothing pinned
+    that: a later edit narrowing `needs_logs` to the monitor signal would
+    take the trace panel back down with the log source and every test would
+    still pass.
+
+    This used to say the reach was real "because no dashboard route has ever
+    checked traces:read", and measured what the filter covered rather than
+    changing it. That premise was true when it was written and is not any
+    more: `_trace_panels` checks the permission now, for the reason written
+    out there. So the role here holds it, and what is still being measured
+    is the routing — a failure in the LOG source must not take a trace panel
+    down with it.
     """
 
     PANELS = [LOG_PANEL, TRACE_PANEL]
+    PERMISSIONS = ("dashboard:view", "monitors:read", "traces:read")
 
     def make_es(self):
         return TracingES()
@@ -1099,11 +1105,57 @@ class TracePanelsOnTheFailurePathsTest(MonitorPanelTest):
         """The log scope is a boundary on log data; the trace panel has its
         own — `allowed_trace_indices` and `allowed_services`, which this role
         still holds."""
-        self.login(("dashboard:view", "monitors:read"), indices=["infra-*"])
+        self.login(self.PERMISSIONS, indices=["infra-*"])
         payload = self.data().get_json()
         self.assertEqual(payload["error_type"], "no_accessible_containers")
         panel = self.panel(payload, "tr-1")
         self.assertEqual([row["name"] for row in panel["rows"]], ["checkout"])
+
+
+class TheTracePanelNeedsTheTracePermissionTest(MonitorPanelTest):
+    """`traces:read` on the panel, as on the route and on its sibling.
+
+    Measured before this, against the lab's Elasticsearch trace indices: a
+    board carrying a `trace_services` and a `trace_list` panel, shown to a
+    role holding `dashboard:view` and nothing else. The first filled with
+    nine services and their span and error counts; the second answered
+    "Traces need the traces:read permission"; `/api/traces/services` answered
+    403. One question, three answers.
+    """
+
+    PANELS = [LOG_PANEL, TRACE_PANEL]
+    PERMISSIONS = ("dashboard:view", "monitors:read", "traces:read")
+
+    REFUSAL = "Traces need the traces:read permission"
+
+    def make_es(self):
+        return TracingES()
+
+    def test_a_role_without_it_gets_a_reason_and_no_services(self):
+        self.login(("dashboard:view", "monitors:read"))
+        panel = self.panel(self.data().get_json(), "tr-1")
+        self.assertIn(self.REFUSAL, panel.get("error", ""))
+        self.assertNotIn("rows", panel)
+
+    def test_the_rest_of_the_board_still_works(self):
+        """A panel is refused, never the dashboard: a colleague who lacks the
+        permission reads everything else on it."""
+        self.login(("dashboard:view", "monitors:read"))
+        payload = self.data().get_json()
+        self.assertEqual(self.data().status_code, 200)
+        self.assertNotIn("error", self.panel(payload, LOG_PANEL["id"]))
+
+    def test_a_role_with_it_reads_the_services(self):
+        panel = self.panel(self.data().get_json(), "tr-1")
+        self.assertEqual([row["name"] for row in panel["rows"]], ["checkout"])
+
+    def test_no_trace_store_assigned_is_said_rather_than_drawn_empty(self):
+        """`containers(scope)` answers [] for such a role, so the panel used
+        to draw an empty service list — a role boundary wearing the clothes
+        of a cluster where nothing is running."""
+        grant(self.app, "u", self.PERMISSIONS, ("*",), trace_indices=())
+        panel = self.panel(self.data().get_json(), "tr-1")
+        self.assertIn("no trace stores assigned", panel.get("error", ""))
 
 
 class MonitorLinkTest(unittest.TestCase):

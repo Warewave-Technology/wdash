@@ -87,6 +87,17 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **A trace panel on a dashboard needs `traces:read`.** It filled for any
+  role that could open the board, so a shared dashboard handed out the
+  service inventory — names, span counts, error counts and error rates — to
+  roles the Traces screen and `/api/traces/services` both refuse. The panel
+  now says so and leaves the rest of the board alone, and a role with no
+  trace stores assigned gets that sentence instead of an empty list.
+
+  **Give `traces:read` to any role that should keep seeing those panels.**
+  Monitor and certificate panels have wanted `monitors:read` all along and
+  are unchanged.
+
 - **A `monitor_down` alert no longer resolves when the probe goes quiet.**
   It used to send `resolved` to your channel the moment the monitor went
   `unknown` — an agent five minutes silent, a check running late, a rotated
