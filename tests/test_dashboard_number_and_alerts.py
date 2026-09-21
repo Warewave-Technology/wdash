@@ -478,7 +478,24 @@ class AlertPanelTest(_Board):
               delivered=True)
         panel = self.one([self.NUMBER], "a2")
         self.assertEqual(panel["number"], 0)
-        self.assertEqual(panel["fired"], 3)
+        # ONE, not three. The three rows are one subject, and the number
+        # above them counts subjects — a ratio needs one population.
+        # Measured before this: a board where every delivery had failed read
+        # "1 of the 12 alerts in this window reached nobody" beside a table
+        # of twelve rows all marked undelivered.
+        self.assertEqual(panel["fired"], 1)
+
+    def test_the_number_and_what_it_is_out_of_are_one_population(self):
+        """Every delivery failing must read as all of them, not one of N."""
+        for minutes in (9, 8, 7):
+            fired(self.app.store, minutes_ago=minutes, subject="checkout",
+                  delivered=False)
+        for minutes in (6, 5):
+            fired(self.app.store, minutes_ago=minutes, subject="payments",
+                  delivered=False)
+        panel = self.one([self.NUMBER], "a2")
+        self.assertEqual((panel["number"], panel["fired"]), (2, 2))
+        self.assertIn("2 alerts", panel["question"])
 
     def test_the_number_says_what_it_is_out_of(self):
         fired(self.app.store, minutes_ago=5, delivered=False)

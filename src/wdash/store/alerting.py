@@ -407,12 +407,28 @@ class AlertHistoryRepository:
         happens is a window being called quiet because of something outside
         it.
         """
+        return (alert_history.c.delivered.is_(False),
+                cls._last_word(since, until))
+
+    @classmethod
+    def _last_word(cls, since=None, until=None):
+        """Rows that are the last word on their (rule, subject), delivered
+        or not.
+
+        The half of `_outstanding` that says WHICH ROWS COUNT, without the
+        half that says which of them failed. Separate because the two halves
+        are a numerator and its population, and they were not the same one:
+        "reached nobody" counted the last word per subject while "of the N
+        alerts in this window" counted every row, so a board where every
+        delivery had failed read `1 of the 12 alerts in this window reached
+        nobody` — measured, twelve rows all marked undelivered in the table
+        beside it.
+        """
         from sqlalchemy import func
         newest = (select(func.max(alert_history.c.id))
                   .where(*cls._within(since, until))
                   .group_by(alert_history.c.rule_id, alert_history.c.subject))
-        return (alert_history.c.delivered.is_(False),
-                alert_history.c.id.in_(newest))
+        return alert_history.c.id.in_(newest)
 
     @staticmethod
     def _within(since, until):
@@ -453,7 +469,14 @@ class AlertHistoryRepository:
             return [dict(r, at=_aware(r["at"])) for r in
                     connection.execute(query).mappings().all()]
 
-    def count(self, undelivered_only=False, since=None, until=None):
+    def count(self, undelivered_only=False, since=None, until=None,
+              last_word_only=False):
+        """How many history rows, or how many SUBJECTS, in the window.
+
+        `last_word_only` counts one per (rule, subject) without asking how
+        the delivery went — the population `undelivered_only` is a subset
+        of, and the only honest denominator for it.
+        """
         from sqlalchemy import func
         query = select(func.count()).select_from(alert_history)
         if undelivered_only:
@@ -465,6 +488,8 @@ class AlertHistoryRepository:
             # Alerts page's own definition — the last word on each rule and
             # subject — and the page asks it unbounded, which is unchanged.
             query = query.where(*self._outstanding(since, until))
+        elif last_word_only:
+            query = query.where(self._last_word(since, until))
         query = query.where(*self._within(since, until))
         with self._engine.connect() as connection:
             return connection.execute(query).scalar() or 0

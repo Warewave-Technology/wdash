@@ -737,6 +737,35 @@ class FailedShardsAreSaidTest(unittest.TestCase):
                 [(self.query(), [Terms("lv", "severity")])] * 2, EVERY):
             self.assertIn("5 of 6 shards failed", " ".join(result.warnings))
 
+    def test_the_aggregations_carry_it_as_a_flag_and_not_only_as_words(self):
+        """A warning is for a reader; `partial` is for the code above.
+
+        The dashboard's threshold badge is decided in Python, and reading a
+        sentence out of a list to decide it is the string-matching this
+        codebase has already had to undo twice. `search`, `field_stats` and
+        `histogram` all set the flag; the aggregation paths said it only in
+        words, and the board painted "Within thresholds" from counts that
+        same response described as short.
+        """
+        source = self.source(SHARDS_FAILED)
+        self.assertTrue(
+            source.aggregate(self.query(), [Terms("lv", "severity")],
+                             EVERY).partial)
+        for result in source.multi_aggregate(
+                [(self.query(), [Terms("lv", "severity")])] * 2, EVERY):
+            self.assertTrue(result.partial)
+
+    def test_a_whole_answer_is_not_flagged(self):
+        """Otherwise every board loses its badge and nobody sets thresholds
+        again."""
+        source = self.source({"total": 6, "successful": 6, "failed": 0})
+        self.assertFalse(
+            source.aggregate(self.query(), [Terms("lv", "severity")],
+                             EVERY).partial)
+        for result in source.multi_aggregate(
+                [(self.query(), [Terms("lv", "severity")])] * 2, EVERY):
+            self.assertFalse(result.partial)
+
     def test_the_field_statistics_say_it_too(self):
         """The review found the other two read paths in this file still
         reading a partial answer as a whole one: on the lab, with 5 of 6

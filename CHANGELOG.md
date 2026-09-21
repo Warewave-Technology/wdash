@@ -87,6 +87,29 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **A dashboard's threshold badge is withheld when the answer is short.**
+  Elasticsearch fails a search outright only when *every* shard fails; when
+  some fail it answers 200 with what the rest found. The board painted a
+  green "Within thresholds" from those counts while the same response
+  carried "5 of 9 shards failed" in its warnings. No badge now, for the same
+  reason a board with no thresholds has none: it is a claim about numbers,
+  and these are numbers nobody can vouch for. The same applies when one
+  source of several did not answer.
+
+- **"Alerts nobody received" is out of a number it is part of.** The card
+  counted one per rule and subject and divided it by every history row, so a
+  board where every delivery had failed read "1 of the 12 alerts in this
+  window reached nobody" beside a table of twelve, all marked undelivered.
+  Both halves count the same thing now, so that board reads 12 of 12.
+
+- **A time chart split by a field adds up to the traffic again.** The split
+  names the ten commonest values, and the chart stacked only those — so a
+  board split by a high-cardinality field drew a fraction of its own volume
+  with nothing saying so: measured, a bar of 14 over a window holding 304
+  records. Records with no value for the field get the `unknown` band the
+  other panels already give them, and everything past the tenth value is one
+  `other` band.
+
 - **A check result with an impossible duration no longer loses the batch it
   came in.** On Postgres, `duration_us` is a four-byte column and the guard
   checked incoming numbers against an eight-byte one, so a value between the

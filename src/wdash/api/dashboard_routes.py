@@ -22,8 +22,8 @@ from datetime import timedelta
 
 from .access import request_scope
 from ..hub import (
-    Capability, DateHistogram, Hub, LogQuery, Scope, Terms, TimeWindow,
-    TraceQuery,
+    Bucket, Capability, DateHistogram, Hub, LogQuery, Scope, Terms,
+    TimeWindow, TraceQuery,
 )
 from ..hub.models import DOWN, UNKNOWN, UP
 from ..hub.query import DEFAULT_LOG_FIELDS, SORT_RECENT, SORT_SLOWEST
@@ -231,6 +231,44 @@ def _manager():
 
 def _buckets(buckets):
     return [b.to_dict() for b in buckets]
+
+
+#: How many values a split names. The rest of them are one band.
+SPLIT_VALUES = 10
+
+#: What that band is called. Not `unknown`, which is a different fact and
+#: has its own band: `unknown` is a record with no value for the field, and
+#: this is a value the chart did not have room to name.
+SPLIT_REST = "other"
+
+
+def _with_the_rest(buckets, name=SPLIT_REST):
+    """Give each time bucket a band for what its split did not name.
+
+    A split is a terms list, so it names the commonest `SPLIT_VALUES` and
+    stops — and the client stacks the split and never reads the bucket's own
+    count, so the bar drawn was the top ten's share of the traffic and the
+    rest of it was not on the chart at all. Measured through the route
+    against the lab, a board split by `user_id` over seven days beside an
+    identical unsplit panel: the tallest bar drew 14 of 304 records, and
+    nothing on the payload said the bar was short — no `partial`, no
+    warning, and a hint that only says clicking a segment opens the Logs
+    page.
+
+    The adapter one layer down already does exactly this for severity, and
+    says why: "The page stacks these rather than drawing the count, so what
+    no level bucket holds — records without the field, levels beyond the ten
+    asked for — is drawn too." This is that rule, for the split an author
+    chose rather than the one the stat cards use.
+    """
+    for bucket in buckets:
+        children = bucket.sub.get("split")
+        if not children:
+            continue
+        rest = (bucket.count or 0) - sum(child.count or 0 for child in children)
+        if rest > 0:
+            children.append(Bucket(key=name, count=rest, key_text=name))
+    return buckets
 
 
 #: Which raw level names each stat card stands for.
@@ -1232,6 +1270,15 @@ def _alert_panels(panels, window, scope):
         undelivered = (history.count(undelivered_only=True,
                                      since=window.start, until=window.end)
                        if numbers else 0)
+        # The population `undelivered` is a subset of, which `fired` is not:
+        # `fired` counts every history row and `undelivered` counts one per
+        # (rule, subject). Measured on a board where every delivery had
+        # failed — twelve rows, all marked undelivered in the table — the
+        # card beside it read "1 of the 12 alerts in this window reached
+        # nobody". A ratio needs one population, not two.
+        incidents = (history.count(last_word_only=True,
+                                   since=window.start, until=window.end)
+                     if numbers else 0)
     except Exception as exc:
         current_app.logger.warning(f"Alert panel failed: {exc}")
         return refuse("Alert history could not be read.")
@@ -1262,10 +1309,10 @@ def _alert_panels(panels, window, scope):
             # the Alerts page's own, the last word on each rule and subject,
             # so the board and the page cannot report two different numbers
             # for one question.
-            "question": (f"of the {fired:,} alert"
-                         f"{'' if fired == 1 else 's'} in this window "
+            "question": (f"of the {incidents:,} alert"
+                         f"{'' if incidents == 1 else 's'} in this window "
                          f"reached nobody"),
-            "fired": fired,
+            "fired": incidents,
         }
     return out
 
@@ -1388,7 +1435,14 @@ def _panel_aggregations(panels, window):
         elif panel["type"] == "timeseries":
             sub = ()
             if panel.get("split_by"):
-                sub = (Terms(name="split", field=panel["split_by"], size=10),)
+                # `missing`, like the count and terms panels beside it. A
+                # record with no value for the split field is a record, and
+                # leaving it unlabelled dropped it out of a chart whose bars
+                # are supposed to add up to the bucket they stand in.
+                sub = (Terms(name="split", field=panel["split_by"],
+                             size=SPLIT_VALUES,
+                             missing=(None if panel["split_by"] == "severity"
+                                      else "unknown")),)
             aggregations.append(DateHistogram(
                 name=panel["id"], interval=_heatmap_interval(window),
                 min_count=0, sub=sub))
@@ -1579,7 +1633,10 @@ def _panel_results(panels, result, extra=None):
             rendered["buckets"] = []
             rendered["error"] = f"No {signal_of(panel)} backend is configured."
         else:
-            rendered["buckets"] = _buckets(result.get(panel["id"]))
+            answer = result.get(panel["id"])
+            if panel["type"] == "timeseries" and panel.get("split_by"):
+                answer = _with_the_rest(answer)
+            rendered["buckets"] = _buckets(answer)
             reasons = list(result.reasons(panel["id"]))
             if reasons:
                 # The same pair the trace panels use, so the client learns one
@@ -2761,10 +2818,22 @@ def api_dashboard_data(dashboard_id):
         "previous_period": previous,
         # None when nothing is configured. "ok" is a claim that someone
         # defined normal and this is inside it — not the same statement.
-        "status": evaluate_thresholds(dashboard.thresholds, {
-            "error_rate": (counts["error"] / result.total) if result.total else 0.0,
-            "error_count": counts["error"],
-        }),
+        #
+        # And None when the answer is SHORT. `_without_log_containers` says
+        # the same thing three lines from here — "Not `evaluate_thresholds`
+        # over zeros: 'within thresholds' is a claim about numbers, and
+        # there are none" — and the half-answer is the same claim over
+        # numbers nobody can vouch for. Measured against the lab: an
+        # `error_count` of 18,609 against a critical threshold of 20,000
+        # painted the badge green, from a response carrying "5 of 9 shards
+        # failed: Fielddata is disabled" in its own warnings. The counts
+        # could have been anything above that.
+        "status": None if result.partial else evaluate_thresholds(
+            dashboard.thresholds, {
+                "error_rate": ((counts["error"] / result.total)
+                               if result.total else 0.0),
+                "error_count": counts["error"],
+            }),
         "thresholds": dashboard.thresholds,
         # Which log sources the four numbers above were added up from, and
         # how much each gave — the same breakdown the Logs page prints. A

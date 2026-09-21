@@ -737,6 +737,9 @@ class ElasticsearchLogSource(LogSource):
                          for agg in aggregations if agg.name in raw},
                 warnings=tuple(warnings) + ((shards,) if shards else ()),
                 notes=notes,
+                # A shard that did not answer makes every count here short.
+                # The warning said so and nothing read it.
+                partial=bool(shards),
             )
         except MalformedResponse as exc:
             return AggregationResult(warnings=tuple(warnings) + (str(exc),),
@@ -789,7 +792,7 @@ class ElasticsearchLogSource(LogSource):
                     buckets={agg.name: self._read_buckets(raw.get(agg.name), agg)
                              for agg in aggregations if agg.name in raw},
                     warnings=tuple(warnings) + ((shards,) if shards else ()),
-                    notes=notes))
+                    notes=notes, partial=bool(shards)))
             except MalformedResponse as exc:
                 out.append(AggregationResult(
                     warnings=tuple(warnings) + (str(exc),),

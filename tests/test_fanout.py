@@ -580,6 +580,75 @@ class AggregationMergeTest(unittest.TestCase):
         self.assertTrue(buckets.get("t")[0].key_text)
 
 
+class AShortAnswerTravelsTest(unittest.TestCase):
+    """One member's half-answer makes the merge a half-answer.
+
+    `partial` is what the dashboard's threshold badge is decided from, and
+    only the member knows its own shards did not all reply. Merged away, the
+    board paints "Within thresholds" from counts nobody can vouch for — the
+    same failure the single-source path had, one level up.
+    """
+
+    def merge(self, *sources):
+        fan = FanOutLogSource(list(sources), name="*")
+        return fan.aggregate(
+            LogQuery(window=TimeWindow.of("1h"), text="*",
+                     containers=tuple(s.name for s in sources)),
+            [Terms(name="t", field="severity")], Scope.unrestricted())
+
+    def whole(self, name="a"):
+        first, second = build_pair()
+        first.name = name
+        return first
+
+    def short(self, name="b"):
+        source = self.whole(name)
+        original = source.aggregate
+
+        def answer(query, aggregations, scope):
+            result = original(query, aggregations, scope)
+            result.partial = True
+            result.warnings = result.warnings + ("2 of 6 shards failed",)
+            return result
+
+        source.aggregate = answer
+        return source
+
+    def test_a_whole_merge_is_not_marked(self):
+        self.assertFalse(self.merge(self.whole("a"), self.whole("b")).partial)
+
+    def test_one_short_member_marks_the_merge(self):
+        self.assertTrue(self.merge(self.whole("a"), self.short("b")).partial)
+
+    def test_a_member_that_answered_failed_marks_it_too(self):
+        """Nothing at all from one member is the shortest answer there is,
+        and it used to set `failed` and leave `partial` alone.
+
+        This member CATCHES its own failure and returns `failed=True`, which
+        is what the Elasticsearch adapter does for a malformed answer."""
+        dead = self.whole("b")
+        dead.fail = True
+        merged = self.merge(self.whole("a"), dead)
+        self.assertTrue(merged.partial)
+        self.assertTrue(merged.failed)
+
+    def test_a_member_that_raised_marks_it_too(self):
+        """The other road into the same place, and a different branch: an
+        adapter that lets the exception out reaches the fan-out's own
+        handler rather than the `result.failed` test below it."""
+        exploding = self.whole("b")
+
+        def raises(query, aggregations, scope):
+            raise ConnectionError("connection refused")
+
+        exploding.aggregate = raises
+        merged = self.merge(self.whole("a"), exploding)
+        self.assertTrue(merged.partial)
+        self.assertTrue(merged.failed)
+        self.assertTrue(any("b failed" in warning
+                            for warning in merged.warnings), merged.warnings)
+
+
 class CuttingSource(LogSource):
     """A backend that answers a terms question with ITS OWN top `size`.
 

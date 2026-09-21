@@ -395,6 +395,76 @@ class WireTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["error_type"], "invalid_panels")
 
+    def test_a_split_asks_for_the_records_that_have_no_value(self):
+        """The count and terms panels beside it label those records. This
+        one did not, so they were not in the chart at all."""
+        change_dashboard(self.app, self.dashboard, panels=normalise_all(
+            [{"id": "volume", "type": "timeseries", "split_by": "host"}]))
+        self.data()
+        split = (self.es.searches[0]["body"]["aggs"]["volume"]
+                 ["aggs"]["split"]["terms"])
+        self.assertEqual(split.get("missing"), "unknown")
+        self.assertEqual(split.get("size"), 10)
+
+    def split_answering(self, named, whole):
+        """A board split by `host`, where the split names `named` of `whole`.
+
+        Built rather than taken from the fixture, whose split happens to add
+        up exactly — so a test read off it passes with the fix removed,
+        measured. A real backend does this on every high-cardinality field:
+        `doc_count` is the bucket, `split.buckets` is its ten commonest
+        values, and the two are not the same number.
+        """
+        from wdash.hub.aggregation import AggregationResult, Bucket
+
+        change_dashboard(self.app, self.dashboard, panels=normalise_all(
+            [{"id": "volume", "type": "timeseries", "split_by": "host"}]))
+        source = self.app.hub.logs()
+        original = source.multi_aggregate
+
+        def answer(requests, scope):
+            results = original(requests, scope)
+            for result in results:
+                bucket = Bucket(key=1785841200000, key_text="t0", count=whole)
+                bucket.sub["split"] = [
+                    Bucket(key=f"host-{n}", count=count)
+                    for n, count in enumerate(named)]
+                result.buckets["volume"] = [bucket]
+            return results
+
+        source.multi_aggregate = answer
+        self.addCleanup(setattr, source, "multi_aggregate", original)
+        return self.data()["panels"][0]["buckets"]
+
+    def test_the_bars_of_a_split_add_up_to_the_bucket_they_stand_in(self):
+        """A split names the ten commonest values and stops, and the client
+        stacks the split without ever reading the bucket's own count — so
+        the bar drawn was the top ten's share of the traffic and the rest of
+        it was nowhere. Measured through the route against the lab, a board
+        split by `user_id` over seven days beside an identical unsplit
+        panel: the tallest bar drew 14 of 304 records.
+        """
+        buckets = self.split_answering(named=[8, 4, 2], whole=304)
+        self.assertEqual(len(buckets), 1)
+        stacked = buckets[0]["sub"]["split"]
+        self.assertEqual(sum(child["count"] for child in stacked), 304)
+        self.assertEqual(stacked[-1]["key"], "other")
+        self.assertEqual(stacked[-1]["count"], 304 - 14)
+
+    def test_a_split_that_named_everything_gets_no_extra_band(self):
+        """Otherwise every chart carries an "other" nobody can click, and a
+        legend entry that is always zero is one people learn to ignore."""
+        buckets = self.split_answering(named=[8, 4, 2], whole=14)
+        self.assertEqual([child["key"] for child in buckets[0]["sub"]["split"]],
+                         ["host-0", "host-1", "host-2"])
+
+    def test_a_split_that_somehow_overcounts_gets_no_negative_band(self):
+        """A backend answering with more in the split than in the bucket is
+        not a thing to draw below the axis."""
+        buckets = self.split_answering(named=[8, 4, 2], whole=10)
+        self.assertNotIn("other",
+                         [child["key"] for child in buckets[0]["sub"]["split"]])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

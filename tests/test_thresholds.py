@@ -168,6 +168,42 @@ class PayloadTest(unittest.TestCase):
         self.assertEqual(self.status({"error_count": {"critical": 5}})["level"],
                          "critical")
 
+    def test_a_short_answer_gets_no_badge_at_all(self):
+        """"Within thresholds" is a claim about numbers, and a half-answer
+        is numbers nobody can vouch for.
+
+        Elasticsearch fails a search outright only when EVERY shard fails;
+        when some do it answers 200 with what the rest found and says so in
+        `_shards`. Measured against the lab: `error_count` 18,609 against a
+        critical threshold of 20,000 painted the badge GREEN, from a
+        response carrying "5 of 9 shards failed: Fielddata is disabled" in
+        the warnings of that same payload. It could have been anything above
+        the threshold.
+        """
+        original = self.app.hub.logs().multi_aggregate
+
+        def short(requests, scope):
+            answers = original(requests, scope)
+            for answer in answers:
+                answer.partial = True
+                answer.warnings = answer.warnings + (
+                    "5 of 9 shards failed: Fielddata is disabled",)
+            return answers
+
+        self.app.hub.logs().multi_aggregate = short
+        self.addCleanup(setattr, self.app.hub.logs(), "multi_aggregate",
+                        original)
+
+        # Both directions: the badge that would have been green, and the one
+        # that would have been critical. Neither is a thing we can say.
+        self.assertIsNone(self.status({"error_rate": {"warning": 0.5}}))
+        self.assertIsNone(self.status({"error_count": {"critical": 5}}))
+
+    def test_a_whole_answer_still_gets_one(self):
+        """The control: the same board, nothing short about it."""
+        self.assertEqual(self.status({"error_rate": {"warning": 0.5}})["level"],
+                         "ok")
+
 
 
 class PayloadOnTheFileStoreTest(PayloadTest):

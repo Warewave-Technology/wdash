@@ -456,7 +456,7 @@ class FanOutLogSource(LogSource):
         merged answer is cut back to.
         """
         merged, warnings, notes = {}, [], {}
-        total, failed = 0, False
+        total, failed, partial = 0, False, False
         contributions = []
         by_name = {aggregation.name: aggregation
                    for aggregation in aggregations or ()}
@@ -466,7 +466,7 @@ class FanOutLogSource(LogSource):
 
         for source, result, error in results:
             if error is not None or result is None:
-                failed = True
+                failed = partial = True
                 warnings.append(f"{source.name} failed: {error}")
                 # In the breakdown as well as in the warnings: "0 from
                 # loki" and "loki did not answer" are different facts, and
@@ -488,7 +488,15 @@ class FanOutLogSource(LogSource):
                         f"a lower bound")
                 continue
             if result.failed:
-                failed = True
+                # `failed` is the shortest answer there is, so it is a short
+                # answer too. An adapter that catches its own failure and
+                # returns `failed=True` rather than raising takes this road
+                # instead of the one above.
+                failed = partial = True
+            # A member that answered SHORT makes the merge short. It travels
+            # rather than being re-derived here, because only the member can
+            # know its own shards did not all reply.
+            partial = partial or bool(getattr(result, "partial", False))
             contributions.append({"name": source.name, "total": result.total,
                                   "failed": bool(result.failed)})
             warnings.extend(f"{source.name}: {warning}"
@@ -536,6 +544,7 @@ class FanOutLogSource(LogSource):
             warnings=tuple(warnings),
             notes=notes,
             failed=failed,
+            partial=partial,
             sources=tuple(contributions))
 
     def histogram(self, query, scope):

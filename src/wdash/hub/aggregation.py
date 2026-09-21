@@ -61,6 +61,21 @@ class AggregationResult:
     #: Conflating the two lets a backend outage render as "traffic dropped to
     #: zero" — a comparison against it would be a confident lie.
     failed: bool = False
+    #: The query ran and the answer is SHORT: some shards did not reply, or
+    #: one member of a fan-out did not. Distinct from `failed`, which means
+    #: there is no answer at all, and from a whole answer that happens to be
+    #: small.
+    #:
+    #: It exists because a number nobody can vouch for was being vouched
+    #: for. Elasticsearch fails a search outright only when EVERY shard
+    #: fails; when some do it answers 200 with what the rest found, and
+    #: `_shard_failure` turned that into a warning string and nothing else —
+    #: so a board painted a green "Within thresholds" badge from counts the
+    #: same response described as incomplete. Measured against the lab: 200,
+    #: `error_count 18,609` against a critical threshold of 20,000, a green
+    #: badge, and `"5 of 9 shards failed: Fielddata is disabled"` in the
+    #: warnings of that same payload.
+    partial: bool = False
     #: The subset of `warnings` that belongs to ONE aggregation, filed under
     #: its name: {name: [reason, ...]}.
     #:
