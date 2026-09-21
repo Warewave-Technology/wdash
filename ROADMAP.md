@@ -97,9 +97,10 @@ Both of the reasons this was held back turned out to be right, and both were
 answered rather than dodged:
 
 * **The browser is a deployment question.** It is a separate image —
-  `--target browser`, measured at 1.77GB against the server's 260MB. Anybody
-  running a probe for uptime checks does not pull it. Where no browser agent
-  is assigned, a journey reports as unknown rather than pretending.
+  `--target browser`, measured at 592MB of content against the server's
+  81MB, a seventh of it. Anybody running a probe for uptime checks does not
+  pull it. Where no browser agent is assigned, a journey reports as unknown
+  rather than pretending.
 * **A journey is not a request with a duration.** It is a sequence, and the
   model grew `JourneyRun` and `StepResult` to say so. Every step is timed on
   its own, and the first failure stops the run — the steps after it are

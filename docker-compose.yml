@@ -19,8 +19,8 @@ services:
     build:
       context: .
       # The server. `--target browser` is the same tree plus Chromium, for
-      # the agent that runs browser journeys: 1.77GB against 260MB, and
-      # nothing in here needs it.
+      # the agent that runs browser journeys: 592MB against 81MB of
+      # content, and nothing in here needs it.
       target: server
     ports:
       # 5001 on this machine, 5000 in the container. Not a whim: macOS has

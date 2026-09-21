@@ -386,8 +386,13 @@ variables has to do something before it upgrades.
   `up` then `seed` is two commands with a wait between them that nobody was
   told about, and seeding a backend that is up but not ready fails in a way
   that reads as a broken seeder.
-
-
+- **A documentation page**, in `site/`. Install step by step, one section
+  per backend with what it can and cannot answer, the query language, every
+  panel kind, the three role boundaries and the pattern language, the three
+  ways somebody signs in, monitoring, alerting, a reference for every
+  variable the process reads, a table of everything WDash refuses, and
+  thirteen named failures with what each one means. It has no published
+  address yet; the README links it by path.
 - **CSRF protection**, on every state-changing request, with the token in a
   hidden field for a form and in `X-CSRF-Token` for a `fetch`. The agent API
   is exempt: it authenticates with a bearer token and no cookie.

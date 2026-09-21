@@ -1199,8 +1199,8 @@ An agent runs the checks. It pulls its configuration and pushes results back,
 so it works behind NAT and restarting WDash misses no check.
 
 ```bash
-docker build -t wdash .                                  # server, 260MB
-docker build -t wdash-browser --target browser .         # + Chromium, 1.77GB
+docker build -t wdash .                                  # server, 81MB
+docker build -t wdash-browser --target browser .         # + Chromium, 592MB
 
 docker run -d wdash-browser \
     --server https://wdash.example.com --token <the agent token>
@@ -1208,7 +1208,12 @@ docker run -d wdash-browser \
 
 - **Two images, and the small one is the default.** The browser is most of the
   second one and nothing in the first needs it. Anybody running a probe for
-  http and tcp checks should use `wdash`.
+  http and tcp checks should use `wdash`. The sizes above are **content
+  size** — what a registry reports and what you pull. `docker images` prints
+  disk usage instead, which depends on the storage driver: the same two
+  images are 369MB and 2.39GB there, measured on arm64 over containerd's
+  overlayfs snapshotter. The ratio is the part that matters and it holds
+  either way — the server is about a seventh of the browser image.
 - **A journey needs a browser agent.** Assign the journey to one. An agent
   with no browser reports nothing for it and says so in its own log, so the
   journey reads `unknown` — "no agent has reported a result for this check" —
