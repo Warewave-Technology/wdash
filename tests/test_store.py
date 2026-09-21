@@ -893,6 +893,76 @@ class ChannelHostsLoseTheirCredentialTest(unittest.TestCase):
                          "hooks.example.com")
 
 
+class AlertStateRowsWrittenBeforeTheLabelTest(unittest.TestCase):
+    """Migration 22 adds a column; a row that predates it carries NULL.
+
+    NULL has to read as "this row does not say", not as a name — and the
+    sweep it exists for has to go on working for such a row, naming the
+    subject exactly as it used to.
+    """
+
+    def upgrade_from_twenty_one(self):
+        """A store at version 21, with the column genuinely absent.
+
+        Dropped by hand after the tables are built, because migration 1
+        creates them from the LIVE `metadata` — which already declares
+        `label`, so stopping the list at 21 gives a database that is version
+        21 and has the column anyway. A test that skipped this step passed
+        with migration 22 deleted from the list entirely, and with it
+        altering the wrong table. Measured: both mutations survived.
+        """
+        from datetime import datetime, timezone
+
+        from sqlalchemy import insert, text
+
+        from wdash.store import migrations
+        from wdash.store.schema import alert_state
+
+        engine = build_engine("sqlite:///:memory:")
+        every = migrations.MIGRATIONS
+        migrations.MIGRATIONS = [step for step in every if step[0] <= 21]
+        try:
+            migrations.migrate(engine)
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "ALTER TABLE wdash_alert_state DROP COLUMN label"))
+                connection.execute(insert(alert_state).values(
+                    rule_id="r1", subject="m1", state="firing", failures=3,
+                    since=datetime.now(timezone.utc), detail="expires in 5"))
+        finally:
+            migrations.MIGRATIONS = every
+        migrations.migrate(engine)
+        return engine
+
+    def test_the_column_is_added_where_it_was_missing(self):
+        from sqlalchemy import inspect
+        engine = self.upgrade_from_twenty_one()
+        with engine.connect() as connection:
+            columns = {column["name"] for column in
+                       inspect(connection).get_columns("wdash_alert_state")}
+        self.assertIn("label", columns)
+
+    def test_the_row_survives_and_reads_as_saying_no_name(self):
+        from wdash.store.alerting import AlertStateRepository
+        state = AlertStateRepository(self.upgrade_from_twenty_one()).load("r1")
+        self.assertEqual(state["m1"].state, "firing")
+        self.assertEqual(state["m1"].failures, 3)
+        self.assertEqual(state["m1"].label, "")
+
+    def test_the_sweep_still_names_such_a_subject_by_its_id(self):
+        """The fallback, which is what every row written before now needs."""
+        from datetime import datetime, timezone
+
+        from wdash.alerts.evaluate import evaluate
+        from wdash.store.alerting import AlertStateRepository
+        previous = AlertStateRepository(
+            self.upgrade_from_twenty_one()).load("r1")
+        decisions = evaluate({"threshold": 1}, previous, [],
+                             datetime.now(timezone.utc))
+        self.assertEqual([(d.subject, d.label, d.notify) for d in decisions],
+                         [("m1", "m1", "resolved")])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

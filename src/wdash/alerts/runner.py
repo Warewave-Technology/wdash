@@ -103,10 +103,29 @@ def observe(rule, source, store, window, now):
         out = []
         for monitor in monitors:
             certificate = monitor.certificate
-            if certificate is None:
-                continue
-            remaining = certificate.days_remaining
+            remaining = (certificate.days_remaining
+                         if certificate is not None else None)
             if remaining is None:
+                # In the listing, with nothing to read. Skipping it dropped
+                # the subject out of `observations` entirely, and a firing
+                # subject that is absent from a COMPLETE listing is resolved
+                # as "no longer being checked" and then forgotten. Measured:
+                # a certificate five days from expiry, alerting; the target
+                # refused the next connection, so the result carried no TLS
+                # block; pass 2 sent `resolved` and emptied the state row,
+                # and the alert re-fired from scratch when the endpoint came
+                # back. The certificate had not moved and the check was
+                # still there and still enabled.
+                #
+                # `known=False` says the true thing: this is a subject of
+                # the rule and there is no reading for it right now. A check
+                # that never had a certificate — a plain HTTP monitor —
+                # lands here too and costs nothing, because a subject with
+                # no reading and no stored state produces no decision and no
+                # row. The two are indistinguishable from here, and reading
+                # them both as "nothing to worry about" is what this was.
+                out.append(Observation(monitor.id, False, "", monitor.name,
+                                       known=False))
                 continue
             detail = (f"expired {abs(remaining)} day(s) ago"
                       if certificate.expired

@@ -276,13 +276,17 @@ class AlertStateRepository:
             state=r["state"], failures=r["failures"],
             since=_aware(r["since"]),
             last_notified_at=_aware(r["last_notified_at"]),
-            detail=r["detail"] or "") for r in rows}
+            detail=r["detail"] or "",
+            # NULL on a row written before migration 22. Empty reads as
+            # "this row does not say", and the sweep falls back to the id.
+            label=r["label"] or "") for r in rows}
 
     def save(self, rule_id, subject, state):
         values = {
             "state": state.state, "failures": state.failures,
             "since": state.since, "last_notified_at": state.last_notified_at,
             "detail": (state.detail or "")[:2000],
+            "label": (state.label or "")[:255],
         }
         with self._engine.begin() as connection:
             changed = connection.execute(

@@ -479,6 +479,12 @@ alert_state = Table(
     #: The most recent reason, for the history screen and so a repeat
     #: notification can say what changed.
     Column("detail", Text),
+    #: The name the subject had when it was last observed. Kept for the same
+    #: reason `alert_history.subject_label` is (migration 13): the one
+    #: notification that cannot look a name up is the one about a subject
+    #: that has gone — and that is exactly when this rule resolves. Without
+    #: it the recovery named a uuid.
+    Column("label", String(255)),
     Index("ix_wdash_alert_state_key", "rule_id", "subject", unique=True),
 )
 

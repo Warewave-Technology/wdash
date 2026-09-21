@@ -74,17 +74,24 @@ class Observation:
 
 
 class State:
-    """What was stored about one subject last time round."""
+    """What was stored about one subject last time round.
 
-    __slots__ = ("state", "failures", "since", "last_notified_at", "detail")
+    `label` is the name the subject had when it was last seen, carried here
+    for the one notification that cannot look a name up: the one about a
+    subject that has gone. See the sweep at the end of `evaluate`.
+    """
+
+    __slots__ = ("state", "failures", "since", "last_notified_at", "detail",
+                 "label")
 
     def __init__(self, state=OK, failures=0, since=None,
-                 last_notified_at=None, detail=""):
+                 last_notified_at=None, detail="", label=""):
         self.state = state
         self.failures = failures
         self.since = since
         self.last_notified_at = last_notified_at
         self.detail = detail
+        self.label = label
 
 
 class Decision:
@@ -171,8 +178,13 @@ def evaluate(rule, previous, observations, now, silenced=(), complete=True):
         for subject, before in previous.items():
             if subject in seen or before.state != FIRING:
                 continue
+            # Named from the stored row, because the thing this is about is
+            # gone and there is nothing left to ask. It used to pass the
+            # subject twice, so the one notification with no other source of
+            # a name was the one that said `4f3c…`.
             decisions.append(Decision(
-                subject, subject, State(state=OK, failures=0, since=now),
+                subject, before.label or subject,
+                State(state=OK, failures=0, since=now, label=before.label),
                 notify=NOTIFY_RESOLVED,
                 detail="no longer being checked", since=before.since))
     return decisions
@@ -226,7 +238,7 @@ def _one(observation, before, threshold, repeat, now, is_silenced):
             observation.subject, observation.label,
             State(state=FIRING, failures=failures, since=before.since or now,
                   last_notified_at=(now if notify else before.last_notified_at),
-                  detail=observation.detail),
+                  detail=observation.detail, label=observation.label),
             notify=notify, detail=observation.detail, since=before.since or now)
 
     if not reached:
@@ -236,7 +248,7 @@ def _one(observation, before, threshold, repeat, now, is_silenced):
             observation.subject, observation.label,
             State(state=OK, failures=failures, since=before.since,
                   last_notified_at=before.last_notified_at,
-                  detail=observation.detail),
+                  detail=observation.detail, label=observation.label),
             notify=None, detail=observation.detail)
 
     # Crossing into firing. A silence suppresses the NOTIFICATION and not the
@@ -246,7 +258,7 @@ def _one(observation, before, threshold, repeat, now, is_silenced):
         observation.subject, observation.label,
         State(state=FIRING, failures=failures, since=now,
               last_notified_at=(None if is_silenced else now),
-              detail=observation.detail),
+              detail=observation.detail, label=observation.label),
         notify=(None if is_silenced else NOTIFY_FIRING),
         detail=observation.detail, since=now)
 
@@ -258,7 +270,8 @@ def _recovered(observation, before, now):
         return Decision(
             observation.subject, observation.label,
             State(state=OK, failures=0, since=before.since,
-                  last_notified_at=before.last_notified_at),
+                  last_notified_at=before.last_notified_at,
+                  label=observation.label),
             notify=None)
 
     # A recovery is ALWAYS notified, silence or not. Somebody silenced the
@@ -266,6 +279,7 @@ def _recovered(observation, before, now):
     # not what they asked for.
     return Decision(
         observation.subject, observation.label,
-        State(state=OK, failures=0, since=now, last_notified_at=now),
+        State(state=OK, failures=0, since=now, last_notified_at=now,
+              label=observation.label),
         notify=NOTIFY_RESOLVED,
         detail=observation.detail or "recovered", since=before.since)

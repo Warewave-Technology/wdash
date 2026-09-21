@@ -498,6 +498,105 @@ class AnOutageThatLosesItsProbeTest(AlertingTestCase):
         self.assertEqual(self.transitions(), ["firing", "resolved"])
 
 
+class ACertificateAlertOutlivesTheHandshakeTest(AlertingTestCase):
+    """A firing certificate alert, and then the endpoint stops answering.
+
+    Measured before this, real runner and real receiver, a certificate five
+    days from expiry with `days_before: 30`:
+
+        pass 1 (cert 5 days out)  -> notified 1   alert_state {'m1': firing}
+        pass 2 (target refused)   -> notified 1   alert_state {}
+        webhooks: firing | Payments API (payments.internal) | expires in 5 day(s)
+                  resolved | m1 | no longer being checked
+
+    Nothing about the certificate changed and the check was still there and
+    still enabled. The reading was gone, the monitor fell out of the
+    observation list, and a firing subject absent from a complete listing is
+    resolved and then forgotten — so the alert re-fired from scratch the
+    moment the endpoint answered again.
+
+    And the recovery named `m1`, a uuid in production, because the sweep had
+    no name to use. It has one now.
+    """
+
+    #: What a certificate rule calls its subject: the check and the name on
+    #: the certificate, which is the pair somebody has to go and renew.
+    NAMED = "Payments API (payments.internal)"
+
+    def setUp(self):
+        super().setUp()
+        self.rule = self.store.rules.create(
+            name="Certificates", kind="certificate_expiring", threshold=1,
+            days_before=30, channel_id=self._channel()["id"])
+        self.expiring = Certificate(
+            common_name="payments.internal",
+            not_after=datetime.now(timezone.utc) + timedelta(days=5))
+
+    def pass_(self, certificate, listed=True):
+        monitors = [Monitor(id="m1", name="Payments API",
+                            status=UP, certificate=certificate)] if listed else []
+        return AlertRunner(self.store, self._hub(*monitors)).evaluate_once()
+
+    def stored(self):
+        return self.store.alert_state.load(self.rule["id"]).get("m1")
+
+    def sent(self):
+        return [(row["transition"], row["subject_label"])
+                for row in reversed(self.store.alert_history.recent())]
+
+    def test_losing_the_reading_sends_nothing(self):
+        self.assertEqual(self.pass_(self.expiring), 1)
+        self.assertEqual(self.pass_(None), 0,
+                         "the alert was closed by a refused handshake")
+        self.assertEqual(self.sent(), [("firing", self.NAMED)])
+
+    def test_the_alert_is_still_there_to_resolve_later(self):
+        """It was forgotten, not just unnotified: `alert_state` went empty,
+        so the endpoint coming back fired a second incident."""
+        self.pass_(self.expiring)
+        self.pass_(None)
+        self.assertIsNotNone(self.stored(), "the state row was forgotten")
+        self.assertEqual(self.stored().state, "firing")
+        self.assertEqual(self.pass_(self.expiring), 0,
+                         "one certificate, two incidents")
+
+    def test_a_replaced_certificate_still_resolves(self):
+        """Holding is not latching: the next real reading decides."""
+        self.pass_(self.expiring)
+        self.pass_(None)
+        fresh = Certificate(common_name="payments.internal",
+                            not_after=datetime.now(timezone.utc)
+                            + timedelta(days=200))
+        self.assertEqual(self.pass_(fresh), 1)
+        self.assertEqual(self.sent(),
+                         [("firing", self.NAMED), ("resolved", self.NAMED)])
+
+    def test_a_check_deleted_after_days_of_firing_is_still_named(self):
+        """The name has to survive every pass, not only the first.
+
+        Each pass rebuilds the stored state, so an alert that had been
+        firing for a while — which is every alert anybody deletes a check
+        to silence — carried whatever the LAST pass put there. A test that
+        deleted the check on pass two could not see it.
+        """
+        self.assertEqual(self.pass_(self.expiring), 1)
+        for _ in range(3):
+            self.assertEqual(self.pass_(self.expiring), 0)
+        self.assertEqual(self.pass_(None, listed=False), 1)
+        self.assertEqual(self.sent(),
+                         [("firing", self.NAMED), ("resolved", self.NAMED)])
+
+    def test_a_check_that_is_deleted_is_still_resolved_and_by_name(self):
+        """The sweep is a different question and must keep working — and the
+        one notification that cannot look a name up is this one."""
+        self.assertEqual(self.pass_(self.expiring), 1)
+        self.assertEqual(self.pass_(None, listed=False), 1)
+        self.assertEqual(self.sent(),
+                         [("firing", self.NAMED), ("resolved", self.NAMED)],
+                         "the recovery named the subject id")
+        self.assertIsNone(self.stored(), "the row outlived the subject")
+
+
 class ObservationTest(AlertingTestCase):
     """What each rule kind counts as bad."""
 
@@ -566,7 +665,15 @@ class ObservationTest(AlertingTestCase):
                 self.assertEqual([(o.bad, o.known) for o in observations],
                                  [(True, True)])
 
-    def test_a_certificate_rule_only_sees_checks_that_have_one(self):
+    def test_a_certificate_rule_only_judges_checks_that_have_one(self):
+        """A check with no certificate reading is OBSERVED, with no reading.
+
+        It used to be left out of the list altogether, and a firing subject
+        absent from a complete listing is resolved as "no longer being
+        checked". So the one event that takes the reading away — the
+        endpoint refusing the next connection — closed the alert about its
+        own certificate.
+        """
         now = datetime.now(timezone.utc)
         soon = Certificate(not_after=now + timedelta(days=5))
         later = Certificate(not_after=now + timedelta(days=200))
@@ -575,8 +682,18 @@ class ObservationTest(AlertingTestCase):
             Monitor(id="soon", status=UP, certificate=soon),
             Monitor(id="later", status=UP, certificate=later),
             Monitor(id="plain", status=UP))
-        self.assertEqual({o.subject: o.bad for o in observations},
-                         {"soon": True, "later": False})
+        self.assertEqual({o.subject: (o.bad, o.known) for o in observations},
+                         {"soon": (True, True), "later": (False, True),
+                          "plain": (False, False)})
+
+    def test_a_certificate_with_no_expiry_date_is_no_reading_either(self):
+        """A TLS block that came back without `not_after` is not a
+        certificate that is fine for ever."""
+        observations = self._observe(
+            {"kind": "certificate_expiring", "days_before": 30},
+            Monitor(id="dateless", status=UP, certificate=Certificate()))
+        self.assertEqual([(o.bad, o.known) for o in observations],
+                         [(False, False)])
 
     def test_an_expired_certificate_says_so_rather_than_counting_down(self):
         now = datetime.now(timezone.utc)

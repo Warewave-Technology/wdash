@@ -579,6 +579,31 @@ def _take_the_credential_out_of_the_channel_host(connection):
             row["name"], config["host"])
 
 
+def _add_alert_state_label(connection):
+    """Version 22: the name the stored state is about.
+
+    Migration 13 added this to `alert_history` and gave the reason: looking
+    a name up at render time does not work, because history is most often
+    read about a monitor that has since been deleted. The same is true of
+    the state table, and in one place it is not a display problem but the
+    only chance there is. When a firing subject vanishes from the listing,
+    `evaluate` resolves it — and the notification it sends is built from the
+    stored row alone, because the thing it is about is gone. It said
+    `Decision(subject, subject, ...)`, so the message an operator receives
+    named a uuid.
+
+    NULL on an existing row reads as "this version did not record one",
+    which is true of every row written before now, and the sweep falls back
+    to the subject exactly as it used to.
+    """
+    from sqlalchemy import inspect, text
+    columns = {column["name"] for column
+               in inspect(connection).get_columns("wdash_alert_state")}
+    if "label" not in columns:
+        connection.execute(text(
+            "ALTER TABLE wdash_alert_state ADD COLUMN label VARCHAR(255)"))
+
+
 MIGRATIONS = [
     (1, "initial schema", _create_everything),
     (2, "authorization audit trail", _add_audit),
@@ -609,6 +634,7 @@ MIGRATIONS = [
      _report_source_urls_holding_a_password),
     (21, "take the credential out of every stored alert channel host",
      _take_the_credential_out_of_the_channel_host),
+    (22, "the name an alert's stored state is about", _add_alert_state_label),
 ]
 
 

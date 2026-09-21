@@ -87,6 +87,18 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **A certificate alert is no longer closed by the endpoint going quiet.**
+  A firing `certificate_expiring` alert resolved as "no longer being
+  checked" and forgot its state the moment the check stopped returning a
+  certificate — a refused connection is enough — so it re-fired from scratch
+  when the endpoint answered again, about a certificate that had not moved.
+  Such a subject now holds, the way a `monitor_down` one does.
+
+  A recovery for a subject that really has been deleted now carries the name
+  the subject had, not its id. Alerts about deleted checks used to name a
+  uuid, because the name is the one thing that cannot be looked up once the
+  check is gone.
+
 - **An alert channel's stored host no longer carries its credential.** A
   webhook saved as `https://user:password@hooks.example.com/...` kept the
   whole `user:password@host` in the clear part of the row, so the password
