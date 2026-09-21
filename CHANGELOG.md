@@ -87,6 +87,27 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **A check result with an impossible duration no longer loses the batch it
+  came in.** On Postgres, `duration_us` is a four-byte column and the guard
+  checked incoming numbers against an eight-byte one, so a value between the
+  two passed the guard and failed at the insert — taking every other result
+  in the same batch with it, answering the agent 500, and being retried for
+  ever. Such a field is dropped now, with a line saying so, and the rest of
+  the result is kept. SQLite installations were never affected.
+
+- **Two administrators deleting accounts at the same moment cannot empty the
+  table.** "This is the last local account" was a count followed by a
+  delete, and nothing held between them: measured with two processes, 15 of
+  20 trials ended with no local account at all and both deletions reporting
+  success — an installation nobody can sign in to if the directory is also
+  down, and the fix involves the database.
+
+- **A monitor cannot be pinned to an agent that no longer exists.** Saving
+  an edit form that was opened before an agent was deleted wrote an
+  assignment naming it, and a monitor with an assignment is not run by
+  anybody else — so it sat on the page, enabled, checked by nobody. The save
+  is refused now and names the agent.
+
 - **A directory outage no longer says which names are local accounts.** A
   local name skipped the directory and was refused 401 while every other
   name got the directory's 503, so the pair of status codes sorted a list of

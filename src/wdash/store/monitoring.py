@@ -926,10 +926,35 @@ class MonitorRepository:
 
     @staticmethod
     def _assign(connection, monitor_id, agent_ids):
-        rows = [{"monitor_id": monitor_id, "agent_id": a}
-                for a in dict.fromkeys(agent_ids or ())]
-        if rows:
-            connection.execute(insert(monitor_agents).values(rows))
+        """Pin a monitor to agents, refusing an agent that does not exist.
+
+        It used to insert whatever it was handed — the schema declares no
+        foreign keys — and `for_agent` reads "has an assignment" as "is
+        pinned", so one row naming a dead agent is strictly worse than no
+        row at all: it suppresses the fallback the comment there calls the
+        useful default, and the monitor is enabled, listed on the page, and
+        checked by nobody.
+
+        Reachable through the product's own pages, measured: two agents, a
+        monitor pinned to `singapore`, `singapore` deleted (which correctly
+        switches the monitor off and clears its assignments), and then a
+        first administrator's edit form — opened before the deletion, with
+        `singapore` still ticked — saved. The monitor came back enabled,
+        pinned to an agent that was gone, and ran nowhere.
+        """
+        wanted = list(dict.fromkeys(agent_ids or ()))
+        if not wanted:
+            return
+        known = set(connection.execute(
+            select(agents.c.id).where(agents.c.id.in_(wanted))).scalars())
+        missing = [a for a in wanted if a not in known]
+        if missing:
+            raise MonitoringError(
+                f"{'This agent is' if len(missing) == 1 else 'These agents are'}"
+                f" no longer registered: {', '.join(sorted(missing))}. "
+                f"Reload the page and choose from the agents that are.")
+        connection.execute(insert(monitor_agents).values(
+            [{"monitor_id": monitor_id, "agent_id": a} for a in wanted]))
 
     # ---------- reading ----------
 
@@ -1176,6 +1201,20 @@ def _steps_of(result):
 #: range is where a number stops being storable.
 INT64 = 2 ** 63 - 1
 
+#: What an `Integer` column holds, which is what `duration_us` actually is
+#: (schema.py declares `Integer`, four bytes on Postgres). Bounding it to
+#: INT64 checked it against a column it is not: measured on the lab Postgres,
+#: `duration_us = 3_000_000_000` passed the guard, reached the INSERT and
+#: raised `NumericValueOutOfRange` — outside the per-result try/except, which
+#: wraps `_row` and not the insert, so all three results in the batch were
+#: lost and the endpoint answered 500 to an agent that then retried it.
+#:
+#: SQLite stores it happily, so this was a fault on one dialect only — the
+#: reason to name the column's real width rather than the widest integer
+#: there is. INT32 is 35 minutes in microseconds, past every timeout this
+#: product allows (120s for a check, 600s for a journey).
+INT32 = 2 ** 31 - 1
+
 #: What an HTTP status can be. RFC 9110: three digits, the first 1-5.
 HTTP_STATUS_RANGE = (100, 599)
 
@@ -1331,7 +1370,7 @@ class ResultRepository:
             "received_at": received,
             "status": "down" if result.get("status") == "down" else "up",
             "duration_us": self._number(agent_id, monitor_id, result,
-                                        "duration_us"),
+                                        "duration_us", -INT32 - 1, INT32),
             # `str` before the slice: an error that arrived as a dictionary
             # raised TypeError on the slice and took the whole batch with it.
             "error": str(result.get("error") or "")[:2000] or None,

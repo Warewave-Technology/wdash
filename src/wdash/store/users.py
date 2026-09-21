@@ -10,6 +10,7 @@ purpose is to work when the identity provider does not, which is also why it
 must be protected like the thing it is: a permanent credential to the system.
 """
 
+import hashlib
 import logging
 import secrets
 import uuid
@@ -19,7 +20,17 @@ from argon2 import PasswordHasher
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from . import migrations
 from .schema import settings, users
+
+#: The Postgres advisory-lock key for "is this the last local account?".
+#: A constant rather than a hash of anything: there is one such question for
+#: the whole installation, and every worker asking it must ask for the same
+#: lock. Built the same way `audit._lock_key` builds its keys, so the two
+#: cannot collide by accident.
+_LAST_ACCOUNT_LOCK = int.from_bytes(
+    hashlib.blake2b(b"users|the last local account", digest_size=8).digest(),
+    "big", signed=True)
 
 #: Fixed key claimed by whoever completes first-run setup.
 SETUP_SENTINEL = "setup.completed"
@@ -359,6 +370,21 @@ class UserRepository:
         """
         username = (username or "").strip().lower()
         with self._engine.begin() as connection:
+            # The count and the delete are one decision, and they were two
+            # statements with nothing between them. Measured with two
+            # processes deleting different accounts off a barrier, 20 trials
+            # on a store holding exactly alice and bob: 15 ended with ZERO
+            # local accounts and both processes reporting success. On SQLite
+            # the count is not even inside a transaction — pysqlite emits no
+            # BEGIN until a write — so it locks nothing at all.
+            #
+            # The same lock `audit.record_state` takes, for the same shape:
+            # decide from a read, then write. `create_first_admin` solves it
+            # the other way, by letting the constraint decide in one
+            # statement, and there is no constraint that says "not the last
+            # one".
+            migrations.serialise_writes(connection, self._engine.dialect.name,
+                                        postgres_key=_LAST_ACCOUNT_LOCK)
             remaining = connection.execute(
                 select(func.count()).select_from(users)
                 .where(users.c.username != username)).scalar() or 0

@@ -141,6 +141,44 @@ class AssignmentTest(StoreTestCase):
         self.store.monitors.update(monitor["id"], enabled=False)
         self.assertEqual(self.store.monitors.for_agent(one["id"]), [])
 
+    def test_a_monitor_cannot_be_pinned_to_an_agent_that_is_gone(self):
+        """`for_agent` reads "has an assignment" as "is pinned", so a row
+        naming a dead agent is strictly worse than no row: it suppresses the
+        run-everywhere default, and the monitor is enabled, on the page, and
+        checked by nobody.
+
+        The schema declares no foreign keys, so nothing below this refuses
+        it. Reachable through the product's own pages: an edit form opened
+        before an agent was deleted still has it ticked.
+        """
+        from wdash.store.monitoring import MonitoringError
+        one, _ = self._agent("frankfurt")
+        with self.assertRaises(MonitoringError) as caught:
+            self._monitor(agent_ids=[one["id"], "singapore-that-is-gone"])
+        self.assertIn("singapore-that-is-gone", str(caught.exception))
+        self.assertEqual(self.store.monitors.all(), [])
+
+    def test_the_same_on_an_edit(self):
+        """The measured path: the agent is deleted while a form is open."""
+        from wdash.store.monitoring import MonitoringError
+        one, _ = self._agent("frankfurt")
+        two, _ = self._agent("singapore")
+        monitor = self._monitor(agent_ids=[one["id"], two["id"]])
+        self.store.agents.delete(two["id"])
+        with self.assertRaises(MonitoringError):
+            self.store.monitors.update(monitor["id"],
+                                       agent_ids=[one["id"], two["id"]])
+        # And the monitor is left as the deletion left it, not half-rewritten.
+        self.assertEqual(self.store.monitors.get(monitor["id"])["agent_ids"],
+                         [one["id"]])
+
+    def test_an_assignment_to_agents_that_all_exist_is_untouched(self):
+        one, _ = self._agent("one")
+        two, _ = self._agent("two")
+        monitor = self._monitor(agent_ids=[one["id"], two["id"]])
+        self.assertEqual(sorted(monitor["agent_ids"]),
+                         sorted([one["id"], two["id"]]))
+
 
 class IngestTest(StoreTestCase):
     """An endpoint that accepts anything is a way to paint the board green."""

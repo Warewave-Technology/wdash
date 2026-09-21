@@ -1105,6 +1105,119 @@ def _record_one_fact(url, barrier):
                              state={"in_force": "ldap", "shadowed": "oidc"})
 
 
+def _delete_one_account(url, username, barrier, outcome):
+    """One worker deleting one account, off a barrier.
+
+    Module level so a spawned process can import it. Its own store, which is
+    the point: two administrators on two gunicorn workers are two processes
+    with two connections and no pool between them.
+    """
+    from wdash.store import Store
+    store = Store.open(url)
+    barrier.wait(30)
+    try:
+        outcome.value = 1 if store.users.delete(username) else 4
+    except ValueError:
+        outcome.value = 2
+    except Exception:
+        outcome.value = 3
+
+
+class TheLastLocalAccountCannotBeRacedAwayTest(unittest.TestCase):
+    """`delete` counts, then deletes, and those were two statements.
+
+    An installation with no local account and a broken identity provider is
+    unreachable and the fix involves the database, which is why the guard
+    exists. Measured with two processes deleting different accounts off a
+    barrier, 20 trials on a store holding exactly alice and bob: 15 ended
+    with ZERO accounts and both processes reporting a successful delete. On
+    SQLite the count is not inside a transaction at all — pysqlite emits no
+    BEGIN until a write — so it locked nothing.
+
+    SQLite only, and deliberately: this is about two PROCESSES, and the
+    Postgres path takes an advisory lock that the shared-schema test harness
+    cannot model.
+    """
+
+    def run_two(self):
+        import multiprocessing
+
+        folder = tempfile.mkdtemp()
+        url = f"sqlite:///{folder}/accounts.db"
+        store = Store.open(url)
+        store.users.create_first_admin("alice", "a-long-enough-password")
+        store.users.create("bob", "a-long-enough-password", role="admin")
+        store.engine.dispose()
+
+        barrier = multiprocessing.Barrier(2)
+        outcomes = [multiprocessing.Value("i", 0) for _ in range(2)]
+        workers = [multiprocessing.Process(
+            target=_delete_one_account,
+            args=(url, name, barrier, outcome))
+            for name, outcome in zip(("alice", "bob"), outcomes)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(60)
+        left = Store.open(url).users.count()
+        return left, tuple(outcome.value for outcome in outcomes)
+
+    @unittest.skipIf(os.environ.get("WDASH_TEST_POSTGRES"),
+                     "two SQLite processes; the Postgres path locks instead")
+    def test_two_at_once_cannot_empty_the_table(self):
+        for trial in range(6):
+            left, outcomes = self.run_two()
+            self.assertEqual(left, 1, f"trial {trial}: {outcomes}")
+            # One deleted and one was refused, in whichever order they raced.
+            self.assertEqual(sorted(outcomes), [1, 2], f"trial {trial}")
+
+    def test_every_worker_asks_for_the_same_lock(self):
+        """On Postgres the serialisation is an advisory lock, and two
+        workers holding different keys do not wait for each other — so the
+        race above would be open there, on the dialect the two-process test
+        cannot model.
+
+        Measured by what the key IS, across two stores with two engines and
+        two connections: a key derived from anything per-process passes
+        every other test in this class and fixes nothing.
+        """
+        from wdash.store import migrations
+        real = migrations.serialise_writes
+        seen = []
+
+        def record(connection, dialect, postgres_key):
+            seen.append(postgres_key)
+            return real(connection, dialect, postgres_key)
+
+        for _ in range(2):
+            folder = tempfile.mkdtemp()
+            store = Store.open(f"sqlite:///{folder}/lock.db")
+            store.users.create_first_admin("alice", "a-long-enough-password")
+            store.users.create("bob", "a-long-enough-password", role="admin")
+            with mock.patch.object(migrations, "serialise_writes", record):
+                store.users.delete("bob")
+
+        self.assertEqual(len(seen), 2, "the lock was not taken")
+        self.assertIsInstance(seen[0], int)
+        self.assertEqual(seen[0], seen[1])
+
+    def test_deleting_the_only_account_is_still_refused(self):
+        folder = tempfile.mkdtemp()
+        store = Store.open(f"sqlite:///{folder}/one.db")
+        store.users.create_first_admin("alice", "a-long-enough-password")
+        with self.assertRaises(ValueError):
+            store.users.delete("alice")
+        self.assertEqual(store.users.count(), 1)
+
+    def test_deleting_one_of_two_still_works(self):
+        folder = tempfile.mkdtemp()
+        store = Store.open(f"sqlite:///{folder}/two.db")
+        store.users.create_first_admin("alice", "a-long-enough-password")
+        store.users.create("bob", "a-long-enough-password", role="admin")
+        self.assertTrue(store.users.delete("bob"))
+        self.assertEqual([u["username"] for u in store.users.all()], ["alice"])
+
+
 class RecordingAFactOnceTest(unittest.TestCase):
     """`audit.record_state`, for something true of the installation.
 

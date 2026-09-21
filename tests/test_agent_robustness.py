@@ -943,7 +943,19 @@ class AResultTheStoreCannotReadTest(unittest.TestCase):
                 "an http status of 10**30": {"http_status": 10 ** 30},
                 "an http status nobody can answer with": {"http_status": 9999},
                 "a duration that is an infinity": {"duration_us":
-                                                   float("inf")}}.items():
+                                                   float("inf")},
+                # The band this test used to leave open. `duration_us` is an
+                # `Integer` column — four bytes on Postgres — and the guard
+                # checked it against a BIGINT, so 3e9 passed the guard,
+                # reached the INSERT and raised NumericValueOutOfRange there,
+                # outside the per-result try/except. Measured on the lab
+                # Postgres: `record()` raised DataError and all three rows of
+                # the batch were lost. SQLite stored it, so the suite was
+                # green on the dialect the default installation runs.
+                "a duration past what a 4-byte column holds":
+                    {"duration_us": 3_000_000_000},
+                "the same, negative": {"duration_us": -3_000_000_000},
+        }.items():
             with self.subTest(bad=label):
                 before = self.store.results.count()
                 with self.assertLogs("wdash.store.monitoring", "WARNING"):
