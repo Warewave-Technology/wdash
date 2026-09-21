@@ -93,9 +93,8 @@ def observe(rule, source, store, window, now):
         for m in monitors:
             if m.id not in worst or _rank(m) < _rank(worst[m.id]):
                 worst[m.id] = m
-        return Observed([Observation(m.id, m.status == DOWN,
-                                     m.error or "the check failed", m.name,
-                                     known=m.status in (UP, DOWN))
+        return Observed([Observation(m.id, m.status == DOWN, _detail(m),
+                                     m.name, known=m.status in (UP, DOWN))
                          for m in worst.values()], complete, warnings)
 
     if kind == CERTIFICATE_EXPIRING:
@@ -150,6 +149,30 @@ def observe(rule, source, store, window, now):
     # nothing is not "everything this rule watched has recovered".
     return Observed([], False, (f"{kind!r} is not a rule kind this version "
                                 f"knows how to evaluate",))
+
+
+def _detail(monitor):
+    """Why this monitor is bad, or nothing at all because it is not.
+
+    The fallback is for a monitor that IS down and whose source gave no
+    reason. Every monitor used to reach it, because a healthy one has no
+    error text either, and `_recovered` puts `observation.detail or
+    "recovered"` into the payload — so the RESOLVED notification for a
+    recovered check read "the check failed", over the wire to Alertmanager
+    and into the alert history, where the row sits under a column somebody
+    reads to decide whether an incident is over.
+
+    Gated on the verdict rather than on the error being empty. `Monitor.error`
+    is documented "Empty when it is up", but neither adapter enforces it —
+    both read the document's error field without consulting the status — and
+    a recovery quoting the failure it recovered from is the same sentence
+    with extra steps. It is the same condition as `bad`, deliberately: what
+    the detail explains is the judgement, and the two drifting apart is what
+    this was.
+    """
+    if monitor.status != DOWN:
+        return ""
+    return monitor.error or "the check failed"
 
 
 def _rank(monitor):

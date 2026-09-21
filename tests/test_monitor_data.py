@@ -835,7 +835,9 @@ class TheAlertSeesOneMonitorOnceTest(_PageCase):
         self.assertEqual(sorted((o.subject, o.bad, o.detail)
                                 for o in observations),
                          [("api", True, "received 500"),
-                          ("web", False, "the check failed")])
+                          # No detail on a healthy row: the fallback is for
+                          # a monitor that is down and said no more.
+                          ("web", False, "")])
 
 
 # ---------------------------------------------------------------------------

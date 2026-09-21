@@ -597,6 +597,96 @@ class ACertificateAlertOutlivesTheHandshakeTest(AlertingTestCase):
         self.assertIsNone(self.stored(), "the row outlived the subject")
 
 
+class ARecoveryThatReadsAsAFailureTest(AlertingTestCase):
+    """The resolved notification said "the check failed".
+
+    `observe` built every monitor_down observation with `m.error or "the
+    check failed"`. That fallback is for a monitor that IS down and whose
+    source gave no reason; a monitor that is up has no error either, so it
+    was handed the same sentence, and `_recovered` passes
+    `observation.detail or "recovered"` straight into the payload. Measured
+    before this, against a real runner, a real StoreMonitorSource and a real
+    receiver, four passes down -> unknown -> down -> up:
+
+        firing   | Payments API | could not connect: connection refused
+        resolved | Payments API | the check failed
+
+    It went to Alertmanager and PagerDuty over the wire and into the alert
+    history, which is the page somebody reads to work out whether an
+    incident is over. Both halves of the pair claimed a failure, so the
+    only thing separating "it broke" from "it is better" was the
+    transition field.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.rule = self.store.rules.create(
+            name="API down", kind="monitor_down", threshold=1,
+            channel_id=self._channel()["id"])
+        self.monitor = Monitor(id="m1", name="Payments API", status=DOWN,
+                               error="could not connect: connection refused")
+
+    def pass_(self, status, error):
+        self.monitor.status = status
+        self.monitor.error = error
+        return AlertRunner(self.store, self._hub(self.monitor)).evaluate_once()
+
+    def sent(self):
+        """What reached the receiver, as it was posted."""
+        return [(item["body"]["transition"], item["body"]["detail"])
+                for item in self.receiver.received]
+
+    def test_the_recovery_does_not_announce_a_failure(self):
+        self.pass_(DOWN, "could not connect: connection refused")
+        self.pass_(UP, "")
+        self.assertEqual(
+            self.sent(),
+            [("firing", "could not connect: connection refused"),
+             ("resolved", "recovered")])
+
+    def test_the_history_row_says_the_same(self):
+        """The alerts page draws this column, and a row reading "the check
+        failed" beside a resolved badge is read as the failure it names."""
+        self.pass_(DOWN, "could not connect: connection refused")
+        self.pass_(UP, "")
+        self.assertEqual(
+            [(row["transition"], row["detail"])
+             for row in reversed(self.store.alert_history.recent())],
+            [("firing", "could not connect: connection refused"),
+             ("resolved", "recovered")])
+
+    def test_a_down_monitor_with_no_reason_still_says_the_check_failed(self):
+        """The fallback keeps the job it was written for. Deleting it
+        instead would leave a FIRING alert with nothing in the detail,
+        which the page draws as an em dash."""
+        self.pass_(DOWN, "")
+        self.assertEqual(self.sent(), [("firing", "the check failed")])
+
+    def test_a_healthy_monitor_is_observed_with_no_detail_at_all(self):
+        """Gated on the verdict, not on the error being empty: there is
+        nothing to say about a check that passed, and leaving it empty is
+        what lets the state machine supply its own word for the
+        transition."""
+        from wdash.hub.query import TimeWindow
+        hub = self._hub(Monitor(id="m1", name="API", status=UP))
+        observations = observe(
+            {"kind": "monitor_down"}, hub.monitors(hub.ALL_SOURCES),
+            self.store, TimeWindow.of("1h"),
+            datetime.now(timezone.utc)).observations
+        self.assertEqual([(o.bad, o.detail) for o in observations],
+                         [(False, "")])
+
+    def test_an_error_left_on_a_healthy_row_is_not_the_recovery(self):
+        """`Monitor.error` is documented "Empty when it is up", but nothing
+        enforces it: both adapters read the document's error field without
+        consulting the status. Gating only the FALLBACK would leave that
+        stale sentence to be the recovery message — the same fault in a
+        second costume — so the whole detail is gated instead."""
+        self.pass_(DOWN, "received 500")
+        self.pass_(UP, "received 500")
+        self.assertEqual(self.sent()[-1], ("resolved", "recovered"))
+
+
 class ObservationTest(AlertingTestCase):
     """What each rule kind counts as bad."""
 
