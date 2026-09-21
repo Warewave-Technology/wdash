@@ -196,6 +196,19 @@ class FanOutLogSource(LogSource):
         records, warnings, containers = [], [], []
         total, partial, countable = 0, False, True
         contributions = []
+        #: Time buckets, merged across the members. This used not to exist:
+        #: the merged page was built without `histogram=` at all, so it fell
+        #: back to the dataclass default and `to_dict()` shipped `[]`. The
+        #: Logs page hides the volume chart on an empty list, so configuring
+        #: a SECOND log source made the chart disappear — measured, 29
+        #: buckets through one member and 0 through the fan-out over the same
+        #: window, with both members answering.
+        histogram = {}
+        #: Members that cannot draw one at all. Their records are in the page
+        #: and their lines are not in the chart, which is a chart that is
+        #: short by an unknown amount — and the one thing it must not do is
+        #: look complete.
+        histogram_blind = []
         # A merged page is only a note if every note in it is one. One real
         # fault among five sources is still a fault.
         informational = True
@@ -219,6 +232,11 @@ class FanOutLogSource(LogSource):
             })
             records.extend(page.records)
             containers.extend(page.containers or ())
+            if query.histogram:
+                if Capability.HISTOGRAM not in set(source.capabilities):
+                    histogram_blind.append(source.name)
+                else:
+                    _merge_histogram(histogram, page.histogram or ())
             total += page.total
             partial = partial or page.partial
             warnings.extend(f"{source.name}: {warning}"
@@ -240,6 +258,19 @@ class FanOutLogSource(LogSource):
                 f"at least {total:,} matches; an exact count is not available "
                 f"across these sources")
 
+        if histogram_blind:
+            # Said on the page rather than inferred from a short chart: the
+            # records of these members are in the table and their lines are
+            # not in the bars above it, and nothing about the drawing says
+            # so.
+            partial = True
+            informational = False
+            warnings.append(
+                f"the volume chart leaves out "
+                f"{', '.join(sorted(histogram_blind))}: "
+                f"{'it cannot' if len(histogram_blind) == 1 else 'they cannot'}"
+                f" count over time")
+
         # Counted from what SURVIVED the merge, not from what each source
         # returned: a page capped at 50 shows 29 from one and 21 from the
         # other, and the number people read is the one on screen.
@@ -259,6 +290,7 @@ class FanOutLogSource(LogSource):
             containers=tuple(containers),
             partial=partial,
             warnings=tuple(warnings),
+            histogram=[bucket for _, bucket in sorted(histogram.items())],
             # Paging a merged, time-ordered result needs each source's own
             # cursor advanced together, and each backend's cursor means
             # something different. Not attempted rather than done wrongly:
@@ -378,14 +410,26 @@ class FanOutLogSource(LogSource):
                 warnings=("the scope permits no containers",))
                 for _ in requests]
 
+        # Each member is asked for MORE values than the panel wants, because
+        # the top N of a union is not the union of the top Ns. Measured with
+        # two stubs asked for their own top 2: `alpha` really has 11, 10 in
+        # a and 1 in b, and b's single one fell outside b's top 2 — so the
+        # merge added up 10 and showed it as the whole. Widening does not
+        # make the answer exact (nothing short of asking for every value
+        # would), it makes the tail that gets added up longer; `_merge` says
+        # so when a member was cut.
+        widened = [(query, tuple(_widened(aggregation)
+                                 for aggregation in aggregations or ()))
+                   for query, aggregations in requests]
+
         def ask(source):
             batch = getattr(source, "multi_aggregate", None)
             if batch is None:
                 # Written against the interface's one required method: it
                 # answers a request at a time, and its answers are its own.
                 return [source.aggregate(query, aggregations, scope)
-                        for query, aggregations in requests]
-            return list(batch(requests, scope))
+                        for query, aggregations in widened]
+            return list(batch(widened, scope))
 
         answers = self._parallel(ask)
 
@@ -405,10 +449,20 @@ class FanOutLogSource(LogSource):
 
     @staticmethod
     def _merge(results, aggregations):
-        """One request's answers from every member, as one result."""
+        """One request's answers from every member, as one result.
+
+        `aggregations` is what the CALLER asked for, not the widened
+        question the members were sent: the sizes here are the ones the
+        merged answer is cut back to.
+        """
         merged, warnings, notes = {}, [], {}
         total, failed = 0, False
         contributions = []
+        by_name = {aggregation.name: aggregation
+                   for aggregation in aggregations or ()}
+        #: Which members returned a full list for which aggregation, and how
+        #: many answered at all.
+        cut, answered = {}, 0
 
         for source, result, error in results:
             if error is not None or result is None:
@@ -452,14 +506,32 @@ class FanOutLogSource(LogSource):
                     f"{source.name}: {reason}" for reason in reasons)
             total += result.total
 
+            answered += 1
             for name, buckets in (result.buckets or {}).items():
                 merged.setdefault(name, {})
                 for bucket in buckets:
                     _merge_bucket(merged[name], bucket)
+                # A member that gave back as many values as it was asked for
+                # has more, and the ones it did not give back are the ones
+                # this merge counts short. Same rule the merged PAGE uses to
+                # decide its total is a floor.
+                wanted = getattr(by_name.get(name), "size", None)
+                if wanted and len(buckets) >= _widened_size(wanted):
+                    cut.setdefault(name, []).append(source.name)
+
+        # Only when more than one member answered: one member cut at its own
+        # top N is an ordinary terms list, not a merge losing a tail.
+        if answered > 1:
+            for name, sources in cut.items():
+                notes.setdefault(name, []).append(
+                    f"{' and '.join(sorted(sources))} had more values than "
+                    f"this asked for, so a value missing from "
+                    f"{'its' if len(sources) == 1 else 'their'} own list is "
+                    f"counted short here. The largest values are whole.")
 
         return AggregationResult(
             total=total,
-            buckets={name: _ordered(buckets)
+            buckets={name: _ordered(buckets, by_name.get(name))
                      for name, buckets in merged.items()},
             warnings=tuple(warnings),
             notes=notes,
@@ -531,20 +603,99 @@ def _merge_bucket(target, bucket):
             _merge_bucket(existing["sub"][name], child)
 
 
-def _ordered(accumulated):
-    """Rebuild Buckets, date buckets by time and everything else by size."""
+def _widened_size(size):
+    """How many values to ask one member for when the panel wants `size`.
+
+    Elasticsearch's own `shard_size` rule, `size * 1.5 + 10`, and for the
+    same reason: a shard's top N and the index's top N are different lists,
+    and so are a member's and the fan-out's. Borrowed rather than invented
+    so the number has a provenance.
+    """
+    return int(size * 1.5) + 10
+
+
+def _widened(aggregation):
+    """The same aggregation, asking each member for a longer list.
+
+    Children too: a split inside a date histogram is a terms list with the
+    same problem one level down.
+    """
+    import dataclasses
+
+    children = tuple(getattr(aggregation, "sub", None) or ())
+    changes = {}
+    if children:
+        changes["sub"] = tuple(_widened(child) for child in children)
+    size = getattr(aggregation, "size", None)
+    if size:
+        changes["size"] = _widened_size(size)
+    return dataclasses.replace(aggregation, **changes) if changes else aggregation
+
+
+def _merge_histogram(target, buckets):
+    """Add one member's time buckets into `target`, keyed by instant.
+
+    The severity split is added level by level rather than replaced: two
+    backends both holding ERROR lines in the same minute are one bar of the
+    sum, and taking the later one would draw whichever member the fan-out
+    happened to ask last.
+
+    Aligning the buckets is the ADAPTERS' job and it is done: every one of
+    them keys a bucket by the START of the interval it counts, in
+    milliseconds. Loki did not until the commit before this one — its
+    buckets were labelled with the interval's END — and merging an
+    Elasticsearch and a Loki here would have interleaved two grids offset by
+    one interval, each bar at half its height. Worth saying because the two
+    changes look unrelated and are not.
+    """
+    for bucket in buckets:
+        key = bucket.get("key")
+        if key is None:
+            continue
+        existing = target.get(key)
+        if existing is None:
+            target[key] = {"timestamp": bucket.get("timestamp"),
+                           "key": key,
+                           "count": bucket.get("count") or 0,
+                           "by_severity": dict(bucket.get("by_severity") or {})}
+            continue
+        existing["count"] += bucket.get("count") or 0
+        for level, count in (bucket.get("by_severity") or {}).items():
+            existing["by_severity"][level] = (
+                existing["by_severity"].get(level, 0) + count)
+
+
+def _ordered(accumulated, aggregation=None):
+    """Rebuild Buckets, date buckets by time and everything else by size.
+
+    And cut back to what was ASKED for. `_merge` accumulates every value
+    every member returned, and members were asked for a longer list than the
+    panel wants (`_widened`), so without this a "top 5" drew as many bars as
+    the union happened to hold — measured against the lab, 9 bars for a
+    panel asking for 5, with the largest value sixth in the row.
+
+    `aggregation` is the ORIGINAL, not the widened one, and it is passed
+    down through `sub` so a split inside a date histogram is cut to its own
+    size rather than to its parent's.
+    """
+    children = {child.name: child
+                for child in (getattr(aggregation, "sub", None) or ())}
     buckets = [
         Bucket(key=key, count=data["count"], key_text=data["key_text"],
-               sub={name: _ordered(children)
-                    for name, children in data["sub"].items()})
+               sub={name: _ordered(grandchildren, children.get(name))
+                    for name, grandchildren in data["sub"].items()})
         for key, data in accumulated.items()
     ]
     if buckets and all(isinstance(bucket.key, (int, float))
                        for bucket in buckets):
         buckets.sort(key=lambda bucket: bucket.key)
-    else:
-        buckets.sort(key=lambda bucket: bucket.count, reverse=True)
-    return buckets
+        # A date histogram has no `size` and must never be cut: every bucket
+        # is a point on an axis, and dropping the quiet ones leaves a chart
+        # with gaps that read as an outage.
+        return buckets
+    buckets.sort(key=lambda bucket: bucket.count, reverse=True)
+    size = getattr(aggregation, "size", None)
+    return buckets[:size] if size else buckets
 
 
 class FanOutTraceSource(TraceSource):

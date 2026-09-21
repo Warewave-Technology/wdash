@@ -87,6 +87,25 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **The volume chart is back on a board or a search that reads more than one
+  source.** The merged page was built without a histogram at all, and the
+  Logs page hides the chart when the list is empty — so configuring a second
+  log source made the chart disappear. A member that cannot count over time
+  is now named on the page rather than silently left out of the bars.
+
+- **A merged "top 5" draws five bars.** Reading several sources at once,
+  every value every source returned was drawn: measured against three lab
+  sources, a panel asking for the top 5 drew nine. Each source is also asked
+  for a longer list than the panel wants, so a value that sits outside one
+  source's own top N is no longer counted short — and when a source really
+  did hand back everything it was asked for, the panel says its smallest
+  counts are a floor.
+
+  One consequence worth knowing: a **number panel** on a board that merges
+  sources can now say it cannot answer for a rare value where it used to
+  give a count. It was answering off the extra values the bug returned. It
+  still never reports such a value as zero.
+
 - **Every Loki time chart was drawn one interval late.** `count_over_time`
   evaluated at *t* counts the lines before *t*, and the adapter used *t* as
   the bucket's label — so each bar sat one whole interval to the right of the

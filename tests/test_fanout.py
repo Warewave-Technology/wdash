@@ -580,5 +580,252 @@ class AggregationMergeTest(unittest.TestCase):
         self.assertTrue(buckets.get("t")[0].key_text)
 
 
+class CuttingSource(LogSource):
+    """A backend that answers a terms question with ITS OWN top `size`.
+
+    Every real one does — Elasticsearch by `size`, Loki and VictoriaLogs by
+    `limit` after sorting — and that cut is the whole problem a merged top N
+    has. The shared `StubSource` returns every value it holds, so a fan-out
+    that ignored `size` and one that applied it were the same green test.
+    """
+
+    capabilities = frozenset({Capability.SEARCH, Capability.AGGREGATION,
+                              Capability.HISTOGRAM})
+
+    #: Three hours on the hour, so a merge that cut a date histogram to a
+    #: fixed length has somewhere to show.
+    HOURS = (1785841200000, 1785844800000, 1785848400000)
+
+    def __init__(self, name, rows, histogram=None):
+        self.name, self.backend = name, "stub"
+        self.rows = dict(rows)
+        self._histogram = list(histogram or ())
+        #: Every `size` this source was asked for, in order.
+        self.asked_for = []
+
+    def health(self):
+        return True, "ok"
+
+    def containers(self, scope):
+        return [self.name]
+
+    def fetch(self, ref, scope):
+        return None
+
+    def search(self, query, scope):
+        return LogPage(records=[], total=sum(self.rows.values()),
+                       containers=(self.name,),
+                       histogram=list(self._histogram)
+                       if query.histogram else [])
+
+    def _ranked(self, size):
+        ranked = sorted(self.rows.items(), key=lambda kv: (-kv[1], kv[0]))
+        return [Bucket(key=key, count=count, key_text=key)
+                for key, count in ranked[:size]]
+
+    def aggregate(self, query, aggregations, scope):
+        buckets = {}
+        for aggregation in aggregations:
+            size = getattr(aggregation, "size", None)
+            self.asked_for.append(size)
+            children = getattr(aggregation, "sub", None) or ()
+            for child in children:
+                self.asked_for.append(getattr(child, "size", None))
+            if size is None:
+                # A date histogram: SEVERAL buckets, because a merge that
+                # cut one to a fixed length would be invisible against a
+                # single bucket. Each carries whatever split it was asked
+                # for, so the split's own cut is visible too.
+                whole = sum(self.rows.values())
+                made = []
+                for index in range(3):
+                    bucket = Bucket(key=self.HOURS[index],
+                                    key_text=f"t{index}", count=whole)
+                    for child in children:
+                        bucket.sub[child.name] = self._ranked(
+                            getattr(child, "size", None))
+                    made.append(bucket)
+                buckets[aggregation.name] = made
+                continue
+            buckets[aggregation.name] = self._ranked(size)
+        return AggregationResult(total=sum(self.rows.values()),
+                                 buckets=buckets)
+
+
+class MergedTermsRespectTheSizeAskedForTest(unittest.TestCase):
+    """`size` is a ceiling, and it was applied to the members and not to the
+    merge.
+
+    Measured against the lab before this, a terms panel over three log
+    sources asking for the top 5: NINE bars, with the largest value sixth in
+    the row. And with two stubs asked for their own top 2, `alpha` — really
+    11 records, 10 in one member and 1 in the other — came back as 10,
+    because its single row fell outside the second member's own top 2.
+    """
+
+    #: `alpha` is the value that is short: it is inside a's top 2 and
+    #: outside b's, so a merge that asks each member for 2 never sees b's.
+    A = {"alpha": 10, "beta": 9, "epsilon": 4, "zeta": 3, "eta": 2}
+    B = {"gamma": 100, "delta": 99, "theta": 8, "iota": 7, "alpha": 1}
+
+    def setUp(self):
+        self.a = CuttingSource("a", self.A)
+        self.b = CuttingSource("b", self.B)
+        self.fan = FanOutLogSource([self.a, self.b], name="*")
+
+    def ask(self, size, **overrides):
+        query = LogQuery(window=TimeWindow.of("1h"), text="*",
+                         containers=("a", "b"), **overrides)
+        return self.fan.aggregate(query, [Terms(name="t", field="host",
+                                                size=size)],
+                                  Scope.unrestricted())
+
+    def rows(self, result):
+        return [(bucket.key, bucket.count) for bucket in result.get("t")]
+
+    def test_a_top_two_is_two_rows(self):
+        self.assertEqual(self.rows(self.ask(2)),
+                         [("gamma", 100), ("delta", 99)])
+
+    def test_each_member_is_asked_for_more_than_the_panel_wants(self):
+        """The top N of a union is not the union of the top Ns, so the merge
+        needs a tail to add up."""
+        self.ask(2)
+        self.assertEqual((self.a.asked_for, self.b.asked_for), ([13], [13]))
+
+    def test_the_value_split_across_members_is_whole_again(self):
+        found = dict(self.rows(self.ask(20)))
+        self.assertEqual(found["alpha"], 11)
+
+    def _timeline(self, *sub):
+        return self.fan.aggregate(
+            LogQuery(window=TimeWindow.of("1h"), text="*",
+                     containers=("a", "b")),
+            [DateHistogram(name="t", min_count=0, sub=tuple(sub))],
+            Scope.unrestricted())
+
+    def test_a_date_histogram_is_never_cut(self):
+        """It has no `size` and every bucket is a point on an axis: dropping
+        the quiet ones leaves gaps that read as an outage."""
+        result = self._timeline()
+        self.assertEqual([key for key, _ in self.rows(result)],
+                         list(CuttingSource.HOURS))
+        self.assertEqual(self.a.asked_for, [None])
+
+    def test_a_split_inside_a_histogram_is_widened_and_then_cut(self):
+        """A split one level down is a terms list with the same problem."""
+        result = self._timeline(Terms(name="s", field="host", size=3))
+        self.assertEqual(self.a.asked_for, [None, 14])
+        stacked = result.get("t")[0].sub["s"]
+        self.assertEqual([bucket.key for bucket in stacked],
+                         ["gamma", "delta", "alpha"])
+
+    def test_a_member_that_was_cut_is_said_on_the_panel(self):
+        """The widening makes the tail longer, not infinite. When a member
+        really did hand back everything it was asked for, the counts near
+        the bottom are a floor and the panel has to say so."""
+        crowded = CuttingSource(
+            "c", {f"host-{n}": 100 - n for n in range(40)})
+        fan = FanOutLogSource([self.a, crowded], name="*")
+        result = fan.aggregate(
+            LogQuery(window=TimeWindow.of("1h"), text="*",
+                     containers=("a", "c")),
+            [Terms(name="t", field="host", size=2)], Scope.unrestricted())
+        said = " ".join(result.notes.get("t", ()))
+        self.assertIn("c had more values", said)
+        self.assertIn("counted short", said)
+
+    def test_one_member_answering_is_not_a_merge_losing_a_tail(self):
+        """A single source cut at its own top N is an ordinary terms list.
+        Saying "counted short" there would teach people to ignore it."""
+        crowded = CuttingSource(
+            "c", {f"host-{n}": 100 - n for n in range(40)})
+        fan = FanOutLogSource([crowded], name="*")
+        result = fan.aggregate(
+            LogQuery(window=TimeWindow.of("1h"), text="*", containers=("c",)),
+            [Terms(name="t", field="host", size=2)], Scope.unrestricted())
+        self.assertEqual(result.notes.get("t", []), [])
+
+
+class TheVolumeChartSurvivesASecondSourceTest(unittest.TestCase):
+    """`search` built its merged page without `histogram=` at all.
+
+    So it fell back to the dataclass default and `to_dict()` shipped `[]`,
+    and the Logs page hides the chart on an empty list. Measured: 29 buckets
+    through one member and 0 through the fan-out over the same window, with
+    both members answering. `hub.logs()` returns the single source itself
+    while only one is registered, so the chart disappeared the moment a
+    second log source was configured.
+    """
+
+    EARLY = {"timestamp": "2026-08-04T11:00:00Z", "key": 1785841200000,
+             "count": 4, "by_severity": {"INFO": 3, "ERROR": 1}}
+    LATE = {"timestamp": "2026-08-04T12:00:00Z", "key": 1785844800000,
+            "count": 6, "by_severity": {"INFO": 6}}
+
+    def page(self, *sources):
+        fan = FanOutLogSource(list(sources), name="*")
+        return fan.search(
+            LogQuery(window=TimeWindow.of("1h"), text="*", histogram=True,
+                     containers=tuple(s.name for s in sources)),
+            Scope.unrestricted())
+
+    def test_the_buckets_come_through(self):
+        page = self.page(CuttingSource("a", {"x": 1}, [self.EARLY]))
+        self.assertEqual([b["key"] for b in page.histogram],
+                         [self.EARLY["key"]])
+
+    def test_two_members_of_one_bucket_are_added(self):
+        page = self.page(
+            CuttingSource("a", {"x": 1}, [self.EARLY]),
+            CuttingSource("b", {"x": 1}, [dict(self.EARLY, count=10,
+                                               by_severity={"ERROR": 10})]))
+        self.assertEqual([(b["key"], b["count"]) for b in page.histogram],
+                         [(self.EARLY["key"], 14)])
+        self.assertEqual(page.histogram[0]["by_severity"],
+                         {"INFO": 3, "ERROR": 11})
+
+    def test_the_buckets_come_back_in_time_order(self):
+        page = self.page(CuttingSource("a", {"x": 1}, [self.LATE]),
+                         CuttingSource("b", {"x": 1}, [self.EARLY]))
+        self.assertEqual([b["key"] for b in page.histogram],
+                         [self.EARLY["key"], self.LATE["key"]])
+
+    def test_a_member_that_cannot_draw_one_is_named(self):
+        """Its records are in the table and its lines are not in the bars,
+        which is a chart short by an unknown amount. The one thing it must
+        not do is look complete."""
+        blind = CuttingSource("b", {"x": 1})
+        blind.capabilities = frozenset({Capability.SEARCH,
+                                        Capability.AGGREGATION})
+        page = self.page(CuttingSource("a", {"x": 1}, [self.EARLY]), blind)
+        self.assertTrue(page.partial)
+        self.assertFalse(page.informational)
+        self.assertTrue(any("volume chart leaves out b" in warning
+                            for warning in page.warnings), page.warnings)
+
+    def test_a_page_that_did_not_ask_gets_none(self):
+        fan = FanOutLogSource([CuttingSource("a", {"x": 1}, [self.EARLY])],
+                              name="*")
+        page = fan.search(
+            LogQuery(window=TimeWindow.of("1h"), text="*", containers=("a",)),
+            Scope.unrestricted())
+        self.assertEqual(page.histogram, [])
+
+    def test_a_page_that_did_not_ask_is_not_told_who_cannot_draw_one(self):
+        """A table with no chart above it is not a chart missing a member,
+        and warning about one is how a real warning gets ignored."""
+        blind = CuttingSource("b", {"x": 1})
+        blind.capabilities = frozenset({Capability.SEARCH,
+                                        Capability.AGGREGATION})
+        fan = FanOutLogSource([CuttingSource("a", {"x": 1}, [self.EARLY]),
+                               blind], name="*")
+        page = fan.search(
+            LogQuery(window=TimeWindow.of("1h"), text="*",
+                     containers=("a", "b")), Scope.unrestricted())
+        self.assertEqual(page.warnings, ())
+        self.assertFalse(page.partial)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

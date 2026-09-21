@@ -1174,9 +1174,26 @@ class CountOnABoardThatMergesSourcesTest(_Board):
         self.assertIn("merge", panel["error"])
         self.assertIn("2 sources", panel["error"])
 
-    def test_a_value_one_member_holds_is_still_counted(self):
-        panel = self.ask("east-1")
-        self.assertEqual(panel["number"], 1)
+    def test_a_value_one_member_holds_is_never_drawn_as_zero(self):
+        """Counted when it survives the merged cut, refused BY NAME when it
+        does not. Which of the two depends on the cut, and saying so is the
+        honest answer: the merged list is `COUNT_VALUES` long, so whether a
+        value holding one record is in it is a property of the cut and not
+        of the data.
+
+        Both were counted before the fan-out started applying the size it
+        was asked for, because it returned every value every member had —
+        more than the panel wanted, which is the same bug that drew a "top
+        5" as nine bars. The capability was an accident of that bug; the
+        refusal is the answer the single-source path has always given.
+        """
+        for value in ("east-1", "west-1"):
+            with self.subTest(value=value):
+                panel = self.ask(value)
+                self.assertNotEqual(panel.get("number"), 0)
+                if "number" not in panel:
+                    self.assertIn("not a count of zero", panel["error"])
+                    self.assertIn(value, panel["error"])
 
 
 class AlertingSwitchedOffTest(_Board):
