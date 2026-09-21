@@ -20,6 +20,7 @@
         <div class="card">
             <div class="card-body">
                 <form method="POST">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     {# The revision this form was rendered from. The store
                        refuses a write against a stale one, so two people
                        editing the same dashboard get told rather than one of

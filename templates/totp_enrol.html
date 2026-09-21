@@ -87,6 +87,7 @@
         <hr>
 
         <form method="POST" class="row g-2 align-items-end">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="col-sm-6">
             <label for="code" class="form-label">
               Enter the code it shows

@@ -134,6 +134,59 @@ for _variable, _value in FORCED.items():
 # module is the first thing the discovery loader touches.
 os.environ["WDASH_NO_DOTENV"] = "1"
 
+# --------------------------------------------------------------------------
+# Every test client carries the CSRF token.
+#
+# Not switched OFF under TESTING, which is the obvious alternative and the
+# exact trap this application already fell into once: Flask-WTF was installed
+# and never initialised while five test configurations set
+# `WTF_CSRF_ENABLED = False`, so the suite read as "protection is on in
+# production, off for tests" about a protection that was never on anywhere.
+# A guard the suite disables is a guard no test exercises.
+#
+# So it stays on for all four thousand of them, and the client carries the
+# token the way a browser does. `csrf=False` is how the handful of tests
+# that are ABOUT the guard send a request without one.
+# --------------------------------------------------------------------------
+
+def _install_csrf_client():
+    from flask import Flask
+    from flask.testing import FlaskClient
+
+    class TokenCarryingClient(FlaskClient):
+        def open(self, *args, **kwargs):
+            method = (kwargs.get("method") or "").upper()
+            if not method and len(args) > 1 and isinstance(args[1], str):
+                method = args[1].upper()
+            if not method:
+                # `client.post(...)` and friends set it in the environ
+                # overrides rather than in `method`.
+                method = (kwargs.get("environ_overrides", {})
+                          .get("REQUEST_METHOD", "")).upper()
+            wanted = kwargs.pop("csrf", True)
+
+            from wdash.security import FIELD, GUARDED_METHODS, HEADER
+            if wanted and method in GUARDED_METHODS:
+                with self.session_transaction() as session:
+                    value = session.get(FIELD)
+                    if not value:
+                        import secrets as _secrets
+                        value = _secrets.token_urlsafe(32)
+                        session[FIELD] = value
+                headers = kwargs.setdefault("headers", {})
+                try:
+                    if HEADER not in headers:
+                        headers[HEADER] = value
+                except TypeError:          # a Headers object, not a dict
+                    if not headers.get(HEADER):
+                        headers[HEADER] = value
+            return super().open(*args, **kwargs)
+
+    Flask.test_client_class = TokenCarryingClient
+
+
+_install_csrf_client()
+
 # On Postgres, when asked. Last, because it imports the store, and nothing
 # from the package may be imported before the environment above is settled.
 if os.environ.get("WDASH_TEST_POSTGRES"):

@@ -78,6 +78,9 @@ These are vulnerabilities. Report them.
   is untrusted input.
 * **Audit evasion** — a configuration change, sign-in or lockout that leaves
   no row, or a row that can be edited or deleted from the application.
+* **A state-changing request accepted without its CSRF token** — a route, a
+  verb or a content type that gets past the check in
+  `src/wdash/security.py`.
 * **Anything in the agent protocol** — an agent token that reaches
   configuration it was not assigned, or a result that can be attributed to a
   monitor the agent does not own.
@@ -88,9 +91,6 @@ Each of these is stated in the README already. A report will be closed with a
 pointer to it — which is not a dismissal, it is that the trade was made
 deliberately and written down.
 
-* **No CSRF protection.** State-changing endpoints rely on `SameSite=Lax`
-  cookies. There is no CSRF library installed and no flag pretending
-  otherwise.
 * **The local administrator is a permanent credential.** It is created at
   first run and keeps working when the identity provider does not, which is
   the point and also what makes it worth stealing. It takes a password AND an
@@ -134,6 +134,15 @@ deliberately and written down.
 So that a report can say what it got past:
 
 * every query carries a `Scope`, resolved per request, failing closed;
+* a per-session CSRF token on every state-changing request — a hidden field
+  on a form, `X-CSRF-Token` on a `fetch` — refused when it is missing or
+  wrong. The check is over the METHOD rather than over a list of routes, so
+  it covers a route the day it is written; the one exemption is the agent
+  API, which authenticates with a bearer token and no cookie and so has no
+  ambient authority for another site to borrow. `tests/test_csrf.py`
+  enumerates every state-changing route and every POST form in every
+  template, and the suite runs with the protection ON rather than disabling
+  it for tests — which is what the Flask-WTF flag that used to sit here did;
 * Argon2 for local passwords, SHA-256 for agent tokens, Fernet for stored
   secrets — and a refusal to store a secret at all when no encryption key is
   configured, rather than writing it as text;

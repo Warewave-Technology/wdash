@@ -1293,13 +1293,26 @@ Stated plainly, because they affect whether this fits your deployment:
   session store, and nothing here is waiting for one — a Redis was configured,
   deployed and never read by a line of code, and it has been removed rather
   than left looking like a plan.
-- **No CSRF protection.** State-changing endpoints rely on `SameSite=Lax`
-  cookies only. Flask-WTF was installed and never initialised — no
+- **CSRF protection is on, and the suite does not switch it off.** Every
+  state-changing request — POST, PUT, PATCH, DELETE — carries a token tied
+  to the session, in a hidden field for a form and in `X-CSRF-Token` for a
+  `fetch`; without it the request is refused with a 400 and a page that says
+  what to do. The guard is over the METHOD rather than over a list of
+  routes, so a route written next year is protected before anybody
+  remembers it exists, and the one exemption is the agent API, which sends
+  a bearer token and no cookie and therefore has no ambient authority to
+  borrow. `tests/test_csrf.py` enumerates every state-changing route and
+  every POST form in every template.
+
+  This replaces `SameSite=Lax` cookies as the only defence. The history is
+  worth keeping: Flask-WTF had been installed and never initialised — no
   `CSRFProtect(app)` anywhere — while five test configurations set
   `WTF_CSRF_ENABLED = False`, which reads as "switched off for tests" and
-  therefore as "on in production". It was never on. The library and the flag
-  have been removed so the sentence above is the only thing left saying
-  anything about CSRF.
+  therefore as "on in production". It was never on. What is here now is
+  WDash's own, about sixty lines in `src/wdash/security.py`, and the suite
+  runs with it ON: the test client carries the token the way a browser
+  does, so the protection is exercised by four thousand tests rather than
+  by the handful that are about it.
 - **Query language is a subset.** Fuzzy matching, boosting and regular
   expressions are not supported; unsupported syntax is rejected rather than
   silently misinterpreted.

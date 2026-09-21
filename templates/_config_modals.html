@@ -3,6 +3,7 @@
   <div class="modal-dialog modal-lg">
     <div class="modal-content">
       <form method="POST" action="{{ url_for('config.save_source') }}" id="sourceForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="modal-header">
           <h5 class="modal-title" id="sourceModalTitle">Add source</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
@@ -209,6 +210,7 @@
   <div class="modal-dialog modal-lg">
     <div class="modal-content">
       <form method="POST" action="{{ url_for('config.save_role') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="mode" id="roleMode" value="create">
         <div class="modal-header">
           <h5 class="modal-title" id="roleModalTitle">Add role</h5>
@@ -342,6 +344,7 @@
   <div class="modal-dialog modal-lg">
     <div class="modal-content">
       <form method="post" action="{{ url_for('config.save_monitor') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="modal-header">
           <h5 class="modal-title" id="monitorModalTitle">Add check</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
@@ -653,6 +656,7 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <form method="post" action="{{ url_for('config.save_channel') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="modal-header">
           <h5 class="modal-title">Add channel</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
@@ -706,6 +710,7 @@
   <div class="modal-dialog modal-lg">
     <div class="modal-content">
       <form method="post" action="{{ url_for('config.save_rule') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="modal-header">
           <h5 class="modal-title">Add rule</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
@@ -796,6 +801,7 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <form method="post" action="{{ url_for('config.save_silence') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="modal-header">
           <h5 class="modal-title">Silence alerts</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
@@ -883,6 +889,7 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <form method="POST" action="{{ url_for('config.create_account') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="modal-header">
           <h5 class="modal-title">Add local account</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
@@ -953,6 +960,7 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <form method="POST" id="passwordForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="modal-header">
           <h5 class="modal-title">Reset the password for
             <code id="passwordFor"></code></h5>
@@ -1006,6 +1014,7 @@
     <div class="modal-content">
       <form method="POST" action="{{ url_for('config.save_mapping') }}"
             id="mappingForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="modal-header">
           <h5 class="modal-title" id="mappingModalTitle">Add mapping</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>

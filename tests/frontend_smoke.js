@@ -1069,6 +1069,80 @@ check('Clear takes away the chart, the sources, the warnings and the stats', () 
         });
     }
 
+    // ---------------------------------------------------------------
+    // The CSRF token on a fetch.
+    //
+    // Five call sites send one today and a sixth will be written without
+    // thinking about it, so the token is added by wrapping `fetch` once
+    // rather than at each of them. What that wrapper must get right is
+    // narrow and easy to get wrong: not on a GET, not to another origin,
+    // and never over a header the caller set itself.
+    // ---------------------------------------------------------------
+    console.log('the csrf shim');
+    {
+        const shim = (token) => {
+            const dom = new JSDOM(
+                token === null
+                    ? '<!doctype html><head></head><body></body>'
+                    : `<!doctype html><head><meta name="csrf-token"
+                         content="${token}"></head><body></body>`,
+                { url: 'http://wdash.example/logs' });
+            const w = dom.window;
+            const calls = [];
+            w.fetch = (resource, options) => {
+                calls.push({ resource, options });
+                return Promise.resolve({});
+            };
+            w.Headers = w.Headers || globalThis.Headers;
+            global.window = w;
+            global.document = w.document;
+            w.eval(fs.readFileSync(path.join(ROOT, 'static/js/csrf.js'),
+                                   'utf8'));
+            return { w, calls };
+        };
+        const sent = call => {
+            const headers = call.options && call.options.headers;
+            if (!headers) return null;
+            return typeof headers.get === 'function'
+                ? headers.get('X-CSRF-Token')
+                : headers['X-CSRF-Token'];
+        };
+
+        const posting = shim('the-token');
+        posting.w.fetch('/api/dashboards/d1/data', { method: 'POST' });
+        check('a same-origin POST carries the token', () => assert(sent(posting.calls[0]) === 'the-token',
+              JSON.stringify(posting.calls[0].options)));
+
+        posting.w.fetch('/api/search?q=x');
+        check('a GET does not', () => assert(sent(posting.calls[1]) === null || !sent(posting.calls[1])));
+
+        posting.w.fetch('https://example.com/collect', { method: 'POST' });
+        check('and neither does a call to somebody else', () => assert(!sent(posting.calls[2]),
+              'the token was handed to another origin'));
+
+        posting.w.fetch('http://wdash.example/api/x', { method: 'POST' });
+        check('an absolute URL to our own origin still carries it', () => assert(sent(posting.calls[3]) === 'the-token'));
+
+        posting.w.fetch('/api/x', {
+            method: 'POST', headers: { 'X-CSRF-Token': 'mine' } });
+        check('a header the caller set is left alone', () => assert(sent(posting.calls[4]) === 'mine'));
+
+        posting.w.fetch('/api/x', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' } });
+        const both = posting.calls[5].options.headers;
+        check('and the headers it set are kept', () => assert(both.get('Content-Type') === 'application/json'
+              && both.get('X-CSRF-Token') === 'the-token'));
+
+        // A page with no meta tag is a page this script has nothing to do
+        // on. Wrapping fetch anyway would send an empty header, which the
+        // server reads as "no token" with an extra step.
+        const bare = shim(null);
+        const before = bare.w.fetch;
+        bare.w.eval(fs.readFileSync(path.join(ROOT, 'static/js/csrf.js'),
+                                    'utf8'));
+        check('a page with no token leaves fetch alone', () => assert(bare.w.fetch === before));
+    }
+
     console.log(failures.length
         ? `\n${failures.length} failure(s)`
         : '\nall front-end smoke checks passed');

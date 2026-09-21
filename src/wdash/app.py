@@ -683,7 +683,14 @@ def create_app(config_class=Config):
     # Response headers. Installed before the routes so every response
     # carries them, including error pages and redirects.
     from .security import install as install_security
+    from .security import install_csrf
     install_security(app)
+    # After the headers and before the blueprints' own hooks matter: the
+    # check is a `before_request`, and Flask runs application-wide hooks in
+    # the order they were registered. The setup gate redirects every route
+    # to /setup and is registered later, so a POST with no token is refused
+    # as such rather than redirected into a page that cannot explain it.
+    install_csrf(app)
 
     # Routes
     @app.route('/')

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Request refused - WDash{% endblock %}
+
+{% block content %}
+{# What a refused state-changing request says. Not a bare 400: the person
+   reading it did nothing wrong in the ordinary case — they left a tab open
+   until the session behind it was replaced — and a page that says only
+   "Bad Request" sends them to an administrator. #}
+<div class="card mx-auto mt-5" style="max-width:38rem">
+  <div class="card-body">
+    <h5 class="card-title">
+      <i class="fas fa-shield-halved text-warning"></i>
+      That request did not carry a valid security token
+    </h5>
+    <p class="mb-2" style="font-size:.9rem">
+      Every form here carries a token tied to your session, and this one
+      arrived without it or with one that has expired. Nothing was changed.
+    </p>
+    <p class="text-muted" style="font-size:.85rem">
+      The ordinary cause is a page left open while the session behind it
+      ended or was signed in again. Go back, reload the page, and do it
+      once more. If a form on this site does it every time, that is a fault
+      worth reporting.
+    </p>
+    <a class="btn btn-sm btn-primary" href="{{ url_for('index') }}">
+      <i class="fas fa-house"></i> Back to WDash
+    </a>
+  </div>
+</div>
+{% endblock %}

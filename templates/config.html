@@ -128,6 +128,7 @@
               <form method="POST" class="d-inline"
                     action="{{ url_for('config.delete_source', source_id=source.id) }}"
                     data-confirm="Delete {{ source.name }}?">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button class="btn btn-sm btn-outline-danger">Delete</button>
               </form>
             </td>
@@ -181,6 +182,7 @@
         <div class="card-header"><h5 class="mb-0">OpenID Connect</h5></div>
         <div class="card-body">
           <form method="POST" action="{{ url_for('config.save_auth') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="provider" value="oidc">
             <div class="form-check form-switch mb-3">
               <input class="form-check-input" type="checkbox" name="enabled"
@@ -282,6 +284,7 @@
         <div class="card-header"><h5 class="mb-0">LDAP</h5></div>
         <div class="card-body">
           <form method="POST" action="{{ url_for('config.save_auth') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="provider" value="ldap">
             <div class="form-check form-switch mb-3">
               <input class="form-check-input" type="checkbox" name="enabled"
@@ -409,6 +412,7 @@
                    next request. It has its own control beside Delete. #}
                 <form method="POST" class="d-flex align-items-center gap-2"
                       action="{{ url_for('config.save_account', username=account.username) }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <select class="form-select form-select-sm" name="role"
                           style="width:auto" aria-label="Role for {{ account.username }}">
                     {% for role in roles %}
@@ -466,11 +470,13 @@
                 {% if account.disabled %}
                 <form method="POST" class="d-inline"
                       action="{{ url_for('config.enable_account', username=account.username) }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <button class="btn btn-sm btn-outline-primary">Enable</button>
                 </form>
                 {% else %}
                 <form method="POST" class="d-inline"
                       action="{{ url_for('config.disable_account', username=account.username) }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <button class="btn btn-sm btn-outline-secondary">Disable</button>
                 </form>
                 {% endif %}
@@ -489,6 +495,7 @@
                 <form method="POST" class="d-inline"
                       action="{{ url_for('config.reset_account_totp', username=account.username) }}"
                       data-confirm="Reset the authenticator for {{ account.username }}? Until they set up a new one at their next sign-in, their password alone gets in.">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <button class="btn btn-sm btn-outline-danger">Reset TOTP</button>
                 </form>
                 {% endif %}
@@ -498,6 +505,7 @@
                 <form method="POST" class="d-inline"
                       action="{{ url_for('config.delete_account', username=account.username) }}"
                       data-confirm="Delete the local account {{ account.username }}? Its dashboards and saved searches stay, owned by a name nobody can sign in as.">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <button class="btn btn-sm btn-outline-danger">Delete</button>
                 </form>
               </td>
@@ -576,6 +584,7 @@
       <h5 class="mb-0">Agents</h5>
       <form method="post" action="{{ url_for('config.create_agent') }}"
             class="d-flex gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input class="form-control form-control-sm" name="name"
                placeholder="frankfurt" required style="width:12rem">
         <button class="btn btn-sm btn-primary" type="submit">
@@ -618,6 +627,7 @@
           <td class="text-end">
             <form method="post" class="d-inline"
                   action="{{ url_for('config.rotate_agent', agent_id=agent.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button class="btn btn-sm btn-outline-secondary"
                       title="The old token stops working immediately">
                 <i class="fas fa-rotate"></i> Rotate token
@@ -625,6 +635,7 @@
             </form>
             <form method="post" class="d-inline"
                   action="{{ url_for('config.delete_agent', agent_id=agent.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button class="btn btn-sm btn-outline-danger">
                 <i class="fas fa-trash"></i>
               </button>
@@ -698,6 +709,7 @@
             <form method="post" class="d-inline"
                   action="{{ url_for('config.delete_monitor',
                                      monitor_id=monitor.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button class="btn btn-sm btn-outline-danger">
                 <i class="fas fa-trash"></i>
               </button>
@@ -768,6 +780,7 @@
             <form method="post" class="d-inline"
                   action="{{ url_for('config.delete_channel',
                                      channel_id=channel.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button class="btn btn-sm btn-outline-danger">
                 <i class="fas fa-trash"></i></button>
             </form>
@@ -839,6 +852,7 @@
           <td class="text-end">
             <form method="post" class="d-inline"
                   action="{{ url_for('config.delete_rule', rule_id=rule.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button class="btn btn-sm btn-outline-danger">
                 <i class="fas fa-trash"></i></button>
             </form>
@@ -886,6 +900,7 @@
             <form method="post" class="d-inline"
                   action="{{ url_for('config.delete_silence',
                                      silence_id=silence.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button class="btn btn-sm btn-outline-secondary"
                       title="Lift this silence">
                 <i class="fas fa-bell"></i></button>
@@ -946,6 +961,7 @@
                   <form method="POST" class="d-inline"
                         action="{{ url_for('config.delete_role', name=role.name) }}"
                         data-confirm="Delete role {{ role.name }}?">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button class="btn btn-sm btn-outline-danger">Delete</button>
                   </form>
                   {% endif %}
@@ -963,6 +979,7 @@
         <div class="card-header"><h5 class="mb-0">Default role</h5></div>
         <div class="card-body">
           <form method="POST" action="{{ url_for('config.save_mappings') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="mb-3">
               {# A default that names no existing role must say so. With no
                  option selected the browser selects the FIRST one, which is
@@ -1052,6 +1069,7 @@
               <form method="POST" class="d-inline"
                     action="{{ url_for('config.delete_mapping') }}"
                     data-confirm="Remove the mapping for {{ who }}?">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="identifier" value="{{ who }}">
                 <button class="btn btn-sm btn-outline-danger">Delete</button>
               </form>

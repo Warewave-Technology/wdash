@@ -157,6 +157,7 @@
                                    front of a room nobody chose. #}
                                 <form method="POST" class="d-inline"
                                       action="{{ url_for('dashboards.duplicate_dashboard', dashboard_id=dashboard.id) }}">
+                                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                     <button type="submit"
                                             class="btn btn-outline-secondary"
                                             title="Make a private copy of this dashboard">
