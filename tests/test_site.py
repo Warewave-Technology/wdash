@@ -134,8 +134,39 @@ class TheLandingPageTest(unittest.TestCase):
         dangling = [name for name in deep if name not in self.sections]
         self.assertEqual(dangling, [], "landing-page links with no section")
 
-    def test_it_links_to_the_docs_at_all(self):
-        self.assertIn('href="docs/', self.text)
+
+class TheReadmeLinksIntoTheSiteTest(unittest.TestCase):
+    """The README's link row is four anchors deep into the docs page.
+
+    Two files away from the page, in a file nobody re-reads when a section
+    is renamed — and a reader following a stale one lands at the top of a
+    very long page, which is indistinguishable from landing where they
+    meant to and the section having been cut.
+    """
+
+    def setUp(self):
+        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as handle:
+            self.readme = handle.read()
+        self.sections = re.findall(r'<section id="([a-z0-9-]+)"',
+                                   _read("docs", "index.html"))
+
+    def test_every_anchor_it_names_is_there(self):
+        """Asserting there is at least one covers "the README stopped
+        linking to the page" as well, which is why that is not a second
+        test: it is the same assertion with less of it."""
+        deep = sorted(set(re.findall(
+            r"site/docs/index\.html#([a-z0-9-]+)", self.readme)))
+        self.assertTrue(deep, "the README links into no section")
+        dangling = [name for name in deep if name not in self.sections]
+        self.assertEqual(dangling, [], "README links with no section")
+
+    def test_the_project_layout_lists_the_site(self):
+        """The layout block is the map somebody reads instead of looking.
+        `site/` was added to it when the site was linked; a directory the
+        map leaves out is one nobody knows to open."""
+        layout = self.readme.split("## Project layout", 1)[1].split("```")[1]
+        self.assertRegex(layout, re.compile(r"^site/", re.M),
+                         msg="`site/` is not in the project layout")
 
 
 class TheVersionOnThePagesTest(unittest.TestCase):

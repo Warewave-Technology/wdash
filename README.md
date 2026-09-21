@@ -1,11 +1,24 @@
 # WDash
 
-A small observability front-end for logs and traces, with role-based access
-control that lives in the application rather than in the data store.
+A small observability front-end for logs, traces and synthetic monitoring,
+with role-based access control that lives in the application rather than in
+the data store.
 
-WDash sits in front of Elasticsearch and gives you log search, dashboards,
-distributed traces, and a cluster configuration advisor — without requiring a
-commercial licence for the features that matter.
+WDash reads the stores you already run — Elasticsearch, Grafana Loki,
+VictoriaLogs, Jaeger, Grafana Tempo — and gives you log search, dashboards,
+distributed traces, uptime checks and a cluster configuration advisor, without
+requiring a commercial licence for the features that matter. It collects
+nothing of its own.
+
+**[Documentation](site/docs/index.html)** ·
+[Install](site/docs/index.html#install) ·
+[Config reference](site/docs/index.html#config) ·
+[What WDash refuses](site/docs/index.html#refuses) ·
+[Security policy](SECURITY.md)
+
+Those four are a static page in [`site/`](site/) — open it from disk, or serve
+that directory. There is no published address yet, and when there is, this
+paragraph and the links above it are the only things that change.
 
 ## Why it exists
 
@@ -1041,6 +1054,7 @@ src/wdash/
 kubernetes/             manifests, kustomization, and kubernetes/README.md
 lab/                    docker-compose environment, data generator, collector
 docs/                   hub, advisor and OpenTelemetry documentation
+site/                   the published page: index.html, docs/index.html, a mark
 tests/                  unit tests, adapter conformance suite, fixtures
 ```
 
