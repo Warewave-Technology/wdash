@@ -28,7 +28,8 @@ from flask import (
 from flask_login import current_user, login_required
 
 from ..auth.providers import (
-    LABELS, directory, refuses_second_directory, why_unusable,
+    FIELDS as PROVIDER_FIELDS, LABELS, directory, listed, malformed, missing,
+    refuses_second_directory, why_unusable,
 )
 from ..dashboard.invariants import (
     FEW, few, refuses_account_change, refuses_directory_off,
@@ -797,6 +798,12 @@ def save_auth():
         flash("Unknown provider.", "error")
         return _back_to_auth(which)
 
+    # Read here rather than further down: what is already stored decides
+    # whether the blank secret field means "there is none" or "keep the one
+    # you have", and the checks after the directory rules turn on that.
+    held = store.settings.all(prefix=key).get(key) or {}
+    has_secret = bool(secret) or bool(held.get("has_secret"))
+
     # Which directory this installation signs people in through, before and
     # after. Both refusals below and the sentence at the end are computed from
     # the SAME resolution, so "which is in force" and "which counts as the
@@ -822,7 +829,52 @@ def save_auth():
                state={**value, "reason": refusal})
         return _back_to_auth(which)
 
-    held = store.settings.all(prefix=key).get(key) or {}
+    # Now the card itself. AFTER the two rules above, on the same
+    # principle the role editor states: "this installation may have one
+    # directory" is a property of the system and "this card is not filled
+    # in" is a property of the form, and the message a person reads should
+    # be the larger of the two things that are wrong.
+    #
+    # A card with nothing in it and no secret behind it. Saved, it wrote a
+    # row of empty strings that counted as a configured directory — enough
+    # to be in force, to refuse the other one as a second directory, and to
+    # be reported as "saved and in force now" while no sign-in was ever
+    # offered through it.
+    #
+    # Only where nothing is stored either. Blanking a card that exists is how
+    # a provider is removed — there is no delete button — and an empty card
+    # somebody then switches ON is refused by the completeness rule below,
+    # which names the fields instead of saying "empty".
+    filled = [field for field in PROVIDER_FIELDS[which]
+              if (value.get(field) or "").strip()]
+    if not filled and not has_secret and not held:
+        flash(f"There is nothing to save: every {label} field is empty. "
+              f"Fill the card in, or leave it alone.", "error")
+        return _back_to_auth(which)
+
+    # Shape first, and whether or not the card is being switched on: an
+    # address with no protocol is wrong in a draft too, and the alternative
+    # is finding out at somebody's next sign-in.
+    wrong = malformed(which, value)
+    if wrong:
+        flash(f"{label} was not saved: {wrong}.", "error")
+        _audit(f"{label} settings refused", subject=f"auth:{which}",
+               state={**value, "reason": wrong})
+        return _back_to_auth(which)
+
+    # Completeness, only where it decides anything. A half-filled card that
+    # is switched off is a draft somebody is coming back to; switched on it
+    # is a directory that cannot sign anybody in, and the page said it was
+    # in force.
+    absent = missing(which, value, has_secret) if value["enabled"] else []
+    if absent:
+        said = (f"{label} cannot be switched on without "
+                f"{listed(absent)}. Nothing was saved.")
+        flash(said, "error")
+        _audit(f"{label} settings refused", subject=f"auth:{which}",
+               state={**value, "reason": said})
+        return _back_to_auth(which)
+
     url_key, verify_key, what = (
         ("discovery_url", None, "client secret") if key == OIDC
         else ("server", "verify_certs", "bind password"))

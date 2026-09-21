@@ -524,7 +524,13 @@ class RecoveryToolTest(unittest.TestCase):
         code, output = self.run_tool("--use-directory", "oidc")
         self.assertEqual(code, 1)
         self.assertIn("cannot be used as it stands", output)
-        self.assertIn("discovery URL", output, "it must name what is missing")
+        # The field that is blank, by the name the card gives it — not a
+        # pair of names with "one of them" after it, which leaves the reader
+        # to work out which box to go and look at.
+        self.assertIn("a Discovery URL is required and blank", output,
+                      "it must name what is missing")
+        self.assertNotIn("a Client ID is", output,
+                         "the one that is filled in is not the complaint")
         self.assertTrue(self.store.settings.get("auth.ldap")["enabled"],
                         "the directory that worked was turned off anyway")
         self.assertIs(self.store.settings.get("auth.oidc")["enabled"], False)
@@ -540,7 +546,8 @@ class RecoveryToolTest(unittest.TestCase):
         code, output = self.run_tool("--use-directory", "ldap")
         self.assertEqual(code, 1)
         self.assertIn("cannot be used as it stands", output)
-        self.assertIn("server and a base DN", output)
+        self.assertIn("a Server is required and blank", output)
+        self.assertNotIn("a Base DN is", output)
         self.assertIs(self.store.settings.get("auth.ldap")["enabled"],
                       False)
         self.assertIsNone(self.store.settings.get("auth.oidc"),

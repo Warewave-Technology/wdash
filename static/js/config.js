@@ -680,6 +680,52 @@ document.querySelectorAll('.pick-target').forEach(button => {
 
 
 /* ------------------------------------------------------------------------
+ * What switching a provider on needs.
+ *
+ * An identity provider card could be saved with every box empty, and switched
+ * ON with every box empty: the row was stored, counted as a configured
+ * directory, refused the other one as "a second directory", and the page
+ * reported it as in force while no sign-in was ever offered through it. The
+ * server refuses both now.
+ *
+ * This is the same rule in the browser, and only that: `required` goes on
+ * while the switch is on and comes off when it is off, so a half-filled card
+ * can still be saved as the draft somebody is coming back to. A field paired
+ * with another — the bind password, which is needed only where a bind DN
+ * names a service account — follows that one as well.
+ * --------------------------------------------------------------------- */
+
+(function requireWhatEnablingNeeds() {
+    document.querySelectorAll('form').forEach(form => {
+        const toggle = form.querySelector('input[name="enabled"]');
+        const needed = form.querySelectorAll('[data-needed-to-enable]');
+        if (!toggle || !needed.length) { return; }
+
+        const partners = [];
+        const apply = () => needed.forEach(field => {
+            const partner = field.dataset.neededWith
+                ? form.querySelector(`[name="${field.dataset.neededWith}"]`)
+                : null;
+            field.required = toggle.checked
+                && (!partner || partner.value.trim() !== '');
+        });
+
+        needed.forEach(field => {
+            if (!field.dataset.neededWith) { return; }
+            const partner = form.querySelector(
+                `[name="${field.dataset.neededWith}"]`);
+            if (partner && !partners.includes(partner)) {
+                partners.push(partner);
+                partner.addEventListener('input', apply);
+            }
+        });
+        toggle.addEventListener('change', apply);
+        apply();
+    });
+})();
+
+
+/* ------------------------------------------------------------------------
  * Role mappings.
  *
  * A row on the table is a record: the modal edits ONE of them and the server

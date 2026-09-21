@@ -262,6 +262,22 @@ restart. That page is the only place either is configured: nothing about a
 provider is read from the environment, and a provider switched off is off,
 even with its settings still filled in.
 
+**Switching one on takes a card that can sign somebody in.** OpenID Connect
+needs a client ID, a discovery URL and a client secret; LDAP needs a server
+and a base DN, plus a bind password wherever a bind DN names a service
+account to bind as. A card missing any of those is refused with the fields
+named, on the server and in the browser, and nothing is saved. A card that
+is switched OFF may be half-filled — that is a draft somebody is coming back
+to — but what IS filled in has to be usable either way: a server address
+without `ldap://` or `ldaps://`, or a discovery URL that is not http(s) or
+that resolves to a link-local address, is refused whether or not the switch
+is on. An empty card with nothing stored behind it is not saved at all; a
+card that exists may be blanked, which is how a provider is removed.
+
+Before this, an empty card saved, switched on, reported itself as "in force
+now", and refused the other directory as a second one — while every sign-in
+through it was declined out of sight, in a log line.
+
 The OpenID Connect card asks the provider for `openid email profile groups`
 unless its **Scopes** field says otherwise — `groups` because roles are
 mapped from groups, and a provider that gates that claim behind a scope

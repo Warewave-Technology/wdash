@@ -204,6 +204,38 @@ function build() {
     return { w, calls };
 }
 
+/**
+ * An identity provider card: the switch, the boxes enabling it needs, and
+ * one that is needed only alongside another. Built as the template builds
+ * it, so what is measured is config.js against real markup.
+ */
+function buildProviderCard() {
+    const dom = new JSDOM(`<!doctype html><body>
+      <form id="ldapForm">
+        <input type="checkbox" name="enabled" id="ldapEnabled">
+        <input name="server" id="server" data-needed-to-enable>
+        <input name="base_dn" id="baseDn" data-needed-to-enable>
+        <input name="bind_dn" id="bindDn">
+        <input type="password" name="bind_password" id="bindPassword"
+               data-needed-to-enable data-needed-with="bind_dn">
+        <input name="user_filter" id="userFilter">
+      </form>
+      </body>`,
+      { runScripts: 'outside-only', url: 'http://localhost/admin/config' });
+    const w = dom.window;
+    global.window = w;
+    global.document = w.document;
+    w.bootstrap = { Modal: class { constructor() {} show() {}
+                                   static getInstance() { return null; }
+                                   static getOrCreateInstance() {
+                                       return new this(); } },
+                    Tab: class { static getOrCreateInstance() {
+                        return { show() {} }; } } };
+    w.fetch = () => Promise.resolve({ json: () => Promise.resolve({}) });
+    w.eval(fs.readFileSync(path.join(ROOT, 'static/js/config.js'), 'utf8'));
+    return w;
+}
+
 /** What Jinja's autoescape does to text, and to an attribute value. */
 function escapeText(value) {
     return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -568,6 +600,49 @@ function type(w, id, value) {
           adding.document.getElementById('sourceMonitorPatterns').value === '',
           `monitors=${JSON.stringify(
               adding.document.getElementById('sourceMonitorPatterns').value)}`);
+
+    // Switching an identity provider on. The card could be saved with
+    // every box empty and switched ON with every box empty: the row counted
+    // as a configured directory, refused the other one as "a second
+    // directory", and was reported as in force while no sign-in was ever
+    // offered through it. The server refuses both; this is the same rule in
+    // the browser, and only while the switch is on — a half-filled card is
+    // still saveable as the draft somebody is coming back to.
+    console.log('enabling a provider');
+    const card = buildProviderCard();
+    const enabled = card.document.getElementById('ldapEnabled');
+    const server = card.document.getElementById('server');
+    const bindDn = card.document.getElementById('bindDn');
+    const bindPassword = card.document.getElementById('bindPassword');
+    const userFilter = card.document.getElementById('userFilter');
+
+    check('a card that is off asks for nothing',
+          !server.required && !bindPassword.required);
+
+    enabled.checked = true;
+    enabled.dispatchEvent(new card.Event('change'));
+    check('switching it on asks for what a sign-in needs',
+          server.required
+          && card.document.getElementById('baseDn').required);
+    check('and for nothing else',
+          !userFilter.required);
+    check('a bind password is not asked for without a bind DN',
+          !bindPassword.required);
+
+    bindDn.value = 'cn=admin,dc=example,dc=com';
+    bindDn.dispatchEvent(new card.Event('input'));
+    check('naming a service account asks for its password',
+          bindPassword.required);
+
+    bindDn.value = '';
+    bindDn.dispatchEvent(new card.Event('input'));
+    check('and clearing the DN stops asking',
+          !bindPassword.required);
+
+    enabled.checked = false;
+    enabled.dispatchEvent(new card.Event('change'));
+    check('switching it off again asks for nothing, so a draft can be saved',
+          !server.required && !bindPassword.required);
 
     // Direct mappings. A select with nothing selected shows, and SUBMITS,
     // its FIRST option, and the first role is `admin`: a mapping whose role

@@ -190,18 +190,25 @@
             <div class="mb-2">
               <label class="form-label small">Discovery URL</label>
               <input class="form-control form-control-sm" name="discovery_url"
+                     data-needed-to-enable
                      placeholder="https://idp.example.com/.well-known/openid-configuration"
                      value="{{ oidc.value.discovery_url if oidc.value else '' }}">
             </div>
             <div class="mb-2">
               <label class="form-label small">Client ID</label>
               <input class="form-control form-control-sm" name="client_id"
+                     data-needed-to-enable
                      value="{{ oidc.value.client_id if oidc.value else '' }}">
             </div>
             <div class="mb-2">
               <label class="form-label small">Client secret</label>
+              {# Needed to enable only while there is none stored: after the
+                 first save the box is blank on every visit, because a sealed
+                 secret is replaced rather than shown, and a `required` on it
+                 would refuse every later save of an unchanged card. #}
               <input type="password" class="form-control form-control-sm"
                      name="client_secret" autocomplete="new-password"
+                     {% if not oidc.has_secret %}data-needed-to-enable{% endif %}
                      placeholder="{% if oidc.has_secret %}set — leave blank to keep{% else %}not set{% endif %}"
                      {% if not secrets_available %}disabled{% endif %}>
               <div class="form-text">Stored encrypted and never shown again.</div>
@@ -284,6 +291,7 @@
             <div class="mb-2">
               <label class="form-label small">Server</label>
               <input class="form-control form-control-sm" name="server"
+                     data-needed-to-enable
                      placeholder="ldaps://ldap.example.com:636"
                      value="{{ ldap.value.server if ldap.value else '' }}">
             </div>
@@ -294,14 +302,21 @@
             </div>
             <div class="mb-2">
               <label class="form-label small">Bind password</label>
+              {# Needed only where a Bind DN names a service account to bind
+                 AS: a DN with no password binds anonymously under a name, and
+                 the directory reports that as "the service account could not
+                 bind" — two screens from the box that is empty. #}
               <input type="password" class="form-control form-control-sm"
                      name="bind_password" autocomplete="new-password"
+                     {% if not ldap.has_secret %}data-needed-to-enable
+                     data-needed-with="bind_dn"{% endif %}
                      placeholder="{% if ldap.has_secret %}set — leave blank to keep{% else %}not set{% endif %}"
                      {% if not secrets_available %}disabled{% endif %}>
             </div>
             <div class="mb-2">
               <label class="form-label small">Base DN</label>
               <input class="form-control form-control-sm" name="base_dn"
+                     data-needed-to-enable
                      value="{{ ldap.value.base_dn if ldap.value else '' }}">
             </div>
             <div class="mb-2">

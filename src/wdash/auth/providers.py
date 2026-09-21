@@ -69,6 +69,106 @@ OTHER = {"ldap": "oidc", "oidc": "ldap"}
 #: is "write SQL" is a lockout with better wording.
 RECOVERY = "python -m wdash.store.recover --use-directory <ldap|oidc|none>"
 
+#: What a directory cannot sign anybody in without, named as the card names
+#: the field. ONE list: the page refuses a save that would enable a provider
+#: missing any of these, and `_oidc_effective` and `_ldap_effective` below
+#: refuse to offer one. Two lists would let the page accept a card the
+#: sign-in then declines, which is how a blank OpenID Connect card came to be
+#: saved, enabled, reported as "in force now", and never offered to anybody.
+REQUIRED = {
+    "oidc": (("client_id", "a Client ID"),
+             ("discovery_url", "a Discovery URL")),
+    "ldap": (("server", "a Server"), ("base_dn", "a Base DN")),
+}
+
+#: Every field either card holds, for "is there anything here at all".
+FIELDS = {
+    "oidc": ("client_id", "discovery_url", "redirect_uri", "scopes",
+             "username_claim", "email_claim", "groups_claim"),
+    "ldap": ("server", "bind_dn", "base_dn", "user_filter",
+             "group_attribute", "ca_certs"),
+}
+
+
+def listed(names):
+    """"a, b and c" — a list somebody reads rather than a Python repr.
+
+    Public, like `invariants.few()` and for the same reason: the
+    configuration page builds the same kind of sentence out of the same
+    names, and reaching across a module boundary for a name with a leading
+    underscore says one thing while the import says another.
+    """
+    names = list(names)
+    if len(names) <= 1:
+        return names[0] if names else ""
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def needs_secret(which, value):
+    """The secret this provider cannot work without, named, or None.
+
+    OpenID Connect always: WDash is a confidential client and the token
+    request carries it. LDAP only where a bind DN names a service account to
+    bind AS — a DN with no password binds anonymously under a name, which a
+    directory reports as "the service account could not bind", two screens
+    away from the field that is empty.
+    """
+    if which == "oidc":
+        return "a Client secret"
+    if which == "ldap" and ((value or {}).get("bind_dn") or "").strip():
+        return "a Bind password"
+    return None
+
+
+def missing(which, value, has_secret=False):
+    """Which required fields are blank, in the words the card uses for them.
+
+    `has_secret` is whether one is stored or was typed on this submission —
+    the field itself is blank on every visit after the first, because a
+    sealed secret is replaced rather than shown.
+    """
+    value = value or {}
+    names = [label for field, label in REQUIRED.get(which, ())
+             if not str(value.get(field) or "").strip()]
+    wanted = needs_secret(which, value)
+    if wanted and not has_secret:
+        names.append(wanted)
+    return names
+
+
+def malformed(which, value):
+    """Why a field that IS filled in could not work, or None.
+
+    Separate from `missing` because it applies to a draft as well: a server
+    address with no protocol is wrong whether or not anybody has switched the
+    card on, and saving it and finding out at the next sign-in is the long
+    way round.
+    """
+    value = value or {}
+    if which == "ldap":
+        server = (value.get("server") or "").strip()
+        if server and not server.lower().startswith(("ldap://", "ldaps://")):
+            return (f"the Server has to start with ldap:// or ldaps:// — "
+                    f"'{server}' names no protocol")
+    if which == "oidc":
+        from ..store.sources import SourceError, validate_url
+        for field, label in (("discovery_url", "Discovery URL"),
+                             ("redirect_uri", "Redirect URI")):
+            address = (value.get(field) or "").strip()
+            if not address:
+                continue
+            try:
+                # The same check a source address gets, for the same reason:
+                # WDash's own server fetches the discovery document, so an
+                # address naming cloud instance metadata is a request it
+                # would make on somebody's behalf.
+                validate_url(address)
+            except SourceError as exc:
+                said = str(exc)
+                return (f"the {label} cannot be used: "
+                        f"{said[:1].lower()}{said[1:]}")
+    return None
+
 
 def _store(app):
     return getattr(app, "store", None)
@@ -297,12 +397,20 @@ def _oidc_effective(app, if_enabled=False):
         # be worse than signing nobody in.
         logger.error(f"OIDC client secret could not be read: {exc}")
         return None, "the client secret could not be decrypted"
-    if not (stored.get("client_id") and stored.get("discovery_url")):
+    # `has_secret=True`, like the LDAP one below: whether a secret is there
+    # is asked at the gate, where somebody can type one, and not here. An
+    # installation that already has OpenID Connect enabled with no stored
+    # secret goes on being offered exactly as it was — it fails at the token
+    # request, which is the provider's answer and not ours to change on an
+    # upgrade. The configuration page refuses to switch one on without it.
+    absent = missing("oidc", stored, has_secret=True)
+    if absent:
         logger.warning(
-            "OIDC is enabled but incomplete (client id and discovery URL "
-            "are both required); it will not be offered")
-        return None, ("a client id and a discovery URL are both required "
-                      "and one of them is blank")
+            f"OIDC is enabled and incomplete ({', '.join(absent)} "
+            f"{'are' if len(absent) > 1 else 'is'} blank); it will not be "
+            f"offered")
+        return None, (f"{listed(absent)} {'are' if len(absent) > 1 else 'is'} "
+                      f"required and blank")
     return {
         "client_id": stored["client_id"],
         "client_secret": secret or "",
@@ -356,12 +464,14 @@ def _ldap_effective(app, if_enabled=False):
     stored = store.settings.get(LDAP_KEY)
     if not stored or not (stored.get("enabled") or if_enabled):
         return None, None
-    if not stored.get("server") or not stored.get("base_dn"):
+    absent = missing("ldap", stored, has_secret=True)
+    if absent:
         logger.warning(
-            "LDAP is enabled but incomplete (server and base DN are both "
-            "required); it will not be offered")
-        return None, ("a server and a base DN are both required and one of "
-                      "them is blank")
+            f"LDAP is enabled and incomplete ({', '.join(absent)} "
+            f"{'are' if len(absent) > 1 else 'is'} blank); it will not be "
+            f"offered")
+        return None, (f"{listed(absent)} {'are' if len(absent) > 1 else 'is'} "
+                      f"required and blank")
 
     try:
         password = store.settings.secret(LDAP_KEY)

@@ -15,6 +15,7 @@ What these tests hold:
   * the URL a source points at is checked before the server will fetch it
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -373,7 +374,8 @@ class AuthSettingsTest(ConfigTestCase):
     def save_oidc(self, **overrides):
         form = {"provider": "oidc", "client_id": "wdash",
                 "discovery_url": "https://idp/.well-known/openid-configuration",
-                "redirect_uri": "https://wdash/auth/callback", "enabled": "on"}
+                "redirect_uri": "https://wdash/auth/callback",
+                "client_secret": "wdash-client-secret", "enabled": "on"}
         form.update(overrides)
         return self.client.post("/admin/auth", data=form, follow_redirects=True)
 
@@ -469,8 +471,216 @@ class IdentityProviderSettingsTest(AuthSettingsTest):
 
 LDAP_FORM = {"provider": "ldap", "server": "ldaps://ldap:636",
              "base_dn": "dc=example,dc=com", "verify_certs": "on"}
+#: A complete card, because switching a provider on takes one. The secret is
+#: part of that for OpenID Connect: WDash is a confidential client and the
+#: token request carries it, so a card enabled without one is a sign-in that
+#: gets as far as the provider and fails there.
 OIDC_FORM = {"provider": "oidc", "client_id": "wdash",
-             "discovery_url": "https://idp/.well-known/openid-configuration"}
+             "discovery_url": "https://idp/.well-known/openid-configuration",
+             "client_secret": "wdash-client-secret"}
+
+
+
+class AProviderNeedsFillingInTest(ConfigTestCase):
+    """What a card has to hold before it can be saved, and before it can be
+    switched on.
+
+    Measured before the rule, on an empty OpenID Connect card with Enabled
+    ticked: HTTP 302, a row of empty strings written, "OIDC settings saved
+    and in force now — no restart needed", `directory()` reporting it as the
+    directory in force, and LDAP then refused as "a second directory". No
+    sign-in was ever offered through it — `_oidc_effective` declined it, out
+    of sight, in a log line — so the page said one thing and every visitor
+    met another.
+
+    The three rules, in the order the handler applies them: there has to be
+    something in the card at all; what is filled in has to be usable; and
+    switching it on takes everything a sign-in needs.
+    """
+
+    def stored(self, which):
+        return self.app.store.settings.get(f"auth.{which}")
+
+    def refusals(self):
+        return [row for row in self.app.store.audit.recent()
+                if "settings refused" in row["action"]]
+
+    def save(self, **form):
+        return self.client.post("/admin/auth", data=form,
+                                follow_redirects=True)
+
+    # --- there has to be something in it ---------------------------------
+
+    def test_an_empty_card_is_not_a_saved_provider(self):
+        for which in ("oidc", "ldap"):
+            with self.subTest(provider=which):
+                response = self.save(provider=which)
+                self.assertIn(b"There is nothing to save", response.data)
+                self.assertIsNone(self.stored(which))
+
+    def test_an_empty_card_cannot_be_switched_on_either(self):
+        response = self.save(provider="oidc", enabled="on")
+        self.assertIn(b"There is nothing to save", response.data)
+        self.assertIsNone(self.stored("oidc"))
+
+    def test_an_existing_card_blanked_and_switched_on_is_refused_by_name(self):
+        """The same submission against a provider that is already stored.
+        "Nothing to save" would be wrong there — blanking it is how one is
+        removed — so what refuses it is the completeness rule, which names
+        the fields rather than calling the card empty."""
+        self.save(**{**LDAP_FORM, "enabled": "on"})
+        response = self.save(provider="ldap", enabled="on")
+        self.assertIn(b"a Server and a Base DN", response.data)
+        self.assertNotIn(b"There is nothing to save", response.data)
+        self.assertEqual(self.stored("ldap")["server"], "ldaps://ldap:636",
+                         "nothing was supposed to be saved")
+
+    def test_clearing_a_provider_that_exists_is_still_allowed(self):
+        """Blanking the card is how a provider is removed — there is no
+        delete button — so "nothing in it" refuses a first save and not a
+        later one."""
+        self.save(**{**LDAP_FORM, "enabled": "on"})
+        self.save(provider="ldap")
+        self.assertEqual(self.stored("ldap")["server"], "")
+
+    # --- what is filled in has to be usable ------------------------------
+
+    def test_a_server_with_no_protocol_is_refused_even_as_a_draft(self):
+        """ldap3 is handed the string as it stands. Saved, the first person
+        to try signing in is where this would have been found."""
+        response = self.save(provider="ldap", server="ldap.example.com",
+                             base_dn="dc=example,dc=com")
+        self.assertIn(b"has to start with ldap:// or ldaps://", response.data)
+        self.assertIsNone(self.stored("ldap"))
+
+    def test_a_discovery_url_that_is_not_a_url_is_refused(self):
+        response = self.save(provider="oidc", client_id="wdash",
+                             discovery_url="file:///etc/passwd")
+        self.assertIn(b"Discovery URL cannot be used", response.data)
+        self.assertIsNone(self.stored("oidc"))
+
+    def test_a_redirect_uri_that_is_not_a_url_is_refused(self):
+        response = self.save(**{**OIDC_FORM, "redirect_uri": "not a url"})
+        self.assertIn(b"Redirect URI cannot be used", response.data)
+        self.assertIsNone(self.stored("oidc"))
+
+    def test_a_usable_address_is_saved(self):
+        self.save(**{**LDAP_FORM, "enabled": "on"})
+        self.assertEqual(self.stored("ldap")["server"], "ldaps://ldap:636")
+
+    # --- switching it on takes everything a sign-in needs -----------------
+
+    def test_enabling_without_a_client_secret_is_refused(self):
+        """WDash is a confidential client: the token request carries it.
+        Enabled without one, the sign-in gets as far as the provider and
+        fails there, which reads as the provider's fault."""
+        response = self.save(provider="oidc", client_id="wdash",
+                             discovery_url="https://idp/.well-known/x",
+                             enabled="on")
+        self.assertIn(b"a Client secret", response.data)
+        self.assertIsNone(self.stored("oidc"))
+
+    def test_the_refusal_names_every_field_that_is_blank(self):
+        response = self.save(provider="oidc", redirect_uri="https://w/cb",
+                             enabled="on").get_data(as_text=True)
+        self.assertIn("a Client ID, a Discovery URL and a Client secret",
+                      response)
+
+    def test_enabling_ldap_without_a_server_is_refused(self):
+        response = self.save(provider="ldap", base_dn="dc=example,dc=com",
+                             enabled="on")
+        self.assertIn(b"a Server", response.data)
+        self.assertIsNone(self.stored("ldap"))
+
+    def test_a_bind_dn_with_no_password_is_refused(self):
+        """A DN with no password binds anonymously under a name, and the
+        directory reports that as "the service account could not bind" —
+        two screens from the box that is empty."""
+        response = self.save(**{**LDAP_FORM, "bind_dn": "cn=admin,dc=x",
+                                "enabled": "on"})
+        self.assertIn(b"a Bind password", response.data)
+        self.assertIsNone(self.stored("ldap"))
+
+    def test_no_bind_dn_needs_no_password(self):
+        """An anonymous search is a real configuration, and ldap_auth.py
+        supports it: `bind_dn` is read with `or None`."""
+        self.save(**{**LDAP_FORM, "enabled": "on"})
+        self.assertTrue(self.stored("ldap")["enabled"])
+
+    def test_a_draft_may_be_half_filled_as_long_as_it_is_off(self):
+        """Somebody filling a card in over two visits. Nothing is signing
+        anybody in, so nothing is broken."""
+        self.save(provider="oidc", client_id="wdash")
+        self.assertEqual(self.stored("oidc")["client_id"], "wdash")
+        self.assertFalse(self.stored("oidc")["enabled"])
+
+    def test_a_secret_already_stored_counts_as_filled_in(self):
+        """The box is blank on every visit after the first, because a sealed
+        secret is replaced rather than shown. Requiring the BOX would refuse
+        every later save of a card that is complete."""
+        self.save(**{**OIDC_FORM, "enabled": "on"})
+        response = self.save(**{**OIDC_FORM, "client_secret": "",
+                                "client_id": "renamed", "enabled": "on"})
+        self.assertIn(b"saved and in force", response.data)
+        self.assertEqual(self.stored("oidc")["client_id"], "renamed")
+
+    # --- and the form says so before anybody submits it -------------------
+
+    def card(self, which):
+        """One provider's form, as the page renders it."""
+        page = self.client.get("/admin/config").get_data(as_text=True)
+        after = page.split(f'name="provider" value="{which}"', 1)[1]
+        return after.split("</form>", 1)[0]
+
+    def test_the_card_marks_every_field_enabling_needs(self):
+        """The browser's half of the rule, held to the server's list. A field
+        the form does not mark is one somebody fills the card in around,
+        submits, and is sent back to."""
+        from wdash.auth.providers import REQUIRED
+
+        for which in ("oidc", "ldap"):
+            card = self.card(which)
+            for field, _ in REQUIRED[which]:
+                with self.subTest(provider=which, field=field):
+                    box = card.split(f'name="{field}"', 1)[1].split(">", 1)[0]
+                    self.assertIn("data-needed-to-enable", box,
+                                  f"{which}.{field} is required to enable and "
+                                  f"the form does not say so")
+
+    def test_the_secret_is_marked_only_while_there_is_none_stored(self):
+        """It is blank on every visit after the first, because a sealed
+        secret is replaced rather than shown — so a form that went on asking
+        for it would refuse every later save of a complete card."""
+        card = self.card("oidc")
+        box = card.split('name="client_secret"', 1)[1].split(">", 1)[0]
+        self.assertIn("data-needed-to-enable", box)
+
+        self.save(**{**OIDC_FORM, "enabled": "on"})
+        card = self.card("oidc")
+        box = card.split('name="client_secret"', 1)[1].split(">", 1)[0]
+        self.assertNotIn("data-needed-to-enable", box)
+
+    def test_the_bind_password_is_marked_as_following_the_bind_dn(self):
+        """Needed only where a DN names a service account, so the form asks
+        for it only then — the same condition the server applies."""
+        box = self.card("ldap").split('name="bind_password"', 1)[1] \
+                               .split(">", 1)[0]
+        self.assertIn("data-needed-to-enable", box)
+        self.assertIn('data-needed-with="bind_dn"', box)
+
+    def test_a_refusal_is_recorded_with_its_reason(self):
+        self.save(provider="oidc", client_id="wdash", enabled="on")
+        refused = self.refusals()
+        self.assertEqual(len(refused), 1, "the refusal was not recorded")
+        self.assertIn("a Discovery URL", refused[0]["state"]["reason"])
+
+    def test_a_refusal_records_no_secret(self):
+        """The audit trail carries the card's state, and a refused save is
+        still a save that was submitted with one."""
+        self.save(provider="oidc", client_id="wdash",
+                  client_secret="hunter2", enabled="on")
+        recorded = json.dumps(self.refusals()[0]["state"])
+        self.assertNotIn("hunter2", recorded)
 
 
 class OneDirectoryOnThePageTest(ConfigTestCase):
@@ -723,7 +933,9 @@ class TurningTheDirectoryOffTest(ConfigTestCase):
         page = self.client.post("/admin/auth", data=OIDC_FORM,
                                 follow_redirects=True).get_data(as_text=True)
         self.assertIn("hand this installation to LDAP", page)
-        self.assertIn("one of them is blank", page)
+        # Which field, by the name the card gives it, rather than "one of
+        # them is blank" about a pair.
+        self.assertIn("a Server is required and blank", page)
         self.assertIs(self.app.store.settings.get("auth.oidc")["enabled"],
                       True)
 
