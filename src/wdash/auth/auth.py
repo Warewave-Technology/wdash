@@ -480,6 +480,42 @@ def login():
                                directory_notice=notice,
                                username=username), 401
 
+    # The name the DIRECTORY answered with, checked against the local
+    # accounts a second time.
+    #
+    # The guard above checks what was typed. Those were the same string
+    # until the username started coming from the directory's own attribute
+    # rather than from the form — and with a filter that matches more than
+    # one attribute, say `(|(uid={username})(mail={username}))`, they are
+    # not. Measured against the lab's OpenLDAP: typing `alice` was refused
+    # 401 as a local name, and typing `alice@lab.local` was accepted and
+    # started a session as `alice` — the break-glass administrator's name,
+    # with her role mapping, her dashboards and an ordinary sign-in row in
+    # the audit trail. Disabling that local account did not end the session
+    # either: `load_user_from_session` re-reads the stored account only for
+    # a session that says it is local.
+    #
+    # Refused rather than renamed. A principal who resolves to a local
+    # account's name has no other name here that would be theirs.
+    if account and not account.get('local'):
+        resolved = account.get('username') or ''
+        if resolved != username and store.users.by_username(resolved):
+            store.signin.record(username, address, FAILURE)
+            store.audit.record(
+                resolved, "directory sign-in refused",
+                subject=f"user:{resolved}", address=address,
+                state={"typed": username, "reason": "the directory resolves "
+                                                    "this to a local account"})
+            current_app.logger.error(
+                f"Directory sign-in refused: {username!r} resolves to "
+                f"{resolved!r}, which is a local account")
+            flash('Invalid username or password', 'error')
+            return render_template('login.html', oidc_available=oidc_available,
+                                   ldap_available=directory is not None,
+                                   local_available=True,
+                                   directory_notice=notice,
+                                   username=username), 401
+
     if account.get('local'):
         # Half a sign-in. No session, no SUCCESS recorded — see `_completed`
         # for why the success has to wait for the second half — and nothing

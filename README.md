@@ -417,7 +417,10 @@ Entra v1 tokens do: that sign-in is refused, with a message naming the setting,
 rather than signing the person in as an opaque id that owns none of their
 dashboards. No provider, OIDC or directory, may sign somebody in under the
 name of a local account: that name owns the break-glass administrator's
-dashboards. Such a sign-in is refused and audited. Named nowhere, the claims
+dashboards. Such a sign-in is refused and audited — checked against the
+name the DIRECTORY answers with as well as against the one that was typed,
+because a filter matching more than one attribute makes those two different
+strings and the second one is the one the session gets. Named nowhere, the claims
 are `preferred_username`, `email` and `groups` — unless the installation
 imported other names from an rbac.yaml's `claim_mappings` at an earlier
 version, which it keeps and goes on using.

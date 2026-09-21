@@ -551,6 +551,46 @@ class DirectoryTest(IdentityTestCase):
                                   "groups": []})
         self.assertEqual(signed_in.status_code, 302)
 
+    def test_a_directory_name_that_resolves_to_a_local_account_is_refused(self):
+        """The break-glass administrator's identity, through the directory.
+
+        The local-name guard checks what was TYPED, and that was the same
+        string as the session's username until the username started coming
+        from the directory's own attribute. With a filter matching more than
+        one attribute — `(|(uid={username})(mail={username}))`, which is an
+        ordinary thing to write — they are not the same string.
+
+        Measured against the lab's OpenLDAP before this refusal existed:
+        typing `alice` was refused 401 as a local name, and typing
+        `alice@lab.local` was accepted and started a session as `alice`,
+        reached /admin/config with the local alice's admin role, and
+        survived that local account being disabled — because
+        `load_user_from_session` re-reads the stored account only for a
+        session that says it is local.
+        """
+        self.app.store.users.create("alice", "local-password-12chars",
+                                    role="admin")
+
+        response = self.attempt({"username": "alice", "email": "alice@corp",
+                                 "groups": []}, username="alice@corp")
+        self.assertEqual(response.status_code, 401)
+        with self.client.session_transaction() as session:
+            self.assertIsNone(session.get("user_data"))
+
+        refused = [row for row in self.app.store.audit.recent()
+                   if row["action"] == "directory sign-in refused"]
+        self.assertEqual(len(refused), 1, "the refusal was not recorded")
+        self.assertEqual(refused[0]["state"]["typed"], "alice@corp")
+
+    def test_a_directory_name_of_its_own_still_signs_in(self):
+        """The refusal is about a collision, not about a name that differs
+        from what was typed — which is now the ordinary case."""
+        response = self.attempt({"username": "bob", "email": "bob@corp",
+                                 "groups": []}, username="bob@corp")
+        self.assertEqual(response.status_code, 302)
+        with self.client.session_transaction() as session:
+            self.assertEqual(session["user_data"]["username"], "bob")
+
     def test_the_session_holds_the_name_the_directory_gave(self):
         """What the directory answered, not what was typed — and it is the
         name everything downstream is keyed by: the role a mapping names,
