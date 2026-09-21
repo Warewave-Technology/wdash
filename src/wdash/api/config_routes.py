@@ -236,10 +236,23 @@ def _actor():
     asserted, and the role stored on a local account.
     """
     data = session.get("user_data") or {}
+    username = getattr(current_user, "username", None)
+    local_role = data.get("local_role")
+    if data.get("provider") == "local account":
+        # READ NOW, not taken from the cookie — the same thing
+        # `load_user_from_session` does, for the same reason, which is why
+        # the two disagreeing mattered. `local_role` is written at sign-in
+        # and never rewritten, so authorization was fresh and the lockout
+        # question was stale: measured, an account promoted to admin after
+        # signing in still answered `viewer` here, and the invariants that
+        # ask "would this change leave nobody able to administer" were
+        # answering about a picture that had already changed.
+        account = _store().users.by_username(username)
+        local_role = account["role"] if account else None
     return {"email": getattr(current_user, "email", None),
-            "username": getattr(current_user, "username", None),
+            "username": username,
             "groups": list(getattr(current_user, "groups", None) or ()),
-            "local_role": data.get("local_role"),
+            "local_role": local_role,
             # Which door this session came through, for the rule about turning
             # a directory off. Absent in a session written before it was
             # recorded, and then nothing is claimed about it.
@@ -769,6 +782,17 @@ def test_source():
         from ..store.sources import validate_url
         url = validate_url(payload.get("url"))
     except SourceError as exc:
+        # Audited like every other refusal on this page. This one is the
+        # SSRF guard — the link-local address SECURITY.md is about — and it
+        # was the one refusal that left no row anywhere: `_audit` writes to
+        # the logger AND the table, so skipping it wrote to neither.
+        # Measured: six refusals through this route and the save beside it,
+        # including `http://169.254.169.254/latest/meta-data/`, and zero new
+        # audit rows.
+        _audit("source test refused",
+               subject=f"source:{payload['id']}" if payload.get("id") else None,
+               state={"target": _where(payload.get("url")),
+                      "reason": str(exc)})
         return jsonify({"ok": False, "error": str(exc)}), 200
 
     password = payload.get("password")
@@ -795,8 +819,29 @@ def test_source():
         try:
             password = store.sources.credential(stored["id"])
             reused = password is not None
-        except Exception:
-            password = None
+        except Exception as exc:
+            # NOT a probe without the password. It used to be, and the far
+            # end's answer was then reported as a success — so one render of
+            # this page carried the red "not in use" badge and the sentence
+            # about a secret that could not be decrypted for a source whose
+            # Test connection answered ok, on the same row. Measured after a
+            # key rotation: `hub.logs('lab-es')` raising KeyError for every
+            # query while the button said the connection was fine.
+            #
+            # `reused` could not have said so either: it is False both for
+            # "no password is stored" and for "the stored one could not be
+            # read", which are the two facts this has to tell apart.
+            logger.warning(f"source {stored['id']} could not be tested: {exc}")
+            _audit("source test refused", subject=f"source:{stored['id']}",
+                   state={"target": _where(url),
+                          "reason": "the stored password could not be read"})
+            return jsonify({
+                "ok": False,
+                "message": "The stored password could not be read, so this "
+                           "connection cannot be tested as it is saved. "
+                           "WDASH_ENCRYPTION_KEY has probably changed since "
+                           "it was written; type the password to test and "
+                           "save it again."}), 200
 
     from ..hub.probe import probe_source
     result = probe_source(kind=payload.get("kind"), url=url,

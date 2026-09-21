@@ -571,6 +571,163 @@ class APasswordInTheAddressTest(ConfigTestCase):
         self.assertIn(b"Take the password out of the address", response.data)
 
 
+class TheLockoutQuestionIsAskedAboutNowTest(ConfigTestCase):
+    """The invariants ask what role the asker would land on after a change.
+
+    They were handed `local_role` out of the session cookie, which is
+    written at sign-in and never rewritten. `load_user_from_session`
+    deliberately stopped trusting it — it re-reads the account, and its
+    comment says why — so authorization was fresh and the question "would
+    this leave nobody able to administer" was stale. `_actor` reads the
+    account now, the same way.
+    """
+
+    def signed_in_as(self, role):
+        """Change the stored role of the signed-in account, leaving the
+        cookie exactly as the sign-in wrote it."""
+        self.app.store.users.set_role("owner", role)
+        self.app.store.rbac.invalidate()
+
+    def stored_role(self):
+        return self.app.store.users.by_username("owner")["role"]
+
+    def test_the_actor_carries_the_stored_role_not_the_cookie(self):
+        from wdash.api.config_routes import _actor
+        self.app.store.roles.upsert("co-admin", permissions=["system:admin"],
+                                    containers=["*"], trace_containers=["*"])
+        self.signed_in_as("co-admin")
+        with self.client:
+            self.client.get("/admin/config")
+            self.assertEqual(_actor()["local_role"], "co-admin")
+
+    def test_a_promotion_that_has_already_happened_counts(self):
+        """The other direction, and the one that matters: an account
+        promoted after signing in IS an administrator, and a change that
+        relies on it is safe. The cookie said `viewer`."""
+        self.app.store.roles.upsert("co-admin", permissions=["system:admin"],
+                                    containers=["*"], trace_containers=["*"])
+        self.signed_in_as("co-admin")
+        response = self.client.post("/admin/roles/admin/delete",
+                                    follow_redirects=True)
+        self.assertIsNone(self.app.store.roles.get("admin"),
+                          "the delete was refused on a stale picture")
+        self.assertEqual(self.stored_role(), "co-admin")
+
+    def test_a_directory_session_still_reads_its_groups(self):
+        """`local_role` is a local account's field. A directory principal
+        has none, and inventing one would give it a role nobody granted."""
+        from wdash.api.config_routes import _actor
+        with self.client.session_transaction() as session:
+            # Reassigned, not mutated in place: Flask marks the session
+            # modified on assignment, and a nested edit is not one.
+            session["user_data"] = dict(session["user_data"],
+                                        provider="directory",
+                                        local_role=None)
+        with self.client:
+            self.client.get("/admin/config")
+            self.assertIsNone(_actor()["local_role"])
+
+
+class WhatTheConfigurationPageRefusesIsRecordedTest(ConfigTestCase):
+    """Every refusal on this page leaves a row. These left none.
+
+    The route's own refusals all audit — `source save refused`, `source
+    update refused`, `source rename refused`, `source creation refused`,
+    `source test refused`. The VALIDATOR's did not: `save_source` and
+    `test_source` each caught `SourceError` and only answered. Measured,
+    six refusals through both routes including
+    `http://169.254.169.254/latest/meta-data/`: zero new audit rows.
+    SECURITY.md calls the trail "an append-only audit trail … recording
+    refused changes as well as accepted ones", and the SSRF guard is one of
+    the things it is about.
+    """
+
+    def audited(self, action):
+        return [row for row in self.app.store.audit.recent()
+                if row["action"] == action]
+
+    def test_a_refused_connection_test_is_recorded(self):
+        response = self.client.post("/admin/api/sources/test", json={
+            "kind": "elasticsearch",
+            "url": "http://169.254.169.254/latest/meta-data/"})
+        self.assertFalse(response.get_json()["ok"])
+        rows = self.audited("source test refused")
+        self.assertEqual(len(rows), 1)
+        self.assertIn("link-local", rows[0]["state"]["reason"])
+
+    def test_a_refused_save_is_recorded(self):
+        self.add_source(name="bad", url="file:///etc/passwd")
+        rows = self.audited("source save refused")
+        self.assertEqual(len(rows), 1)
+        self.assertIn("http and https", rows[0]["state"]["reason"])
+
+    def test_a_test_that_runs_is_still_recorded_as_one(self):
+        """The refusal row must not replace the ordinary one."""
+        self.client.post("/admin/api/sources/test", json={
+            "kind": "elasticsearch", "url": "http://127.0.0.1:1",
+            "verify_certs": False})
+        self.assertEqual(len(self.audited("source tested")), 1)
+        self.assertEqual(self.audited("source test refused"), [])
+
+
+class ATestThatCannotReadTheSecretTest(ConfigTestCase):
+    """Testing a saved source whose password will not decrypt.
+
+    It probed WITHOUT the password and reported the far end's answer as a
+    success. So one render of this page carried the red "not in use" badge
+    and the sentence about a secret that could not be decrypted for a
+    source whose Test connection answered ok — two sentences about one row,
+    in one response, disagreeing, which is the shape `_not_live` exists to
+    prevent. Measured after replacing the key under a running app, as a
+    rotated `WDASH_ENCRYPTION_KEY` does.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.add_source(name="lab", url="http://127.0.0.1:1",
+                        username="elastic", password="a-stored-password")
+        self.source = self.app.store.sources.all()[0]
+
+    def lose_the_key(self):
+        from wdash.store import SecretBox
+        self.app.store.secrets._fernet = SecretBox(
+            SecretBox.generate_key())._fernet
+
+    def test(self, **overrides):
+        body = {"id": self.source["id"], "kind": "elasticsearch",
+                "url": "http://127.0.0.1:1", "username": "elastic",
+                "verify_certs": True}
+        body.update(overrides)
+        return self.client.post("/admin/api/sources/test",
+                                json=body).get_json()
+
+    def test_it_is_refused_rather_than_probed_anonymously(self):
+        self.lose_the_key()
+        answer = self.test()
+        self.assertFalse(answer["ok"])
+        self.assertIn("could not be read", answer["message"])
+        self.assertIn("WDASH_ENCRYPTION_KEY", answer["message"])
+        # And what to do about it. A refusal that names no remedy sends
+        # somebody to the logs to find out what this page already knows —
+        # and the remedy it names is one that works, which is the next test.
+        self.assertIn("type the password", answer["message"])
+
+    def test_the_refusal_is_recorded(self):
+        self.lose_the_key()
+        self.test()
+        rows = [row for row in self.app.store.audit.recent()
+                if row["action"] == "source test refused"]
+        self.assertEqual(len(rows), 1)
+        self.assertIn("could not be read", rows[0]["state"]["reason"])
+
+    def test_typing_the_password_is_still_a_way_to_test_it(self):
+        """The remedy the message names has to exist."""
+        self.lose_the_key()
+        answer = self.test(password="a-stored-password")
+        self.assertIn("ok", answer)
+        self.assertNotIn("could not be read", answer.get("message", ""))
+
+
 class DeleteAsksFirstTest(ConfigTestCase):
     """The listener in config.js asks before a form with `data-confirm` is
     sent. The attribute has to be on the forms the page renders, or the

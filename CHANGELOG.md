@@ -87,6 +87,24 @@ variables has to do something before it upgrades.
   Pin the boards that should read one source; the rest say on screen which
   sources answered.
 
+- **"Would this lock me out?" is asked about the account, not the cookie.**
+  The lockout invariants read the role that was written into the session at
+  sign-in, which is never rewritten — so an account whose role had changed
+  since signing in was checked against the role it used to have, while its
+  actual permissions had already moved. The account is read now, the way
+  every other authorization decision on the request already does.
+
+- **Test connection no longer reports success after probing without the
+  password.** When a stored password could not be decrypted — a rotated
+  `WDASH_ENCRYPTION_KEY` — the button probed anonymously and reported the
+  far end's answer, so one page could show the red "not in use" badge and a
+  working connection test for the same source. It says what happened and
+  what to do instead.
+
+- **A source save or connection test refused by the validator is audited.**
+  Including the refusal of the cloud metadata address, which was the one
+  refusal on this page that left no row anywhere.
+
 - **A dashboard's threshold badge is withheld when the answer is short.**
   Elasticsearch fails a search outright only when *every* shard fails; when
   some fail it answers 200 with what the rest found. The board painted a
