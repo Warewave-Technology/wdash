@@ -236,13 +236,18 @@ build.
   the rest: monitors, journeys, dashboards and alert rules are a sequence of
   steps somebody follows. One `./lab.sh demo` is the difference between
   trying WDash and reading about it.
-* ~~**A release line behind the tag.**~~ Done as far as this repository can
-  take it: `CHANGELOG.md` written from the operator's side, `RELEASING.md`
-  with the commands and with what it deliberately does not do,
-  `THIRD-PARTY-NOTICES.md` generated from installed metadata, and
-  `tests/test_release_files.py` holding all three to the version. What is
-  still missing is outside the repository — there is no remote, so the five
-  CI jobs have never run, and no image has been published.
+* ~~**A release line behind the tag.**~~ Done, and the part that used to be
+  outside this repository is done too. `CHANGELOG.md` written from the
+  operator's side, `RELEASING.md` with the commands and with what it
+  deliberately does not do, `THIRD-PARTY-NOTICES.md` generated from the
+  pins, and `tests/test_release_files.py` holding all three to the version —
+  including, now, that a tagged version's heading carries its date rather
+  than the word "unreleased", which 3.0.0 shipped with. The repository has a
+  remote and the nine CI jobs run on every push; `3.0.0` is published for
+  `linux/amd64` and `linux/arm64`, and the documentation is at
+  <https://wdash.warewave.tech/>. What is still missing is named in
+  `RELEASING.md` under what the process does not do: no image signing, no
+  provenance attestation, no published SBOM.
 
 ### Honesty
 
