@@ -140,6 +140,23 @@ The tag message is not the release notes. `CHANGELOG.md` is.
 
 2. **Publish the notes**, from the changelog entry, verbatim.
 
+   ```bash
+   gh release create v3.1.1 --title "WDash 3.1.1" \
+       --notes-file notes.md --latest --verify-tag
+   ```
+
+   Verbatim means the section body with its own `## 3.1.1 — <date>` line
+   dropped, because the release title already says that. `--verify-tag`
+   refuses to invent a tag that does not exist, which is the mistake this
+   step can make: `gh` will otherwise create one at whatever HEAD happens
+   to be.
+
+   This step was skipped for 3.0.0 and 3.1.0 — both tagged, neither with
+   notes — and nothing noticed, because the tag is what the manifests and
+   the images refer to and the notes are only for people. Backfilled at
+   3.1.1, with `--latest=false` on the two older ones so the newest stays
+   the one GitHub offers.
+
 3. **Check the manifests deploy what was pushed.** `tests/test_version.py`
    holds the tag in the YAML to the package version, and nothing holds
    either one to what is in the registry — that is this step.
