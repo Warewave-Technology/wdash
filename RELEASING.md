@@ -69,17 +69,19 @@ command somebody types, and step 6 is the one no test replaces.
 
    **Check the ratio rather than the number, and say which number you
    mean.** There are three, and they are three questions rather than a mess
-   to tidy up. Measured for 3.0.0:
+   to tidy up. Measured for 3.1.1:
 
    | | server | browser |
    |---|---|---|
-   | registry, `linux/amd64` — what you wait for | 77MB | 555MB |
-   | registry, `linux/arm64` | 79MB | 591MB |
-   | `docker images`, unpacked on this machine | 369MB | 2.39GB |
+   | registry, `linux/amd64` — what you wait for | 79MB | 557MB |
+   | registry, `linux/arm64` | 81MB | 592MB |
+   | `docker images`, unpacked on this machine | 370MB | 2.39GB |
 
    The last row depends on the storage driver (containerd's overlayfs
    snapshotter here) and is the one `docker images` prints, which is why it
-   is the one that gets quoted by accident. The figures this file carried
+   is the one that gets quoted by accident. Measure all three again at
+   every release rather than carrying them forward: 3.0.0's registry
+   figures were 2MB light by 3.1.1. The figures this file carried
    before — 260MB and 1.77GB — match none of the three, and the 2.4.1 image
    built on this machine measures 375MB unpacked against the 260MB its own
    README claimed, so that gap was the measurement environment rather than
@@ -105,18 +107,36 @@ command somebody types, and step 6 is the one no test replaces.
 ## The tag
 
 ```bash
-git tag -a v3.0.0 -m "WDash 3.0.0"
-git push origin v3.0.0        # when there is a remote to push to
+git tag -a v3.1.1 -m "WDash 3.1.1"
+git push origin main
+git push origin v3.1.1
 ```
 
 The tag message is not the release notes. `CHANGELOG.md` is.
 
 ## After the tag
 
-1. **Push the images.** The manifests pull
-   `<registry>/wdash-elastic-dashboard:<version>`; `kubernetes/README.md`
-   has the exact lines. Push the browser image only if anybody runs browser
-   journeys.
+1. **Push the images**, for both architectures. Step 5 built for this
+   machine's; a release has to carry `amd64` too, and `buildx` is what
+   makes one manifest naming both.
+
+   ```bash
+   docker buildx build --builder wdash --platform linux/amd64,linux/arm64 \
+       --target server  -t yigitbasalma/wdash-elastic-dashboard:3.1.1 --push .
+   docker buildx build --builder wdash --platform linux/amd64,linux/arm64 \
+       --target browser -t yigitbasalma/wdash-browser:3.1.1 --push .
+   ```
+
+   Then read back what landed, because the sizes in step 5 are this
+   machine's and the table there is the registry's:
+
+   ```bash
+   docker buildx imagetools inspect yigitbasalma/wdash-elastic-dashboard:3.1.1
+   ```
+
+   `kubernetes/README.md` has the lines for mirroring that into a private
+   registry, which is a different job. Push the browser image only if
+   anybody runs browser journeys.
 
 2. **Publish the notes**, from the changelog entry, verbatim.
 

@@ -236,7 +236,7 @@ and it is reasonable to run both — give each its own token, because the agents
 page identifies an agent by it.
 
 Browser journeys need the browser image, `yigitbasalma/wdash-browser:3.1.1` —
-555MB against the server's 77MB on amd64, and published for the same two
+557MB against the server's 79MB on amd64, and published for the same two
 architectures:
 
 ```bash
