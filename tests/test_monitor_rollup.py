@@ -354,3 +354,96 @@ class TheEdgesTheFirstTestsDidNotReachTest(unittest.TestCase):
         self.assertEqual(row["duration_min"], 100)
         self.assertEqual(row["duration_max"], 9000)
         self.assertEqual(row["duration_sum"], 9100)
+
+
+class WhatTheDetailPageIsToldTest(unittest.TestCase):
+    """The counts survive folding; the percentiles do not, and say so."""
+
+    def setUp(self):
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+        self.store = _store()
+        self.agent, _ = self.store.agents.create("a")
+        self.monitor = self.store.monitors.create(
+            name="m", kind="http", target="http://x/",
+            agent_ids=[self.agent["id"]])
+        self.now = dt.datetime.now(dt.timezone.utc).replace(
+            minute=30, second=0, microsecond=0)
+        self.store.results.record(self.agent["id"], [
+            {"monitor_id": self.monitor["id"],
+             "started_at": (self.now - dt.timedelta(minutes=k + 1)).isoformat(),
+             "status": "down" if k % 50 == 0 else "up",
+             "duration_us": 1000 + k}
+            for k in range(10 * 24 * 60)])
+        self.source = StoreMonitorSource(self.store)
+
+    def history(self):
+        from wdash.hub import Scope
+        from wdash.hub.query import TimeWindow
+        return self.source.history(self.monitor["id"], TimeWindow.of("30d"),
+                                   Scope.unrestricted())
+
+    def test_with_nothing_folded_it_says_nothing(self):
+        """`whole_window` is the mechanism for "the rows are not the
+        window". Setting it where they ARE would put every monitor on the
+        estimated path for no reason."""
+        got = self.history()
+        self.assertIsNone(got.whole_window)
+        self.assertEqual(got.total, len(got))
+
+    def test_the_header_still_counts_every_check(self):
+        before = self.history().total
+        self.store.results.roll_up(2, now=self.now)
+        after = self.history()
+        self.assertLess(len(after), before, "nothing was folded")
+        self.assertEqual(after.total, before)
+        self.assertEqual(after.whole_window["checks"], before)
+
+    def test_the_failures_come_through_too(self):
+        before = sum(1 for c in self.history() if c.status == "down")
+        self.store.results.roll_up(2, now=self.now)
+        self.assertEqual(self.history().whole_window["failed"], before)
+
+    def test_it_offers_no_percentile_and_says_where_they_start(self):
+        """An hourly summary cannot produce a median. Inventing one is the
+        single thing this design refused to store, so the adapter passes
+        None and the date the rows begin."""
+        self.store.results.roll_up(2, now=self.now)
+        whole = self.history().whole_window
+        self.assertIsNone(whole["median_ms"])
+        self.assertIsNone(whole["p95_ms"])
+        self.assertFalse(whole["estimated"], "the COUNTS are exact")
+        self.assertIsNotNone(whole["folded_from"])
+        self.assertGreater(whole["folded_from"],
+                           self.now - dt.timedelta(days=3))
+
+    def test_the_page_turns_that_into_an_exact_availability(self):
+        from wdash.api.monitor_routes import _availability
+        self.store.results.roll_up(2, now=self.now)
+        checks = self.history()
+        summary = _availability(None, checks)
+        self.assertEqual(summary["checks"], checks.whole_window["checks"])
+        self.assertIsNone(summary["median_ms"])
+        self.assertIsNotNone(summary["folded_from"])
+        self.assertAlmostEqual(
+            summary["availability"],
+            round(100.0 * (summary["checks"] - summary["failed"])
+                  / summary["checks"], 2))
+
+    def test_and_says_so_on_the_page(self):
+        """The sentence, rendered. A p95 of two days under a heading that
+        says thirty is the kind of number somebody quotes."""
+        from flask import render_template_string
+        from wdash.api.monitor_routes import _availability
+        from wdash.app import create_app
+        from wdash.config import Config
+
+        self.store.results.roll_up(2, now=self.now)
+        summary = _availability(None, self.history())
+        app = create_app(Config)
+        with app.app_context():
+            block = open("templates/monitor_detail.html").read()
+            start = block.index("{% if summary.folded_from %}")
+            end = block.index("{% endif %}", start) + len("{% endif %}")
+            said = render_template_string(block[start:end], summary=summary)
+        self.assertIn("counts every one of the", said)
+        self.assertIn("one row per hour", said)

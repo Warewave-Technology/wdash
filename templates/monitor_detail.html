@@ -60,9 +60,12 @@
     {% for label, value, unit, hint in [
         ('Availability', summary.availability, '%', 'of checks that answered'),
         ('Median', summary.median_ms, 'ms',
-         'estimated by the source' if summary.estimated else 'typical response'),
+         'estimated by the source' if summary.estimated
+         else 'from the checks still kept' if summary.folded_from
+         else 'typical response'),
         ('p95', summary.p95_ms, 'ms',
          'estimated by the source' if summary.estimated
+         else 'from the checks still kept' if summary.folded_from
          else 'nearest-rank, a real observation'),
         ('Slowest', summary.worst_ms, 'ms', 'over this window')] %}
     <div class="col-6 col-md-3">
@@ -84,6 +87,19 @@
    total beside the pager is their own — and have no merged window to take
    percentiles from. The sentence was telling the reader the opposite of what
    had happened. #}
+{# Older checks folded into hourly summaries. The counts above cover the whole
+   window and are exact; the response times cannot, because an hour of checks
+   has no median. Said here rather than left to the reader: a p95 of two days
+   under a heading that says thirty is the kind of number somebody quotes. #}
+{% if summary.folded_from %}
+<p class="text-muted small" style="margin-top:-1rem">
+    Availability above counts every one of the
+    {{ "{:,}".format(summary.checks) }} checks in this window. The response
+    times are from the checks still kept one by one — since
+    {{ summary.folded_from.strftime('%-d %b, %H:%M') }} — because everything
+    older is one row per hour, which holds counts and no percentiles.
+</p>
+{% endif %}
 {% if summary.sample %}
 <p class="text-muted small" style="margin-top:-1rem">
     From the newest {{ "{:,}".format(summary.sample.used) }} of

@@ -387,6 +387,34 @@ class StoreMonitorSource(MonitorSource):
 
         result = _CountedChecks(checks)
         result.total = total
+
+        # Where the hours behind the rows have been folded, the rows are no
+        # longer the window. `totals` counts both halves — exactly, which is
+        # what the summary is for — so the header can say 30 days while the
+        # rows in hand are two.
+        #
+        # No median and no p95 here, and not an omission: an hourly summary
+        # cannot produce either, so the page shows them from the rows it has
+        # and says from when. A number invented for the folded part would be
+        # the one thing this whole design refused to store.
+        try:
+            counted = self._store.results.totals(
+                monitor_id, window.start, window.end)
+        except Exception as exc:
+            logger.warning(f"{self.name}: could not count the window: {exc}")
+            return result
+
+        if counted["summarised"]:
+            result.total = counted["checks"]
+            result.whole_window = {
+                "checks": counted["checks"], "failed": counted["down"],
+                "median_ms": None, "p95_ms": None, "worst_ms": None,
+                # The COUNTS are exact. `estimated` is about the percentiles,
+                # and there are none to estimate.
+                "estimated": False,
+                "folded_from": counted["oldest_row"],
+                "covers": counted["covers"],
+            }
         return result
 
     def series(self, monitor_id, window, scope, points=120):
@@ -492,3 +520,10 @@ def _steps(raw):
 class _CountedChecks(list):
     """A list that also knows the total, matching the Elasticsearch source."""
     total = 0
+    #: The header figures over the WHOLE window, when the rows are no longer
+    #: it — set where older hours have been folded into summaries. Declared
+    #: here and not only assigned, so the attribute exists on every one of
+    #: these: `monitor_routes` reaches for it with `getattr`, which would
+    #: have read "no folding" and "this object predates folding" as the same
+    #: thing for ever.
+    whole_window = None

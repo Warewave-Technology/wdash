@@ -878,6 +878,12 @@ def _availability(points, checks):
             "median_ms": whole["median_ms"], "p95_ms": whole["p95_ms"],
             "worst_ms": whole["worst_ms"],
             "estimated": bool(whole.get("estimated")), "sample": None,
+            # Set where the older half of the window is hourly summaries.
+            # The counts beside it are exact — that is what a summary keeps
+            # — and the percentiles are absent rather than estimated,
+            # because an hour of checks cannot produce one. The page says
+            # from when the rows it DID take them from begin.
+            "folded_from": whole.get("folded_from"),
         }
 
     failed = sum(1 for c in checks if c.status == DOWN)
@@ -891,6 +897,7 @@ def _availability(points, checks):
         "median_ms": None, "p95_ms": None, "worst_ms": None,
         "estimated": False,
         "sample": {"used": total, "of": held} if held > total else None,
+        "folded_from": None,
     }
     if durations:
         summary["median_ms"] = round(durations[len(durations) // 2], 1)
