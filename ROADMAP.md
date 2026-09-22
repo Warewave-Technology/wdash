@@ -229,13 +229,20 @@ build.
 
 ### Reach
 
-* **A demo that runs out of the box.** Half done. `docker compose up -d`
-  now starts WDash itself rather than an Elasticsearch and a Kibana with the
-  product commented out, and `./lab.sh targets` says what every backend
-  holds and what to type into the page to read it. What is still manual is
-  the rest: monitors, journeys, dashboards and alert rules are a sequence of
-  steps somebody follows. One `./lab.sh demo` is the difference between
-  trying WDash and reading about it.
+* ~~**A demo that runs out of the box.**~~ Done. `./lab.sh demo` starts
+  five backends, waits for each and fills them with a day of data;
+  `python -m wdash.demo` then claims an empty installation and puts the
+  lab into it — five sources, an agent, seven checks including one that is
+  deliberately down and a certificate with days left on it, a board over
+  all four signals, a saved search, a channel and three rules.
+
+  Two things it deliberately does not do. It does not sign anybody in and
+  it does not enrol an authenticator: the account is a normal local one
+  with the enrolment page waiting, because handing over a signed-in
+  administrator needs a bypass in the guard this project is most careful
+  about. And it refuses an installation that already has an account rather
+  than writing into somebody's — `--into-claimed` is the way to say you
+  meant it.
 * ~~**A release line behind the tag.**~~ Done, and the part that used to be
   outside this repository is done too. `CHANGELOG.md` written from the
   operator's side, `RELEASING.md` with the commands and with what it
