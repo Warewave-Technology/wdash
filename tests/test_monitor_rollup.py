@@ -33,6 +33,13 @@ from wdash.store.secrets import SecretBox  # noqa: E402
 HOUR = dt.timedelta(hours=1)
 
 
+def _aware(value):
+    """SQLite hands back naive datetimes; Postgres hands back aware ones."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=dt.timezone.utc)
+
+
 def _store():
     return Store.open("sqlite:///:memory:",
                       secret_box=SecretBox(SecretBox.generate_key()))
@@ -379,7 +386,9 @@ class WhatTheDetailPageIsToldTest(unittest.TestCase):
     def history(self):
         from wdash.hub import Scope
         from wdash.hub.query import TimeWindow
-        return self.source.history(self.monitor["id"], TimeWindow.of("30d"),
+        # Anchored on the fixture's clock — see `TheShapeAfterFoldingTest`.
+        window = TimeWindow.between(self.now - dt.timedelta(days=30), self.now)
+        return self.source.history(self.monitor["id"], window,
                                    Scope.unrestricted())
 
     def test_with_nothing_folded_it_says_nothing(self):
@@ -447,3 +456,157 @@ class WhatTheDetailPageIsToldTest(unittest.TestCase):
             said = render_template_string(block[start:end], summary=summary)
         self.assertIn("counts every one of the", said)
         self.assertIn("one row per hour", said)
+
+
+class TheShapeAfterFoldingTest(unittest.TestCase):
+    """The sparkline over folded time, which is where this could have gone
+    quietly wrong.
+
+    Leaving summaries out of the chart was the obvious implementation and
+    the wrong one: a flat gap where a month of checks used to be reads as
+    "nothing ran", which is the one thing that did not happen. Every number
+    this chart draws survives an hourly summary — the count and the failures
+    are sums, the mean is the total over the total count, the worst is the
+    largest of the largests — and it draws no percentile, which is the only
+    thing a summary cannot give back.
+    """
+
+    def setUp(self):
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+        self.store = _store()
+        self.agent, _ = self.store.agents.create("a")
+        self.monitor = self.store.monitors.create(
+            name="m", kind="http", target="http://x/",
+            agent_ids=[self.agent["id"]])
+        self.now = dt.datetime.now(dt.timezone.utc).replace(
+            minute=0, second=0, microsecond=0)
+        # Ramping, which is the worst case for putting an hour in the wrong
+        # bucket: with a flat response time no misplacement would show.
+        # Every 97th fails, and a failure has NO duration — a connection
+        # refused has no response time. Without one of those in here, the
+        # total count and the timed count are the same number and a mean
+        # taken over the wrong one is invisible.
+        self.store.results.record(self.agent["id"], [
+            {"monitor_id": self.monitor["id"],
+             "started_at": (self.now - dt.timedelta(minutes=k + 1)).isoformat(),
+             "status": "down" if k % 97 == 0 else "up",
+             "duration_us": None if k % 97 == 0 else 1000 + k * 10}
+            for k in range(10 * 24 * 60)])
+        self.source = StoreMonitorSource(self.store)
+
+    def window(self, days=7):
+        """Anchored on the fixture's clock, not on the real one.
+
+        `TimeWindow.of("7d")` ends at the real now, and the rows here end at
+        `self.now` — the top of the hour this started in. The two agree when
+        the test is written and drift apart as the hour turns, so rows at
+        the window's edge move in and out and a folded hour lands outside a
+        window its rows were inside. Both of these tests passed for an hour
+        and then failed during a mutation run, which is how it was found.
+        """
+        from wdash.hub.query import TimeWindow
+        return TimeWindow.between(self.now - dt.timedelta(days=days), self.now)
+
+    def chart(self, points=120):
+        from wdash.hub import Scope
+        return self.source.series(self.monitor["id"], self.window(),
+                                  Scope.unrestricted(), points=points)
+
+    def test_no_bucket_goes_empty_where_the_rows_went(self):
+        """The whole point. An empty bucket means "nothing ran then", and
+        after folding that would be most of the chart."""
+        before = [p.checks for p in self.chart()]
+        self.store.results.roll_up(2, now=self.now)
+        after = [p.checks for p in self.chart()]
+        self.assertEqual(sum(1 for c in after if c == 0),
+                         sum(1 for c in before if c == 0))
+
+    def test_the_totals_on_it_are_unchanged(self):
+        before = self.chart()
+        self.store.results.roll_up(2, now=self.now)
+        after = self.chart()
+        self.assertEqual(sum(p.checks for p in before),
+                         sum(p.checks for p in after))
+        self.assertEqual(sum(p.down for p in before),
+                         sum(p.down for p in after))
+
+    def test_the_mean_is_over_the_checks_that_were_timed(self):
+        """Not over every check. A failure with no response time still
+        counts as a check, and dividing the summed duration by the number of
+        CHECKS reports a mean too low by exactly the failures — the
+        direction that flatters, on the number somebody watches for a
+        slowdown."""
+        self.store.results.roll_up(2, now=self.now)
+        folded = self.store.results.summaries(
+            self.monitor["id"], self.now - dt.timedelta(days=30), self.now)
+        self.assertTrue([h for h in folded if h["checks"] > h["duration_count"]],
+                        "no folded hour held an untimed check, so the two "
+                        "divisors are the same number here")
+
+        # One bucket, built only from folded hours, against the arithmetic
+        # done by hand. Dividing by `checks` instead of `duration_count`
+        # gives a different number on exactly this bucket, which is what
+        # makes this an assertion rather than a restatement.
+        chart = self.chart()
+        width = (self.window().end - self.window().start).total_seconds() / len(chart)
+        for index, point in enumerate(chart):
+            start = self.window().start + dt.timedelta(seconds=index * width)
+            end = start + dt.timedelta(seconds=width)
+            inside = [h for h in folded
+                      if start <= _aware(h["hour"]) < end]
+            if not inside or point.duration_ms is None:
+                continue
+            if sum(h["checks"] for h in inside) == point.checks:
+                counted = sum(h["duration_count"] for h in inside)
+                summed = sum(h["duration_sum"] for h in inside)
+                if counted == point.checks:
+                    continue          # the two divisors agree here
+                self.assertAlmostEqual(point.duration_ms,
+                                       summed / counted / 1000.0, places=6)
+                return
+        self.fail("no bucket came only from folded hours with an untimed "
+                  "check in it")
+
+    def test_the_worst_it_ever_saw_survives(self):
+        """`max` of the hourly maxima is the maximum. Unlike a percentile,
+        this one does come back."""
+        before = max(p.worst_ms for p in self.chart() if p.worst_ms)
+        self.store.results.roll_up(2, now=self.now)
+        after = max(p.worst_ms for p in self.chart() if p.worst_ms)
+        self.assertEqual(before, after)
+
+    def test_a_folded_hour_moves_its_bucket_mean_by_under_two_percent(self):
+        """The one inexactness, bounded and measured rather than waved at.
+
+        A bucket boundary is not on the hour, so an hour can span two and
+        its checks are all attributed to the first. Measured at 1.10% on
+        this fixture and this grid; the assertion leaves room for the
+        fixture to change without inviting a rewrite of the rule.
+        """
+        before = self.chart()
+        self.store.results.roll_up(2, now=self.now)
+        after = self.chart()
+        moved = [abs(b.duration_ms - a.duration_ms) / b.duration_ms * 100
+                 for b, a in zip(before, after)
+                 if b.duration_ms and a.duration_ms]
+        self.assertTrue(moved, "no bucket had a mean on both sides")
+        self.assertLess(max(moved), 2.0)
+
+    def test_the_listing_draws_it_too(self):
+        """`series` is the detail chart; the listing builds its sparklines
+        through a different path, in one query for the page. Both had to
+        learn this, and only one of them is exercised above."""
+        from wdash.hub import Scope
+        from wdash.hub.query import TimeWindow
+        before = self.source.monitors(self.window(), Scope.unrestricted(),
+                                      series=True).monitors[0]
+        counted = sum(p.checks for p in before.series)
+        self.store.results.roll_up(2, now=self.now)
+        after = self.source.monitors(self.window(), Scope.unrestricted(),
+                                     series=True).monitors[0]
+
+        self.assertTrue(after.series, "no sparkline at all")
+        # Against what it drew BEFORE, not against a floor. "More than two
+        # days' worth" is true of the two days of rows that survive folding,
+        # so a listing that never asked for the summaries passed it.
+        self.assertEqual(sum(p.checks for p in after.series), counted)

@@ -1914,6 +1914,43 @@ class ResultRepository:
         summed["covers"] = (covers_from, covers_to)
         return summed
 
+    def latest_summaries(self, window_start, window_end):
+        """Every monitor's folded hours in a window, by monitor id.
+
+        The sparkline's other half, and one query for the page like
+        `latest_series` beside it — a summary lookup per monitor would be
+        the N+1 that one exists to avoid, reintroduced for the older part of
+        the same chart.
+        """
+        query = select(
+            monitor_summaries.c.monitor_id, monitor_summaries.c.hour,
+            monitor_summaries.c.checks, monitor_summaries.c.down,
+            monitor_summaries.c.duration_count,
+            monitor_summaries.c.duration_sum, monitor_summaries.c.duration_max,
+        ).where(
+            monitor_summaries.c.hour >= window_start,
+            monitor_summaries.c.hour <= window_end,
+        ).order_by(monitor_summaries.c.hour)
+
+        out = {}
+        with self._engine.connect() as connection:
+            for row in connection.execute(query).mappings():
+                out.setdefault(row["monitor_id"], []).append(dict(row))
+        return out
+
+    def summaries(self, monitor_id, start, end, agent_id=None):
+        """One monitor's folded hours, oldest first."""
+        query = select(monitor_summaries).where(
+            monitor_summaries.c.monitor_id == monitor_id,
+            monitor_summaries.c.hour >= start,
+            monitor_summaries.c.hour <= end,
+        ).order_by(monitor_summaries.c.hour)
+        if agent_id:
+            query = query.where(monitor_summaries.c.agent_id == agent_id)
+        with self._engine.connect() as connection:
+            return [dict(r) for r in
+                    connection.execute(query).mappings().all()]
+
     def summary_count(self, monitor_id=None):
         query = select(func.count()).select_from(monitor_summaries)
         if monitor_id:
