@@ -22,6 +22,55 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
+## 3.1.2 — 2026-09-22
+
+Both of these came from the same screenshot of a real cluster, a day
+after 3.1.1 fixed what the one before it showed.
+
+### Needs action
+
+- **Pull the image if your services are .NET.** Until you do, every
+  informational line from them reads `UNSPECIFIED` and shows a line of JSON
+  instead of its message.
+
+### Fixed
+
+- **Serilog's compact format was shown as its own envelope, with no
+  level.** Rows read
+
+      {"@t":"…","@m":"Sayfa bulunamadı (NotFound): KZIAQV","@l":"Warning"}
+
+  at `UNSPECIFIED`, beside a field sidebar counting `@l` — Warning 3,204,
+  Error 15. The level was in the cluster, mapped and aggregatable, and the
+  page was showing the packaging. `@m` is the message now, `@mt` the
+  template behind it, `@l` the level, and `@tr`/`@sp` the trace and span a
+  line belongs to, which is what makes the link to its trace appear. The
+  raw line stays on the record, so what the shipper received is still
+  there.
+
+  **An absent `@l` means Information**, which is the format's rule and not
+  a guess: it omits the key for that level and only for that level, which
+  is why the sidebar counted Warning and Error and nothing else.
+
+- **`Information` was not a level WDash knew**, so even a level it could
+  read would have shown as nothing. That is Serilog's spelling and also
+  `Microsoft.Extensions.Logging`'s. Three standards turned out to be half
+  covered — syslog had `crit` and `notice` but not `emerg` or `alert`;
+  java.util.logging had `severe` and `fine` but not `finer`, `finest` or
+  `config` — and all three are finished. A filter for INFO now matches the
+  lines spelled `Information` too.
+
+### Added
+
+- **The log sidebar's fields can be chosen**, per source, by an
+  administrator. It showed the first ten field names a mapping offers,
+  sorted — which on a cluster whose fields begin with `@` is ten nobody
+  asked for, with three of them holding a single value seen once and the
+  container name never reaching the list. Choose from everything the
+  source maps; the filter box searches the whole mapping rather than the
+  page. Nothing chosen keeps the old behaviour exactly, and a chosen field
+  a mapping later loses is named rather than quietly dropped.
+
 ## 3.1.1 — 2026-09-22
 
 Both of these were found by running 3.1.0 against a real Kubernetes

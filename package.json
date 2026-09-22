@@ -1,6 +1,6 @@
 {
   "name": "wdash",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "description": "Front-end build and test tooling for WDash. The application itself is Python; npm is only needed to work on static/js.",
   "private": true,
   "license": "MIT",
