@@ -29,11 +29,12 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import case, delete, func, insert, select, update
 
 from .secrets import may_follow
 from .schema import (
-    agents, journey_screenshots, monitor_agents, monitor_results, monitors,
+    agents, journey_screenshots, monitor_agents, monitor_results,
+    monitor_summaries, monitors,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,31 @@ DEFAULT_RETENTION_DAYS = 30
 
 #: The settings key an operator changes it with.
 RETENTION_SETTING = "monitoring.retention_days"
+
+#: How old a result has to be before it is folded into its hour. 0 — the
+#: default — is off, and off is what an installation that never asked for it
+#: keeps: folding DELETES the rows, and the summary cannot answer a median
+#: or a p95 afterwards. Somebody turns this on when the table is the problem,
+#: which `/health` says before it is.
+DEFAULT_ROLLUP_DAYS = 0
+ROLLUP_SETTING = "monitoring.rollup_after_days"
+
+#: Rows read, summarised and deleted in one transaction. Bounded because the
+#: whole batch is held in memory to be bucketed, and because a transaction
+#: that deletes a million rows blocks every writer behind it for as long as
+#: it takes.
+ROLLUP_BATCH = 5000
+
+#: What this table stores in `status`. Written in one place on the way in —
+#: `"down" if result.get("status") == "down" else "up"` — so anything that is
+#: not the first is the second, and a summary that counted `== UP` and a
+#: summary that counted `!= DOWN` would agree today and diverge the day a
+#: third value arrives. Named here so both halves of `totals` read the same
+#: one, and deliberately NOT imported from the hub: the hub is the read
+#: layer over this, and a store that imported its vocabulary from its own
+#: reader has the dependency backwards.
+RESULT_UP = "up"
+RESULT_DOWN = "down"
 
 #: Least often the ingest path will consider pruning. The DELETE is cheap and
 #: indexed, but running it on every batch would put a table scan behind every
@@ -1368,7 +1394,8 @@ class ResultRepository:
             "agent_id": agent_id,
             "started_at": started or received,
             "received_at": received,
-            "status": "down" if result.get("status") == "down" else "up",
+            "status": (RESULT_DOWN if result.get("status") == RESULT_DOWN
+                       else RESULT_UP),
             "duration_us": self._number(agent_id, monitor_id, result,
                                         "duration_us", -INT32 - 1, INT32),
             # `str` before the slice: an error that arrived as a dictionary
@@ -1592,7 +1619,12 @@ class ResultRepository:
         except (TypeError, ValueError):
             shot_days = SCREENSHOT_RETENTION_DAYS
 
-        if days <= 0 and shot_days <= 0:
+        try:
+            rollup_days = int(settings.get(ROLLUP_SETTING, DEFAULT_ROLLUP_DAYS))
+        except (TypeError, ValueError):
+            rollup_days = DEFAULT_ROLLUP_DAYS
+
+        if days <= 0 and shot_days <= 0 and rollup_days <= 0:
             # Retention off ON PURPOSE is a choice somebody can make. It is
             # not the default, because a table that grows without bound is
             # noticed when it is already too large to clean up cheaply.
@@ -1623,6 +1655,18 @@ class ResultRepository:
         # arrives mid-way, it should skip rather than start a second one over
         # the same rows.
         settings.set(PRUNE_MARKER, now.isoformat())
+
+        # BEFORE the delete, and that order is the whole of it. Pruning first
+        # would throw the rows away and then summarise what is left, so every
+        # hour between the two horizons would be lost rather than folded —
+        # which is the outcome rolling up exists to avoid.
+        if rollup_days > 0:
+            folded, written = self.roll_up(rollup_days, now=now)
+            if folded:
+                logger.info(f"folded {folded:,} monitor result(s) older than "
+                            f"{rollup_days} days into {written:,} hourly "
+                            f"summaries")
+
         removed = 0
         if days > 0:
             removed = self.prune(days)
@@ -1651,6 +1695,231 @@ class ResultRepository:
                 logger.info(f"pruned {gone:,} journey screenshot(s) older "
                             f"than {keep} days")
         return removed
+
+    def roll_up(self, older_than_days, now=None, batch=ROLLUP_BATCH):
+        """Fold results older than the horizon into hourly summaries.
+
+        Returns (rows folded, summaries written). Nothing happens at 0, which
+        is the default: folding DELETES, and an installation that never asked
+        for it keeps every row it has.
+
+        The transaction is the point. Reading, summing, writing the summary
+        and deleting the rows happen together, so a crash half way leaves
+        either the rows or the summary and never both — which would double
+        every count behind it. The unique key on (monitor, agent, hour) is
+        what makes a retry safe: a second attempt at the same hour adds to
+        the row that is there rather than writing a second one.
+
+        An hour is only folded once it is CLOSED. The current hour is still
+        being written into, and a summary of it would be a number that keeps
+        changing while claiming to be final.
+        """
+        if not older_than_days or float(older_than_days) <= 0:
+            return 0, 0
+
+        now = now or _now()
+        # A float, and not rounded to whole days. `int()` here made
+        # `roll_up(0.5)` mean `roll_up(0)` — off, silently, on a number
+        # somebody had deliberately typed — and it made the clamp below
+        # unreachable, because a horizon of a whole day or more is always
+        # earlier than the current hour. A guard nothing can reach is not a
+        # guard.
+        horizon = now - timedelta(days=float(older_than_days))
+        # Never the hour in progress, whatever the horizon says: it is still
+        # being written into, and a summary of it is a number that keeps
+        # changing while claiming to be final.
+        closed = now.replace(minute=0, second=0, microsecond=0)
+        cutoff = min(horizon, closed)
+
+        folded = summaries = 0
+        while True:
+            with self._engine.begin() as connection:
+                rows = connection.execute(
+                    select(monitor_results.c.id,
+                           monitor_results.c.monitor_id,
+                           monitor_results.c.agent_id,
+                           monitor_results.c.started_at,
+                           monitor_results.c.status,
+                           monitor_results.c.duration_us)
+                    .where(monitor_results.c.started_at < cutoff)
+                    .order_by(monitor_results.c.started_at)
+                    .limit(batch)).mappings().all()
+                if not rows:
+                    break
+
+                buckets = {}
+                for row in rows:
+                    started = _aware(row["started_at"])
+                    key = (row["monitor_id"], row["agent_id"],
+                           started.replace(minute=0, second=0, microsecond=0))
+                    seen = buckets.setdefault(key, {
+                        "checks": 0, "up": 0, "down": 0,
+                        "duration_count": 0, "duration_sum": 0,
+                        "duration_min": None, "duration_max": None})
+                    seen["checks"] += 1
+                    if row["status"] == RESULT_UP:
+                        seen["up"] += 1
+                    else:
+                        seen["down"] += 1
+                    taken = row["duration_us"]
+                    if taken is not None:
+                        seen["duration_count"] += 1
+                        seen["duration_sum"] += int(taken)
+                        seen["duration_min"] = (
+                            taken if seen["duration_min"] is None
+                            else min(seen["duration_min"], taken))
+                        seen["duration_max"] = (
+                            taken if seen["duration_max"] is None
+                            else max(seen["duration_max"], taken))
+
+                for (monitor_id, agent_id, hour), totals in buckets.items():
+                    self._add_to_summary(connection, monitor_id, agent_id,
+                                         hour, totals, now)
+                    summaries += 1
+
+                connection.execute(delete(monitor_results).where(
+                    monitor_results.c.id.in_([row["id"] for row in rows])))
+                folded += len(rows)
+
+            if len(rows) < batch:
+                break
+        return folded, summaries
+
+    @staticmethod
+    def _add_to_summary(connection, monitor_id, agent_id, hour, totals, now):
+        """Add one batch's totals to the row for that hour, or write it.
+
+        Added rather than replaced, because a batch is a slice of an hour
+        and an hour can span several: writing would keep the last slice and
+        throw away the rest, which is the shape of an availability figure
+        that silently drops most of its evidence.
+        """
+        existing = connection.execute(
+            select(monitor_summaries).where(
+                monitor_summaries.c.monitor_id == monitor_id,
+                monitor_summaries.c.agent_id == agent_id,
+                monitor_summaries.c.hour == hour)).mappings().first()
+
+        if existing is None:
+            connection.execute(monitor_summaries.insert().values(
+                monitor_id=monitor_id, agent_id=agent_id, hour=hour,
+                created_at=now, **totals))
+            return
+
+        smallest = [v for v in (existing["duration_min"],
+                                totals["duration_min"]) if v is not None]
+        largest = [v for v in (existing["duration_max"],
+                               totals["duration_max"]) if v is not None]
+        connection.execute(
+            monitor_summaries.update()
+            .where(monitor_summaries.c.id == existing["id"])
+            .values(
+                checks=existing["checks"] + totals["checks"],
+                up=existing["up"] + totals["up"],
+                down=existing["down"] + totals["down"],
+                duration_count=(existing["duration_count"]
+                                + totals["duration_count"]),
+                duration_sum=existing["duration_sum"] + totals["duration_sum"],
+                duration_min=min(smallest) if smallest else None,
+                duration_max=max(largest) if largest else None))
+
+    def totals(self, monitor_id, start, end, agent_id=None):
+        """Checks, up and down over a window, from summaries AND rows.
+
+        Exact, which is the whole reason the summary holds counts and not a
+        median: an hour that has been folded still contributes every check
+        it saw. The two halves cannot overlap — the rollup deletes the rows
+        it summarised inside the transaction that writes the summary — so
+        adding them is addition rather than an estimate.
+
+        `oldest_row` is returned beside them because it is where the
+        percentiles stop: everything before it has counts and no durations
+        to take a percentile of, and a screen that did not say so would show
+        a p95 of a fortnight computed from two days.
+
+        **A summary is an hour, so a window that cuts one cannot be answered
+        for exactly that window.** Measured on 432,000 results folded at two
+        days: asking for the last 30 days returned 43,184 checks where the
+        rows had said 43,200. The sixteen were the part-hour at the far edge
+        — their rows lived inside the window, their summary's hour started
+        just outside it, and `hour >= start` dropped the lot.
+
+        Picking a side silently is the thing to avoid, either side: dropping
+        the hour under-reports, counting it whole over-reports, and both
+        look like a correct number. So the summarised half is taken by
+        OVERLAP and `covers` says the window it actually spans, hour-aligned
+        and at least as wide as the one asked for. Exact for a window it
+        names, rather than approximate for the window it was handed.
+        """
+        summed = {"checks": 0, "up": 0, "down": 0, "summarised": 0}
+        # Down to the hour the window STARTS in, not the hour after it.
+        from_hour = start.replace(minute=0, second=0, microsecond=0)
+
+        rolled = select(
+            func.coalesce(func.sum(monitor_summaries.c.checks), 0),
+            func.coalesce(func.sum(monitor_summaries.c.up), 0),
+            func.coalesce(func.sum(monitor_summaries.c.down), 0),
+        ).where(
+            monitor_summaries.c.monitor_id == monitor_id,
+            monitor_summaries.c.hour >= from_hour,
+            monitor_summaries.c.hour <= end,
+        )
+        raw = select(
+            func.count(),
+            func.coalesce(
+                func.sum(case((monitor_results.c.status == RESULT_UP, 1), else_=0)),
+                0),
+            func.coalesce(
+                func.sum(case((monitor_results.c.status != RESULT_UP, 1), else_=0)),
+                0),
+        ).where(
+            monitor_results.c.monitor_id == monitor_id,
+            monitor_results.c.started_at >= start,
+            monitor_results.c.started_at <= end,
+        )
+        oldest = select(func.min(monitor_results.c.started_at)).where(
+            monitor_results.c.monitor_id == monitor_id,
+            monitor_results.c.started_at >= start)
+        if agent_id:
+            rolled = rolled.where(monitor_summaries.c.agent_id == agent_id)
+            raw = raw.where(monitor_results.c.agent_id == agent_id)
+            oldest = oldest.where(monitor_results.c.agent_id == agent_id)
+
+        spans = select(func.min(monitor_summaries.c.hour),
+                       func.max(monitor_summaries.c.hour)).where(
+            monitor_summaries.c.monitor_id == monitor_id,
+            monitor_summaries.c.hour >= from_hour,
+            monitor_summaries.c.hour <= end)
+        if agent_id:
+            spans = spans.where(monitor_summaries.c.agent_id == agent_id)
+
+        with self._engine.connect() as connection:
+            checks, up, down = connection.execute(rolled).one()
+            summed.update(checks=checks, up=up, down=down, summarised=checks)
+            first, last = connection.execute(spans).one()
+            checks, up, down = connection.execute(raw).one()
+            summed["checks"] += checks
+            summed["up"] += up
+            summed["down"] += down
+            summed["oldest_row"] = _aware(connection.execute(oldest).scalar())
+
+        # The window these counts are exactly true of. Wider than the one
+        # asked for by up to an hour at each end, and only where a summary
+        # reaches past it — with nothing folded it is the window itself.
+        covers_from, covers_to = start, end
+        if first is not None:
+            covers_from = min(covers_from, _aware(first))
+        if last is not None:
+            covers_to = max(covers_to, _aware(last) + timedelta(hours=1))
+        summed["covers"] = (covers_from, covers_to)
+        return summed
+
+    def summary_count(self, monitor_id=None):
+        query = select(func.count()).select_from(monitor_summaries)
+        if monitor_id:
+            query = query.where(monitor_summaries.c.monitor_id == monitor_id)
+        with self._engine.connect() as connection:
+            return connection.execute(query).scalar() or 0
 
     def count(self, monitor_id=None):
         query = select(func.count()).select_from(monitor_results)

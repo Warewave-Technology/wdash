@@ -604,6 +604,19 @@ def _add_alert_state_label(connection):
             "ALTER TABLE wdash_alert_state ADD COLUMN label VARCHAR(255)"))
 
 
+def _add_monitor_summaries(connection):
+    """Version 23: an hour of a check, for after its rows have gone.
+
+    Empty on arrival and read by nothing until somebody sets
+    `monitoring.rollup_after_days`. Adding the table without turning the
+    rollup on is deliberate: folding rows DELETES them, and an upgrade that
+    quietly threw away three weeks of a stranger's raw history to save disk
+    would be doing it on their behalf and without asking.
+    """
+    from .schema import monitor_summaries
+    monitor_summaries.create(connection, checkfirst=True)
+
+
 MIGRATIONS = [
     (1, "initial schema", _create_everything),
     (2, "authorization audit trail", _add_audit),
@@ -635,6 +648,8 @@ MIGRATIONS = [
     (21, "take the credential out of every stored alert channel host",
      _take_the_credential_out_of_the_channel_host),
     (22, "the name an alert's stored state is about", _add_alert_state_label),
+    (23, "hourly summaries, for results past the rollup horizon",
+     _add_monitor_summaries),
 ]
 
 

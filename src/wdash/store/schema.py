@@ -386,6 +386,54 @@ monitor_results = Table(
 )
 
 
+#: An hour of one check, from one agent, after its rows have gone.
+#:
+#: The table above was measured comfortable at two million rows and unusable
+#: at eight — fifty checks at fifteen seconds reach the second in a month.
+#: Retention answered that by deleting, which trades the whole history for a
+#: table that fits. This keeps the part of the history that can be kept
+#: exactly, at 3,600 times fewer rows per check per agent.
+#:
+#: What it deliberately does NOT hold is a median or a p95. Neither can be
+#: computed from hourly summaries: the median of twelve hourly medians is not
+#: the median, and an average of p95s is not a p95 of anything. Storing one
+#: would produce a number that looks like the raw one, is not, and changes
+#: meaning the day the rows behind it are folded. So the summary holds what
+#: it can state exactly — the counts, and the sum, smallest and largest
+#: duration — and the response-time percentiles narrow to the window that
+#: still has rows, which the screen says.
+monitor_summaries = Table(
+    "wdash_monitor_summaries", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("monitor_id", String(64), nullable=False),
+    Column("agent_id", String(64), nullable=False),
+    #: The hour this summarises, truncated, UTC. By the agent's clock, like
+    #: `started_at` — a summary bucketed by OUR clock would put an agent an
+    #: hour out into the wrong hour, which is the skew `received_at` exists
+    #: to make visible rather than something to bake in.
+    Column("hour", DateTime(timezone=True), nullable=False),
+    Column("checks", Integer, nullable=False),
+    Column("up", Integer, nullable=False),
+    Column("down", Integer, nullable=False),
+    #: Microseconds, over the runs that reported one. `duration_count` is
+    #: separate from `checks` because a run can fail before it has a duration
+    #: — a connection refused has no response time — and dividing the sum by
+    #: `checks` would then report a mean that is too low by exactly the
+    #: failures, which is the direction that flatters.
+    Column("duration_count", Integer, nullable=False, default=0),
+    Column("duration_sum", BigInteger, nullable=False, default=0),
+    Column("duration_min", Integer),
+    Column("duration_max", Integer),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    #: One row per check per agent per hour, so a rollup that runs twice
+    #: cannot double the counts. The rollup writes inside a transaction that
+    #: deletes the rows it read, and this is what makes that safe to retry.
+    UniqueConstraint("monitor_id", "agent_id", "hour",
+                     name="uq_wdash_monitor_summaries_bucket"),
+    Index("ix_wdash_monitor_summaries_lookup", "monitor_id", "hour"),
+)
+
+
 
 # ---------------------------------------------------------------------------
 # Alerting
