@@ -1721,10 +1721,13 @@ WDash misses no check, and two WDash replicas do not double every probe.</p>
 
 <pre>$ python -m wdash.agent --server https://wdash.internal --token <span class="g">&lt;token&gt;</span>
 
-<span class="c"># or the image — two of them, and the small one is the default</span>
-$ docker build -t wdash .                              <span class="c"># server, 81MB</span>
-$ docker build -t wdash-browser --target browser .     <span class="c"># + Chromium, 592MB</span>
-$ docker run -d wdash-browser --server https://wdash.example.com --token <span class="g">&lt;token&gt;</span></pre>
+<span class="c"># or the image — two of them, and the small one is the default.</span>
+<span class="c"># Published for linux/amd64 and linux/arm64.</span>
+$ docker pull <span class="g">yigitbasalma/wdash-elastic-dashboard:3.0.0</span>   <span class="c"># server, 77MB</span>
+$ docker pull <span class="g">yigitbasalma/wdash-browser:3.0.0</span>            <span class="c"># + Chromium, 555MB</span>
+
+$ docker run -d yigitbasalma/wdash-browser:3.0.0 \
+      --server https://wdash.example.com --token <span class="g">&lt;token&gt;</span></pre>
 
 <p>Create the agent at <strong>Configuration → Agents</strong>; the token is
 shown once. Prefer <code>WDASH_AGENT_TOKEN</code> over <code>--token</code>,
@@ -1732,12 +1735,15 @@ because an argument is visible in <code>ps</code>. Anybody running a probe for
 http and tcp checks should use the small image — the browser is most of the
 second one and nothing in the first needs it.</p>
 
-<p class="fn">Those are <strong>content sizes</strong>: what a registry
-reports and what you pull. <code>docker images</code> prints disk usage
-instead, which depends on the storage driver — the same two images are 369MB
-and 2.39GB there, measured on arm64 over containerd's overlayfs snapshotter.
-The ratio is the part worth remembering and it holds either way: the server
-is about a seventh of the browser image.</p>
+<p class="fn">Those are what the <strong>registry</strong> stores and what
+you wait for: the sum of the compressed layers, read off the published
+manifest, for <code>linux/amd64</code>. The arm64 halves are a little larger
+— 79MB and 591MB — and <code>docker images</code> shows a third number
+again, disk usage after unpacking, which depends on your storage driver
+(369MB and 2.39GB here, over containerd's overlayfs snapshotter). Three
+numbers for one image is not a mess to tidy up; it is three questions. The
+ratio is the part worth remembering and it holds under all of them: the
+server is about a seventh of the browser image.</p>
 
 <h3>Three failures kept apart</h3>
 

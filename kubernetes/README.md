@@ -12,22 +12,31 @@ shipping nothing.
 
 ## Before you apply
 
-Three things, and none of them start without you.
+Two things, and neither starts without you.
 
-**0. The image.** The manifests name
-`yigitbasalma/wdash-elastic-dashboard:3.0.0`, and the published images stop at
-2.2.4 — an apply of these files as they are pulls a tag that does not exist,
-and every container waits in `ErrImagePull`. Build this version and push it
-where your cluster can pull from, then point the manifests at it:
+**0. The image needs nothing from you any more.** The manifests name
+`yigitbasalma/wdash-elastic-dashboard:3.0.0`, and that tag is published, for
+`linux/amd64` and `linux/arm64` both. This page used to say the published
+images stopped at 2.2.4 and that an apply would leave every container in
+`ErrImagePull`; that was true, and it is the reason the rest of this section
+exists.
+
+You still need the steps below if your cluster pulls from a registry of its
+own — an air-gapped one, or a mirror:
 
 ```bash
-docker build -t <registry>/wdash-elastic-dashboard:3.0.0 --target server .
+docker pull yigitbasalma/wdash-elastic-dashboard:3.0.0
+docker tag  yigitbasalma/wdash-elastic-dashboard:3.0.0 \
+            <registry>/wdash-elastic-dashboard:3.0.0
 docker push <registry>/wdash-elastic-dashboard:3.0.0
 cd kubernetes && kustomize edit set image \
     yigitbasalma/wdash-elastic-dashboard=<registry>/wdash-elastic-dashboard:3.0.0
 ```
 
-`wdash-agent.yaml` is not part of the kustomization; set its `image:` by hand.
+Retag rather than rebuild: a rebuild on your machine is a different image
+under the same version, and which one a node has then depends on when it
+pulled. `wdash-agent.yaml` is not part of the kustomization; set its `image:`
+by hand.
 
 **1. The two secrets.** Both are empty on purpose, and they are empty for
 different reasons.
@@ -226,11 +235,13 @@ outside measures what your users experience. They answer different questions,
 and it is reasonable to run both — give each its own token, because the agents
 page identifies an agent by it.
 
-Browser journeys need the browser image, which is 1.77GB against 260MB and is
-not published:
+Browser journeys need the browser image, `yigitbasalma/wdash-browser:3.0.0` —
+555MB against the server's 77MB on amd64, and published for the same two
+architectures:
 
 ```bash
-docker build -t <registry>/wdash-browser:3.0.0 --target browser .
+docker pull yigitbasalma/wdash-browser:3.0.0
+# or, for a registry of your own, retag as above
 ```
 
 Raise the agent's memory limit with it: Chromium needs gigabytes, not the

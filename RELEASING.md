@@ -65,15 +65,23 @@ list of what to run locally until it does.
    docker images | grep wdash
    ```
 
-   **Read the content size, not the disk usage, and check the ratio rather
-   than the number.** The two differ by the storage driver: measured on
-   2026-09-22, arm64, containerd snapshotter over overlayfs, the server
-   image is **81MB** of content and **369MB** of disk usage, the browser one
-   **592MB** and **2.39GB**. The figures this file carried before — 260MB
-   and 1.77GB — match neither column here, and the 2.4.1 image built on this
-   machine measures 375MB of disk usage against the 260MB its own README
-   claims, so that gap is the measurement environment rather than anything
-   the release changed.
+   **Check the ratio rather than the number, and say which number you
+   mean.** There are three, and they are three questions rather than a mess
+   to tidy up. Measured for 3.0.0:
+
+   | | server | browser |
+   |---|---|---|
+   | registry, `linux/amd64` — what you wait for | 77MB | 555MB |
+   | registry, `linux/arm64` | 79MB | 591MB |
+   | `docker images`, unpacked on this machine | 369MB | 2.39GB |
+
+   The last row depends on the storage driver (containerd's overlayfs
+   snapshotter here) and is the one `docker images` prints, which is why it
+   is the one that gets quoted by accident. The figures this file carried
+   before — 260MB and 1.77GB — match none of the three, and the 2.4.1 image
+   built on this machine measures 375MB unpacked against the 260MB its own
+   README claimed, so that gap was the measurement environment rather than
+   anything a release changed.
 
    What the check is really for survives all of that: **the server image is
    about a seventh of the browser one.** A server image that has grown
