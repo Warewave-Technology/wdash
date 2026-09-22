@@ -561,9 +561,21 @@ cmd_demo() {
     echo
     cmd_targets
     cat <<'EOF'
-Now add them in WDash: Configuration → Sources → Add source, using the
-lines above. Each is one entry; an Elasticsearch serving logs AND traces
-is ONE source with both boxes ticked.
+Now put them in WDash. One command, against an installation nobody has
+claimed yet — it creates the administrator and adds every backend above
+that answered:
+
+    PYTHONPATH=src python -m wdash.demo
+
+It asks for a password and stops there. The first sign-in enrols an
+authenticator, which is what every local account does and what a demo is
+not allowed to skip. An installation that already has an account is a
+refusal, and `--into-claimed` adds the sources to it without touching
+the account.
+
+By hand instead: Configuration → Sources → Add source, using the lines
+above. Each is one entry; an Elasticsearch serving logs AND traces is ONE
+source with both boxes ticked.
 EOF
 }
 
