@@ -178,6 +178,31 @@ def _as_keywords(body):
 MAX_INDICES_IN_URL = 3500
 
 
+def _in_url_sized_batches(indices):
+    """`indices` split so each batch fits in a request line.
+
+    For the calls that have nowhere else to put the names. `_search` can move
+    them into an `_msearch` body; `indices.get_mapping` cannot — the index IS
+    the path — so the only way under the limit is fewer per call.
+
+    This was missed when `_search` was fixed, and the screenshot showed
+    exactly what that costs: the results arrived, and the field-statistics
+    sidebar beside them still read "elasticsearch could not answer:
+    too_long_http_line_exception". Fixing the path somebody reports and not
+    the others is how one bug becomes two.
+    """
+    batch, length = [], 0
+    for name in indices:
+        # +1 for the comma that will join it.
+        if batch and length + len(name) + 1 > MAX_INDICES_IN_URL:
+            yield batch
+            batch, length = [], 0
+        batch.append(name)
+        length += len(name) + 1
+    if batch:
+        yield batch
+
+
 def _search(es, indices, body, **options):
     """One search. `indices` is a list; the client wants a string.
 
@@ -1213,7 +1238,15 @@ class ElasticsearchLogSource(LogSource):
         """
         if not targets:
             return {}, {}
-        mapping = self._es.indices.get_mapping(index=",".join(targets))
+
+        # In batches that fit the request line. A cluster with a few hundred
+        # indices put 24,000 characters in it and Elasticsearch refused the
+        # lot; asked in sevens of them it answers, and the answers merge
+        # because `get_mapping` is keyed by index and `walk` below already
+        # reads across all of them.
+        mapping = {}
+        for batch in _in_url_sized_batches(targets):
+            mapping.update(self._es.indices.get_mapping(index=",".join(batch)))
 
         skip = {"@timestamp", "message"}
         aggregatable = {"keyword", "boolean", "integer", "short", "byte", "long", "ip"}

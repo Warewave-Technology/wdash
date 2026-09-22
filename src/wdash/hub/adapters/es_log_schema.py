@@ -133,6 +133,130 @@ class OtelLogSchema(LogSchema):
         )
 
 
+
+#: What a container record maps onto the model. Everything else — `stream`,
+#: `tag`, `docker.container_id` — stays an attribute, because each is a fact
+#: about the capture that somebody chasing a missing line asks for, and a
+#: shipper's field dropped here is a field with nowhere else to appear.
+#:
+#: The body and the severity are NOT in this set: which key held them is
+#: decided per document below, and consuming a key that was not used would
+#: drop a field the record still has.
+_CONTAINER_CONSUMED = {"@timestamp", "kubernetes", "trace_id", "span_id"}
+
+#: Where the line is, in order. `log` is what the Docker json-file driver and
+#: fluent-bit's tail input write. `message` is there for a shipper with JSON
+#: merging on, which parses the line and puts its fields at the top level —
+#: the `kubernetes` object is what still says this is a container record.
+_CONTAINER_BODY = ("log", "message")
+
+#: A level only if the shipper parsed one out of the line. Reading it is not
+#: guessing: it is in the document. Absent, the record says UNSPECIFIED, and
+#: see the class docstring for why nothing is inferred from the text.
+_CONTAINER_SEVERITY = ("level", "severity", "severity_text")
+
+#: Where the name of the thing that logged lives, in order. The container
+#: name is what a person recognises; the pod name carries a replica suffix
+#: that changes on every deploy, so a chart grouped by it draws a new series
+#: each time and no series survives a restart.
+_CONTAINER_SERVICE = ("container_name", "labels.app_kubernetes_io/name",
+                      "labels.app", "labels.k8s-app")
+
+#: Lifted out of `kubernetes` onto the record's resource, under the neutral
+#: names the rest of WDash groups, filters and displays by.
+_CONTAINER_RESOURCE = {"host": "host", "namespace": "namespace_name",
+                       "pod": "pod_name", "container": "container_name"}
+
+#: Any one of these beside `log` makes a document the shippers' rather than
+#: an application index that happens to have a field called `log`.
+_CONTAINER_MARKERS = ("kubernetes", "stream", "tag", "docker")
+
+
+class ContainerLogSchema(LogSchema):
+    """A container's stdout, as the Kubernetes log shippers file it.
+
+    Docker's json-file driver writes `log` and `stream`; fluentd's and
+    fluent-bit's `kubernetes` filters add `tag` and a `kubernetes` object of
+    pod, namespace, container and labels. It is one of the most common
+    shapes an Elasticsearch holding container logs has — and WDash read none
+    of it. A real cluster of 710 indices searched correctly, 177,511 hits,
+    and every row of them came back with an empty line, no service and
+    UNSPECIFIED, because neither of the two schemas matched and the flat one
+    was used as a fallback: it looks for `message`, `level` and `service`,
+    and this shape has none of the three.
+
+    There is usually no severity here and this does not invent one. A level
+    is read where the shipper parsed one into the document; otherwise the
+    record says UNSPECIFIED and means it. `stream: stderr` is not a level —
+    plenty of programs log INFO to stderr — and a level read out of the text
+    would find one in the lines that happen to start `E0922` or contain the
+    word, and leave the rest, which is worse than an honest UNSPECIFIED
+    because it looks like data. A filter for errors would then quietly
+    return a subset of them.
+    """
+
+    name = "container"
+    body_field = "log"
+    #: None, and the one schema here with no severity field at all.
+    severity_field = None
+    service_field = "kubernetes.container_name"
+
+    @classmethod
+    def detect(cls, properties):
+        """The `kubernetes` object, or `log` beside one of the shippers'.
+
+        `log` on its own is too weak — an application index can map a field
+        called that and mean something else entirely — so it needs a second
+        field only a shipper writes. `kubernetes` alone is enough on its own
+        because nothing else writes an object by that name at the top level,
+        and a shipper with JSON merging on writes no `log` field.
+        """
+        names = set(properties)
+        return "kubernetes" in names or (
+            "log" in names and bool(set(_CONTAINER_MARKERS) & names))
+
+    def to_record(self, hit, backend, source_name=None):
+        source = hit.get("_source") or {}
+        kubernetes = source.get("kubernetes") or {}
+        consumed = set(_CONTAINER_CONSUMED)
+
+        body_key = _first_with_value(source, _CONTAINER_BODY)
+        if body_key:
+            consumed.add(body_key)
+
+        severity_key = _first_with_value(source, _CONTAINER_SEVERITY)
+        if severity_key:
+            consumed.add(severity_key)
+        severity_text = str(source.get(severity_key) or "") if severity_key else ""
+
+        resource = {}
+        for neutral, key in _CONTAINER_RESOURCE.items():
+            value = dig(kubernetes, key)
+            if value:
+                resource[neutral] = _as_text(value)
+
+        service = ""
+        for candidate in _CONTAINER_SERVICE:
+            value = dig(kubernetes, candidate)
+            if value:
+                service = _as_text(value)
+                break
+
+        return LogRecord(
+            timestamp=parse_time(source.get("@timestamp")),
+            body=_as_text(source.get(body_key)) if body_key else "",
+            severity=normalise_severity(severity_text or None),
+            severity_text=severity_text,
+            service=service,
+            resource=resource,
+            attributes={k: v for k, v in source.items() if k not in consumed},
+            trace_id=source.get("trace_id"),
+            span_id=source.get("span_id"),
+            ref=self._ref(hit, backend),
+            source=source_name,
+        )
+
+
 class FlatLogSchema(LogSchema):
     """One document, one level of keys: `message`, `level`, `service`.
 
@@ -170,10 +294,16 @@ class FlatLogSchema(LogSchema):
         )
 
 
-#: Order matters: OTel is checked first because a collector-written index has
+#: Order matters. OTel is checked first because a collector-written index has
 #: neither `message` nor `level`, while a flat index has neither `body_text`
-#: nor `severity_number`. The two are cleanly distinguishable.
-SCHEMAS = (OtelLogSchema, FlatLogSchema)
+#: nor `severity_number`; the two are cleanly distinguishable.
+#:
+#: The container shape goes BEFORE flat and not after, because flat is the
+#: fallback and answers yes to anything with a `message` — and a shipper that
+#: writes both `log` and `message` has put the line in `log`. Flat stays last
+#: for the same reason it always was: it is what nothing more specific
+#: matched, rather than a claim about the index.
+SCHEMAS = (OtelLogSchema, ContainerLogSchema, FlatLogSchema)
 
 
 def detect_schema(properties):
@@ -197,17 +327,37 @@ def _as_text(value):
     return str(value)
 
 
+def _first_with_value(source, candidates):
+    """The first of `candidates` the document actually has something under.
+
+    Presence is not enough: fluent-bit writes `log: ""` for a blank line, and
+    a key held with an empty value would otherwise win over the one holding
+    the text.
+    """
+    for name in candidates:
+        if source.get(name):
+            return name
+    return None
+
+
 def schema_for_document(source):
     """Pick a schema from a document, for the single-record fetch path.
 
     A `get` by id returns no mapping, and fetching one would cost a round trip
     to answer a question the document itself already answers.
+
+    A document's own keys ARE the properties a schema detects on, so this
+    asks them in `SCHEMAS` order rather than repeating their conditions. It
+    used to repeat one of them — the OTel markers, inline — and a container
+    record went on reading as flat for as long as it took to notice that
+    adding a schema to `SCHEMAS` had changed nothing on this path.
+
+    Flat is still the fallback, as it is in `detect_schema`: it is what
+    nothing more specific matched.
     """
     if not isinstance(source, dict):
         return FlatLogSchema()
-    if any(name in source for name in _OTEL_MARKERS):
-        return OtelLogSchema()
-    return FlatLogSchema()
+    return detect_schema(source) or FlatLogSchema()
 
 
 #: Where each neutral field lives, per schema, in preference order.
@@ -217,16 +367,26 @@ def schema_for_document(source):
 #: checks the actual mapping, so the order only decides ties.
 FIELD_CANDIDATES = {
     "timestamp": ("@timestamp",),
-    "body": ("message", "body_text"),
-    "severity": ("level", "severity_text"),
-    "severity_text": ("level", "severity_text"),
+    "body": ("message", "body_text", "log"),
+    "severity": ("level", "severity_text", "severity"),
+    "severity_text": ("level", "severity_text", "severity"),
     "service": ("service", "resource.attributes.service.name",
-                "resource.service.name"),
-    "host": ("host", "resource.attributes.host.name"),
+                "resource.service.name", "kubernetes.container_name"),
+    "host": ("host", "resource.attributes.host.name", "kubernetes.host"),
     "environment": ("environment",
                     "resource.attributes.deployment.environment"),
     "trace_id": ("trace_id",),
     "span_id": ("span_id",),
+    # Not in `DEFAULT_LOG_FIELDS`, and here so that a column or a filter
+    # naming one is looked for where a shipper puts it rather than at a top
+    # level that has nothing. `container` is the name, not the id: the id is
+    # in `docker` and changes on every restart.
+    "namespace": ("namespace", "kubernetes.namespace_name",
+                  "resource.attributes.k8s.namespace.name"),
+    "pod": ("pod", "kubernetes.pod_name",
+            "resource.attributes.k8s.pod.name"),
+    "container": ("container", "kubernetes.container_name",
+                  "resource.attributes.k8s.container.name"),
 }
 
 
@@ -261,6 +421,11 @@ def match_candidates(name):
 #: What the schemas read beyond the neutral fields: the markers that tell a
 #: collector record from a flat one — one of them the number that decides its
 #: level — and a structured body, however it was written.
+#:
+#: A container record needs no marker of its own here: `log` arrives as a
+#: candidate for `body` and `kubernetes.container_name` as one for `service`,
+#: and a list that asked for neither has no body and no service to read, so
+#: which schema was chosen changes nothing about the row.
 SCHEMA_FIELDS = _OTEL_MARKERS + ("body_structured", "body")
 
 

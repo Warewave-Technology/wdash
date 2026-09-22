@@ -856,6 +856,21 @@ class ModelledES:
         return {"buckets": out[:terms.get("size", 10)]}
 
     def msearch(self, searches=None, **kw):
+        """Each query answered by `search`, with its body put back into
+        keywords first.
+
+        `_msearch` carries real request BODIES — that is the whole reason
+        the adapter reaches for it, and `_source` is spelt `_source` there.
+        Handing those straight to `search` sent a body field through a door
+        that checks keyword names, and the one search WDash sends this way
+        — a list over more indices than fit in a URL, which is every search
+        on a cluster of a few hundred — came back as
+        "search() has no parameter(s) ['_source']" instead of records.
+        """
+        inverted = {body: keyword for keyword, body in KEYWORD_TO_BODY.items()}
         pairs = zip(searches[0::2], searches[1::2])
-        return {"responses": [self.search(index=header.get("index"), **body)
-                              for header, body in pairs]}
+        return {"responses": [
+            self.search(index=header.get("index"),
+                        **{inverted.get(key, key): value
+                           for key, value in body.items()})
+            for header, body in pairs]}
