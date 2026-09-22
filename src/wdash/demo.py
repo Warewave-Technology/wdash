@@ -117,6 +117,61 @@ def config_for(kind, url):
     return {"url": url, "verify_certs": False}
 
 
+#: Where the lab publishes its six synthetic targets. The ports are fixed in
+#: `lab/docker-compose.yml`; only the host moves, and only for somebody
+#: running the lab elsewhere.
+TARGETS_HOST = os.environ.get("WDASH_LAB_TARGETS", "localhost")
+
+#: The six, and what each one is FOR. `lab/synthetics/nginx.conf` says it
+#: first and says it better: "a monitoring page that only ever shows green
+#: proves nothing". So the demo takes all six rather than the two that look
+#: tidy — the 500 is how a `monitor_down` rule has anything to fire on, and
+#: the twelve-day certificate is how a `certificate_expiring` rule does.
+#:
+#: `labels` are what an alert rule's selector matches, so they are the join
+#: between the monitors here and the rules below.
+def _monitors(host):
+    return (
+        {"name": "lab up", "kind": "http", "target": f"http://{host}:18080/",
+         "assertions": {"status": [200]},
+         "labels": {"lab": "yes", "expect": "up"}},
+        {"name": "lab down", "kind": "http", "target": f"http://{host}:18081/",
+         "assertions": {"status": [200]},
+         "labels": {"lab": "yes", "expect": "down"}},
+        {"name": "lab echo", "kind": "http",
+         "target": f"http://{host}:18082/echo",
+         "assertions": {"status": [200]},
+         "labels": {"lab": "yes", "expect": "up"}},
+        {"name": "lab port", "kind": "tcp", "target": f"{host}:18080",
+         "labels": {"lab": "yes", "expect": "up"}},
+        # Self-signed, so verifying against the public roots would fail for a
+        # reason that says nothing about the certificate's dates. Expiry-only
+        # is the setting these two exist to demonstrate, and WDash withholds
+        # a check's headers and credentials before an expiry-only check
+        # reaches any agent.
+        {"name": "lab TLS, healthy", "kind": "http",
+         "target": f"https://{host}:18443/", "tls": {"mode": "expiry_only"},
+         "labels": {"lab": "yes", "expect": "up"}},
+        {"name": "lab TLS, expiring", "kind": "http",
+         "target": f"https://{host}:18444/", "tls": {"mode": "expiry_only"},
+         "labels": {"lab": "yes", "expect": "expiring"}},
+    )
+
+
+#: A sign-in and a dashboard, against the two pages `lab/synthetics/journey`
+#: serves. Nine verbs and no script — the failure names the step, which is
+#: the whole argument for the step list.
+def _journey(host):
+    return (
+        {"kind": "goto", "value": f"http://{host}:18083/"},
+        {"kind": "fill", "selector": "#email", "value": "demo@lab.local"},
+        {"kind": "fill", "selector": "#password", "value": "hunter2"},
+        {"kind": "click", "selector": "#signin button"},
+        {"kind": "expect_text", "value": "Signed in"},
+        {"kind": "expect_selector", "selector": "#basket"},
+    )
+
+
 def look():
     """Which backends are there, which are not. Asks no database."""
     present, missing = [], []
@@ -182,6 +237,134 @@ def fill(store, username, password, present, out=sys.stdout,
     return created
 
 
+def add_checks(store, username, host=None, out=sys.stdout):
+    """An agent, six monitors and a journey. Returns what it created.
+
+    The agent's token is returned and printed, once, because that is the
+    only time it exists in readable form — the store keeps a SHA-256 of it.
+    A demo that created an agent and swallowed its token would leave six
+    monitors that nothing can ever run, which reads as WDash not working.
+    """
+    host = host or TARGETS_HOST
+    created = {"agent": None, "token": None, "monitors": [], "journey": None}
+
+    named = {agent["name"] for agent in store.agents.all()}
+    if "lab agent" in named:
+        agent = next(a for a in store.agents.all() if a["name"] == "lab agent")
+        print("  lab agent            already registered, token unchanged",
+              file=out)
+    else:
+        agent, token = store.agents.create("lab agent", labels={"lab": "yes"})
+        created["agent"], created["token"] = agent["name"], token
+        print(f"  lab agent            registered", file=out)
+
+    existing = {monitor["name"] for monitor in store.monitors.all()}
+    for definition in _monitors(host):
+        if definition["name"] in existing:
+            print(f"  {definition['name']:<20} already configured", file=out)
+            continue
+        store.monitors.create(
+            agent_ids=[agent["id"]], created_by=username,
+            interval_seconds=60, timeout_seconds=10, **definition)
+        created["monitors"].append(definition["name"])
+        print(f"  {definition['name']:<20} {definition['target']}", file=out)
+
+    if "lab journey" not in existing:
+        store.monitors.create(
+            name="lab journey", kind="browser", target="",
+            steps=list(_journey(host)), agent_ids=[agent["id"]],
+            created_by=username, interval_seconds=300, timeout_seconds=60,
+            labels={"lab": "yes", "expect": "browser"})
+        created["journey"] = "lab journey"
+        print(f"  lab journey          six steps through "
+              f"http://{host}:18083/", file=out)
+    return created
+
+
+def add_boards(store, username, out=sys.stdout):
+    """A dashboard and a saved search, so neither screen opens empty."""
+    created = {"dashboards": [], "searches": []}
+
+    names = {board.name for board in store.dashboards.get_all_dashboards()}
+    if "The lab" not in names:
+        store.dashboards.create_dashboard(
+            name="The lab", created_by=username,
+            description="Everything the lab holds, over every source that "
+                        "answered. Unpinned on purpose: the stat cards name "
+                        "which source gave what.",
+            query="*", panels=[
+                {"type": "timeseries", "title": "Volume, split by severity",
+                 "split_by": "severity", "width": 12},
+                {"type": "terms", "title": "Busiest services",
+                 "field": "service", "size": 10, "width": 6},
+                {"type": "count", "title": "Errors", "field": "severity",
+                 "value": "ERROR", "width": 3},
+                {"type": "alerts_undelivered", "title": "Alerts nobody got",
+                 "width": 3},
+                {"type": "monitors", "title": "Checks", "view": "status",
+                 "width": 6},
+                {"type": "monitor_certificates", "title": "Certificates",
+                 "width": 6},
+                {"type": "trace_services", "title": "Services by traffic",
+                 "size": 10, "sort": "spans", "width": 6},
+                {"type": "records", "title": "Newest records", "size": 10,
+                 "width": 6},
+            ])
+        created["dashboards"].append("The lab")
+        print("  The lab              eight panels over four signals",
+              file=out)
+
+    saved = {search.name for search in store.saved_searches.all_for(username)}
+    if "Errors, everywhere" not in saved:
+        store.saved_searches.create(
+            name="Errors, everywhere", query="level:ERROR",
+            time_range="24h", created_by=username)
+        created["searches"].append("Errors, everywhere")
+        print("  Errors, everywhere   level:ERROR over 24 hours", file=out)
+    return created
+
+
+def add_alerting(store, username, host=None, out=sys.stdout):
+    """A channel and two rules, each with something real to fire on.
+
+    The channel points at the lab's echo target, which answers 200. A demo
+    whose every alert failed to deliver would be demonstrating the delivery
+    failure rather than the alert — and `lab/synthetics/nginx.conf` ships an
+    endpoint that exists precisely to be sent things.
+    """
+    host = host or TARGETS_HOST
+    created = {"channels": [], "rules": []}
+
+    channels = {channel["name"]: channel for channel in store.channels.all()}
+    if "lab echo" in channels:
+        channel = channels["lab echo"]
+    else:
+        channel = store.channels.create(
+            name="lab echo", kind="webhook",
+            url=f"http://{host}:18082/echo")
+        created["channels"].append("lab echo")
+        print(f"  lab echo             http://{host}:18082/echo", file=out)
+
+    named = {rule["name"] for rule in store.rules.all()}
+    wanted = (
+        {"name": "A lab check is down", "kind": "monitor_down",
+         "threshold": 2, "selector": {"lab": "yes"}},
+        {"name": "A lab certificate is nearly gone",
+         "kind": "certificate_expiring", "days_before": 30,
+         "selector": {"lab": "yes"}},
+        {"name": "The lab agent went quiet", "kind": "agent_silent",
+         "selector": {"lab": "yes"}},
+    )
+    for rule in wanted:
+        if rule["name"] in named:
+            continue
+        store.rules.create(channel_id=channel["id"], created_by=username,
+                           **rule)
+        created["rules"].append(rule["name"])
+        print(f"  {rule['name']}", file=out)
+    return created
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="python -m wdash.demo",
@@ -201,6 +384,9 @@ def main(argv=None):
                         help="add the sources to an installation that "
                              "already has an account, leaving the account "
                              "alone. Without this, one is a refusal")
+    parser.add_argument("--targets-host", default=TARGETS_HOST,
+                        help="where the lab publishes its six synthetic "
+                             "targets; WDASH_LAB_TARGETS otherwise")
     arguments = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.WARNING,
@@ -248,6 +434,12 @@ def main(argv=None):
     try:
         fill(store, arguments.username, password, present,
              into_claimed=arguments.into_claimed)
+        print("\nChecks:")
+        checks = add_checks(store, arguments.username, arguments.targets_host)
+        print("\nScreens:")
+        add_boards(store, arguments.username)
+        print("\nAlerting:")
+        add_alerting(store, arguments.username, arguments.targets_host)
     except AlreadyClaimed as exc:
         print(f"\n{exc}", file=sys.stderr)
         print("Nothing was written. Point --database-url at an empty "
@@ -264,6 +456,22 @@ def main(argv=None):
         return 1
 
     _say_what_is_missing(missing, sys.stdout)
+
+    if checks.get("token"):
+        print(f"""
+Run the agent, or every check stays `unknown` — which is what WDash says
+when nobody has looked, and is not the same answer as `down`:
+
+    WDASH_AGENT_TOKEN={checks['token']} \\
+        python -m wdash.agent --server http://127.0.0.1:5001
+
+That token is printed once because only its SHA-256 is stored. The journey
+needs the browser image — `docker build --target browser .` — and reads
+`unknown` until one reports, which is the same sentence for the same
+reason.""")
+
+    print("\nAnd the evaluator, for the two rules to have anything to say:"
+          "\n\n    python -m wdash.alerts")
     print("\nNow sign in. The first sign-in asks for an authenticator, which "
           "is\nwhat every local account does — this one is no exception.")
     return 0

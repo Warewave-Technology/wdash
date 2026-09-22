@@ -225,3 +225,187 @@ class TheDryRunTest(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TheChecksItAddsTest(unittest.TestCase):
+    def setUp(self):
+        self.store = _store()
+        self.store.users.create_first_admin("demo", PASSWORD, role="admin")
+        self.out = io.StringIO()
+        self.created = demo.add_checks(self.store, "demo", host="lab.test",
+                                       out=self.out)
+
+    def test_the_token_comes_back_once_and_only_once(self):
+        """It is returned so the command can print it, and printed because
+        that is the only moment it exists in readable form — the store keeps
+        a SHA-256. An agent whose token was swallowed leaves every monitor
+        `unknown` for ever, which reads as WDash not working."""
+        self.assertTrue(self.created["token"])
+        again = demo.add_checks(self.store, "demo", host="lab.test",
+                                out=self.out)
+        self.assertIsNone(again["token"])
+        self.assertEqual(len(self.store.agents.all()), 1)
+
+    def test_every_monitor_is_assigned_to_it(self):
+        """A monitor with no agent reports `unknown` — honestly, and for
+        ever. A demo full of those is a demo of the guard rather than of the
+        product."""
+        agent = self.store.agents.all()[0]
+        for monitor in self.store.monitors.all():
+            with self.subTest(monitor=monitor["name"]):
+                self.assertIn(agent["id"], monitor["agent_ids"])
+
+    def test_not_everything_it_watches_is_healthy(self):
+        """`lab/synthetics/nginx.conf` says it first: a monitoring page that
+        only ever shows green proves nothing. The 500 is what a
+        `monitor_down` rule fires on and the short certificate is what a
+        `certificate_expiring` rule fires on, so dropping either leaves a
+        rule that can never say anything."""
+        targets = {m["name"]: m["target"] for m in self.store.monitors.all()}
+        self.assertIn("http://lab.test:18081/",
+                      targets.values(), "nothing is deliberately broken")
+        self.assertIn("https://lab.test:18444/",
+                      targets.values(), "no short-lived certificate")
+
+    def test_the_self_signed_ones_are_expiry_only(self):
+        """Verified against the public roots they fail for a reason that
+        says nothing about their dates, which is the opposite of what a
+        certificate demo is for."""
+        for monitor in self.store.monitors.all():
+            if not str(monitor["target"]).startswith("https://"):
+                continue
+            with self.subTest(monitor=monitor["name"]):
+                self.assertEqual((monitor["tls"] or {}).get("mode"),
+                                 "expiry_only")
+
+    def test_the_journey_is_a_step_list_that_parses(self):
+        from wdash.journeys import steps as journey_steps
+        journey = next(m for m in self.store.monitors.all()
+                       if m["kind"] == "browser")
+        parsed = journey_steps.parse(journey["steps"])
+        self.assertGreaterEqual(len(parsed), 2)
+        self.assertEqual(parsed[0].kind, "goto")
+        self.assertTrue(any(journey_steps.STEP_KINDS[s.kind].asserts
+                            for s in parsed),
+                        "a journey that asserts nothing passes whatever "
+                        "happens")
+
+
+class TheAlertingItAddsTest(unittest.TestCase):
+    def setUp(self):
+        self.store = _store()
+        self.store.users.create_first_admin("demo", PASSWORD, role="admin")
+        self.out = io.StringIO()
+        demo.add_checks(self.store, "demo", host="lab.test", out=self.out)
+        self.created = demo.add_alerting(self.store, "demo", host="lab.test",
+                                         out=self.out)
+
+    def test_every_rule_selects_at_least_one_monitor(self):
+        """The join between the two halves, and the one that rots silently:
+        a selector nothing matches is a rule that sits on the page looking
+        configured and never says anything.
+
+        Asked through the runner's own matcher AND the adapter that builds
+        what it matches on, because neither half is obvious: a rule selects
+        on `key=value` TAGS, and tags are what the store's labels become on
+        the way through `StoreMonitorSource`. Comparing the two dictionaries
+        here would be a third copy of that mapping and would pass whatever
+        the real one did.
+        """
+        from wdash.alerts.runner import _selected
+        from wdash.hub import Scope
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+        from wdash.hub.query import TimeWindow
+
+        points = StoreMonitorSource(self.store).monitors(
+            TimeWindow.of("24h"), Scope.unrestricted()).monitors
+        self.assertTrue(points, "the adapter saw no monitor at all")
+        for rule in self.store.rules.all():
+            with self.subTest(rule=rule["name"]):
+                matched = [p for p in points if _selected(rule, p)]
+                self.assertTrue(matched, "this rule can never fire")
+
+    def test_the_down_rule_can_see_the_check_that_is_down(self):
+        """"At least one monitor" is not enough, and a mutation proved it:
+        stripping the label off the one target that answers 500 left every
+        rule still matching something — the other five — and every test
+        passing.
+
+        The demo has exactly one deliberately broken target. A
+        `monitor_down` rule that selects the other five is a rule that sits
+        on the page looking configured and never fires, which is the failure
+        this demo is arranged to SHOW, arranged instead to be invisible.
+        """
+        from wdash.alerts.runner import _selected
+        from wdash.hub import Scope
+        from wdash.hub.adapters.store_monitors import StoreMonitorSource
+        from wdash.hub.query import TimeWindow
+
+        broken = next(m for m in self.store.monitors.all()
+                      if m["target"].endswith(":18081/"))
+        points = StoreMonitorSource(self.store).monitors(
+            TimeWindow.of("24h"), Scope.unrestricted()).monitors
+        point = next(p for p in points if p.name == broken["name"])
+        rules = [r for r in self.store.rules.all()
+                 if r["kind"] == "monitor_down"]
+        self.assertTrue(rules, "nothing watches for a monitor going down")
+        for rule in rules:
+            with self.subTest(rule=rule["name"]):
+                self.assertTrue(_selected(rule, point),
+                                f"{rule['name']} cannot see "
+                                f"{broken['name']}, the one that is down")
+
+    def test_every_rule_is_a_kind_that_exists(self):
+        from wdash.alerts.evaluate import RULE_KINDS
+        kinds = {rule["kind"] for rule in self.store.rules.all()}
+        self.assertTrue(kinds)
+        self.assertEqual(kinds - set(RULE_KINDS), set())
+
+    def test_they_deliver_somewhere_that_answers(self):
+        """The lab's echo target returns 200. A demo whose every alert
+        failed to deliver would be demonstrating the delivery failure
+        rather than the alert — and `nginx.conf` ships an endpoint that
+        exists precisely to be sent things."""
+        channels = {c["id"]: c for c in self.store.channels.all()}
+        self.assertTrue(channels)
+        for rule in self.store.rules.all():
+            with self.subTest(rule=rule["name"]):
+                self.assertIn(rule["channel_id"], channels)
+
+    def test_running_it_twice_adds_nothing(self):
+        again = demo.add_alerting(self.store, "demo", host="lab.test",
+                                  out=self.out)
+        self.assertEqual(again["rules"], [])
+        self.assertEqual(again["channels"], [])
+
+
+class TheBoardsItAddsTest(unittest.TestCase):
+    def setUp(self):
+        self.store = _store()
+        self.store.users.create_first_admin("demo", PASSWORD, role="admin")
+        self.out = io.StringIO()
+        demo.add_boards(self.store, "demo", out=self.out)
+
+    def test_every_panel_is_one_the_editor_knows(self):
+        """Panels are normalised on every READ, and a PanelError there is a
+        400 for the whole board — so one bad panel here is a demo whose
+        dashboard will not open at all."""
+        from wdash.dashboard.panels import PANEL_TYPES
+        board = self.store.dashboards.get_all_dashboards()[0]
+        panels = board.get_panels()
+        self.assertTrue(panels)
+        for panel in panels:
+            with self.subTest(panel=panel.get("title")):
+                self.assertIn(panel["type"], PANEL_TYPES)
+
+    def test_it_shows_more_than_logs(self):
+        """Four signals exist and a demo board over one of them teaches
+        that WDash is a log viewer."""
+        from wdash.dashboard.panels import PANEL_TYPES
+        board = self.store.dashboards.get_all_dashboards()[0]
+        signals = {PANEL_TYPES[p["type"]]["signal"] for p in board.get_panels()}
+        self.assertEqual(signals, {"logs", "traces", "monitors", "alerts"})
+
+    def test_the_saved_search_is_there(self):
+        names = {s.name for s in self.store.saved_searches.all_for("demo")}
+        self.assertIn("Errors, everywhere", names)
