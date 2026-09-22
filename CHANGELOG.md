@@ -22,6 +22,81 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
+## 3.1.0 — 2026-09-22
+
+Two things added and three faults fixed, all five of them found by
+running 3.0.0 somewhere that was not the machine it was built on.
+
+### Needs action
+
+- **Nothing, unless you want the new retention behaviour.** Migration 23
+  adds an empty table and nothing reads it until you set
+  `monitoring.rollup_after_days`. That default is 0 — off — on purpose:
+  folding results DELETES the rows behind them, and an upgrade that threw
+  away three weeks of your raw history to save disk would be deciding that
+  for you.
+
+- **Pull the image.** Three of the fixes below are in it and not in
+  `3.0.0`: a cluster with a few hundred indices could not search at all.
+
+### Fixed
+
+- **A search over more than a few hundred indices failed outright**, with
+  `too_long_http_line_exception` and nothing a reader could act on. The
+  index names go in the URL path and Elasticsearch's request line stops at
+  4kb; measured on a cluster with 563 of them, that line came to 19,039
+  characters and every search on the page failed. Past 3,500 characters the
+  same search now goes as a one-request `_msearch`, which carries the list
+  in the body. One round trip either way, and the role's own index list is
+  still what is searched — not a wildcard standing in for it.
+
+- **Behind an ingress with no certificate the browser accepts, every form
+  was refused** — the sign-in form included — and the page blamed a stale
+  session, which is not what had happened. The session cookie is marked
+  `Secure`, a browser will not send one over `http`, and a session that has
+  merely expired still SENDS its cookie. No cookie at all is a different
+  thing, and the page now says which it is and what to do about it.
+
+- **`Strict-Transport-Security` was sent on plain-`http` responses**,
+  carrying a year and `includeSubDomains`. It is withheld now where a
+  trusted `X-Forwarded-Proto` says the request arrived over `http` — and
+  only there: a proxy that terminates TLS and sets no such header is a
+  normal configuration, and reading its silence as insecure would take the
+  header away from a deployment that has it right.
+
+### Added
+
+- **`python -m wdash.demo`** — one command that puts the lab into an
+  unclaimed installation: five sources, an agent, seven checks including
+  one that is deliberately down and a certificate with days left on it, a
+  board over all four signals, a saved search, a channel and three rules.
+  It does not sign anybody in and does not enrol an authenticator: the
+  account it creates has the enrolment page waiting, like any other. It
+  refuses an installation that already has an account rather than writing
+  into somebody's; `--into-claimed` is how you say you meant it.
+
+- **Hourly summaries for monitor results**, behind
+  `monitoring.rollup_after_days`. The results table is comfortable at two
+  million rows and unusable at eight, and fifty checks at fifteen seconds
+  reach the second in a month; retention's only answer was to delete.
+  Measured on ten checks at sixty seconds over thirty days, folded at two:
+  432,000 rows and 250 MB became 28,810 rows plus 6,730 summaries and
+  13 MB, and a thirty-day availability figure went from 20 ms to 2 ms with
+  the same answer to the check.
+
+  Availability stays exact for ever, because counts add. **Response-time
+  percentiles do not**: an hour of checks has no median, so they narrow to
+  the window that still has rows and the page says from when. The charts
+  lose nothing — a count, a mean and a worst all survive an hourly
+  summary, and no chart here draws a percentile.
+
+### Changed
+
+- The documentation gains the Kubernetes install: the two secrets and what
+  an empty one of each does, the three containers, the three probes and why
+  none of them is `/health`, and the four steps to more than one replica in
+  the order they have to happen.
+
 ## 3.0.0 — 2026-09-22
 
 The first release of this line, and a major one: a deployment that

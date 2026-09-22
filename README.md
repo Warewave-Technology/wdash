@@ -1201,14 +1201,14 @@ so it works behind NAT and restarting WDash misses no check.
 
 ```bash
 # published for linux/amd64 and linux/arm64
-docker pull yigitbasalma/wdash-elastic-dashboard:3.0.0   # server, 77MB
-docker pull yigitbasalma/wdash-browser:3.0.0             # + Chromium, 555MB
+docker pull yigitbasalma/wdash-elastic-dashboard:3.1.0   # server, 77MB
+docker pull yigitbasalma/wdash-browser:3.1.0             # + Chromium, 555MB
 
 # or build them, which is the same two stages of one Dockerfile
 docker build -t wdash .
 docker build -t wdash-browser --target browser .
 
-docker run -d yigitbasalma/wdash-browser:3.0.0 \
+docker run -d yigitbasalma/wdash-browser:3.1.0 \
     --server https://wdash.example.com --token <the agent token>
 ```
 

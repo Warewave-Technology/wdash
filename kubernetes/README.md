@@ -15,7 +15,7 @@ shipping nothing.
 Two things, and neither starts without you.
 
 **0. The image needs nothing from you any more.** The manifests name
-`yigitbasalma/wdash-elastic-dashboard:3.0.0`, and that tag is published, for
+`yigitbasalma/wdash-elastic-dashboard:3.1.0`, and that tag is published, for
 `linux/amd64` and `linux/arm64` both. This page used to say the published
 images stopped at 2.2.4 and that an apply would leave every container in
 `ErrImagePull`; that was true, and it is the reason the rest of this section
@@ -25,12 +25,12 @@ You still need the steps below if your cluster pulls from a registry of its
 own — an air-gapped one, or a mirror:
 
 ```bash
-docker pull yigitbasalma/wdash-elastic-dashboard:3.0.0
-docker tag  yigitbasalma/wdash-elastic-dashboard:3.0.0 \
-            <registry>/wdash-elastic-dashboard:3.0.0
-docker push <registry>/wdash-elastic-dashboard:3.0.0
+docker pull yigitbasalma/wdash-elastic-dashboard:3.1.0
+docker tag  yigitbasalma/wdash-elastic-dashboard:3.1.0 \
+            <registry>/wdash-elastic-dashboard:3.1.0
+docker push <registry>/wdash-elastic-dashboard:3.1.0
 cd kubernetes && kustomize edit set image \
-    yigitbasalma/wdash-elastic-dashboard=<registry>/wdash-elastic-dashboard:3.0.0
+    yigitbasalma/wdash-elastic-dashboard=<registry>/wdash-elastic-dashboard:3.1.0
 ```
 
 Retag rather than rebuild: a rebuild on your machine is a different image
@@ -235,12 +235,12 @@ outside measures what your users experience. They answer different questions,
 and it is reasonable to run both — give each its own token, because the agents
 page identifies an agent by it.
 
-Browser journeys need the browser image, `yigitbasalma/wdash-browser:3.0.0` —
+Browser journeys need the browser image, `yigitbasalma/wdash-browser:3.1.0` —
 555MB against the server's 77MB on amd64, and published for the same two
 architectures:
 
 ```bash
-docker pull yigitbasalma/wdash-browser:3.0.0
+docker pull yigitbasalma/wdash-browser:3.1.0
 # or, for a registry of your own, retag as above
 ```
 
