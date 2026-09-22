@@ -22,6 +22,48 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
+## 3.1.1 — 2026-09-22
+
+Both of these were found by running 3.1.0 against a real Kubernetes
+cluster, on the screen where a fault looks most like an answer.
+
+### Needs action
+
+- **Pull the image if your logs come from fluent-bit, fluentd or Docker's
+  json-file driver.** Until you do, every record on the logs page reads
+  empty.
+
+### Fixed
+
+- **Container logs read as empty.** A cluster of 710 indices searched
+  correctly — 177,511 results — and every row of them showed no message,
+  no service and a severity of `UNSPECIFIED`. WDash knew two document
+  shapes, the OpenTelemetry Collector's and a flat one, and the Kubernetes
+  log shippers write neither: the line is in `log`, the pod and container
+  are in a `kubernetes` object, and there is no `service` field at all.
+  Matching nothing, a document fell through to the flat shape, which looks
+  for `message` and `level` and found neither.
+
+  There is now a third shape. The line, the container name, the pod, the
+  namespace and the host are read; `stream`, `tag` and the shipper's own
+  metadata stay on the record; a filter or a chart that names `service`,
+  `pod` or `namespace` is looked for where a shipper puts it.
+
+  **The severity stays `UNSPECIFIED`**, and that is the honest answer
+  rather than a gap: these documents carry no level unless your shipper
+  parses one out, in which case it is read. A level guessed from the text
+  would find one in the lines that happen to start `E0922` and leave the
+  rest, so a filter for errors would return some of them and look like it
+  had returned all of them.
+
+- **Field statistics still failed on a cluster with a few hundred
+  indices**, with the same `too_long_http_line_exception` 3.1.0 fixed for
+  searches. Searches could move the index names into a request body;
+  reading mappings cannot — there, the index list IS the URL — so that one
+  call went on failing, and the sidebar beside a full page of results read
+  as an error. It is split into as many requests as the line length allows
+  now: 710 names, 21,205 characters, seven requests, one merged answer.
+
 ## 3.1.0 — 2026-09-22
 
 Two things added and three faults fixed, all five of them found by

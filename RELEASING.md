@@ -4,9 +4,11 @@ For whoever cuts the release. The process is short on purpose, and the
 parts that are checked by a test are checked because a person doing them by
 hand gets them wrong on the release where it matters.
 
-Nothing here is automated by CI yet: this repository has no remote, so the
-workflows in `.github/workflows/tests.yml` have never run. Read that as a
-list of what to run locally until it does.
+Step 4 is the one CI also does. `.github/workflows/tests.yml` runs both
+suites on four Pythons, on PostgreSQL, and builds both images on every push
+to `github.com/Warewave-Technology/wdash`; it found three defects on its
+first run that a single machine could not. Everything else below is still a
+command somebody types, and step 6 is the one no test replaces.
 
 ## Before the tag
 
@@ -128,7 +130,7 @@ The tag message is not the release notes. `CHANGELOG.md` is.
   not pretended to be here.
 - **A published SBOM.** `THIRD-PARTY-NOTICES.md` is the licence half of it
   and not the vulnerability half.
-- **Anything automatic.** Every command above is one somebody runs. When
-  the repository gets a remote, `.github/workflows/tests.yml` covers step 4
-  on five jobs, and the rest stays manual until somebody writes it down
-  here first.
+- **Anything automatic past the tests.** `.github/workflows/tests.yml`
+  covers step 4 on nine jobs; the version bump, the images, the tag and the
+  notes are all still typed, and stay that way until somebody writes down
+  here what the automatic version would do.
