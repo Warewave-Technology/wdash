@@ -134,6 +134,43 @@ class OtelLogSchema(LogSchema):
 
 
 
+#: Serilog's Compact Log Event Format, which a shipper with JSON merging on
+#: leaves at the top level of the document beside the shipper's own fields.
+#:
+#: `@t` is the only required key. `@m` is the rendered message,
+#: `@mt` the template it came from, `@l` the level, `@i` an event type hash,
+#: `@x` an exception, `@r` renderings, and `@tr`/`@sp` the trace and span a
+#: line belongs to.
+#:
+#: Reported from a real cluster: rows reading UNSPECIFIED with a body of
+#: `{"@t":"…","@m":"Sayfa bulunamadı (NotFound): KZIAQV","@l":"Warning"}`,
+#: while the field sidebar beside them counted `@l` — Warning 3,204, Error 15.
+#: The level was in the cluster, mapped and aggregatable, and WDash was
+#: showing the JSON envelope and no level at all.
+_CLEF_TIME = "@t"
+_CLEF_BODY = ("@m", "@mt")
+_CLEF_SEVERITY = ("@l",)
+#: `@t` beside any one of these. `@t` alone is too weak to claim a shape.
+_CLEF_MARKERS = ("@m", "@mt", "@l", "@i", "@x", "@r")
+
+#: What CLEF means by leaving `@l` out, and it is not "no level": the format
+#: omits the key FOR Information and only for Information. That is why the
+#: reported cluster's `@l` counted Warning and Error and nothing else — its
+#: informational lines, which are most of them, carry no `@l` at all. Read as
+#: absent they would every one of them say UNSPECIFIED.
+_CLEF_DEFAULT_SEVERITY = "Information"
+
+
+def _is_clef(source):
+    """Is this document Serilog's compact format?
+
+    Asked of a DOCUMENT rather than a mapping, because the rule it decides —
+    an absent `@l` means Information — is a statement about one event.
+    """
+    return _CLEF_TIME in source and any(name in source
+                                        for name in _CLEF_MARKERS)
+
+
 #: What a container record maps onto the model. Everything else — `stream`,
 #: `tag`, `docker.container_id` — stays an attribute, because each is a fact
 #: about the capture that somebody chasing a missing line asks for, and a
@@ -142,18 +179,44 @@ class OtelLogSchema(LogSchema):
 #: The body and the severity are NOT in this set: which key held them is
 #: decided per document below, and consuming a key that was not used would
 #: drop a field the record still has.
-_CONTAINER_CONSUMED = {"@timestamp", "kubernetes", "trace_id", "span_id"}
+#: The clock is NOT in here: which key held it is decided per document, like
+#: the body and the level, and naming `@timestamp` here as well left the line
+#: that consumes it covering only `@t` — half a rule, with nothing saying so.
+_CONTAINER_CONSUMED = {"kubernetes", "trace_id", "span_id", "@tr", "@sp"}
 
-#: Where the line is, in order. `log` is what the Docker json-file driver and
-#: fluent-bit's tail input write. `message` is there for a shipper with JSON
-#: merging on, which parses the line and puts its fields at the top level —
-#: the `kubernetes` object is what still says this is a container record.
-_CONTAINER_BODY = ("log", "message")
+#: Where the line is, in order.
+#:
+#: The parsed message comes FIRST and `log` last, which is the opposite of
+#: what it looks like: where both exist, `log` is the JSON envelope and the
+#: parsed field is the message inside it. A reader handed
+#: `{"@t":"…","@m":"Sayfa bulunamadı (NotFound): KZIAQV","@l":"Warning"}`
+#: instead of `Sayfa bulunamadı (NotFound): KZIAQV` has been shown the
+#: packaging. `@mt` is the template, with its `{Placeholders}` unfilled, and
+#: is still more readable than the envelope.
+#:
+#: `log` alone is what the Docker json-file driver and fluent-bit's tail
+#: input write when nothing parsed the line, and it stays the fallback.
+_CONTAINER_BODY = ("@m", "@mt", "message", "log")
 
-#: A level only if the shipper parsed one out of the line. Reading it is not
-#: guessing: it is in the document. Absent, the record says UNSPECIFIED, and
-#: see the class docstring for why nothing is inferred from the text.
-_CONTAINER_SEVERITY = ("level", "severity", "severity_text")
+#: A level only if the shipper or the application put one in the document.
+#: Reading it is not guessing: it is there. Absent — and absent for a reason
+#: other than CLEF's, which `_CLEF_DEFAULT_SEVERITY` covers — the record says
+#: UNSPECIFIED, and see the class docstring for why nothing is inferred from
+#: the text.
+_CONTAINER_SEVERITY = ("@l", "level", "severity", "severity_text")
+
+#: The trace a line belongs to, per shape. Reading these is what makes the
+#: record's "open this trace" link appear at all.
+_CONTAINER_TRACE = ("@tr", "trace_id")
+_CONTAINER_SPAN = ("@sp", "span_id")
+
+#: The clock, in order, and `@timestamp` FIRST on purpose. `@t` is when the
+#: application logged and `@timestamp` when the shipper filed it, so `@t` is
+#: the truer one — but `@timestamp` is the field this adapter sorts by and
+#: ranges over, and a displayed time that disagrees with the sort reads as a
+#: list in the wrong order. `@t` is the fallback for a document that has no
+#: `@timestamp` at all.
+_CONTAINER_TIME = ("@timestamp", "@t")
 
 #: Where the name of the thing that logged lives, in order. The container
 #: name is what a person recognises; the pod name carries a replica suffix
@@ -227,7 +290,16 @@ class ContainerLogSchema(LogSchema):
         severity_key = _first_with_value(source, _CONTAINER_SEVERITY)
         if severity_key:
             consumed.add(severity_key)
-        severity_text = str(source.get(severity_key) or "") if severity_key else ""
+            severity_text = str(source.get(severity_key) or "")
+        elif _is_clef(source):
+            # Not a missing level: CLEF omits the key FOR Information. See
+            # `_CLEF_DEFAULT_SEVERITY`.
+            severity_text = _CLEF_DEFAULT_SEVERITY
+        else:
+            severity_text = ""
+
+        time_key = _first_with_value(source, _CONTAINER_TIME)
+        consumed.add(time_key or _CONTAINER_TIME[0])
 
         resource = {}
         for neutral, key in _CONTAINER_RESOURCE.items():
@@ -243,15 +315,15 @@ class ContainerLogSchema(LogSchema):
                 break
 
         return LogRecord(
-            timestamp=parse_time(source.get("@timestamp")),
+            timestamp=parse_time(source.get(time_key)) if time_key else None,
             body=_as_text(source.get(body_key)) if body_key else "",
             severity=normalise_severity(severity_text or None),
             severity_text=severity_text,
             service=service,
             resource=resource,
             attributes={k: v for k, v in source.items() if k not in consumed},
-            trace_id=source.get("trace_id"),
-            span_id=source.get("span_id"),
+            trace_id=_first_value(source, _CONTAINER_TRACE),
+            span_id=_first_value(source, _CONTAINER_SPAN),
             ref=self._ref(hit, backend),
             source=source_name,
         )
@@ -327,6 +399,12 @@ def _as_text(value):
     return str(value)
 
 
+def _first_value(source, candidates):
+    """The value under the first of `candidates` the document has one for."""
+    name = _first_with_value(source, candidates)
+    return source.get(name) if name else None
+
+
 def _first_with_value(source, candidates):
     """The first of `candidates` the document actually has something under.
 
@@ -367,16 +445,16 @@ def schema_for_document(source):
 #: checks the actual mapping, so the order only decides ties.
 FIELD_CANDIDATES = {
     "timestamp": ("@timestamp",),
-    "body": ("message", "body_text", "log"),
-    "severity": ("level", "severity_text", "severity"),
-    "severity_text": ("level", "severity_text", "severity"),
+    "body": ("message", "body_text", "log", "@m", "@mt"),
+    "severity": ("level", "severity_text", "severity", "@l"),
+    "severity_text": ("level", "severity_text", "severity", "@l"),
     "service": ("service", "resource.attributes.service.name",
                 "resource.service.name", "kubernetes.container_name"),
     "host": ("host", "resource.attributes.host.name", "kubernetes.host"),
     "environment": ("environment",
                     "resource.attributes.deployment.environment"),
-    "trace_id": ("trace_id",),
-    "span_id": ("span_id",),
+    "trace_id": ("trace_id", "@tr"),
+    "span_id": ("span_id", "@sp"),
     # Not in `DEFAULT_LOG_FIELDS`, and here so that a column or a filter
     # naming one is looked for where a shipper puts it rather than at a top
     # level that has nothing. `container` is the name, not the id: the id is

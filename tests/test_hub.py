@@ -229,6 +229,39 @@ class SeverityTest(unittest.TestCase):
         self.assertEqual(normalise_severity("banana"), "UNSPECIFIED")
         self.assertEqual(normalise_severity(None), "UNSPECIFIED")
 
+    def test_dotnet_spells_info_in_full(self):
+        """Reported from a real cluster. Serilog and
+        `Microsoft.Extensions.Logging` both call it `Information`, which
+        read UNSPECIFIED — so every informational line from every .NET
+        service in that cluster had no level, on a page whose main control
+        is a level filter. Nothing looked broken: an unknown level is a
+        plausible thing for a log to have."""
+        self.assertEqual(normalise_severity("Information"), "INFO")
+
+    def test_and_syslog_spells_it_longer_still(self):
+        self.assertEqual(normalise_severity("informational"), "INFO")
+
+    def test_three_standards_were_each_half_covered(self):
+        """The shape to look for, and what found this one: syslog had
+        `crit`, `err`, `warning` and `notice` and not `emerg` or `alert`;
+        java.util.logging had `severe` and `fine` and not `finer`,
+        `finest` or `config`. A table with half a standard in it is a table
+        somebody stopped in the middle of."""
+        for spelling, expected in (("emerg", "FATAL"), ("emergency", "FATAL"),
+                                   ("alert", "FATAL"), ("finer", "TRACE"),
+                                   ("finest", "TRACE"), ("config", "DEBUG")):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(normalise_severity(spelling), expected)
+
+    def test_a_filter_for_info_now_matches_what_dotnet_wrote(self):
+        """The other side of the same table. A level is normalised on the
+        record and counted normalised in the sidebar, so a filter has to
+        search every spelling that normalises to it — otherwise clicking
+        INFO returns the `info` lines and none of the `Information` ones,
+        which is a subset presented as the answer."""
+        from wdash.hub.models import severity_spellings
+        self.assertIn("information", severity_spellings("INFO"))
+
 
 def _span(span_id, parent, start_offset=0, service="svc"):
     return Span(trace_id="t", span_id=span_id, parent_span_id=parent,

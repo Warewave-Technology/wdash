@@ -26,6 +26,18 @@ from typing import Any, Optional
 SEVERITIES = ("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL")
 UNKNOWN_SEVERITY = "UNSPECIFIED"
 
+#: Spellings of a level that are not one of `SEVERITIES`.
+#:
+#: Three standards are in here and each was half-covered, which is the shape
+#: to look for: syslog had `crit`, `err`, `warning` and `notice` but not
+#: `emerg` or `alert`; java.util.logging had `severe` and `fine` but not
+#: `finer`, `finest` or `config`; and .NET had nothing at all.
+#:
+#: That last gap was reported from a real cluster. Serilog writes
+#: `Information`, which is also `Microsoft.Extensions.Logging`'s name for it,
+#: and it read UNSPECIFIED — so every informational line from every .NET
+#: service in that cluster had no level, on a page whose main control is a
+#: level filter.
 _SEVERITY_ALIASES = {
     "WARNING": "WARN",
     "ERR": "ERROR",
@@ -36,6 +48,17 @@ _SEVERITY_ALIASES = {
     "NOTICE": "INFO",
     "VERBOSE": "TRACE",
     "FINE": "DEBUG",
+    # .NET: Serilog's own names and the `LogLevel` enum's, which agree.
+    "INFORMATION": "INFO",
+    # syslog RFC 5424, whose name for the same level is the longer one.
+    "INFORMATIONAL": "INFO",
+    "EMERG": "FATAL",
+    "EMERGENCY": "FATAL",
+    "ALERT": "FATAL",
+    # java.util.logging, completing the pair already here.
+    "FINER": "TRACE",
+    "FINEST": "TRACE",
+    "CONFIG": "DEBUG",
 }
 
 

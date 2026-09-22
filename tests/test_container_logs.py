@@ -297,13 +297,23 @@ class WhatSurvivesIntoTheAttributesTest(unittest.TestCase):
     def test_a_level_that_was_used_is_not_also_an_attribute(self):
         self.assertNotIn("level", record(shipped(level="error")).attributes)
 
-    def test_but_a_message_beside_a_log_is_kept(self):
-        """Both present means the shipper wrote two things and the line is in
-        `log`. Consuming `message` unconditionally would delete the other
-        one."""
-        read = record(shipped(message="something else"))
-        self.assertEqual(read.body, LINE)
-        self.assertEqual(read.attributes["message"], "something else")
+    def test_a_parsed_message_beside_a_log_wins(self):
+        """Both present means the line was PARSED, and `log` is the envelope
+        it was parsed out of.
+
+        This assertion used to run the other way, on the reasoning that a
+        shipper writing both had put the line in `log`. A real cluster
+        settled it against that: with JSON merging and `Keep_Log` both on,
+        `log` holds `{"@t":"…","@m":"Sayfa bulunamadı (NotFound): KZIAQV"}`
+        and the parsed field holds the sentence. Showing `log` shows the
+        packaging.
+
+        Neither is dropped — the envelope stays an attribute, so a reader
+        chasing what the shipper actually received can still see it.
+        """
+        read = record(shipped(message="the parsed line"))
+        self.assertEqual(read.body, "the parsed line")
+        self.assertEqual(read.attributes["log"], LINE)
 
     def test_and_an_empty_log_falls_through_to_it(self):
         """fluent-bit writes `log: ""` for a blank line. Choosing the body by
@@ -315,6 +325,176 @@ class WhatSurvivesIntoTheAttributesTest(unittest.TestCase):
         """With JSON merging off and a parser on, `log` arrives as a map. An
         empty row is the one thing it must not become."""
         self.assertIn("served", record(shipped(log={"msg": "served 200"})).body)
+
+
+#: The other half of the report, from the same cluster a day later: the
+#: container shape was being read, and the rows still said UNSPECIFIED with a
+#: body of raw JSON. Serilog's compact format, merged to the top level by the
+#: shipper while `log` kept the line it was parsed out of.
+CLEF_MESSAGE = "Sayfa bulunamadı (NotFound): KZIAQV"
+CLEF_ENVELOPE = ('{"@t":"2026-09-22T18:39:52.2909439Z","@m":"' + CLEF_MESSAGE +
+                 '","@i":"9fb525ae","@l":"Warning"}')
+
+
+def serilog(**extra):
+    """A container record whose line was parsed as CLEF."""
+    document = {
+        # The shipper's clock, and deliberately a second behind the
+        # application's below: a fixture where the two agree cannot tell
+        # which one was read.
+        "@timestamp": "2026-09-22T18:39:53.104Z",
+        "log": CLEF_ENVELOPE,
+        "stream": "stdout",
+        "kubernetes": {"container_name": "content-service",
+                       "host": "10.0.40.110",
+                       "namespace_name": "superapp",
+                       "pod_name": "content-service-7c9fb5"},
+        "@t": "2026-09-22T18:39:52.2909439Z",
+        "@m": CLEF_MESSAGE,
+        "@i": "9fb525ae",
+        "@l": "Warning",
+    }
+    document.update(extra)
+    # None removes a key rather than setting it: the interesting cases here
+    # are about a field the format LEAVES OUT, and `@l=None` reads better at
+    # the call site than rebuilding the dict without it.
+    return {key: value for key, value in document.items() if value is not None}
+
+
+class WhatSerilogWritesTest(unittest.TestCase):
+    """CLEF fields inside a container record.
+
+    The screenshot that reported this showed rows of raw JSON at
+    UNSPECIFIED, beside a field sidebar counting `@l` — Warning 3,204,
+    Error 15. The level was in the cluster, mapped and aggregatable, and
+    the page was showing neither it nor the sentence inside the envelope.
+    """
+
+    def test_the_rendered_message_is_the_body(self):
+        self.assertEqual(record(serilog()).body, CLEF_MESSAGE)
+
+    def test_not_the_envelope_it_came_out_of(self):
+        """The fault itself. `log` holds the JSON and a reader handed that
+        has been shown the packaging."""
+        self.assertNotIn("@t", record(serilog()).body)
+
+    def test_which_is_kept_all_the_same(self):
+        """Somebody chasing what the shipper actually received needs the
+        line as it arrived."""
+        self.assertEqual(record(serilog()).attributes["log"], CLEF_ENVELOPE)
+
+    def test_the_level_is_read(self):
+        self.assertEqual(str(record(serilog()).severity), "WARN")
+
+    def test_an_absent_level_means_information_and_not_nothing(self):
+        """CLEF omits `@l` FOR Information and only for Information, which
+        is why the reported cluster's `@l` counted Warning and Error and
+        nothing else: its informational lines — most of them — carry no
+        `@l` at all. Read as missing, every one of them says UNSPECIFIED.
+        """
+        self.assertEqual(str(record(serilog(**{"@l": None})).severity), "INFO")
+
+    def test_and_that_rule_does_not_leak_to_anything_else(self):
+        """A container record with no level and no CLEF marker is still
+        UNSPECIFIED. The rule is CLEF's, not a default for logs."""
+        self.assertEqual(str(record(shipped()).severity), "UNSPECIFIED")
+
+    def test_the_template_is_used_when_there_is_no_rendered_message(self):
+        """`CompactJsonFormatter` writes `@mt` and leaves `@m` out. A
+        template with its `{Placeholders}` unfilled is still a sentence,
+        and still beats the envelope."""
+        read = record(serilog(**{"@m": None,
+                                 "@mt": "Sayfa bulunamadı (NotFound): {Code}"}))
+        self.assertEqual(read.body, "Sayfa bulunamadı (NotFound): {Code}")
+
+    def test_the_trace_and_span_are_read(self):
+        """Serilog's tracing writes `@tr` and `@sp`. Reading them is what
+        makes a record's link to its trace appear at all."""
+        read = record(serilog(**{"@tr": "e64d43507a07f838454ed6b354d53be6",
+                                 "@sp": "2e3765e5b46662d1"}))
+        self.assertEqual(read.trace_id, "e64d43507a07f838454ed6b354d53be6")
+        self.assertEqual(read.span_id, "2e3765e5b46662d1")
+
+    def test_and_the_ordinary_spellings_still_are(self):
+        read = record(shipped(trace_id="abc", span_id="def"))
+        self.assertEqual((read.trace_id, read.span_id), ("abc", "def"))
+
+    def test_the_event_id_stays_an_attribute(self):
+        """`@i` is a hash of the message template — the thing that groups
+        every occurrence of one log statement. Data, not bookkeeping."""
+        self.assertEqual(record(serilog()).attributes["@i"], "9fb525ae")
+
+    def test_the_shippers_clock_is_the_one_shown(self):
+        """`@t` is when the application logged and `@timestamp` when the
+        shipper filed it, so `@t` is the truer one — and `@timestamp` is
+        the field this adapter sorts by and ranges over. A displayed time
+        that disagrees with the sort reads as a list in the wrong order."""
+        read = record(serilog())
+        self.assertEqual((read.timestamp.second,
+                          read.timestamp.microsecond // 1000), (53, 104))
+
+    def test_but_the_applications_clock_when_there_is_no_other(self):
+        read = record(serilog(**{"@timestamp": None}))
+        self.assertIsNotNone(read.timestamp)
+        self.assertEqual((read.timestamp.second,
+                          read.timestamp.microsecond // 1000), (52, 290))
+
+    def test_the_clock_that_was_read_is_not_also_an_attribute(self):
+        self.assertNotIn("@timestamp", record(serilog()).attributes)
+
+    def test_whichever_of_the_two_it_was(self):
+        """The half that was not covered: with no `@timestamp` the clock is
+        `@t`, and a record showing its own timestamp again in the attribute
+        list is showing the same fact twice."""
+        read = record(serilog(**{"@timestamp": None}))
+        self.assertNotIn("@t", read.attributes)
+
+    def test_and_the_other_one_still_is(self):
+        """They are two different facts — when the application logged, and
+        when the shipper filed it — and the gap between them is what
+        somebody investigating a delayed pipeline is looking for."""
+        self.assertEqual(record(serilog()).attributes["@t"],
+                         "2026-09-22T18:39:52.2909439Z")
+
+    def test_the_trace_and_span_are_not_repeated_into_the_attributes(self):
+        """Read onto the record, so a second copy under their raw names is
+        the same value twice on the detail page."""
+        attributes = record(serilog(**{"@tr": "abc", "@sp": "def"})).attributes
+        self.assertNotIn("@tr", attributes)
+        self.assertNotIn("@sp", attributes)
+
+    def test_a_lone_at_t_is_not_the_compact_format(self):
+        """`@t` on its own is too weak to claim a shape, for the same
+        reason `log` on its own is: the rule it would switch on — an absent
+        `@l` means Information — is a strong claim to make about a document
+        that carries no other sign of the format."""
+        read = record({"kubernetes": {"container_name": "x"},
+                       "log": "a line", "@t": "2026-09-22T18:39:52.290Z"})
+        self.assertEqual(str(read.severity), "UNSPECIFIED")
+
+    def test_a_document_with_neither_has_no_timestamp_rather_than_a_crash(self):
+        self.assertIsNone(record({"kubernetes": {"container_name": "x"},
+                                  "log": "a line"}).timestamp)
+
+    def test_it_is_still_the_container_shape(self):
+        """Not a schema of its own: these documents carry the `kubernetes`
+        object too, and a CLEF schema taking them would read the message
+        and lose the pod, the namespace and the service."""
+        read = record(serilog())
+        self.assertEqual(read.service, "content-service")
+        self.assertEqual(read.resource["namespace"], "superapp")
+
+    def test_a_filter_naming_severity_looks_where_serilog_put_it(self):
+        self.assertIn("@l", match_candidates("severity"))
+
+    def test_and_a_narrowed_list_asks_for_it(self):
+        """The list view fetches a slice of each document. Leaving `@l` or
+        `@m` out of it is a row that reads differently from the record it
+        lists — which is the fault this whole file is about, one level
+        down."""
+        asked = source_fields(DEFAULT_LOG_FIELDS)
+        for field in ("@m", "@mt", "@l", "@tr"):
+            self.assertIn(field, asked)
 
 
 class WhereTheNeutralNamesLiveTest(unittest.TestCase):

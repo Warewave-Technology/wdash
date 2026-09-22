@@ -188,9 +188,23 @@ class ElasticsearchRenderTest(unittest.TestCase):
         self.assertIn("body_text", body)
 
     def test_a_field_with_one_home_is_not_wrapped(self):
-        """No should-clause where there is nothing to choose between."""
-        self.assertEqual(self.render("trace_id:abc"),
-                         {"match": {"trace_id": {"query": "abc"}}})
+        """No should-clause where there is nothing to choose between.
+
+        `timestamp` rather than `trace_id`, which used to be the example
+        here and stopped being one: Serilog writes the trace under `@tr`,
+        so a filter naming `trace_id` now has two places to look and is
+        wrapped like every other neutral name. The rule this asserts is
+        unchanged; the field that still demonstrates it is not.
+        """
+        self.assertEqual(self.render("timestamp:2026-09-22"),
+                         {"match": {"@timestamp": {"query": "2026-09-22"}}})
+
+    def test_and_the_trace_is_looked_for_where_serilog_puts_it(self):
+        """The other half of the change above, so that moving the example
+        did not quietly drop what moved it."""
+        fields = self._fields(self.render("trace_id:abc"))
+        self.assertIn("trace_id", fields)
+        self.assertIn("@tr", fields)
 
     def test_term_uses_match_not_term(self):
         """`term` silently matches nothing on analysed fields."""
@@ -214,8 +228,8 @@ class ElasticsearchRenderTest(unittest.TestCase):
             self.assertNotIn("query_string", json.dumps(self.render(text)), text)
 
     def test_exists_and_range(self):
-        self.assertEqual(self.render("_exists_:trace_id"),
-                         {"exists": {"field": "trace_id"}})
+        self.assertEqual(self.render("_exists_:timestamp"),
+                         {"exists": {"field": "@timestamp"}})
         # A name the field table does not know is also tried where the
         # collector keeps it — under resource.attributes. and attributes.
         # This pinned the one field, which is where a collector record does
