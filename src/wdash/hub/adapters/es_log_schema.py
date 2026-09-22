@@ -444,7 +444,13 @@ def schema_for_document(source):
 #: deployments have — and the collector's names are the fallback. Resolution
 #: checks the actual mapping, so the order only decides ties.
 FIELD_CANDIDATES = {
-    "timestamp": ("@timestamp",),
+    # `@t` is the other spelling of the clock and the reason it is here is
+    # not the clock: it is the key `_is_clef` detects on, and a list asks
+    # Elasticsearch for only these fields. Without it a row carried `@m` and
+    # `@l` but no `@t`, so the format went unrecognised and the rule that an
+    # absent `@l` means Information never ran — measured against a real
+    # cluster, a record reading UNSPECIFIED in the list and INFO when opened.
+    "timestamp": ("@timestamp", "@t"),
     "body": ("message", "body_text", "log", "@m", "@mt"),
     "severity": ("level", "severity_text", "severity", "@l"),
     "severity_text": ("level", "severity_text", "severity", "@l"),

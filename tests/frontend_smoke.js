@@ -88,6 +88,14 @@ function makeWindow(fetchImpl) {
           <small id="histogramSummary"></small>
           <canvas id="logHistogram"></canvas>
         </div>
+        <button id="fieldStatsPick" class="d-none" aria-expanded="false"></button>
+        <div id="fieldStatsPicker" class="d-none">
+          <input id="fieldStatsFilter">
+          <div id="fieldStatsOptions"></div>
+          <button id="fieldStatsSave"></button>
+          <button id="fieldStatsClear"></button>
+          <div id="fieldStatsPickerNote"></div>
+        </div>
         <div id="fieldStatsContent"></div>
         <div class="modal fade" id="logModal">
           <h5 id="logModalTitle"></h5>
@@ -1319,6 +1327,199 @@ check('Clear takes away the chart, the sources, the warnings and the stats', () 
         bare.w.eval(fs.readFileSync(path.join(ROOT, 'static/js/csrf.js'),
                                     'utf8'));
         check('a page with no token leaves fetch alone', () => assert(bare.w.fetch === before));
+    }
+
+    // --- choosing which fields the sidebar counts -----------------------
+    //
+    // The panel showed the first ten field names a mapping offers, sorted,
+    // which on a cluster whose fields begin with `@` is ten nobody asked
+    // for. These are the ways the picker could look like it worked.
+    {
+        const answers = [];
+        const posted = [];
+        const offer = (body) => (url, init) => {
+            if (init && init.method === 'POST') {
+                posted.push(JSON.parse(init.body));
+                return Promise.resolve({
+                    ok: true, status: 200,
+                    json: () => Promise.resolve({source: 'primary',
+                                                 chosen: JSON.parse(init.body).fields}),
+                });
+            }
+            answers.push(url);
+            return Promise.resolve({ok: true, status: 200,
+                                    json: () => Promise.resolve(body)});
+        };
+
+        const OFFER = {
+            fields: ['@i', '@l', '@sp', 'kubernetes.container_name', 'stream'],
+            chosen: ['@l'], editable: true, source: 'primary',
+        };
+
+        const open = async (body) => {
+            const w = makeWindow(offer(body || OFFER));
+            const search = Object.create(w.__LogSearch.prototype);
+            search._setupFieldStatsPicker();
+            await new Promise(r => setTimeout(r, 0));
+            w.document.getElementById('fieldStatsPick').click();
+            await new Promise(r => setTimeout(r, 0));
+            return { w, search };
+        };
+
+        {
+            const quiet = makeWindow(offer(OFFER));
+            quiet.document.getElementById('fieldStatsPick').remove();
+            Object.create(quiet.__LogSearch.prototype)._setupFieldStatsPicker();
+            await new Promise(r => setTimeout(r, 0));
+            // Only THIS endpoint: the bundle boots itself on
+            // DOMContentLoaded and a working logs page asks for plenty of
+            // other things.
+            check('a page without the control asks the server nothing',
+                  () => assertEqual(
+                      answers.filter(u => String(u).includes(
+                          '/api/field-stats/fields')).length, 0,
+                      'picker requests made'));
+        }
+
+        const { w } = await open();
+        const rows = w.document.querySelectorAll('#fieldStatsOptions .form-check');
+        check('the picker offers every field, not the ten on screen',
+              () => assertEqual(rows.length, 5, 'rows'));
+        check('and the one already chosen is ticked',
+              () => assert(w.document.querySelector(
+                  '[data-field="@l"] input').checked));
+        check('the chosen ones come first, so they are visible without scrolling',
+              () => assertEqual(rows[0].dataset.field, '@l', 'first row'));
+
+        // A filter that hides a ticked row while leaving it in the saved set
+        // is a save that keeps what is off screen.
+        const filter = w.document.getElementById('fieldStatsFilter');
+        filter.value = 'kube';
+        filter.dispatchEvent(new w.Event('input'));
+        check('filtering hides what does not match',
+              () => assert(w.document.querySelector(
+                  '[data-field="@i"]').classList.contains('d-none')));
+        check('and never hides a field that is ticked',
+              () => assert(!w.document.querySelector(
+                  '[data-field="@l"]').classList.contains('d-none')));
+
+        // What is POSTed is what is ticked, including rows the filter is
+        // hiding at the time.
+        const sent = await (async () => {
+            const { w: w2, search } = await open();
+            // `.click()` rather than `.checked = true`: setting the property
+            // fires no `change`, and the ticks are remembered off that event
+            // because a search replaces the rows they live on.
+            w2.document.querySelector(
+                '[data-field="kubernetes.container_name"] input').click();
+            w2.WDash = w2.__WDash;
+            w2.__WDash.showNotification = () => {};
+            await search._saveStatsFields();
+            return posted[posted.length - 1];
+        })();
+        check('saving posts the source and the ticked fields',
+              () => assertEqual(sent.source, 'primary', 'source'));
+        check('and both of them, not just the one just clicked',
+              () => assertEqual(sent.fields.sort().join(','),
+                                '@l,kubernetes.container_name', 'fields'));
+
+        const cleared = await (async () => {
+            const { w: w3, search } = await open();
+            w3.WDash = w3.__WDash;
+            w3.__WDash.showNotification = () => {};
+            await search._saveStatsFields([]);
+            return posted[posted.length - 1];
+        })();
+        check('and clearing posts an empty list rather than nothing',
+              () => assertEqual(JSON.stringify(cleared.fields), '[]', 'cleared'));
+
+        // A search REPLACES the rows. Ticking, searching, then saving used
+        // to store only what the last answer happened to show.
+        const survived = await (async () => {
+            const { w: w6, search } = await open();
+            w6.document.querySelector(
+                '[data-field="kubernetes.container_name"] input').click();
+            // The second answer holds none of the first one's fields.
+            search._renderStatsFieldOffer({fields: ['stream'], chosen: ['@l']});
+            w6.document.querySelector('[data-field="stream"] input').click();
+            w6.WDash = w6.__WDash;
+            w6.__WDash.showNotification = () => {};
+            await search._saveStatsFields();
+            return posted[posted.length - 1];
+        })();
+        check('a tick survives a search that replaces the list',
+              () => assertEqual(survived.fields.sort().join(','),
+                                '@l,kubernetes.container_name,stream',
+                                'fields'));
+
+
+        // The filter reaching past the cut. On an offer that says it is
+        // partial, a word matching nothing on the page is a word the server
+        // should be asked about — otherwise the filter can only narrow what
+        // the cut already let through.
+        {
+            const cut = {fields: ['@i', '@l'], chosen: [], editable: true,
+                         partial: true,
+                         warnings: ['This source maps 439 fields that can be '
+                                    + 'counted; these are the first 300 by name.']};
+            const { w: w4, search } = await open(cut);
+            const before = answers.length;
+            const box = w4.document.getElementById('fieldStatsFilter');
+            box.value = 'container';
+            box.dispatchEvent(new w4.Event('input'));
+            await new Promise(r => setTimeout(r, 400));
+            const asked = answers.slice(before).filter(
+                u => String(u).includes('q=container'));
+            check('a search past a cut offer asks the server',
+                  () => assertEqual(asked.length, 1, 'requests'));
+        }
+
+        // A search that answers completely must not strand the panel inside
+        // its own result: the next word has to reach the server too.
+        {
+            const cut = {fields: ['@i', '@l'], chosen: [], editable: true,
+                         partial: true, warnings: ['cut']};
+            const { w: w7, search } = await open(cut);
+            // The first search answered completely — four rows, no warning.
+            search._renderStatsFieldOffer({fields: ['kubernetes.host']});
+            w7.__LogSearchInstance = search;
+            search._showingSearch = true;
+            const before = answers.length;
+            const box = w7.document.getElementById('fieldStatsFilter');
+            box.value = 'alpaca';
+            box.dispatchEvent(new w7.Event('input'));
+            await new Promise(r => setTimeout(r, 400));
+            check('a second search is not trapped inside the first answer',
+                  () => assert(answers.slice(before).some(
+                      u => String(u).includes('q=alpaca'))));
+
+            const cleared = answers.length;
+            box.value = '';
+            box.dispatchEvent(new w7.Event('input'));
+            await new Promise(r => setTimeout(r, 400));
+            check('and clearing the box asks for the whole offer back',
+                  () => assert(answers.length > cleared));
+        }
+
+        {
+            const whole = {fields: ['@i', '@l'], chosen: [], editable: true};
+            const { w: w5 } = await open(whole);
+            const before = answers.length;
+            const box = w5.document.getElementById('fieldStatsFilter');
+            box.value = 'container';
+            box.dispatchEvent(new w5.Event('input'));
+            await new Promise(r => setTimeout(r, 400));
+            check('and does not when the offer is the whole mapping',
+                  () => assertEqual(answers.length - before, 0, 'requests'));
+        }
+
+        const { w: unsupported } = await open(
+            {fields: [], chosen: [], editable: true, unsupported: true,
+             reason: 'loki does not provide field statistics.'});
+        check('a source that cannot count fields says so rather than showing none',
+              () => assert(unsupported.document
+                  .getElementById('fieldStatsPickerNote').textContent
+                  .includes('does not provide')));
     }
 
     await Promise.all(pending);

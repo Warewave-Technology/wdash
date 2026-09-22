@@ -190,14 +190,16 @@ class ElasticsearchRenderTest(unittest.TestCase):
     def test_a_field_with_one_home_is_not_wrapped(self):
         """No should-clause where there is nothing to choose between.
 
-        `timestamp` rather than `trace_id`, which used to be the example
-        here and stopped being one: Serilog writes the trace under `@tr`,
-        so a filter naming `trace_id` now has two places to look and is
-        wrapped like every other neutral name. The rule this asserts is
-        unchanged; the field that still demonstrates it is not.
+        This example has moved twice, which is itself the point: `trace_id`
+        stopped being single-homed when Serilog's `@tr` was added, and
+        `timestamp` when `@t` was. Every NEUTRAL name now has more than one
+        place to look, so the case that remains is the one that always did
+        — a path already spelt the way a collector writes it, which is
+        looked for exactly where it says and nowhere else.
         """
-        self.assertEqual(self.render("timestamp:2026-09-22"),
-                         {"match": {"@timestamp": {"query": "2026-09-22"}}})
+        self.assertEqual(
+            self.render("resource.attributes.host.name:web-1"),
+            {"match": {"resource.attributes.host.name": {"query": "web-1"}}})
 
     def test_and_the_trace_is_looked_for_where_serilog_puts_it(self):
         """The other half of the change above, so that moving the example
@@ -228,8 +230,8 @@ class ElasticsearchRenderTest(unittest.TestCase):
             self.assertNotIn("query_string", json.dumps(self.render(text)), text)
 
     def test_exists_and_range(self):
-        self.assertEqual(self.render("_exists_:timestamp"),
-                         {"exists": {"field": "@timestamp"}})
+        self.assertEqual(self.render("_exists_:attributes.request_id"),
+                         {"exists": {"field": "attributes.request_id"}})
         # A name the field table does not know is also tried where the
         # collector keeps it — under resource.attributes. and attributes.
         # This pinned the one field, which is where a collector record does

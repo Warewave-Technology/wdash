@@ -190,10 +190,58 @@
         </div>
         <div class="card-body p-0" id="sourceBreakdownContent"></div>
     </div>
+    {# The panel, and the control that decides what is in it.
+
+       Which fields a cluster's sidebar counts is not a matter of taste: the
+       source discovers what its mapping offers and shows the first ten BY
+       NAME, so a cluster whose fields begin with punctuation gets those.
+       Reported from a real one — `@i`, `@l`, `@m`, `@sp`, `@tr` and an
+       application's own counter filled it, three of them with a single
+       value seen once, while `kubernetes.container_name` never reached the
+       list. #}
     <div class="card">
-        <div class="card-header py-2">
+        <div class="card-header py-2 d-flex align-items-center justify-content-between">
             <small class="fw-bold"><i class="fas fa-chart-bar"></i> Field Statistics</small>
+            {# Rendered only for somebody who may save it. The page used to
+               ask the server on load and hide the button on the answer,
+               which put a request on every page load whose only job was to
+               decide a button — and on an installation with no reachable
+               source that request is a 503, in the console of a page that
+               is working. `tests/test_rendered_pages` caught it. #}
+            {% if current_user.has_permission('system:admin') %}
+            <button type="button" class="btn btn-link btn-sm p-0 text-muted"
+                    id="fieldStatsPick" title="Choose which fields are counted"
+                    aria-expanded="false" aria-controls="fieldStatsPicker">
+                <i class="fas fa-sliders"></i>
+            </button>
+            {% endif %}
         </div>
+        {# The panel goes inside the same condition as the button that opens
+           it. Guarding only the button leaves a reader with a hidden Save
+           they cannot reach and a list nothing fills — inert markup whose
+           only effect is to make "may I change this" ambiguous to anybody
+           reading the page. #}
+        {% if current_user.has_permission('system:admin') %}
+        <div class="card-body p-2 border-bottom d-none" id="fieldStatsPicker">
+            <div class="d-flex gap-1 mb-2">
+                <input type="search" class="form-control form-control-sm"
+                       id="fieldStatsFilter" placeholder="Filter fields"
+                       autocomplete="off" aria-label="Filter the field list">
+            </div>
+            <div id="fieldStatsOptions" style="max-height:14rem;overflow-y:auto">
+            </div>
+            <div class="d-flex gap-1 mt-2 align-items-center">
+                <button type="button" class="btn btn-primary btn-sm"
+                        id="fieldStatsSave">Save</button>
+                <button type="button" class="btn btn-outline-secondary btn-sm"
+                        id="fieldStatsClear"
+                        title="Count whatever this source offers">Use the
+                    source's own</button>
+            </div>
+            <div class="text-muted mt-2" style="font-size:.7rem"
+                 id="fieldStatsPickerNote"></div>
+        </div>
+        {% endif %}
         <div class="card-body p-0" id="fieldStatsContent">
             <div class="text-center py-3 text-muted"><small>Run a search to see field stats</small></div>
         </div>

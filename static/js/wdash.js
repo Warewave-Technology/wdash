@@ -372,6 +372,7 @@ class LogSearch {
         // Set up clear button with event delegation to avoid issues
         this.setupClearButtonDelegation();
         this._setupSavedSearches();
+        this._setupFieldStatsPicker();
 
         this.initialized = true;
         this._applyUrlParams();
@@ -874,6 +875,245 @@ class LogSearch {
         container.querySelectorAll('[data-sidebar-filter]').forEach(el => {
             el.addEventListener('click', () => this._applyFieldFilter(el.dataset.sidebarFilter));
         });
+    }
+
+    // ---- which fields the sidebar counts ------------------------------
+    //
+    // The source discovers what its mapping offers and shows the first ten
+    // BY NAME, which on a cluster whose fields begin with punctuation is
+    // ten fields nobody asked for. This is where somebody says otherwise.
+    //
+    // The offer is fetched ONCE per opening rather than with every search:
+    // it reads the whole mapping and does not change between two searches
+    // a minute apart.
+
+    _setupFieldStatsPicker() {
+        const button = document.getElementById('fieldStatsPick');
+        if (!button) { return; }
+        const panel = document.getElementById('fieldStatsPicker');
+
+        button.addEventListener('click', () => {
+            const open = !panel.classList.contains('d-none');
+            panel.classList.toggle('d-none', open);
+            button.setAttribute('aria-expanded', String(!open));
+            if (!open) {
+                // Forgotten on each opening, so the panel always starts
+                // from what is actually stored rather than from ticks
+                // somebody abandoned earlier.
+                this._ticked = null;
+                this._loadStatsFieldOffer();
+            }
+        });
+
+        const filter = document.getElementById('fieldStatsFilter');
+        if (filter) {
+            filter.addEventListener('input', () => {
+                const wanted = filter.value.trim().toLowerCase();
+                let anything = false;
+                document.querySelectorAll('#fieldStatsOptions .form-check')
+                    .forEach(row => {
+                        const name = row.dataset.field || '';
+                        // A ticked field never hides: a filter that removes
+                        // it from view while leaving it in the saved set is
+                        // a save that silently keeps what is off screen.
+                        const ticked = row.querySelector('input').checked;
+                        const matches = !wanted || name.toLowerCase().includes(wanted);
+                        anything = anything || matches;
+                        row.classList.toggle('d-none', !ticked && !matches);
+                    });
+
+                // Nothing on this page matches, and the page holds a cut
+                // of the mapping — so ask the server, which searches the
+                // whole of it. Without this the filter can only narrow
+                // what the cut already let through, which is the fault the
+                // picker exists to fix, one level up.
+                //
+                // `_showingSearch` matters as much as the cut: once a
+                // search has replaced the list, what is on screen is one
+                // answer and not the offer, so the next word has to go to
+                // the server whether or not THAT answer was cut. Without
+                // it the panel got stuck inside the previous search — four
+                // rows, and no word could reach past them.
+                if (!wanted) {
+                    if (this._showingSearch) { this._searchServerSide(''); }
+                    return;
+                }
+                if (!anything && (this._offerWasCut || this._showingSearch)) {
+                    this._searchServerSide(wanted);
+                }
+            });
+        }
+
+        const save = document.getElementById('fieldStatsSave');
+        if (save) { save.addEventListener('click', () => this._saveStatsFields()); }
+        const clear = document.getElementById('fieldStatsClear');
+        if (clear) { clear.addEventListener('click', () => this._saveStatsFields([])); }
+
+        // No probe on load. The button is rendered only for somebody who
+        // may save the choice, which the template already knows.
+    }
+
+    //: The last search sent, so a keystroke that arrives while one is in
+    //: flight replaces it rather than racing it: two answers to two
+    //: prefixes can arrive in either order, and the loser paints a list
+    //: for a word nobody is still typing.
+    _searchServerSide(wanted) {
+        this._offerSearch = wanted;
+        clearTimeout(this._offerSearchTimer);
+        this._offerSearchTimer = setTimeout(() => {
+            if (this._offerSearch !== wanted) { return; }
+            this._loadStatsFieldOffer({search: wanted});
+        }, 250);
+        return this._offerSearchTimer;
+    }
+
+    _statsSourceName() {
+        const select = document.getElementById('sourceSelect');
+        return select && select.value ? select.value : '';
+    }
+
+    async _loadStatsFieldOffer(options) {
+        const search = (options && options.search) || '';
+        const options_el = document.getElementById('fieldStatsOptions');
+        const note = document.getElementById('fieldStatsPickerNote');
+        const params = new URLSearchParams();
+        const source = this._statsSourceName();
+        if (source) { params.append('source', source); }
+        if (search) { params.append('q', search); }
+
+        if (options_el) {
+            options_el.innerHTML = '<div class="text-center py-2">' +
+                '<div class="spinner-border spinner-border-sm text-info"></div></div>';
+        }
+        let data;
+        try {
+            const response = await fetch(
+                '/api/field-stats/fields?' + params.toString());
+            data = await response.json();
+            if (!response.ok || data.error) {
+                options_el.innerHTML = '<div class="text-warning" ' +
+                    'style="font-size:.75rem">' + WDash.escapeHtml(
+                        data.error || ('HTTP ' + response.status)) + '</div>';
+                return;
+            }
+        } catch (e) {
+            options_el.innerHTML = '<div class="text-muted" ' +
+                'style="font-size:.75rem">The field list could not be ' +
+                'loaded.</div>';
+            return;
+        }
+
+        // Remembered so the filter box knows whether looking further is
+        // worth a request: on an offer that holds the whole mapping, a word
+        // that matches nothing here matches nothing anywhere.
+        //
+        // Only from the UNSEARCHED offer. A search that happens to answer
+        // completely would otherwise clear the flag and strand the panel
+        // inside its own result.
+        if (!search) { this._offerWasCut = !!data.partial; }
+        this._showingSearch = !!search;
+        this._renderStatsFieldOffer(data);
+        if (note) {
+            const lines = [];
+            if (data.unsupported && data.reason) { lines.push(data.reason); }
+            (data.warnings || []).forEach(w => lines.push(w));
+            if (!data.chosen || !data.chosen.length) {
+                lines.push("Nothing chosen: this source shows the first ten " +
+                           "field names it finds.");
+            }
+            if (search) {
+                lines.unshift(data.fields && data.fields.length
+                    ? 'Showing the ' + data.fields.length + ' field' +
+                      (data.fields.length === 1 ? '' : 's') +
+                      ' matching "' + search + '".'
+                    : 'No field in this source\'s mapping matches "' +
+                      search + '".');
+            }
+            note.innerHTML = lines.map(WDash.escapeHtml).join('<br>');
+        }
+    }
+
+    _renderStatsFieldOffer(data) {
+        const container = document.getElementById('fieldStatsOptions');
+        if (!container) { return; }
+        // Ticks live here and not in the DOM, because a search REPLACES the
+        // list: ticking four fields, searching for a fifth and saving used
+        // to store only the fifth, and the four went without a word. Seeded
+        // from what is stored the first time the panel is filled.
+        if (!this._ticked) { this._ticked = new Set(data.chosen || []); }
+        const chosen = this._ticked;
+        const names = data.fields || [];
+        if (!names.length) {
+            container.innerHTML = '<div class="text-muted" ' +
+                'style="font-size:.75rem">This source maps no field that can ' +
+                'be counted.</div>';
+            return;
+        }
+        // Chosen first, so that the ones in force are visible without
+        // scrolling a list of three hundred.
+        const ordered = names.slice().sort((a, b) => {
+            const picked = (chosen.has(b) ? 1 : 0) - (chosen.has(a) ? 1 : 0);
+            return picked || a.localeCompare(b);
+        });
+        container.innerHTML = ordered.map((name, index) => {
+            const id = 'fs-pick-' + index;
+            return '<div class="form-check" data-field="' +
+                WDash.escapeAttr(name) + '">' +
+                '<input class="form-check-input" type="checkbox" id="' + id +
+                    '"' + (chosen.has(name) ? ' checked' : '') + '>' +
+                '<label class="form-check-label text-truncate d-block" ' +
+                    'for="' + id + '" title="' + WDash.escapeAttr(name) +
+                    '" style="font-size:.75rem">' + WDash.escapeHtml(name) +
+                '</label></div>';
+        }).join('');
+
+        container.querySelectorAll('input[type="checkbox"]').forEach(box => {
+            box.addEventListener('change', () => {
+                const name = box.closest('.form-check').dataset.field;
+                if (box.checked) { this._ticked.add(name); }
+                else { this._ticked.delete(name); }
+            });
+        });
+    }
+
+    async _saveStatsFields(override) {
+        // From the remembered set, not from the rows on screen: a search
+        // has replaced them, and what is on screen is one answer rather
+        // than the whole choice.
+        const chosen = override || Array.from(this._ticked || []);
+        const note = document.getElementById('fieldStatsPickerNote');
+        try {
+            const response = await fetch('/api/field-stats/fields', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({source: this._statsSourceName(),
+                                      fields: chosen}),
+            });
+            const data = await response.json();
+            if (!response.ok || data.error) {
+                if (note) {
+                    note.innerHTML = '<span class="text-warning">' +
+                        WDash.escapeHtml(data.error ||
+                            ('HTTP ' + response.status)) + '</span>';
+                }
+                return;
+            }
+            WDash.showNotification(
+                chosen.length
+                    ? 'The sidebar now counts ' + chosen.length +
+                      (chosen.length === 1 ? ' field.' : ' fields.')
+                    : 'The sidebar shows what this source offers.',
+                'success');
+            document.getElementById('fieldStatsPicker').classList.add('d-none');
+            document.getElementById('fieldStatsPick')
+                .setAttribute('aria-expanded', 'false');
+            this.loadFieldStats();
+        } catch (e) {
+            if (note) {
+                note.innerHTML = '<span class="text-warning">The choice ' +
+                    'could not be saved.</span>';
+            }
+        }
     }
 
     _setupSavedSearches() {

@@ -82,9 +82,48 @@ class LogSource(Source):
         """
         raise NotImplementedError(f"{self.name} does not expose raw documents")
 
-    def field_stats(self, query, scope):
-        """Field distributions in the current query context. Optional."""
+    def field_stats(self, query, scope, fields=None, top=10):
+        """Field distributions in the current query context. Optional.
+
+        `fields` is a {shown name: path to aggregate} map, from
+        `stats_fields` narrowed to somebody's choice. None means the
+        source picks, which is what it did before anybody could choose.
+        """
         raise NotImplementedError(f"{self.name} does not support field statistics")
+
+    def stats_fields(self, scope, matching=None):
+        """Every field `field_stats` COULD report on here. Optional.
+
+        `matching` narrows by substring, and narrows BEFORE any cut: the
+        answer is a search of the whole mapping rather than of the first
+        page of it.
+
+        What the sidebar's picker offers, and a different question from
+        `field_stats` itself: that one answers about ten fields in a query
+        context, this one about the whole mapping with no query at all.
+        A source that reports field statistics at all can answer it.
+
+        A `PartialList`, because the honest answer on a cluster with a
+        thousand dynamic fields is a cut one that says it was cut.
+        """
+        raise NotImplementedError(f"{self.name} does not list its fields")
+
+    def resolve_stats_fields(self, scope, names):
+        """{name: what to aggregate it on} for the names still mapped here.
+
+        Separate from `stats_fields` for two reasons, and each of them was
+        a fault before it was a method.
+
+        The list is CUT and this is not: resolving against the first three
+        hundred names reported every chosen field past the cut as one the
+        cluster had lost — four of them, on a screen that then said so.
+
+        And what a field is called is not always what an aggregation runs
+        on: a `text` field with a `keyword` sub-field is counted on the
+        sub-field, so passing the name through would have asked
+        Elasticsearch to aggregate on analysed text, which it refuses.
+        """
+        raise NotImplementedError(f"{self.name} does not resolve its fields")
 
     def group_by_fields(self, scope, window=None):
         """Neutral field names a panel may GROUP BY here. Optional.

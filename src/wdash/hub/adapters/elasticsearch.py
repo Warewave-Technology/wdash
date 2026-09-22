@@ -730,6 +730,58 @@ class ElasticsearchLogSource(LogSource):
                       f"by name. Narrow this source's index patterns to "
                       f"reach the rest.",))
 
+    #: How many field names the sidebar's picker is offered.
+    #:
+    #: Larger than `GROUP_BY_LIMIT` because this is a checkbox list somebody
+    #: scrolls and filters, not a select they read top to bottom — and
+    #: because the field they are looking for is exactly the one the
+    #: sidebar's own ten-by-name cut left out. Still a cut: the lab's
+    #: eleven-index cluster discovers 1,465 aggregatable fields.
+    STATS_FIELD_LIMIT = 300
+
+    def stats_fields(self, scope, matching=None):
+        """Every field the sidebar could report on, with a warning if cut.
+
+        `matching` narrows by substring BEFORE the cut, which is the whole
+        point of it: a search that only narrowed the first three hundred
+        could not reach the field the cut left out, and that is the fault
+        the picker exists to fix, one level up. Measured on the lab: 439
+        fields, 300 offered, `kubernetes.container_name` in neither the
+        panel nor the picker until the search reached past the cut.
+        """
+        targets = self.containers(scope)
+        if not targets:
+            # A round trip saved, not a guard: the discovery below answers
+            # the same empty list for no targets, because
+            # `_in_url_sized_batches` yields no batches for an empty list
+            # and there is then no mapping to walk.
+            return PartialList([])
+        discovered = self._aggregatable_fields(list(targets), max_fields=10000)
+        names = list(discovered)
+        if matching:
+            wanted = str(matching).strip().lower()
+            names = [name for name in names if wanted in name.lower()]
+        if len(names) <= self.STATS_FIELD_LIMIT:
+            return PartialList(names)
+        return PartialList(
+            names[:self.STATS_FIELD_LIMIT], partial=True,
+            warnings=(f"This source maps {len(names)} fields that can be "
+                      f"counted; these are the first "
+                      f"{self.STATS_FIELD_LIMIT} by name. Narrow its index "
+                      f"patterns to reach the rest.",))
+
+    def resolve_stats_fields(self, scope, names):
+        """{name: path to aggregate} for the names this source still maps.
+
+        Uncut, unlike `stats_fields`: the cut is for a list somebody reads,
+        and a chosen field past it is still a field this cluster has.
+        """
+        targets = self.containers(scope)
+        if not targets:
+            return {}
+        discovered = self._aggregatable_fields(list(targets), max_fields=10000)
+        return {name: discovered[name] for name in names if name in discovered}
+
     def field_stats(self, query, scope, fields=None, top=10):
         targets = self._targets(query, scope)
         if not targets:

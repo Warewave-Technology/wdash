@@ -496,6 +496,32 @@ class WhatSerilogWritesTest(unittest.TestCase):
         for field in ("@m", "@mt", "@l", "@tr"):
             self.assertIn(field, asked)
 
+    def test_and_for_the_key_that_says_it_is_the_compact_format(self):
+        """`@t`, which is not about the clock at all here.
+
+        It is what `_is_clef` detects on, and a list asks for only the
+        fields in this table — so a row arrived carrying `@m` and `@l` and
+        no `@t`, the format went unrecognised, and the rule that an absent
+        `@l` means Information never ran. Measured against a real cluster
+        after the rest of this was written: UNSPECIFIED in the list, INFO
+        when the same record was opened.
+        """
+        self.assertIn("@t", source_fields(DEFAULT_LOG_FIELDS))
+
+    def test_a_row_and_the_record_it_lists_agree_about_the_level(self):
+        """The fault above, stated as what it costs rather than as which
+        field was missing. This is the invariant the whole projection list
+        exists for."""
+        whole = serilog(**{"@l": None})
+        asked = source_fields(DEFAULT_LOG_FIELDS)
+        # As Elasticsearch projects it: `kubernetes.container_name` in the
+        # list keeps the `kubernetes` object, with that key inside it.
+        narrowed = {key: value for key, value in whole.items()
+                    if key in asked or any(f.startswith(key + ".")
+                                           for f in asked)}
+        self.assertEqual(str(record(narrowed).severity),
+                         str(record(whole).severity))
+
 
 class WhereTheNeutralNamesLiveTest(unittest.TestCase):
     """The other half of reading a cluster: a column, a filter and an

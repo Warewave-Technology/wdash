@@ -611,6 +611,59 @@ def _stats_failed(source, exc):
                     "error_type": "backend_error"}), 503
 
 
+#: Where the sidebar's chosen fields live: one setting holding
+#: {source name: [field, ...]}.
+#:
+#: One row rather than one per source, because it is read on every search
+#: and a dict is one query whatever the number of sources. In `settings`
+#: rather than in each source's own config, so that choosing fields does not
+#: rewrite a row holding credentials and index patterns — and so a source
+#: can be re-pointed without the choice following it into a cluster where
+#: none of those names exist.
+STATS_FIELDS_SETTING = "logs.stats_fields"
+
+#: How many a source may be asked to count at once. Each one is a terms
+#: aggregation in the same request, and the sidebar is a sidebar.
+MAX_STATS_FIELDS = 40
+
+
+def _chosen_stats_fields(store, source_name):
+    """The fields somebody chose for this source, or () for "you decide"."""
+    chosen = store.settings.get(STATS_FIELDS_SETTING) or {}
+    if not isinstance(chosen, dict):
+        return ()
+    return tuple(chosen.get(source_name) or ())
+
+
+def _gone(names):
+    """What to say about chosen fields this cluster no longer maps."""
+    return (f"{', '.join(sorted(names))} "
+            f"{'is' if len(names) == 1 else 'are'} no longer mapped by this "
+            f"source, so nothing is counted for "
+            f"{'it' if len(names) == 1 else 'them'}.")
+
+
+def _resolve_chosen(source, scope, chosen):
+    """({shown name: path}, [names this cluster no longer has]).
+
+    A name that has gone is NAMED rather than dropped. A mapping changes —
+    an index rolls over, a source is re-pointed — and a picker that quietly
+    stops showing a field somebody chose is a panel that got shorter for no
+    reason anybody can see.
+
+    Asked of `resolve_stats_fields` and not of the offer: the offer is cut
+    for display, so resolving against it reported every field past the cut
+    as one the cluster had lost — and the answer carries the aggregation
+    PATH, which for a text field is its `keyword` sub-field rather than its
+    own name.
+    """
+    try:
+        resolved = source.resolve_stats_fields(scope, chosen)
+    except NotImplementedError:
+        return None, []
+    return resolved, [name for name in chosen if name not in resolved]
+
+
 @log_bp.route("/api/field-stats")
 @login_required
 def api_field_stats():
@@ -662,15 +715,36 @@ def api_field_stats():
     else:
         window = TimeWindow.between(parsed_start, parsed_end)
 
+    chosen = _chosen_stats_fields(current_app.store, source.name)
+    missing = []
+    fields = None
+    if chosen:
+        try:
+            fields, missing = _resolve_chosen(source, scope, chosen)
+        except Exception as exc:
+            return _stats_failed(source, exc)
+        if fields is not None and not fields:
+            # Every chosen field has gone. Answering with the source's own
+            # ten would look like the choice was never saved.
+            return jsonify({"fields": [], "chosen": list(chosen),
+                            "partial": True,
+                            "warnings": [_gone(missing)]})
+
     try:
         stats = source.field_stats(
-            LogQuery(window=window, text=request.args.get("q", "*") or "*"), scope)
+            LogQuery(window=window, text=request.args.get("q", "*") or "*"),
+            scope, **({"fields": fields} if fields else {}))
     except QueryError:
         return jsonify({"fields": []})
     except Exception as exc:
         return _stats_failed(source, exc)
 
     payload = {"fields": [stat.to_dict() for stat in stats]}
+    if chosen:
+        payload["chosen"] = list(chosen)
+    if missing:
+        payload["partial"] = True
+        payload.setdefault("warnings", []).append(_gone(missing))
     # Members of a merged view whose statistics could not be read: the
     # counts are the others', and the sidebar says whose are missing.
     failed = list(getattr(stats, "failed", ()) or ())
@@ -685,7 +759,7 @@ def api_field_stats():
     warnings = list(getattr(stats, "warnings", ()) or ())
     if warnings:
         payload["partial"] = True
-        payload["warnings"] = warnings
+        payload["warnings"] = payload.get("warnings", []) + warnings
 
     # Which members of a merged view could not contribute. An answer from a
     # subset is fine; an answer from a subset that does not say so is the
@@ -700,6 +774,122 @@ def api_field_stats():
             payload["counted_sources"] = can
 
     return jsonify(payload)
+
+
+@log_bp.route("/api/field-stats/fields", methods=["GET"])
+@login_required
+def api_stats_fields():
+    """What the picker offers, and what is chosen now.
+
+    Readable by anybody who can read logs — the list itself is the field
+    NAMES of a source they are already searching — and writable below by
+    an administrator, because which fields a cluster's sidebar shows is a
+    property of the deployment rather than of whoever opened the page.
+    """
+    if not current_user.has_permission("logs:read"):
+        return jsonify({"error": "Access denied",
+                        "error_type": "permission_denied"}), 403
+    try:
+        source = _logs(request.args.get("source"))
+    except SourceMissing as exc:
+        return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
+    if source is None:
+        return _no_source()
+
+    chosen = list(_chosen_stats_fields(current_app.store, source.name))
+    editable = current_user.has_permission("system:admin")
+    if not source.supports(Capability.FIELD_STATS):
+        return jsonify({"fields": [], "chosen": chosen, "editable": editable,
+                        "unsupported": True,
+                        "reason": f"{source.name} does not provide field "
+                                  f"statistics."})
+    # Searched on the SERVER when asked, because the offer is cut: a filter
+    # that only narrows what was already sent cannot reach the field the cut
+    # left out, which is the same failure as the sidebar's own ten-by-name
+    # one level up. Measured on the lab: 439 fields, 300 offered, and
+    # `kubernetes.container_name` in neither the panel nor the picker.
+    wanted = (request.args.get("q") or "").strip()
+    try:
+        available = source.stats_fields(_scope(), matching=wanted or None)
+    except NotImplementedError:
+        # Answers field statistics but cannot list what it could count: a
+        # picker with nothing to pick from, said as that rather than drawn
+        # as an empty list.
+        return jsonify({"fields": [], "chosen": chosen, "editable": editable,
+                        "unsupported": True,
+                        "reason": f"{source.name} does not list the fields "
+                                  f"it can count."})
+    except Exception as exc:
+        return _stats_failed(source, exc)
+
+    warnings = list(getattr(available, "warnings", ()) or ())
+    payload = {"fields": list(available), "chosen": chosen,
+               "editable": editable, "source": source.name}
+    # A chosen field the mapping no longer has is still shown as chosen, so
+    # unticking it is possible. Silently dropping it makes a stored choice
+    # nobody can see and nobody can clear. Not while searching, though: a
+    # search that always returned the chosen ones is a search whose answer
+    # does not match what was asked.
+    if not wanted:
+        payload["fields"] = sorted(set(payload["fields"]) | set(chosen))
+    if warnings:
+        payload["partial"] = True
+        payload["warnings"] = warnings
+    return jsonify(payload)
+
+
+@log_bp.route("/api/field-stats/fields", methods=["POST"])
+@login_required
+def api_save_stats_fields():
+    """Choose which fields the sidebar counts for one source.
+
+    `system:admin`, like every other thing that changes what a source does.
+    An empty list means "you decide" and removes the entry rather than
+    storing an empty one, so that a cleared choice and a never-made one are
+    the same state instead of two that behave differently.
+    """
+    if not current_user.has_permission("system:admin"):
+        return jsonify({"error": "Access denied",
+                        "error_type": "permission_denied"}), 403
+    body = request.get_json(silent=True) or {}
+    # Resolved, not taken from the body. A page showing ONE source renders
+    # no source select, so the body names none — and the first version
+    # refused that with "No source named." on the commonest installation
+    # there is. `_logs` answers the default source for an empty name, which
+    # is what every read on this page already does.
+    try:
+        source = _logs((body.get("source") or "").strip())
+    except SourceMissing as exc:
+        return jsonify({"error": str(exc), "error_type": "source_missing"}), 400
+    if source is None:
+        return jsonify({"error": "No log source is configured."}), 400
+    name = source.name
+    fields = body.get("fields")
+    if not isinstance(fields, list) or any(not isinstance(f, str)
+                                           for f in fields):
+        return jsonify({"error": "fields must be a list of field names."}), 400
+    # Bounded, and the bound is the offer's: a body with ten thousand names
+    # in it is a request to run ten thousand aggregations on every search.
+    if len(fields) > MAX_STATS_FIELDS:
+        return jsonify({"error": f"At most {MAX_STATS_FIELDS} fields can be "
+                                 f"counted at once."}), 400
+
+    store = current_app.store
+    chosen = store.settings.get(STATS_FIELDS_SETTING) or {}
+    if not isinstance(chosen, dict):
+        chosen = {}
+    cleaned = []
+    for field in fields:
+        field = field.strip()
+        if field and field not in cleaned:
+            cleaned.append(field)
+    if cleaned:
+        chosen[name] = cleaned
+    else:
+        chosen.pop(name, None)
+    store.settings.set(STATS_FIELDS_SETTING, chosen,
+                       updated_by=current_user.username)
+    return jsonify({"source": name, "chosen": cleaned})
 
 
 @log_bp.route("/api/indices")
