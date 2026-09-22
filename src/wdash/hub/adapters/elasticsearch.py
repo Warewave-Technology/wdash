@@ -156,10 +156,58 @@ def _as_keywords(body):
     return {_BODY_TO_KEYWORD.get(key, key): value for key, value in body.items()}
 
 
+#: How long the joined index list may be before `_search` stops putting it in
+#: the URL.
+#:
+#: Elasticsearch's `http.max_initial_line_length` defaults to 4kb, and the
+#: index names go in the PATH: `GET /a,b,c,…/_search`. A cluster with a few
+#: hundred indices blows that on the first search — measured against a real
+#: one with 563 of them, the request line came to 19,039 characters and every
+#: search failed with
+#:
+#:     BadRequestError(400, 'too_long_http_line_exception',
+#:                     'An HTTP line is larger than 4096 bytes.')
+#:
+#: which names the transport and not the cause, on a screen that had just
+#: said "Available: 563 indices".
+#:
+#: 3,500 rather than 4,096: the line also carries the verb, `/_search`, the
+#: query string — `?timeout=15s` and friends — and `HTTP/1.1`. The margin is
+#: for those, and it is deliberately generous because the cost of being wrong
+#: is an error message about HTTP lines.
+MAX_INDICES_IN_URL = 3500
+
+
 def _search(es, indices, body, **options):
-    """One search. `indices` is a list; the client wants a string."""
+    """One search. `indices` is a list; the client wants a string.
+
+    Past `MAX_INDICES_IN_URL` the same search goes as a one-request
+    `_msearch`, which carries the index list in the BODY — the limit is on
+    the request LINE, so moving the names off it is the whole fix. One round
+    trip either way.
+
+    Not "use a wildcard instead": the list is what a role's patterns resolved
+    to, and collapsing it back to a pattern would search indices the role was
+    not granted. The transport is the thing that cannot carry this, so the
+    transport is what changes.
+    """
     index = ",".join(indices) if not isinstance(indices, str) else indices
-    return es.search(index=index, **_as_keywords(body), **options)
+    if len(index) <= MAX_INDICES_IN_URL:
+        return es.search(index=index, **_as_keywords(body), **options)
+
+    payload = [{"index": index}, body]
+    response = es.msearch(searches=payload)
+    answers = response.get("responses") or []
+    if not answers:
+        raise RuntimeError(
+            f"_msearch answered nothing for {len(indices)} indices")
+    first = answers[0]
+    # A per-query error comes back INSIDE a 200 here, where `es.search` would
+    # have raised. Raising keeps the two paths the same shape for every
+    # caller — none of which knows which transport it got.
+    if isinstance(first, dict) and first.get("error"):
+        raise RuntimeError(str(first["error"]))
+    return first
 
 
 def _multi_search(es, requests, timeout="15s", reasons=None):

@@ -130,6 +130,54 @@ def token():
     return value
 
 
+def _known_to_be_plain_http(request, proxies=0):
+    """Can we POSITIVELY tell the browser reached this over `http`?
+
+    The question is deliberately this way round rather than "did it arrive
+    securely", and the difference is the whole design. Asked the other way,
+    a proxy that terminates TLS and does not set `X-Forwarded-Proto` —
+    which is a real and common configuration — would look insecure, and
+    `Strict-Transport-Security` would silently stop being sent for a
+    deployment that is correctly behind TLS. That trades an inert problem
+    for a real one: RFC 6797 tells a browser to IGNORE an STS header
+    received over insecure transport, so the header WDash used to send on
+    plain http was most likely doing nothing, while withholding it from a
+    TLS deployment removes protection that was working.
+
+    So the default stays "send it", and only a header that says `http` in
+    so many words withholds it.
+
+    `request.is_secure` is not the question either: behind an ingress that
+    terminates TLS, the connection this process accepted is plain http on
+    every request, including the ones a browser made over https.
+
+    `X-Forwarded-Proto` is counted in from the RIGHT through the same
+    `TRUSTED_PROXY_COUNT` the client address is read with, and for the same
+    reason: the header is written by whatever spoke to the proxy, so a value
+    trusted without knowing the depth is a value the client chose. At depth
+    0 nothing is in front of this process, the header is whatever a client
+    typed, and it is ignored.
+    """
+    if request.is_secure:
+        return False
+    try:
+        depth = int(proxies or 0)
+    except (TypeError, ValueError):
+        depth = 0
+    if depth <= 0:
+        return False
+    forwarded = [value.strip().lower() for value
+                 in (request.headers.get("X-Forwarded-Proto") or "").split(",")
+                 if value.strip()]
+    if not forwarded:
+        # No header at all: this proxy does not set one, and silence is not
+        # evidence of `http`.
+        return False
+    # From the right, so a client that prepends its own value cannot move
+    # the one the nearest trusted proxy wrote.
+    return forwarded[-min(depth, len(forwarded))] != "https"
+
+
 def submitted(request):
     """The token this request carries, from wherever it put it."""
     return (request.form.get(FIELD)
@@ -177,6 +225,17 @@ def install_csrf(app):
                                                          str(given)):
             return None
 
+        # NO cookie at all, rather than a stale one. By the time a browser
+        # POSTs a form here it has a session cookie; none arriving means it
+        # never came back. With `SESSION_COOKIE_SECURE` on, the overwhelming
+        # cause is that the cookie is marked `Secure` and the page was
+        # reached over plain http — behind an ingress with no usable
+        # certificate, say. Then every form fails, the sign-in form
+        # included, and the page said "a page left open while the session
+        # ended", which is a cause the reader does not have.
+        cookieless = not request.cookies and app.config.get(
+            "SESSION_COOKIE_SECURE")
+
         # Logged, not audited. An audit row is a write, and this is the one
         # refusal an unauthenticated stranger can produce at will — a rule
         # that hands them a row per request is a way to fill the table.
@@ -196,7 +255,7 @@ def install_csrf(app):
             return jsonify({"error": "This request did not carry a valid "
                                      "security token. Reload the page and "
                                      "try again."}), 400
-        return render_template("csrf.html"), 400
+        return render_template("csrf.html", cookieless=cookieless), 400
 
 
 def install(app):
@@ -208,6 +267,8 @@ def install(app):
 
     @app.after_request
     def _headers(response):
+        from flask import request
+
         response.headers.setdefault("Content-Security-Policy", _policy(nonce()))
 
         # Redundant with frame-ancestors for current browsers, and the reason
@@ -227,9 +288,20 @@ def install(app):
             "Permissions-Policy",
             "geolocation=(), microphone=(), camera=(), payment=(), usb=()")
 
-        # Only when the deployment says it is behind TLS. Sent otherwise, it
-        # would lock a plain-HTTP installation out of its own hostname.
-        if app.config.get("SESSION_COOKIE_SECURE"):
+        # When the deployment says it is behind TLS, and this request is not
+        # one we can POSITIVELY tell arrived over plain http. A pod behind
+        # an ingress with no usable certificate answered http with a year of
+        # `includeSubDomains`, which is a header that has no business on
+        # that response — and, per RFC 6797, one the browser ignores there
+        # anyway.
+        #
+        # Withheld only on positive evidence, never on silence: a proxy that
+        # terminates TLS and sets no `X-Forwarded-Proto` is a real and
+        # common configuration, and reading its silence as "insecure" would
+        # stop sending HSTS to a deployment that is correctly behind TLS.
+        # That is protection lost to fix something inert.
+        if app.config.get("SESSION_COOKIE_SECURE") and not _known_to_be_plain_http(
+                request, app.config.get("TRUSTED_PROXY_COUNT", 0)):
             response.headers.setdefault(
                 "Strict-Transport-Security",
                 "max-age=31536000; includeSubDomains")

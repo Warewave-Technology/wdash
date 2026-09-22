@@ -16,12 +16,33 @@
       Every form here carries a token tied to your session, and this one
       arrived without it or with one that has expired. Nothing was changed.
     </p>
+    {% if cookieless %}
+    {# No cookie arrived AT ALL, and the session cookie is marked Secure. The
+       ordinary cause below cannot produce that — a stale session still sends
+       its cookie — so offering it here would be telling somebody to reload a
+       page that is going to fail again, for ever. #}
+    <p class="mb-2" style="font-size:.85rem">
+      <strong>No cookie arrived with that request at all</strong>, and this
+      installation marks its session cookie <code>Secure</code>, which means a
+      browser only sends it back over <code>https</code>.
+    </p>
+    <p class="text-muted" style="font-size:.85rem">
+      If you reached this page over <code>http</code> — behind an ingress with
+      no certificate the browser accepts, for instance — that is the cause,
+      and every form here fails the same way, the sign-in form included.
+      Either serve it over TLS with a certificate the browser trusts, or set
+      <code>SESSION_COOKIE_SECURE=false</code> if this installation is
+      somewhere a session cookie may travel in clear. A browser with cookies
+      blocked for this site looks identical from here.
+    </p>
+    {% else %}
     <p class="text-muted" style="font-size:.85rem">
       The ordinary cause is a page left open while the session behind it
       ended or was signed in again. Go back, reload the page, and do it
       once more. If a form on this site does it every time, that is a fault
       worth reporting.
     </p>
+    {% endif %}
     <a class="btn btn-sm btn-primary" href="{{ url_for('index') }}">
       <i class="fas fa-house"></i> Back to WDash
     </a>
