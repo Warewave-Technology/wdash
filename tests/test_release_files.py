@@ -28,6 +28,28 @@ def _read(*parts):
         return handle.read()
 
 
+def heading_complaint(text, version, tagged, when):
+    """Why the changelog's heading for `version` is wrong, or None.
+
+    A function rather than four assertions inside a test, because the
+    interesting states are the ones this repository is not in: untagged, or
+    tagged under a heading that still says "unreleased". A rule that can
+    only be asked about the state you are already in is a rule nothing can
+    check.
+    """
+    heading = next((line for line in text.splitlines()
+                    if line.startswith(f"## {version}")), None)
+    if heading is None:
+        return f"no heading for {version}"
+    if not tagged:
+        return None          # genuinely unreleased; the word is right
+    if "unreleased" in heading.lower():
+        return f"v{version} is tagged, so it is released"
+    if when not in heading:
+        return f"the heading does not carry v{version}'s date, {when}"
+    return None
+
+
 class TheChangelogTest(unittest.TestCase):
     def setUp(self):
         self.text = _read("CHANGELOG.md")
@@ -39,6 +61,86 @@ class TheChangelogTest(unittest.TestCase):
             self.text,
             re.compile(rf"^## {re.escape(__version__)}\b", re.M),
             "no section for the current version")
+
+    def test_a_version_that_has_been_tagged_carries_its_date(self):
+        """`## 3.0.0 — unreleased` shipped, tagged and published like that.
+
+        Nobody notices: the heading is one line above the part people came
+        to read, and it is right for the whole of development — which is
+        why this asks the only thing that distinguishes the two states.
+        A tag exists or it does not, and the answer is in the repository
+        rather than in somebody's memory of whether they pushed.
+
+        Skipped where there is no git — a tarball, a Docker build context —
+        because then the question genuinely cannot be asked, rather than
+        being answered "no tag, so the word is fine".
+        """
+        tag = f"v{__version__}"
+        found = subprocess.run(["git", "tag", "--list", tag], cwd=ROOT,
+                               capture_output=True, text=True)
+        if found.returncode != 0:
+            self.skipTest("not a git checkout")
+        tagged = bool(found.stdout.strip())
+        # Asked a second way, with a different command, because a test that
+        # reads git and then stops using the answer passes for a reason that
+        # has nothing to do with the tag. Mutating this line to `False` made
+        # everything below vacuous and nothing noticed.
+        exists = subprocess.run(["git", "rev-parse", "--verify", "--quiet",
+                                 f"{tag}^{{commit}}"], cwd=ROOT,
+                                capture_output=True, text=True)
+        self.assertEqual(tagged, exists.returncode == 0,
+                         f"`git tag --list {tag}` and `git rev-parse {tag}` "
+                         f"disagree about whether it exists")
+
+        when = ""
+        if tagged:
+            dated = subprocess.run(
+                ["git", "log", "-1", "--format=%ad",
+                 "--date=format:%Y-%m-%d", tag],
+                cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(dated.returncode, 0, dated.stderr)
+            when = dated.stdout.strip()
+
+        self.assertIsNone(
+            heading_complaint(self.text, __version__, tagged, when))
+
+    def test_it_says_which_state_it_is_in(self):
+        """The rule above, driven both ways.
+
+        Asking git and then asserting the answer is fine cannot see a check
+        that stopped checking: on this repository the tag exists and the
+        heading is right, so "pass" is correct AND is what a rule that
+        returned early would produce. Two mutations proved exactly that —
+        one made the check return before it checked, one deleted the branch
+        that lets an untagged version say "unreleased", and both lived.
+
+        So the decision is a function and this drives its four corners.
+        """
+        released = "## 9.9.9 — 2026-09-22\n\nbody\n"
+        pending = "## 9.9.9 — unreleased\n\nbody\n"
+        cases = (
+            # text, tagged, date, what it should say — or None for nothing
+            (released, True, "2026-09-22", None),
+            (pending, False, "", None),
+            (pending, True, "2026-09-22", "is tagged, so it is released"),
+            (released, True, "2026-01-01", "does not carry"),
+            ("## 9.9.9\n\nbody\n", True, "2026-09-22", "does not carry"),
+            ("## 1.0.0 — 2020-01-01\n", True, "2026-09-22", "no heading"),
+        )
+        for text, tagged, when, expected in cases:
+            with self.subTest(heading=text.splitlines()[0], tagged=tagged):
+                said = heading_complaint(text, "9.9.9", tagged, when)
+                if expected is None:
+                    self.assertIsNone(said)
+                else:
+                    # The WORDING, not just that it complained. Two of these
+                    # states are caught by the date check whatever else the
+                    # rule does, so without this the branch that tells you
+                    # "it is tagged, so it is released" — the one sentence
+                    # that says what to do — can be deleted and nothing
+                    # fails.
+                    self.assertIsNotNone(said, "it said nothing")
+                    self.assertIn(expected, said)
 
     def test_the_newest_entry_is_the_current_version(self):
         """Entries go at the top. One added under an older heading is one

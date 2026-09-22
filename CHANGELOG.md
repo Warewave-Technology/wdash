@@ -18,9 +18,11 @@ Three rules the sections encode:
   answer is not here at all.
 
 Versions follow semantic versioning. The one number lives in
-`src/wdash/__init__.py`; `/health` reports it on a running instance.
+`src/wdash/__init__.py`; `/health` reports it on a running instance. A
+heading carries the date its tag was made, which is the one date that is
+recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
-## 3.0.0 — unreleased
+## 3.0.0 — 2026-09-22
 
 The first release of this line, and a major one: a deployment that
 configured its cluster or its identity provider through environment
