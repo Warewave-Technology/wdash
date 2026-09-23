@@ -201,9 +201,20 @@ JavaScript is served under this release's URL and cached for a year. It
 looks like nothing: no error, no warning, and a page whose controls quietly
 belong to an older version. Reported exactly once, that way.
 
-A browser now says so. Open the console on any page: a mismatch prints
-which release the page is and which the JavaScript is, and
-`window.WDASH_BUNDLE_VERSION` answers the second one at any time.
+A browser says so: open the console on any page and a mismatch prints which
+release the page is and which the JavaScript is. From a terminal, the same
+question is two lines and needs no browser at all:
+
+```bash
+curl -s https://wdash.example.com/livez
+curl -s https://wdash.example.com/static/js/wdash.min.js \
+    | grep -o 'WDASH_BUNDLE_VERSION="[^"]*"'
+```
+
+The first is the application container, the second is whatever is actually
+serving `/static` — the nginx sidecar, and anything caching in front of it.
+They have to say the same release. If the second prints nothing at all, the
+file is from before 3.1.5, which is where the stamp starts.
 
 The evaluator is a **separate process, in the same pod**. Separate because
 evaluation has to run when nothing is arriving — an agent going completely
