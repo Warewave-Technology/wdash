@@ -463,13 +463,44 @@ class WhatSerilogWritesTest(unittest.TestCase):
         self.assertNotIn("@tr", attributes)
         self.assertNotIn("@sp", attributes)
 
-    def test_a_lone_at_t_is_not_the_compact_format(self):
-        """`@t` on its own is too weak to claim a shape, for the same
-        reason `log` on its own is: the rule it would switch on — an absent
-        `@l` means Information — is a strong claim to make about a document
-        that carries no other sign of the format."""
+    def test_a_lone_key_is_not_the_compact_format(self):
+        """One key is a coincidence somebody else's index can have. The
+        rule it would switch on — an absent `@l` means Information — is a
+        strong claim to make about a document carrying one field that
+        happens to start with a symbol."""
+        for key, value in (("@t", "2026-09-22T18:39:52.290Z"),
+                           ("@m", "a line"), ("@i", "9fb525ae")):
+            with self.subTest(key=key):
+                read = record({"kubernetes": {"container_name": "x"},
+                               "log": "a line", key: value})
+                self.assertEqual(str(read.severity), "UNSPECIFIED")
+
+    def test_but_two_of_them_are_a_naming_scheme(self):
         read = record({"kubernetes": {"container_name": "x"},
-                       "log": "a line", "@t": "2026-09-22T18:39:52.290Z"})
+                       "@m": "a line", "@i": "9fb525ae"})
+        self.assertEqual(str(read.severity), "INFO")
+
+    def test_the_clock_is_not_one_of_the_two_it_has_to_be(self):
+        """Reported from a real cluster on 3.1.2, which had this fix and
+        still read UNSPECIFIED: fluent-bit's JSON parser CONSUMES its time
+        key into the record's timestamp and drops it from the document
+        unless `Time_Keep On` is set, and `Off` is the default. So the
+        commonest way to ship these logs is the one that leaves no `@t`,
+        and requiring it meant the rule never ran where it was needed."""
+        read = record({"@timestamp": "2026-09-23T05:46:56.368Z",
+                       "@m": "rpc.system: signalr", "@i": "d106fcee",
+                       "kubernetes": {"container_name": "robot-master-service",
+                                      "host": "10.0.40.99"}})
+        self.assertEqual(str(read.severity), "INFO")
+        self.assertEqual(read.body, "rpc.system: signalr")
+        self.assertEqual(read.service, "robot-master-service")
+
+    def test_a_trace_context_alone_is_not_an_event(self):
+        """`@tr` and `@sp` are attached to an event rather than being one.
+        Two of them would otherwise make an Information line out of a
+        document whose only claim is a trace id."""
+        read = record({"kubernetes": {"container_name": "x"},
+                       "log": "a line", "@tr": "abc", "@sp": "def"})
         self.assertEqual(str(read.severity), "UNSPECIFIED")
 
     def test_a_document_with_neither_has_no_timestamp_rather_than_a_crash(self):

@@ -29,6 +29,17 @@ recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 - **Nothing.** The log sidebar chooses its ten fields differently; if you
   picked fields in 3.1.2, yours are untouched.
 
+### Fixed
+
+- **Serilog levels still read `UNSPECIFIED` where the shipper drops `@t`.**
+  3.1.2 reads an absent `@l` as Information, which is the format's rule —
+  but it only recognised the format on a document carrying `@t`, and
+  fluent-bit's JSON parser CONSUMES its time key into the record's
+  timestamp and removes it unless `Time_Keep On` is set. `Off` is the
+  default, so the commonest way to ship these logs is the one where the
+  rule never ran. Two of the format's own keys are enough now — `@m`
+  beside `@i` is a naming scheme, not a coincidence.
+
 ### Changed
 
 - **The log sidebar shows the ten fields that account for most of what you

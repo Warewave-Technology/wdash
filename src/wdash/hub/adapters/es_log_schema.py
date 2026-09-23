@@ -150,8 +150,26 @@ class OtelLogSchema(LogSchema):
 _CLEF_TIME = "@t"
 _CLEF_BODY = ("@m", "@mt")
 _CLEF_SEVERITY = ("@l",)
-#: `@t` beside any one of these. `@t` alone is too weak to claim a shape.
-_CLEF_MARKERS = ("@m", "@mt", "@l", "@i", "@x", "@r")
+
+#: The format's own keys. TWO of them make a document one of its events.
+#:
+#: Not "`@t` and one other", which is what this said first and what a real
+#: cluster then disproved: fluent-bit's JSON parser CONSUMES its time key
+#: into the record's timestamp and drops it from the document unless
+#: `Time_Keep On` is set, and `Off` is the default. So the commonest way to
+#: ship these logs is the one that leaves no `@t` at all — and every
+#: informational line went on reading UNSPECIFIED, which is the fault this
+#: whole rule exists to prevent, surviving the fix for it.
+#:
+#: Two rather than one because one is a coincidence somebody else's index
+#: can have and two is not: `@m` beside `@i`, or `@l` beside `@mt`, is a
+#: naming scheme rather than a field that happens to start with a symbol.
+#:
+#: `@tr` and `@sp` are deliberately NOT here. They are Serilog's tracing
+#: context, attached to an event rather than being one, and a document
+#: carrying only those two would be called an Information line on the
+#: strength of a trace id.
+_CLEF_KEYS = ("@t", "@m", "@mt", "@l", "@i", "@x", "@r")
 
 #: What CLEF means by leaving `@l` out, and it is not "no level": the format
 #: omits the key FOR Information and only for Information. That is why the
@@ -167,8 +185,7 @@ def _is_clef(source):
     Asked of a DOCUMENT rather than a mapping, because the rule it decides —
     an absent `@l` means Information — is a statement about one event.
     """
-    return _CLEF_TIME in source and any(name in source
-                                        for name in _CLEF_MARKERS)
+    return sum(1 for name in _CLEF_KEYS if name in source) >= 2
 
 
 #: What a container record maps onto the model. Everything else — `stream`,
