@@ -554,6 +554,98 @@ class WhatSerilogWritesTest(unittest.TestCase):
                          str(record(whole).severity))
 
 
+class ARowReadsLikeTheRecordItListsTest(unittest.TestCase):
+    """The invariant `SCHEMA_FIELDS` exists for, asked of every shape.
+
+    The list view asks Elasticsearch for a SLICE of each document, and
+    detection reads keys that are nobody's `body` or `severity`. A key left
+    out of the projection is a row that reads differently from the record
+    behind it — which is the fault this whole module exists to prevent, one
+    level down, and it has happened three times:
+
+      * `severity_number` and `body_structured`, on the collector's shape;
+      * `@t`, on the compact format;
+      * `@i`, on the compact format again, once fluent-bit's parser had
+        deleted `@t` from the document as well.
+
+    Each was found on a real cluster, by a person reading a screen. This
+    asks the question the projection is for, of every shape at once, so the
+    fourth is found here instead.
+    """
+
+    #: One document per shape WDash reads, each as its shipper writes it.
+    SHAPES = {
+        "flat": {"@timestamp": "2026-09-23T06:53:23Z", "message": "hello",
+                 "level": "warn", "service": "api", "host": "web-1"},
+        "collector": {"@timestamp": "2026-09-23T06:53:23Z",
+                      "body_text": "hello", "severity_number": 17,
+                      "resource": {"attributes": {"service.name": "api"}}},
+        "collector, structured body": {
+            "@timestamp": "2026-09-23T06:53:23Z", "severity_number": 9,
+            "body_structured": {"msg": "hello"},
+            "resource": {"attributes": {"service.name": "api"}}},
+        "container": {"@timestamp": "2026-09-23T06:53:23Z",
+                      "log": "I0923 registry.go:399] ignoring", "stream": "stderr",
+                      "kubernetes": {"container_name": "node-agent",
+                                     "host": "10.0.40.99"}},
+        "container, a level parsed out": {
+            "@timestamp": "2026-09-23T06:53:23Z", "log": "boom",
+            "level": "error", "stream": "stderr",
+            "kubernetes": {"container_name": "node-agent"}},
+        "compact, with its clock": {
+            "@timestamp": "2026-09-23T06:53:23Z",
+            "@t": "2026-09-23T06:53:23.9Z", "@m": "served", "@i": "d106fcee",
+            "kubernetes": {"container_name": "content-service"}},
+        "compact, clock deleted by the shipper": {
+            "@timestamp": "2026-09-23T06:53:23Z", "@m": "served",
+            "@i": "d106fcee",
+            "kubernetes": {"container_name": "robot-data-service"}},
+        "compact, a level of its own": {
+            "@timestamp": "2026-09-23T06:53:23Z", "@m": "no route",
+            "@l": "Warning", "@i": "d106fcee",
+            "kubernetes": {"container_name": "content-service"}},
+        "compact, a template and an exception": {
+            "@timestamp": "2026-09-23T06:53:23Z",
+            "@mt": "failed for {Code}", "@x": "System.Exception: ...",
+            "kubernetes": {"container_name": "content-service"}},
+    }
+
+    def projected(self, document):
+        """The document as Elasticsearch returns it for a list row.
+
+        A `_source` naming `kubernetes.container_name` keeps the
+        `kubernetes` object with that key inside it, which is why this is
+        not a plain dictionary filter.
+        """
+        asked = source_fields(DEFAULT_LOG_FIELDS)
+        return {key: value for key, value in document.items()
+                if key in asked or any(name.startswith(key + ".")
+                                       for name in asked)}
+
+    def read(self, document):
+        record = schema_for_document(document).to_record(
+            {"_index": "i", "_id": "a", "_source": document},
+            "elasticsearch")
+        return (schema_for_document(document).name, str(record.severity),
+                record.body, record.service)
+
+    def test_every_shape_reads_the_same_either_way(self):
+        for name, document in self.SHAPES.items():
+            with self.subTest(shape=name):
+                self.assertEqual(self.read(self.projected(document)),
+                                 self.read(document))
+
+    def test_and_the_shapes_here_are_not_all_read_the_same_way(self):
+        """A guard on the guard: if every document above happened to read
+        as UNSPECIFIED with an empty body, the check would pass while
+        measuring nothing."""
+        read = [self.read(document) for document in self.SHAPES.values()]
+        self.assertGreater(len({schema for schema, _, _, _ in read}), 2)
+        self.assertGreater(len({severity for _, severity, _, _ in read}), 2)
+        self.assertTrue(all(body for _, _, body, _ in read),
+                        [r for r in read if not r[2]])
+
+
 class WhereTheNeutralNamesLiveTest(unittest.TestCase):
     """The other half of reading a cluster: a column, a filter and an
     aggregation each have to be told where a neutral name lives in it.

@@ -1513,6 +1513,32 @@ check('Clear takes away the chart, the sources, the warnings and the stats', () 
                   () => assertEqual(answers.length - before, 0, 'requests'));
         }
 
+        // A control that silently does nothing is the one failure nobody
+        // can describe — a deployment reported exactly that, with a console
+        // holding no clue.
+        {
+            const said = [];
+            const w8 = makeWindow(offer(OFFER));
+            w8.console.warn = (m) => said.push(String(m));
+            w8.document.getElementById('fieldStatsPicker').remove();
+            Object.create(w8.__LogSearch.prototype)._setupFieldStatsPicker();
+            check('a button with no panel says so',
+                  () => assert(said.some(m => m.includes('#fieldStatsPicker')),
+                               JSON.stringify(said)));
+            check('and is disabled rather than left looking usable',
+                  () => assert(w8.document.getElementById('fieldStatsPick')
+                      .hasAttribute('disabled')));
+
+            const said2 = [];
+            const w9 = makeWindow(offer(OFFER));
+            w9.console.warn = (m) => said2.push(String(m));
+            w9.document.getElementById('fieldStatsPick').remove();
+            Object.create(w9.__LogSearch.prototype)._setupFieldStatsPicker();
+            check('a panel with no button says so too',
+                  () => assert(said2.some(m => m.includes('button is not')),
+                               JSON.stringify(said2)));
+        }
+
         const { w: unsupported } = await open(
             {fields: [], chosen: [], editable: true, unsupported: true,
              reason: 'loki does not provide field statistics.'});

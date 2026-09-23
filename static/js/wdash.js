@@ -888,9 +888,32 @@ class LogSearch {
     // a minute apart.
 
     _setupFieldStatsPicker() {
+        // Both halves are reported, because a control that silently does
+        // nothing is the one failure nobody can describe. A deployment said
+        // "the button does nothing" and the console held no clue at all:
+        // this returns early when the button is absent, and the click
+        // handler would have thrown on a missing panel — neither of which
+        // said so.
         const button = document.getElementById('fieldStatsPick');
-        if (!button) { return; }
         const panel = document.getElementById('fieldStatsPicker');
+        if (!button) {
+            if (panel) {
+                console.warn('WDash: the field picker panel is on the page ' +
+                             'but its button is not, so nothing can open it.');
+            }
+            return;
+        }
+        if (!panel) {
+            console.warn('WDash: the field picker button is on the page but ' +
+                         'its panel (#fieldStatsPicker) is not, so clicking ' +
+                         'it cannot do anything. The two are rendered ' +
+                         'together; a page with one and not the other is a ' +
+                         'stale template or a partial copy of it.');
+            button.setAttribute('disabled', 'disabled');
+            button.title = 'Unavailable: this page is missing the picker.';
+            return;
+        }
+        console.log('WDash: field picker wired up.');
 
         button.addEventListener('click', () => {
             const open = !panel.classList.contains('d-none');

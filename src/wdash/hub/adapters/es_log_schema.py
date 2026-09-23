@@ -519,15 +519,36 @@ def match_candidates(name):
     return (name, f"resource.attributes.{name}", f"attributes.{name}")
 
 
-#: What the schemas read beyond the neutral fields: the markers that tell a
-#: collector record from a flat one — one of them the number that decides its
-#: level — and a structured body, however it was written.
+#: What a narrowed `_source` must carry beyond the neutral fields.
 #:
-#: A container record needs no marker of its own here: `log` arrives as a
+#: The rule is one sentence and it has been broken three times: A ROW HAS TO
+#: DETECT THE SAME SHAPE AS THE RECORD IT LISTS. The list view asks
+#: Elasticsearch for a slice of each document, and detection reads keys that
+#: are nobody's `body` or `severity` — so a key left out here is a row that
+#: reads differently from the record behind it, which is the fault this
+#: whole module exists to prevent, one level down.
+#:
+#: Three times, each measured on a real cluster:
+#:
+#:   * `severity_number` and `body_structured` left out — five of eleven
+#:     collector records read UNSPECIFIED in the list and INFO when opened;
+#:   * `@t` left out — the compact format went unrecognised on a row, so
+#:     its rule that an absent `@l` means Information never ran there;
+#:   * `@i` left out — with `@t` gone from the document too (fluent-bit
+#:     deletes its time key), a row carried ONE of the format's keys where
+#:     the record had two, and every informational line read UNSPECIFIED in
+#:     the list and INFO when opened.
+#:
+#: So it is DERIVED from what detection reads rather than typed out again:
+#: `_CLEF_KEYS` is the list `_is_clef` counts, and `_OTEL_MARKERS` the pair
+#: `OtelLogSchema.detect` looks for. A shape added to `SCHEMAS` brings its
+#: own keys with it.
+#:
+#: A container record needs no marker of its own: `log` arrives as a
 #: candidate for `body` and `kubernetes.container_name` as one for `service`,
 #: and a list that asked for neither has no body and no service to read, so
 #: which schema was chosen changes nothing about the row.
-SCHEMA_FIELDS = _OTEL_MARKERS + ("body_structured", "body")
+SCHEMA_FIELDS = _OTEL_MARKERS + _CLEF_KEYS + ("body_structured", "body")
 
 
 def source_fields(neutral_fields):
