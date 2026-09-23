@@ -991,12 +991,12 @@ class LogSearch {
                         const ticked = row.querySelector('input').checked;
                         const matches = !wanted || name.toLowerCase().includes(wanted);
                         anything = anything || matches;
-                        // The COLUMN, not the row inside it. The list is a
-                        // two-column grid: hiding the row leaves its cell
-                        // holding the space, so filtering a long list drew
-                        // as many blank gaps as it hid names.
-                        (row.closest('.col') || row).classList.toggle(
-                            'd-none', !ticked && !matches);
+                        // The row itself, which is all there is: the columns
+                        // are CSS text columns and reflow around what is
+                        // gone. The grid this replaced needed its CELL
+                        // hidden instead, and hiding only the row inside it
+                        // drew as many blank gaps as it hid names.
+                        row.classList.toggle('d-none', !ticked && !matches);
                     });
 
                 // Nothing on this page matches, and the page holds a cut
@@ -1142,18 +1142,23 @@ class LogSearch {
         });
         container.innerHTML = ordered.map((name, index) => {
             const id = 'fs-pick-' + index;
-            // `col` because the container is a two-column row at md and up.
+            // One element per field, directly in the container: the columns
+            // are the stylesheet's and they FLOW, so hiding a name takes its
+            // space with it. A wrapper here would keep that space — which is
+            // what the grid this replaced did, and what the filter had to
+            // reach past to undo.
+            //
             // The name is the label's title as well as its text: these are
             // long enough to truncate, and a truncated name somebody cannot
             // read in full is a name they cannot choose between.
-            return '<div class="col"><div class="form-check py-1" ' +
+            return '<div class="form-check py-1" ' +
                 'data-field="' + WDash.escapeAttr(name) + '">' +
                 '<input class="form-check-input" type="checkbox" id="' + id +
                     '"' + (chosen.has(name) ? ' checked' : '') + '>' +
                 '<label class="form-check-label text-truncate d-block" ' +
                     'for="' + id + '" title="' + WDash.escapeAttr(name) +
                     '" style="font-size:.8rem">' + WDash.escapeHtml(name) +
-                '</label></div></div>';
+                '</label></div>';
         }).join('');
 
         container.querySelectorAll('input[type="checkbox"]').forEach(box => {

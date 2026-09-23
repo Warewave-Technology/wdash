@@ -1421,13 +1421,17 @@ check('Clear takes away the chart, the sources, the warnings and the stats', () 
         filter.dispatchEvent(new w.Event('input'));
         const hidden = (field) => {
             const row = w.document.querySelector('[data-field="' + field + '"]');
-            return (row.closest('.col') || row).classList.contains('d-none');
+            return row.classList.contains('d-none');
         };
         check('filtering hides what does not match', () => assert(hidden('@i')));
-        check('and hides its COLUMN, so the grid does not keep the gap',
-              () => assert(w.document.querySelector('[data-field="@i"]')
-                  .closest('.col').classList.contains('d-none'),
-                  'the row was hidden inside a cell that still holds space'));
+        // The columns are CSS text columns, so what is hidden takes its space
+        // with it — PROVIDED nothing wraps it. A wrapper would keep the space
+        // and the gap would come back, which is the fault this asserts away.
+        check('and nothing wraps it, so no gap is left where the name was',
+              () => assertEqual(
+                  w.document.querySelector('[data-field="@i"]').parentElement.id,
+                  'fieldStatsOptions',
+                  'the name sits inside a wrapper that still holds space'));
         check('and never hides a field that is ticked',
               () => assert(!hidden('@l')));
 

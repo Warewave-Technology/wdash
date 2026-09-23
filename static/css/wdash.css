@@ -1804,6 +1804,32 @@ code {
     overflow-y: auto;
 }
 
+/*
+ * The field picker's list: as many columns as the names need, not two.
+ *
+ * Two equal halves of a dialog is the right shape for two paragraphs and the
+ * wrong one for a list of `@l`, `@i`, `tag` and `stream`: a 400px column
+ * holding a 30px name is 370px of nothing, twice over, and the dialog read as
+ * mostly empty while its list scrolled.
+ *
+ * Text columns rather than a grid because the count follows the width instead
+ * of being declared per breakpoint — three columns in the dialog, one on a
+ * phone, without a rule naming either number. `break-inside` because a
+ * checkbox split across a column boundary is a tick with no name beside it.
+ *
+ * 13rem is the width a dotted path wants (`kubernetes.container_name` at
+ * .8rem is just over 12), so the common long name sits on one line and the
+ * truncation in the markup stays the exception it was written as.
+ */
+#fieldStatsOptions {
+    columns: 13rem;
+    column-gap: 1.25rem;
+}
+
+#fieldStatsOptions .form-check {
+    break-inside: avoid;
+}
+
 .field-stat-group {
     border-bottom: 1px solid var(--border);
 }
