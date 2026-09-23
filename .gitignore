@@ -28,6 +28,17 @@ venv/
 data/*
 !data/.gitkeep
 
+# And a database at the ROOT, which the rule above does not cover.
+#
+# `DATABASE_URL=sqlite:///wdash.db` is a relative path, so an instance
+# started from this directory — a scratch one, or the reader following the
+# README before they read the part about `data/` — puts its database, its
+# `-wal` and its `-shm` here. Twice now one has reached `git add -A`, and a
+# SQLite file at the root of this repository is never source.
+/*.db
+/*.db-wal
+/*.db-shm
+
 # Front-end tooling (dev only; the app ships the committed wdash.min.js)
 node_modules/
 
