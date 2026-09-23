@@ -1168,6 +1168,19 @@ class RuleReadabilityTest(unittest.TestCase):
                       "record(s) in 15 minute(s)", sentence)
         self.assertNotIn("monitor", sentence)
 
+    def test_a_ratio_rule_reads_as_a_share_and_not_as_a_count(self):
+        """The two conditions differ only by a word in the selector, and a
+        sentence that shows a count for a rule judging a percentage is a
+        rule nobody can tell is wrong by reading it."""
+        sentence = self._describe(
+            kind="log_query",
+            selector={"saved_search": "s1", "group_by": "service",
+                      "condition": "ratio", "ratio_at_least": "5",
+                      "window_minutes": "15"})
+        self.assertIn("matches 5% of each service's records in 15 minute(s)",
+                      sentence)
+        self.assertNotIn("record(s) in 15", sentence)
+
     def test_a_missing_channel_is_stated_as_the_fault_it_is(self):
         """A rule with no channel fires into nothing, and that is the thing to
         notice — not a blank in a column."""

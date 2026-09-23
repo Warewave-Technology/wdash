@@ -169,12 +169,34 @@ LOG_QUERY_GROUPS = 200
 #: selector column is also a monitor label selector, and a typo in a key
 #: would otherwise be read as "a label called `windo_minutes`" and match
 #: nothing, quietly.
-LOG_QUERY_KEYS = ("saved_search", "group_by", "window_minutes", "at_least")
+LOG_QUERY_KEYS = ("saved_search", "group_by", "window_minutes", "at_least",
+                  "condition", "ratio_at_least", "of_at_least")
 
 #: The default window a log rule counts over, in minutes. Fifteen rather
 #: than the monitor side's hour: a log rule is usually about a burst, and an
 #: hour of history keeps a burst alive long after it has stopped.
 LOG_QUERY_WINDOW = 15
+
+#: How a group is judged. A count is "ten errors in this service"; a ratio
+#: is "a twentieth of this service's lines are errors". They are different
+#: questions and a service whose traffic moves during the day can only be
+#: asked the second one — at midnight a threshold tuned for noon is either
+#: silent or permanently firing.
+CONDITION_COUNT = "count"
+CONDITION_RATIO = "ratio"
+CONDITIONS = (CONDITION_COUNT, CONDITION_RATIO)
+
+#: The share, as a percentage, a ratio rule fires at when it says nothing.
+LOG_QUERY_RATIO = 5
+
+#: How many records a group needs before a percentage of it is worth
+#: anything. With N records one record IS 100/N percent, so at twenty a
+#: single line moves the answer by five points and at three it moves it by
+#: thirty-three: below this a threshold measures the sample rather than the
+#: service. A group under it is reported as UNKNOWN rather than as fine —
+#: see `_ratio_groups`, and `Observation.known`, which exists for the
+#: difference between looking and being able to say.
+LOG_QUERY_VOLUME = 20
 
 
 def _log_setting(rule, key, fallback):
@@ -249,8 +271,13 @@ def _log_query(rule, store, hub, now):
             f"the saved search '{search.name}' reads "
             f"{search.source or 'every source'}, and there is none",))
 
-    from ..hub.aggregation import Terms
     from ..hub.query import LogQuery, TimeWindow
+
+    condition = str(selector.get("condition") or CONDITION_COUNT).strip()
+    if condition not in CONDITIONS:
+        return Observed([], False, (
+            f"{condition!r} is not a condition this version knows; it reads "
+            f"{' and '.join(CONDITIONS)}",))
 
     # `exact`, not the aligned `between` an aggregation would normally use.
     # Alignment widens a window by up to one bucket, which is invisible on a
@@ -258,33 +285,12 @@ def _log_query(rule, store, hub, now):
     # outside the minutes the rule names, and the sentence the alert sends
     # says how many happened in those minutes.
     window = TimeWindow.exact(now - timedelta(minutes=minutes), now)
-    query = LogQuery(window=window, text=search.query or "*", limit=1)
-    result = source.aggregate(
-        query, [Terms(name="groups", field=group_by,
-                      size=LOG_QUERY_GROUPS)], _scope())
+    matching = LogQuery(window=window, text=search.query or "*", limit=1)
 
-    # `failed` is no answer; `partial` is a short one. Either way the groups
-    # in hand are not the groups there are, and resolving on them would
-    # announce a recovery out of a backend's bad minute.
-    complete = not result.failed and not result.partial
-    warnings = tuple(result.warnings)
-    buckets = result.get("groups")
+    if condition == CONDITION_RATIO:
+        return _ratio_groups(rule, source, matching, group_by, minutes)
 
-    # And the search can succeed while THIS aggregation does not: a field
-    # that is not mapped as a keyword is refused on its own, and the rest of
-    # the answer comes back fine. Measured against a real cluster, grouping
-    # by `@m`: no buckets, nothing failed, nothing partial — so every firing
-    # group would have been told it had recovered, on a pass that never
-    # counted anything. Not being able to look is not the same as looking
-    # and finding nothing, and this is the line that keeps them apart.
-    refused = result.reasons("groups")
-    if refused:
-        complete = False
-        # Only the ones not already said. A single source files its reason
-        # under both the page-level list and the aggregation's name, and the
-        # same sentence twice in a log reads as the thing having happened
-        # twice.
-        warnings += tuple(r for r in refused if r not in warnings)
+    buckets, complete, warnings = _groups(source, matching, group_by)
 
     # A terms aggregation is ordered by count, so everything below the cut
     # counts no more than the last value returned. If that last one is still
@@ -305,6 +311,129 @@ def _log_query(rule, store, hub, now):
                      str(bucket.key))
          for bucket in buckets],
         complete, warnings)
+
+
+def _groups(source, query, group_by):
+    """One terms aggregation, with everything that can go wrong read off it.
+
+    Answers `(buckets, complete, warnings)`. Shared by both conditions
+    because both need the same three readings, and a second copy of this is
+    a second place for "it could not look" to be read as "there was
+    nothing".
+    """
+    from ..hub.aggregation import Terms
+
+    result = source.aggregate(
+        query, [Terms(name="groups", field=group_by,
+                      size=LOG_QUERY_GROUPS)], _scope())
+
+    # `failed` is no answer; `partial` is a short one. Either way the groups
+    # in hand are not the groups there are, and resolving on them would
+    # announce a recovery out of a backend's bad minute.
+    complete = not result.failed and not result.partial
+    warnings = tuple(result.warnings)
+
+    # And the search can succeed while THIS aggregation does not: a field
+    # that is not mapped as a keyword is refused on its own, and the rest of
+    # the answer comes back fine. Measured against a real cluster, grouping
+    # by `@m`: no buckets, nothing failed, nothing partial — so every firing
+    # group would have been told it had recovered, on a pass that never
+    # counted anything. Not being able to look is not the same as looking
+    # and finding nothing, and this is the line that keeps them apart.
+    refused = result.reasons("groups")
+    if refused:
+        complete = False
+        # Only the ones not already said. A single source files its reason
+        # under both the page-level list and the aggregation's name, and the
+        # same sentence twice in a log reads as the thing having happened
+        # twice.
+        warnings += tuple(r for r in refused if r not in warnings)
+    return result.get("groups"), complete, warnings
+
+
+def _ratio_groups(rule, source, matching, group_by, minutes):
+    """What share of each group's lines the saved search matched.
+
+    The question a service whose traffic moves during the day can actually
+    be asked. Ten errors is an outage at 3am and a rounding error at noon;
+    a twentieth of the lines is the same statement at both.
+
+    The denominator is the SAME window and the same source with the query
+    replaced by everything — "of what this search looks at, how much did it
+    match". Not the whole cluster: a search pinned to one source and
+    compared against every source would answer a question nobody asked.
+
+    Two searches rather than one, because the neutral aggregation model has
+    no filter sub-aggregation and adding one reaches into three adapters.
+    The MATCHES are counted first and the total second, so a record written
+    between the two lands in the denominator rather than the numerator: the
+    ratio comes out a shade low, which is the direction that does not invent
+    an alert.
+    """
+    from ..hub.query import LogQuery
+
+    share, complaint = _log_setting(rule, "ratio_at_least", LOG_QUERY_RATIO)
+    floor, other = _log_setting(rule, "of_at_least", LOG_QUERY_VOLUME)
+    complaint = complaint or other
+    if complaint:
+        return Observed([], False, (complaint,))
+    if share > 100:
+        return Observed([], False, (
+            f"ratio_at_least is {share}, and a share of more than 100% "
+            f"cannot be reached",))
+
+    matched, complete, warnings = _groups(source, matching, group_by)
+    everything = LogQuery(window=matching.window, text="*", limit=1)
+    total, whole, said = _groups(source, everything, group_by)
+    complete = complete and whole
+    warnings += tuple(w for w in said if w not in warnings)
+
+    # The cut hides groups, and a ratio gives no way to bound what is behind
+    # it: terms are ordered by COUNT, and a quiet group with a terrible share
+    # sits wherever its volume puts it. The count condition can reason about
+    # its cut; this cannot, so it says so.
+    #
+    # The TOTAL alone, because every group holding a match also holds
+    # records: the matches are a subset of the total and both are cut at the
+    # same number, so a numerator on the cut means a denominator on it too.
+    # Testing both read like a second safeguard and was a branch no input
+    # could reach.
+    if len(total) >= LOG_QUERY_GROUPS:
+        complete = False
+        warnings += (f"more than {LOG_QUERY_GROUPS} values of "
+                     f"{group_by!r} were counted, and a share gives no way "
+                     f"to tell what is behind the cut",)
+
+    hits = {str(bucket.key): bucket.count for bucket in matched}
+    out = []
+    for bucket in total:
+        name = str(bucket.key)
+        # The denominator's groups, not the numerator's: a group whose
+        # errors stopped has no bucket in `matched` at all, and it is
+        # exactly the group that needs to be reported as WELL so its alert
+        # can resolve.
+        count, of = hits.get(name, 0), bucket.count
+        if of < floor:
+            # Looked at, and not enough of it to say. `bad=False` here would
+            # claim a quiet group is healthy and resolve an alert on a
+            # sample of three; `bad=True` would fire on one line in three.
+            out.append(Observation(
+                name, False,
+                f"{of:,} record(s) in {minutes} minute(s), too few to read "
+                f"a share of — this rule wants {floor:,}",
+                name, known=False))
+            continue
+        # Clamped: the numerator is a subset of the denominator by
+        # construction, so above 100 means the race the docstring describes
+        # ran the other way, and a percentage over 100 in an alert is a
+        # number nobody can act on.
+        percent = min(100.0, count * 100.0 / of)
+        out.append(Observation(
+            name, percent >= share,
+            f"{count:,} of {of:,} record(s) in {minutes} minute(s) — "
+            f"{percent:.1f}%, against a threshold of {share}%",
+            name))
+    return Observed(out, complete, warnings)
 
 
 def _detail(monitor):

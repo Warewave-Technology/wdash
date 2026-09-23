@@ -199,6 +199,18 @@ def _check_log_selector(selector):
             "each value breaching it is its own alert — one noisy service "
             "would otherwise hide the next one to break.")
 
+    from ..alerts.runner import CONDITIONS
+
+    condition = str(selector.get("condition") or CONDITIONS[0]).strip()
+    if condition not in CONDITIONS:
+        # Refused here as well as in the evaluator. Read as anything but one
+        # of these the rule falls back to counting, so a ratio rule saved
+        # with a misspelled condition would fire on ten RECORDS while its
+        # form says ten per cent.
+        raise AlertingError(
+            f"'{condition}' is not a way to judge a group. "
+            f"Available: {', '.join(CONDITIONS)}.")
+
 
 class RuleRepository:
     def __init__(self, engine):

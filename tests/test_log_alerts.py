@@ -286,6 +286,211 @@ class WhenALogRuleCannotLookTest(unittest.TestCase):
         self.assertEqual(list(out.warnings).count(reason), 1)
 
 
+class Ratio:
+    """A source that answers the matches first and the total second.
+
+    `_ratio_groups` runs two searches: the saved search's own query, then
+    the same window with the query replaced by everything. This answers
+    them in that order, which is also the order that keeps the numerator
+    from outgrowing the denominator.
+    """
+
+    def __init__(self, matched=None, total=None, results=None):
+        self.results = results or [
+            AggregationResult(buckets={"groups": [
+                Bucket(key=k, count=v) for k, v in (matched or {}).items()]}),
+            AggregationResult(buckets={"groups": [
+                Bucket(key=k, count=v) for k, v in (total or {}).items()]}),
+        ]
+        self.asked = []
+
+    def aggregate(self, query, aggregations, scope):
+        self.asked.append((query, aggregations, scope))
+        return self.results[min(len(self.asked), len(self.results)) - 1]
+
+
+def share(source, **selector):
+    whole = {"condition": "ratio"}
+    whole.update(selector)
+    return seen(source, **whole)
+
+
+class WhatShareOfAGroupTest(unittest.TestCase):
+    """The condition a service whose traffic moves can be asked.
+
+    Ten errors is an outage at 3am and a rounding error at noon. A
+    twentieth of the lines is the same statement at both.
+    """
+
+    def test_the_share_decides(self):
+        out = share(Ratio(matched={"billing": 10, "checkout": 1},
+                          total={"billing": 100, "checkout": 100}),
+                    ratio_at_least="5", of_at_least="20").observations
+        self.assertEqual({o.subject: o.bad for o in out},
+                         {"billing": True, "checkout": False})
+
+    def test_a_rule_with_no_share_named_uses_a_share_worth_paging_on(self):
+        """Unlike the count condition's default, this one is observable and
+        has to be: a default of nothing would fire on a single error in ten
+        thousand lines, which is every service, all the time."""
+        out = share(Ratio(matched={"billing": 1, "checkout": 20},
+                          total={"billing": 100, "checkout": 100}),
+                    of_at_least="20").observations
+        self.assertEqual({o.subject: o.bad for o in out},
+                         {"billing": False, "checkout": True})
+
+    def test_a_rule_with_no_floor_named_will_not_read_a_handful(self):
+        """Six records cannot support a percentage: one of them is sixteen
+        points. Without a default floor the rule would page on it."""
+        [out] = share(Ratio(matched={"billing": 3}, total={"billing": 6}),
+                      ratio_at_least="5").observations
+        self.assertFalse(out.known,
+                         "a share was read off six records")
+
+    def test_the_threshold_is_at_least_here_too(self):
+        out = share(Ratio(matched={"billing": 5}, total={"billing": 100}),
+                    ratio_at_least="5", of_at_least="20").observations
+        self.assertEqual([o.bad for o in out], [True])
+
+    def test_the_detail_shows_both_numbers_and_the_share(self):
+        """A percentage with no counts behind it cannot be checked, and a
+        reader woken at 4am is exactly the person who needs to see that it
+        was 3 of 20 rather than 300 of 2,000."""
+        [out] = share(Ratio(matched={"billing": 12}, total={"billing": 400}),
+                      ratio_at_least="5", of_at_least="20",
+                      window_minutes="15").observations
+        self.assertEqual(out.detail,
+                         "12 of 400 record(s) in 15 minute(s) — 3.0%, "
+                         "against a threshold of 5%")
+
+    def test_the_denominator_is_the_same_window_with_no_query(self):
+        source = Ratio(matched={"billing": 1}, total={"billing": 10})
+        share(source, ratio_at_least="5", of_at_least="1",
+              window_minutes="15")
+        (matching, _, _), (everything, _, _) = source.asked
+        self.assertEqual(matching.text, "level:ERROR")
+        self.assertEqual(everything.text, "*")
+        self.assertEqual(everything.window, matching.window)
+
+    def test_the_matches_are_counted_before_the_total(self):
+        """A record written between the two searches then lands in the
+        denominator rather than the numerator, so the share comes out a
+        shade low — the direction that does not invent an alert."""
+        source = Ratio(matched={"billing": 1}, total={"billing": 10})
+        share(source, of_at_least="1")
+        self.assertEqual([q.text for q, _, _ in source.asked],
+                         ["level:ERROR", "*"])
+
+    def test_a_group_whose_matches_stopped_is_reported_as_well(self):
+        """It has no bucket in the numerator at all, and it is exactly the
+        group whose alert has to resolve. Iterating the numerator would
+        leave it firing for ever."""
+        out = share(Ratio(matched={}, total={"billing": 100}),
+                    ratio_at_least="5", of_at_least="20").observations
+        self.assertEqual([(o.subject, o.bad, o.known) for o in out],
+                         [("billing", False, True)])
+
+    def test_a_share_over_a_hundred_is_clamped(self):
+        """The numerator is a subset of the denominator by construction, so
+        this is the race running the other way. A percentage over 100 in an
+        alert is a number nobody can act on."""
+        [out] = share(Ratio(matched={"billing": 12}, total={"billing": 10}),
+                      ratio_at_least="5", of_at_least="1").observations
+        self.assertIn("100.0%", out.detail)
+
+
+class TooLittleToSayTest(unittest.TestCase):
+    """A percentage of three records is a statement about three records.
+
+    With N records one record IS 100/N per cent. Below the floor the
+    threshold measures the sample rather than the service, and the honest
+    answer is neither "firing" nor "fine".
+    """
+
+    def small(self, floor="20", **selector):
+        return share(Ratio(matched={"billing": 2}, total={"billing": 3}),
+                     ratio_at_least="5", of_at_least=floor,
+                     **selector).observations
+
+    def test_a_group_under_the_floor_is_not_called_bad(self):
+        """Two errors in three lines is 67%, and firing on it pages
+        somebody about a service nobody is using."""
+        self.assertEqual([o.bad for o in self.small()], [False])
+
+    def test_and_is_not_called_well_either(self):
+        """`bad=False` alone would resolve a firing alert on a sample of
+        three. `known=False` holds it instead — the state machine has meant
+        this since the monitor side, and it means it here."""
+        self.assertEqual([o.known for o in self.small()], [False])
+
+    def test_it_says_how_little_there_was_and_what_it_wanted(self):
+        [out] = self.small()
+        self.assertEqual(out.detail,
+                         "3 record(s) in 15 minute(s), too few to read a "
+                         "share of — this rule wants 20")
+
+    def test_a_floor_the_group_clears_is_judged_normally(self):
+        self.assertEqual([(o.bad, o.known) for o in self.small(floor="3")],
+                         [(True, True)])
+
+
+class ARatioThatCannotBeReadTest(unittest.TestCase):
+    """Its own refusals, and the two searches' failures folded together."""
+
+    def refusal(self, source=None, **selector):
+        out = share(source or Ratio(matched={}, total={}), **selector)
+        self.assertFalse(out.complete)
+        self.assertTrue(out.warnings)
+        return " ".join(out.warnings)
+
+    def test_a_condition_this_version_does_not_know(self):
+        out = seen(Source(), condition="rate")
+        self.assertFalse(out.complete)
+        self.assertEqual(out.observations, [])
+        self.assertIn("'rate' is not a condition", " ".join(out.warnings))
+
+    def test_a_share_that_is_not_a_number(self):
+        self.assertIn("not a whole number",
+                      self.refusal(ratio_at_least="five percent"))
+
+    def test_a_share_over_a_hundred_cannot_be_reached(self):
+        """A rule that can never fire is a rule somebody believes is
+        watching."""
+        self.assertIn("cannot be reached", self.refusal(ratio_at_least="120"))
+
+    def test_a_floor_that_is_not_a_number(self):
+        self.assertIn("not a whole number", self.refusal(of_at_least="lots"))
+
+    def test_the_total_failing_is_enough_to_stop_the_pass(self):
+        """Both searches have to land. The matches alone say nothing about
+        a share, and reporting on them would judge every group against a
+        denominator this pass never read."""
+        source = Ratio(results=[
+            AggregationResult(buckets={"groups": [Bucket(key="billing",
+                                                         count=5)]}),
+            AggregationResult(failed=True, warnings=("the cluster refused",)),
+        ])
+        self.assertIn("the cluster refused", self.refusal(source))
+
+    def test_the_matches_failing_is_too(self):
+        source = Ratio(results=[
+            AggregationResult(failed=True, warnings=("the cluster refused",)),
+            AggregationResult(buckets={"groups": [Bucket(key="billing",
+                                                         count=100)]}),
+        ])
+        self.assertIn("the cluster refused", self.refusal(source))
+
+    def test_a_cut_is_never_reasoned_past_on_a_share(self):
+        """The count condition can bound what is behind its cut, because
+        terms are ordered by count and so is its threshold. A share is not:
+        a quiet group with a terrible ratio sits wherever its VOLUME puts
+        it, which may be last."""
+        full = {f"service-{n}": 1_000 for n in range(LOG_QUERY_GROUPS)}
+        said = self.refusal(Ratio(matched={"service-0": 1}, total=full),
+                            ratio_at_least="90", of_at_least="1")
+        self.assertIn("no way to tell what is behind the cut", said)
+
+
 class TheGroupsItCannotSeeTest(unittest.TestCase):
     """A terms aggregation has a size, and what falls past it is invisible.
 
@@ -377,6 +582,21 @@ class SavingALogRuleTest(unittest.TestCase):
         with self.assertRaises(AlertingError) as refused:
             self.create({"saved_search": "s1"})
         self.assertIn("group by", str(refused.exception))
+
+    def test_a_condition_this_version_cannot_judge_is_refused(self):
+        """Read as anything but a known condition the rule falls back to
+        counting, so a ratio rule saved with a misspelled one would fire on
+        ten RECORDS while its form says ten per cent."""
+        from wdash.store.alerting import AlertingError
+        with self.assertRaises(AlertingError) as refused:
+            self.create({"saved_search": "s1", "group_by": "service",
+                         "condition": "rate"})
+        self.assertIn("'rate' is not a way to judge", str(refused.exception))
+
+    def test_a_ratio_rule_saves(self):
+        saved = self.create({"saved_search": "s1", "group_by": "service",
+                             "condition": "ratio", "ratio_at_least": "5"})
+        self.assertEqual(saved["selector"]["condition"], "ratio")
 
     def test_an_edit_cannot_empty_it_either(self):
         """It arrives by the same form and is the same mistake. The kind is
@@ -552,6 +772,56 @@ class AgainstTheLabTest(unittest.TestCase):
         self.assertEqual(out.observations, [])
         self.assertFalse(out.complete,
                          "not being able to group read as no groups")
+
+    def ratio(self, **selector):
+        whole = {"condition": "ratio", "group_by": "service",
+                 "window_minutes": "5"}
+        whole.update(selector)
+        return observe(rule(**whole), None,
+                       Store(s1=Search(query="level:ERROR")), None, NOW,
+                       Hub(self.source))
+
+    def test_a_real_cluster_answers_a_share_per_service(self):
+        """The fixture is 12, 3 and 40 ERROR records and nothing else, so
+        every service is 100% errors — which is the point: the denominator
+        really is the same search with the query taken off, and the two
+        numbers come from the same cluster in the same window."""
+        out = self.ratio(ratio_at_least="50", of_at_least="1")
+        self.assertEqual({o.subject: o.bad for o in out.observations},
+                         {"billing": True, "search": True, "checkout": True})
+        self.assertTrue(out.complete)
+
+    def test_the_denominator_is_bigger_than_the_query_alone(self):
+        """A second index of non-matching lines in the same window: the
+        totals have to grow and the shares have to fall."""
+        for n in range(60):
+            self.es.index(index=self.INDEX, id=f"quiet-{n}", document={
+                "@timestamp": (NOW - timedelta(minutes=1)).isoformat(),
+                "level": "INFO", "service": "checkout",
+                "message": "all well"})
+        self.es.indices.refresh(index=self.INDEX)
+        try:
+            out = self.ratio(ratio_at_least="50", of_at_least="1")
+            found = {o.subject: o.detail for o in out.observations}
+            self.assertIn("40 of 100 record(s)", found["checkout"])
+            self.assertIn("40.0%", found["checkout"])
+            self.assertFalse(
+                next(o.bad for o in out.observations
+                     if o.subject == "checkout"),
+                "40% fired against a threshold of 50%")
+        finally:
+            for n in range(60):
+                self.es.options(ignore_status=[404]).delete(
+                    index=self.INDEX, id=f"quiet-{n}")
+            self.es.indices.refresh(index=self.INDEX)
+
+    def test_a_service_below_the_floor_is_unknown_on_a_real_cluster(self):
+        """`search` has three records. A share of three records is a
+        statement about three records."""
+        out = self.ratio(ratio_at_least="50", of_at_least="20")
+        known = {o.subject: o.known for o in out.observations}
+        self.assertFalse(known["search"])
+        self.assertTrue(known["checkout"])
 
     def test_a_window_before_the_records_counts_nothing_and_says_so(self):
         """Complete and empty: it looked, and there was nothing. This is

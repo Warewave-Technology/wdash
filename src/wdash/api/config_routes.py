@@ -2773,10 +2773,15 @@ def _describe_rule(rule, channels):
         # a rule and a channel list, not the store, and inventing a lookup
         # would put a database read inside a page's render loop. The form
         # shows the name.
-        what = (f"each {selector.get('group_by') or 'group'} matching the "
-                f"saved search reaches "
-                f"{selector.get('at_least') or 1} record(s) in "
-                f"{selector.get('window_minutes') or 15} minute(s)")
+        each = f"each {selector.get('group_by') or 'group'}"
+        during = f"in {selector.get('window_minutes') or 15} minute(s)"
+        if selector.get("condition") == "ratio":
+            what = (f"the saved search matches "
+                    f"{selector.get('ratio_at_least') or 5}% of "
+                    f"{each}'s records {during}")
+        else:
+            what = (f"{each} matching the saved search reaches "
+                    f"{selector.get('at_least') or 1} record(s) {during}")
     elif kind == "certificate_expiring":
         what = (f"a certificate on {which} is within "
                 f"{rule.get('days_before') or 30} days of expiring")
