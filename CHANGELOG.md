@@ -22,7 +22,7 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
-## 3.1.3 — unreleased
+## 3.1.3 — 2026-09-23
 
 ### Needs action
 
