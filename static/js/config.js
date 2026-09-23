@@ -1071,14 +1071,112 @@ document.querySelectorAll('[data-timestamp]').forEach(element => {
  */
 function applyRuleKind() {
     const kind = document.getElementById('ruleKind')?.value;
+    const condition = document.getElementById('ruleCondition')?.value;
     document.querySelectorAll('[data-rule]').forEach(element => {
         const kinds = (element.dataset.rule || '').split(/\s+/);
         element.classList.toggle('d-none', !kinds.includes(kind));
     });
+    // Within a log rule, the condition decides again. A count box on a rule
+    // judging a percentage is the same fault one level down: a field that
+    // does nothing, on a form that teaches it works. `[data-condition]`
+    // elements without a `[data-rule]` are the explanations under the
+    // condition picker, which belong to the log kind by being there.
+    document.querySelectorAll('[data-condition]').forEach(element => {
+        const wanted = element.dataset.condition === condition;
+        const ofKind = !element.dataset.rule || kind === 'log_query';
+        element.classList.toggle('d-none', !(wanted && ofKind));
+    });
+}
+
+/**
+ * Fill the "one alert per" list with fields the source can actually group by.
+ *
+ * Typed blind, a field that is not aggregatable produces a rule that refuses
+ * to evaluate on every pass and says so only in the log — a rule that exists,
+ * looks like it is watching, and is not. The list is a convenience and not a
+ * constraint: the input stays free text, because this asks the DEFAULT source
+ * and a rule may watch a search pinned to another one.
+ *
+ * A failure here is silent on purpose. The endpoint needs a reachable log
+ * source, and an installation configuring its first alert may have none; an
+ * error banner on the configuration page about a datalist would be noise in
+ * front of the form somebody is trying to fill in.
+ */
+async function loadRuleGroupFields() {
+    const list = document.getElementById('ruleGroupFields');
+    if (!list || list.dataset.loaded) { return; }
+    list.dataset.loaded = '1';
+    try {
+        const response = await fetch('/api/field-stats/fields');
+        if (!response.ok) { return; }
+        const data = await response.json();
+        // Built as elements rather than as a string of HTML: a field name
+        // comes from a cluster's mapping, and this file has no escaping
+        // helper of its own to reach for wrongly.
+        list.replaceChildren(...(data.fields || []).map(name => {
+            const option = document.createElement('option');
+            option.value = name;
+            return option;
+        }));
+    } catch (error) {
+        /* Left empty; the input still takes anything. */
+    }
+}
+
+/**
+ * Open the rule form on a saved search, when the logs page sent us here.
+ *
+ * `?alert_for=<id>` is the whole handover. The logs page knows which search
+ * somebody is looking at and nothing else a rule needs — not the channel, not
+ * the threshold, not the window — so it carries the one fact it has and this
+ * form asks for the rest. Creating a rule from the logs page instead would
+ * mean inventing a channel for it, and an alert delivered somewhere nobody
+ * chose is the failure this whole feature exists to prevent.
+ *
+ * A search id that is not in the list is left alone rather than forced: it
+ * belongs to somebody else or has been deleted since, and silently selecting
+ * the first option would build a rule watching a search nobody asked for.
+ */
+function openRuleForSavedSearch() {
+    const wanted = new URLSearchParams(window.location.search).get('alert_for');
+    if (!wanted) { return; }
+    const modal = document.getElementById('ruleModal');
+    const searches = document.getElementById('ruleSavedSearch');
+    const kind = document.getElementById('ruleKind');
+    if (!modal || !searches || !kind) { return; }
+
+    const known = Array.from(searches.options).some(o => o.value === wanted);
+    if (!known) {
+        // Deleted between the click and this page load, or somebody else's.
+        // The form still opens — the administrator came here to write a
+        // rule — but with NOTHING chosen and a sentence saying why.
+        //
+        // `selectedIndex = -1` rather than leaving it be: a select always
+        // shows its first option, so a form left alone looks filled in with
+        // a search nobody picked, and the save would take it. An empty box
+        // beside the warning is the only pair of those two that agree.
+        searches.selectedIndex = -1;
+        const note = document.getElementById('ruleSavedSearchNote');
+        if (note) {
+            note.textContent = 'The search you came from is not in this ' +
+                'list — it may have been deleted. Choose another.';
+            note.classList.remove('d-none');
+        }
+    } else {
+        searches.value = wanted;
+    }
+    kind.value = 'log_query';
+    applyRuleKind();
+    bootstrap.Modal.getOrCreateInstance(modal).show();
 }
 
 document.getElementById('ruleKind')?.addEventListener('change', applyRuleKind);
+document.getElementById('ruleCondition')?.addEventListener('change',
+                                                           applyRuleKind);
+document.getElementById('ruleModal')?.addEventListener('show.bs.modal',
+                                                       loadRuleGroupFields);
 applyRuleKind();
+openRuleForSavedSearch();
 
 
 

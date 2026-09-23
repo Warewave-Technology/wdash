@@ -611,6 +611,47 @@ check('an empty list still reads as an empty list', async () => {
     assert(/No saved searches yet/.test(list.textContent), list.textContent);
 });
 
+// The offer to alert on a saved search. It lives in this list because a
+// rule can only count something that was saved, so the moment somebody has
+// one is the moment the offer means anything — and it carries the id to the
+// rule form rather than creating a rule, because a rule needs a channel and
+// a threshold only that form asks for.
+const oneSavedSearch = async (w, mayAlert) => {
+    const search = Object.create(w.__LogSearch.prototype);
+    const list = w.document.getElementById('savedSearchList');
+    if (mayAlert) { list.dataset.mayAlert = '1'; } else { delete list.dataset.mayAlert; }
+    w.fetch = async () => ({
+        ok: true, status: 200,
+        json: async () => [{ id: 's 1/&', name: 'Errors',
+                             query: 'level:ERROR', time_range: '15m' }],
+    });
+    global.fetch = w.fetch;
+    await search._loadSavedSearches();
+    return list;
+};
+
+check('an administrator is offered an alert on a saved search', async () => {
+    const list = await oneSavedSearch(makeWindow(), true);
+    const link = list.querySelector('.saved-search-alert');
+    assert(link, 'no offer to alert on a saved search');
+    assert(link.getAttribute('href').includes('alert_for=s%201%2F%26'),
+           `the id was not carried safely: ${link.getAttribute('href')}`);
+    assert(link.getAttribute('href').includes('#tab-alerts'),
+           link.getAttribute('href'));
+});
+
+check('and nobody else is, because the form would refuse them', async () => {
+    const list = await oneSavedSearch(makeWindow(), false);
+    assert(!list.querySelector('.saved-search-alert'),
+           'a link to a form that will refuse them');
+});
+
+check('the offer never replaces the search itself', async () => {
+    const list = await oneSavedSearch(makeWindow(), true);
+    assert(list.querySelector('.saved-search-apply'), 'the search went away');
+    assert(list.querySelector('.saved-search-delete'), 'the delete went away');
+});
+
 check("Elasticsearch's numbers are shown as numbers", () => {
     const w = makeWindow();
     const search = new w.__LogSearch();

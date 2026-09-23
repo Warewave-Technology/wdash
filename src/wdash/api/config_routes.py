@@ -345,6 +345,14 @@ def config_page():
         silences=store.silences.all(),
         rule_kinds=RULE_KINDS,
         rule_descriptions=RULE_DESCRIPTIONS,
+        # The administrator's OWN saved searches, which is all there are:
+        # a saved search carries somebody's working context and is not
+        # shared. A rule can only watch a search its author can open, and
+        # offering a list of other people's would be a list of names with
+        # nothing behind them.
+        saved_searches=store.saved_searches.all_for(
+            getattr(current_user, "username", "")),
+        log_conditions=LOG_CONDITIONS,
         # Each rule rendered as a sentence. Built here rather than in the
         # template because it is a statement about what the rule DOES, and a
         # template assembling it out of `kind`, `threshold` and `selector`
@@ -2748,6 +2756,20 @@ RULE_DESCRIPTIONS = {
         "break."),
 }
 
+#: How a log rule judges a group, as the form offers it. The identifiers are
+#: the evaluator's own, so a condition the form offers is one the evaluator
+#: reads; the sentences live here because they are what somebody chooses
+#: between, and neither of them is the word `ratio`.
+LOG_CONDITIONS = {
+    "count": ("How many records",
+              "Fires when a group reaches this many matching records. "
+              "Right for a thing that should almost never happen."),
+    "ratio": ("What share of the records",
+              "Fires when this much of a group's traffic matches. Right "
+              "for a service that is busy at noon and idle at 3am, where "
+              "one count is either silent or always firing."),
+}
+
 
 def _describe_rule(rule, channels):
     """One sentence saying what this rule does."""
@@ -2865,6 +2887,30 @@ def delete_channel(channel_id):
     return _alerts_tab()
 
 
+def _log_selector(form):
+    """A log rule's selector, out of the form's own fields.
+
+    Empty values are LEFT OUT rather than stored as "". The evaluator reads
+    an absent setting as its default and refuses one it cannot parse, so a
+    stored empty string would be a third state neither of them has a rule
+    for — and the shape stored is the shape the evaluator is tested against.
+
+    The condition decides which threshold is kept. Storing both would leave
+    a ratio rule carrying a count somebody set once, which the rule list
+    would not show and the next person to widen the rule would inherit.
+    """
+    condition = (form.get("condition") or "count").strip()
+    wanted = ["saved_search", "group_by", "window_minutes"]
+    wanted += (["ratio_at_least", "of_at_least"] if condition == "ratio"
+               else ["at_least"])
+    selector = {"condition": condition}
+    for key in wanted:
+        value = (form.get(key) or "").strip()
+        if value:
+            selector[key] = value
+    return selector
+
+
 @config_bp.route("/rules", methods=["POST"])
 @login_required
 def save_rule():
@@ -2875,7 +2921,15 @@ def save_rule():
     store = _store()
     form = request.form
     rule_id = form.get("id") or None
-    selector = _pairs(form.get("selector"))
+    # A log rule's selector is built from named fields rather than typed as
+    # `key: value` pairs. The keys are a contract between this form and the
+    # evaluator — which refuses one it does not recognise — and asking an
+    # administrator to spell `saved_search` and paste a UUID beside it is
+    # asking them to be the place a typo goes unnoticed.
+    kind = form.get("kind") if not rule_id else (
+        (store.rules.get(rule_id) or {}).get("kind"))
+    selector = (_log_selector(form) if kind == "log_query"
+                else _pairs(form.get("selector")))
 
     try:
         if rule_id:

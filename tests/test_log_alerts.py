@@ -700,6 +700,148 @@ class AWholePassTest(unittest.TestCase):
                          "a backend outage was announced as a recovery")
 
 
+class TheFormThatWritesOneTest(unittest.TestCase):
+    """The page, not the store.
+
+    Everything above can pass while the only way to make a log rule is to
+    type `saved_search: <uuid>` into a textarea meant for monitor labels —
+    which is a feature that exists and that nobody can reach.
+    """
+
+    def setUp(self):
+        import tempfile
+        from tests.support import grant
+        from wdash.app import create_app
+        from wdash.config import Config
+        from wdash.store.secrets import SecretBox
+
+        handle, self.database = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.database)
+        database = self.database
+
+        class TestConfig(Config):
+            TESTING = True
+            SECRET_KEY = "log-alert-form"
+            DATABASE_URL = f"sqlite:///{database}"
+            ENCRYPTION_KEY = SecretBox.generate_key()
+            DASHBOARD_STORAGE = "database"
+
+        self.app = create_app(TestConfig)
+        self.client = self.app.test_client()
+        grant(self.app, "admin", ["system:admin", "logs:read"], indices=["*"])
+        with self.client.session_transaction() as session:
+            session["user_data"] = {
+                "id": "u1", "username": "admin", "email": "a@b", "groups": [],
+                "role": "admin",
+                "permissions": ["system:admin", "logs:read"],
+                "allowed_indices": ["*"]}
+            session["_user_id"] = "u1"
+        self.channel = self.app.store.channels.create(
+            "hook", url="https://example.com/hook")
+        self.search = self.app.store.saved_searches.create(
+            "Errors", "level:ERROR", "15m", created_by="admin")
+
+    def tearDown(self):
+        self.app.store.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.database + suffix):
+                os.unlink(self.database + suffix)
+
+    def page(self):
+        return self.client.get("/admin/config").get_data(as_text=True)
+
+    def save(self, **fields):
+        whole = {"name": "errors", "kind": "log_query",
+                 "channel_id": self.channel["id"],
+                 "saved_search": self.search.id, "group_by": "service",
+                 "condition": "count", "at_least": "10",
+                 "window_minutes": "15"}
+        whole.update(fields)
+        self.client.post("/admin/rules", data=whole,
+                         follow_redirects=True)
+        return next((r for r in self.app.store.rules.all()
+                     if r["name"] == whole["name"]), None)
+
+    def test_the_form_offers_the_searches_this_person_saved(self):
+        self.assertIn(self.search.id, self.page())
+
+    def test_it_does_not_ask_for_a_uuid_to_be_typed(self):
+        """A named field, so the key the evaluator refuses to guess at is
+        the form's problem rather than the administrator's."""
+        page = self.page()
+        self.assertIn('name="saved_search"', page)
+        self.assertIn('name="group_by"', page)
+        self.assertIn('name="condition"', page)
+
+    def test_a_rule_written_through_the_form_is_stored_whole(self):
+        saved = self.save()
+        self.assertIsNotNone(saved, "the form saved no rule")
+        self.assertEqual(saved["selector"], {
+            "condition": "count", "saved_search": self.search.id,
+            "group_by": "service", "window_minutes": "15",
+            "at_least": "10"})
+
+    def test_a_ratio_rule_keeps_the_ratio_fields_and_not_the_count(self):
+        """Both are on the form and one of them is hidden. Storing the
+        hidden one leaves a ratio rule carrying a count somebody set once,
+        which the rule list does not show and the next person to widen the
+        rule inherits."""
+        saved = self.save(name="share", condition="ratio",
+                          ratio_at_least="5", of_at_least="20",
+                          at_least="10")
+        self.assertEqual(saved["selector"], {
+            "condition": "ratio", "saved_search": self.search.id,
+            "group_by": "service", "window_minutes": "15",
+            "ratio_at_least": "5", "of_at_least": "20"})
+
+    def test_an_empty_box_is_left_out_rather_than_stored_empty(self):
+        """The evaluator reads an absent setting as its default and refuses
+        one it cannot parse. A stored "" is a third state neither has a rule
+        for."""
+        saved = self.save(window_minutes="")
+        self.assertNotIn("window_minutes", saved["selector"])
+
+    def test_the_rule_it_writes_is_one_the_evaluator_can_run(self):
+        """The whole point of the two halves matching. Saved through the
+        form, observed through the runner, with no hand-written selector in
+        between."""
+        saved = self.save()
+        out = observe(saved, None, self.app.store, None, NOW,
+                      Hub(Source(billing=12, search=3)))
+        self.assertEqual({o.subject: o.bad for o in out.observations},
+                         {"billing": True, "search": False})
+        self.assertTrue(out.complete)
+
+    def test_an_edit_keeps_reading_it_as_a_log_rule(self):
+        """The kind is not editable, so an edit need not send it — and read
+        from the form it arrives as nothing, which is not `log_query`, so
+        the selector would be parsed as monitor labels and a rule that was
+        watching a search would quietly stop. Taken from the stored row
+        instead."""
+        saved = self.save()
+        self.client.post("/admin/rules", data={
+            "id": saved["id"], "name": "errors", "threshold": "1",
+            "channel_id": self.channel["id"],
+            "saved_search": self.search.id, "group_by": "pod",
+            "condition": "count", "at_least": "25",
+            "window_minutes": "30"}, follow_redirects=True)
+        again = self.app.store.rules.get(saved["id"])
+        self.assertEqual(again["selector"], {
+            "condition": "count", "saved_search": self.search.id,
+            "group_by": "pod", "window_minutes": "30", "at_least": "25"})
+
+    def test_a_monitor_rule_still_reads_its_selector_as_labels(self):
+        """The two selectors share a column and must not share a parser."""
+        self.client.post("/admin/rules", data={
+            "name": "down", "kind": "monitor_down",
+            "channel_id": self.channel["id"], "selector": "team: payments"},
+            follow_redirects=True)
+        saved = next(r for r in self.app.store.rules.all()
+                     if r["name"] == "down")
+        self.assertEqual(saved["selector"], {"team": "payments"})
+
+
 class AgainstTheLabTest(unittest.TestCase):
     """The whole path over a real Elasticsearch.
 

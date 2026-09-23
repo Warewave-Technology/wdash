@@ -1286,12 +1286,24 @@ class LogSearch {
                 return;
             }
             var self = this;
+            // An alert has to count something that was saved, so this is
+            // where the offer belongs: a rule points at a saved search, and
+            // the moment somebody has one is the moment the offer means
+            // anything. It carries the id to the rule form rather than
+            // creating a rule, because a rule needs a channel and a
+            // threshold that only that form asks for.
+            var mayAlert = Boolean(listEl.dataset.mayAlert);
             var html = '';
             searches.forEach(function(s) {
                 html += '<div class="d-flex align-items-center px-2 py-1 saved-search-item">';
                 html += '<a href="#" class="dropdown-item py-1 px-2 flex-grow-1 text-truncate saved-search-apply" data-query="' + s.query.replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '" data-time="' + WDash.escapeAttr(s.time_range) + '">';
                 html += '<small>' + WDash.escapeHtml(s.name) + '</small><br><code style="font-size:0.7rem" class="text-muted">' + WDash.escapeHtml(s.query) + '</code>';
                 html += '</a>';
+                if (mayAlert) {
+                    html += '<a class="btn btn-sm btn-link text-info p-0 ms-1 saved-search-alert" ' +
+                        'href="/admin/config?alert_for=' + encodeURIComponent(s.id) + '#tab-alerts" ' +
+                        'title="Alert on this search"><i class="fas fa-bell" style="font-size:0.7rem"></i></a>';
+                }
                 html += '<button class="btn btn-sm btn-link text-danger p-0 ms-1 saved-search-delete" data-id="' + WDash.escapeAttr(s.id) + '" title="Delete"><i class="fas fa-trash-alt" style="font-size:0.7rem"></i></button>';
                 html += '</div>';
             });

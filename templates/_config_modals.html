@@ -772,6 +772,90 @@
               </select>
             </div>
 
+            {# ---- a rule that watches logs ----------------------------
+               Named fields rather than the `key: value` textarea below.
+               The keys are a contract with the evaluator, which refuses a
+               selector key it does not recognise — asking somebody to
+               spell `saved_search` and paste a UUID beside it is asking
+               them to be the place a typo goes unnoticed. #}
+            <div class="col-md-6" data-rule="log_query">
+              <label class="form-label small">Counts this saved search</label>
+              <select class="form-select form-select-sm" name="saved_search"
+                      id="ruleSavedSearch">
+                {% for search in saved_searches %}
+                <option value="{{ search.id }}">{{ search.name }}</option>
+                {% else %}
+                <option value="">You have not saved a search yet</option>
+                {% endfor %}
+              </select>
+              <div class="form-text text-warning d-none"
+                   style="font-size:.7rem" id="ruleSavedSearchNote"></div>
+              <div class="form-text" style="font-size:.7rem">
+                {% if saved_searches %}
+                Saved on the logs page. The rule counts whatever it
+                matches, in its own window rather than the search's.
+                {% else %}
+                Run a search on the logs page and save it first &mdash; a
+                rule needs something to count.
+                {% endif %}
+              </div>
+            </div>
+            <div class="col-md-6" data-rule="log_query">
+              <label class="form-label small">One alert per</label>
+              <input class="form-control form-control-sm" name="group_by"
+                     id="ruleGroupBy" list="ruleGroupFields"
+                     placeholder="service">
+              <datalist id="ruleGroupFields"></datalist>
+              <div class="form-text" style="font-size:.7rem">
+                A field the source can group by. Every VALUE of it over the
+                threshold becomes its own alert, so one noisy service does
+                not hide the next one to break.
+              </div>
+            </div>
+            <div class="col-md-4" data-rule="log_query">
+              <label class="form-label small">Fires on</label>
+              <select class="form-select form-select-sm" name="condition"
+                      id="ruleCondition">
+                {% for name, (title, _why) in log_conditions.items() %}
+                <option value="{{ name }}">{{ title }}</option>
+                {% endfor %}
+              </select>
+              {% for name, (_title, why) in log_conditions.items() %}
+              <div class="form-text" style="font-size:.7rem"
+                   data-condition="{{ name }}">{{ why }}</div>
+              {% endfor %}
+            </div>
+            <div class="col-md-4" data-rule="log_query"
+                 data-condition="count">
+              <label class="form-label small">At least this many</label>
+              <input class="form-control form-control-sm" name="at_least"
+                     type="number" min="1" value="10">
+            </div>
+            <div class="col-md-4" data-rule="log_query"
+                 data-condition="ratio">
+              <label class="form-label small">At least this share (%)</label>
+              <input class="form-control form-control-sm"
+                     name="ratio_at_least" type="number" min="1" max="100"
+                     value="5">
+            </div>
+            <div class="col-md-4" data-rule="log_query">
+              <label class="form-label small">Counted over (minutes)</label>
+              <input class="form-control form-control-sm"
+                     name="window_minutes" type="number" min="1" value="15">
+            </div>
+            <div class="col-md-4" data-rule="log_query"
+                 data-condition="ratio">
+              <label class="form-label small">Ignore groups under</label>
+              <input class="form-control form-control-sm" name="of_at_least"
+                     type="number" min="1" value="20">
+              <div class="form-text" style="font-size:.7rem">
+                Records. A share of three records is a statement about
+                three records &mdash; one of them is a third of the
+                answer. Under this a group is reported as unknown rather
+                than as well, so nothing resolves on a handful.
+              </div>
+            </div>
+
             <div class="col-12" data-rule="monitor_down certificate_expiring">
               <label class="form-label small">Only these monitors</label>
               <textarea class="form-control form-control-sm" name="selector"

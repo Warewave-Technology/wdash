@@ -47,7 +47,10 @@ function check(name, condition, detail) {
     }
 }
 
-function build() {
+// The URL is a parameter because one behaviour reads it: the logs page hands
+// a saved search over as `?alert_for=<id>`, and a fixture with a fixed
+// address cannot tell a page that was sent here from one that was opened.
+function build(url = 'http://localhost/admin/config') {
     const dom = new JSDOM(`<!doctype html><body>
       <div id="rolePermissions">
         <input type="checkbox" name="permissions" value="logs:read">
@@ -159,8 +162,42 @@ function build() {
       </form>
       <code id="passwordFor"></code>
 
+      <!-- The alert rule editor, as the template renders it. The blocks
+           applyRuleKind shows and hides are keyed twice over: by the rule
+           kind, and inside a log rule by the condition. A box that does
+           nothing is a box a form teaches you works. -->
+      <div class="modal fade" id="ruleModal"></div>
+      <select id="ruleKind">
+        <option value="monitor_down">A check stops answering</option>
+        <option value="certificate_expiring">A certificate is running out</option>
+        <option value="log_query">A saved search finds too much</option>
+      </select>
+      <div data-rule="monitor_down agent_silent" id="ruleThresholdField"></div>
+      <div data-rule="certificate_expiring" id="ruleDaysField"></div>
+      <div data-rule="monitor_down certificate_expiring" id="ruleLabelField"></div>
+      <div data-rule="log_query" id="ruleSearchField">
+        <select id="ruleSavedSearch">
+          <option value="s-1">Errors</option>
+          <option value="s-2">Slow requests</option>
+        </select>
+        <div class="d-none" id="ruleSavedSearchNote"></div>
+      </div>
+      <div data-rule="log_query" id="ruleGroupField">
+        <input id="ruleGroupBy" list="ruleGroupFields">
+        <datalist id="ruleGroupFields"></datalist>
+      </div>
+      <select id="ruleCondition">
+        <option value="count">How many records</option>
+        <option value="ratio">What share of the records</option>
+      </select>
+      <div data-rule="log_query" data-condition="count" id="ruleCountField"></div>
+      <div data-rule="log_query" data-condition="ratio" id="ruleShareField"></div>
+      <div data-rule="log_query" data-condition="ratio" id="ruleFloorField"></div>
+      <div data-condition="count" id="ruleCountWhy"></div>
+      <div data-condition="ratio" id="ruleRatioWhy"></div>
+
       <form></form></body>`,
-      { runScripts: 'outside-only', url: 'http://localhost/admin/config' });
+      { runScripts: 'outside-only', url });
 
     const w = dom.window;
     global.window = w;
@@ -1078,6 +1115,77 @@ function type(w, id, value) {
     check('a username is written as text, not as markup',
           resetWho.children.length === 0
           && resetWho.textContent === '<img src=x>');
+
+    // ---- the alert rule editor ------------------------------------------
+    // A form offering a box that does nothing teaches that it works. The
+    // rule kind decides which blocks are shown, and inside a log rule the
+    // condition decides again: a count box on a rule judging a percentage
+    // is the same fault one level down.
+    const rules = build().w;
+    const shown = (id) => !rules.document.getElementById(id)
+        .classList.contains('d-none');
+    const pick = (id, value) => {
+        const element = rules.document.getElementById(id);
+        element.value = value;
+        element.dispatchEvent(new rules.Event('change'));
+    };
+
+    check('a monitor rule shows its own fields and not a log rule\'s',
+          shown('ruleThresholdField') && shown('ruleLabelField')
+          && !shown('ruleSearchField') && !shown('ruleGroupField'));
+
+    pick('ruleKind', 'log_query');
+    check('a log rule shows what it counts and how it is grouped',
+          shown('ruleSearchField') && shown('ruleGroupField'));
+    check('and hides the monitor label box, which it would not read',
+          !shown('ruleLabelField') && !shown('ruleThresholdField'));
+    check('counting shows a count and not a share',
+          shown('ruleCountField')
+          && !shown('ruleShareField') && !shown('ruleFloorField'));
+
+    pick('ruleCondition', 'ratio');
+    check('a share shows a share, a floor, and no count',
+          shown('ruleShareField') && shown('ruleFloorField')
+          && !shown('ruleCountField'));
+    check('and the explanation under the picker follows it too',
+          shown('ruleRatioWhy') && !shown('ruleCountWhy'),
+          'the wrong sentence is under the condition somebody chose');
+
+    pick('ruleKind', 'monitor_down');
+    check('leaving the log kind takes the condition blocks with it',
+          !shown('ruleShareField') && !shown('ruleFloorField'),
+          'a share box survived on a rule that watches monitors');
+
+    // The handover from the logs page. It carries one fact — which saved
+    // search — because it is the only one it has; the channel, the
+    // threshold and the window are this form's to ask for.
+    const sent = build('http://localhost/admin/config?alert_for=s-2').w;
+    check('a page opened from a saved search selects it',
+          sent.document.getElementById('ruleSavedSearch').value === 's-2');
+    check('and switches to the kind that can watch it',
+          sent.document.getElementById('ruleKind').value === 'log_query');
+    check('and the fields for that kind are already showing',
+          !sent.document.getElementById('ruleSearchField')
+              .classList.contains('d-none'));
+
+    const gone = build('http://localhost/admin/config?alert_for=deleted').w;
+    // A select always shows its first option, so leaving it alone is not
+    // "nothing chosen" — it is the first search, chosen by nobody, and the
+    // save would take it. The box has to be EMPTY for it to agree with the
+    // warning printed beside it.
+    check('a search that is no longer in the list leaves nothing chosen',
+          gone.document.getElementById('ruleSavedSearch').selectedIndex === -1,
+          'a search nobody picked was sitting in the box, ready to save');
+    check('and the form says why rather than looking filled in',
+          !gone.document.getElementById('ruleSavedSearchNote')
+              .classList.contains('d-none')
+          && /no longer|not in this list/i.test(
+              gone.document.getElementById('ruleSavedSearchNote').textContent));
+
+    const plain = build().w;
+    check('a page nobody was sent to does not open the form',
+          plain.document.getElementById('ruleSavedSearchNote')
+              .classList.contains('d-none'));
 
     console.log(failures.length ? `\n${failures.length} failure(s)`
                                 : '\nall role editor checks passed');

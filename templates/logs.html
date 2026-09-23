@@ -63,7 +63,15 @@
                                state so the API's shape does not have to
                                change. #}
                             {% set left_behind = json_stores_left_behind() %}
+                            {# `data-may-alert` rather than rendering the
+                               link itself: the list is drawn by the bundle
+                               after the page loads, and a permission the
+                               template knows has to reach it somehow. Only
+                               an administrator may save an alert rule, and
+                               offering the link to anybody else is a link
+                               to a form that will refuse them. #}
                             <li id="savedSearchList"
+                                {% if current_user.has_permission('system:admin') %}data-may-alert="1"{% endif %}
                                 {% if left_behind and left_behind.searches_notice %}data-left-behind="{{ left_behind.searches_notice }}"{% endif %}><span class="dropdown-item-text text-muted"><small>Loading...</small></span></li>
                             <li><hr class="dropdown-divider"></li>
                             <li>
