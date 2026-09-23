@@ -123,6 +123,66 @@ class PolicyTest(HeaderTestCase):
         self.assertIn("object-src 'none'", self.policy())
 
 
+class HowLongAStaticFileKeepsTest(HeaderTestCase):
+    """A year and `immutable`, decided by the application.
+
+    It used to be decided by one deployment's nginx.conf, which meant
+    every other way of running WDash revalidated every asset on every page
+    load — and it stopped being true for the Kubernetes one too, once
+    `/static` moved behind the proxy with the files.
+
+    Safe only because every asset a template asks for carries
+    `?v=<version>`: an upgrade asks a different URL, so nothing that
+    changed is read from a cache. `test_version` holds the stamp that
+    makes the version real; this holds the bargain it buys.
+    """
+
+    ASSET = "/static/js/wdash.min.js"
+
+    def test_a_browser_may_keep_it_for_a_year(self):
+        header = self.client.get(self.ASSET).headers.get("Cache-Control", "")
+        self.assertIn("max-age=31536000", header)
+        self.assertIn("public", header)
+
+    def test_and_need_not_ask_again(self):
+        """`immutable` is the half that removes the round trip: without it
+        a reload revalidates every asset however long the max-age."""
+        self.assertIn("immutable",
+                      self.client.get(self.ASSET).headers.get("Cache-Control", ""))
+
+    def test_it_still_answers_a_conditional_request(self):
+        """The long life is a promise about a URL, not a refusal to talk.
+        A client that asks anyway — a proxy revalidating, a browser told
+        to reload — must get 304 rather than the file again."""
+        first = self.client.get(self.ASSET)
+        again = self.client.get(
+            self.ASSET, headers={"If-None-Match": first.headers["ETag"]})
+        self.assertEqual(again.status_code, 304)
+
+    def test_a_page_is_not_cached_like_an_asset(self):
+        """The rule is for `/static` and nothing else. A logs page held
+        for a year would be a person looking at yesterday."""
+        header = self.client.get("/auth/login").headers.get("Cache-Control", "")
+        self.assertNotIn("max-age=31536000", header)
+
+    def test_under_debug_a_file_edited_between_requests_is_seen(self):
+        """There the buster is the process start, so a year would hold an
+        edited stylesheet until the next restart — which is most of what
+        editing a stylesheet is."""
+        from wdash.config import Config
+
+        class Debugging(Config):
+            TESTING = True
+            DEBUG = True
+            SECRET_KEY = "headers"
+            DATABASE_URL = f"sqlite:///{self.database}"
+            ENCRYPTION_KEY = SecretBox.generate_key()
+
+        client = create_app(Debugging).test_client()
+        self.assertEqual(
+            client.get(self.ASSET).headers.get("Cache-Control"), "no-cache")
+
+
 class ThirdPartyAssetTest(HeaderTestCase):
     """A nonce says "this tag is ours". It says nothing about the bytes.
 

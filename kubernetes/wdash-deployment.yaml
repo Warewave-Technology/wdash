@@ -227,8 +227,6 @@ spec:
         - name: nginx-config
           mountPath: /etc/nginx/conf.d
           readOnly: true
-        - name: static-files
-          mountPath: /app/static
           readOnly: true
         - name: nginx-tmp
           mountPath: /var/cache/nginx
@@ -258,31 +256,12 @@ spec:
       - name: dashboard-storage
         persistentVolumeClaim:
           claimName: wdash-data-pvc
-      - name: static-files
-        emptyDir: {}
       - name: tmp
         emptyDir: {}
       - name: nginx-tmp
         emptyDir: {}
       - name: nginx-run
         emptyDir: {}
-
-      initContainers:
-      - name: copy-static-files
-        image: yigitbasalma/wdash-elastic-dashboard:3.1.5
-        command: ['sh', '-c', 'cp -r /app/static/* /shared/static/']
-        volumeMounts:
-        - name: static-files
-          mountPath: /shared/static
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          runAsNonRoot: true
-          runAsUser: 1000
-          runAsGroup: 1000
-          capabilities:
-            drop:
-            - ALL
 
 ---
 apiVersion: v1

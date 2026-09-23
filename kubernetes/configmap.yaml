@@ -153,26 +153,35 @@ data:
         # honour either. X-XSS-Protection is gone with them: it is removed
         # from every current browser and was itself an XSS vector.
 
-        # Gzip compression
+        # Gzip compression.
+        #
+        # `gzip_proxied any` because /static is proxied now rather than read
+        # off a disk here: nginx does not compress a proxied response unless
+        # told to, and the default would have sent 47KB of JavaScript
+        # uncompressed to every first load without anything saying so.
         gzip on;
         gzip_vary on;
+        gzip_proxied any;
         gzip_min_length 1024;
         gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
 
-        # Static files.
+        # /static is NOT served here. It falls through to the proxy below,
+        # which is the whole point.
         #
-        # A year and `immutable` is only safe because every asset the
-        # templates request carries `?v=<version>`, so an upgrade asks for a
-        # different URL. It did not: the version was a random number
-        # regenerated on every page load, which re-downloaded the CSS and the
-        # JavaScript on every single view — while the favicon and the logo,
-        # which carried no version at all, stayed pinned for a year and would
-        # have kept showing the OLD mark after an upgrade.
-        location /static/ {
-            alias /app/static/;
-            expires 1y;
-            add_header Cache-Control "public, immutable";
-        }
+        # It used to be served from an emptyDir that a `copy-static-files`
+        # init container filled, with `expires 1y, immutable` on top. Two
+        # containers then decided what a browser got: the application
+        # rendered the HTML and the URL `?v=<version>` in it, and this
+        # served the file under that URL out of a copy taken from whatever
+        # image the INIT container happened to be on. An upgrade that moved
+        # one and not the other — which is what `kubectl set image` naming a
+        # container does — served last release's JavaScript under this
+        # release's URL, cached for a year, with no error anywhere. It was
+        # reported as a button that did nothing.
+        #
+        # One source now. The year and the `immutable` moved into the
+        # application with the files, where they also reach every
+        # installation that does not run this manifest.
 
         # Health check
         location /health {

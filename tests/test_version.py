@@ -143,6 +143,36 @@ class EverythingElseReadsItTest(unittest.TestCase):
         # above would pass for the wrong reason.
         self.assertNotIn(f"wdash.min.js?v={self.version}", page)
 
+    def test_nothing_serves_static_but_the_application(self):
+        """One source for a file, which is what stops two from drifting.
+
+        A `copy-static-files` init container used to copy `/app/static`
+        into an emptyDir the nginx sidecar served, so the HTML came from
+        one image and the JavaScript from another. An upgrade that moved
+        one and not the other served last release's file under this
+        release's URL, cached a year by `expires 1y, immutable`, with no
+        error anywhere — reported as a button that did nothing.
+
+        Both halves are asserted, because either one alone leaves the
+        skew: an init container with no nginx `location` copies files
+        nobody reads, and a `location /static` with no init container
+        serves an empty directory.
+        """
+        deployment = _read("kubernetes/wdash-deployment.yaml")
+        self.assertNotIn("copy-static-files", deployment)
+        self.assertNotIn("initContainers", deployment)
+        self.assertNotIn("/app/static", deployment)
+
+        nginx = _read("kubernetes/configmap.yaml")
+        self.assertNotIn("location /static", nginx)
+        self.assertNotIn("alias /app/static", nginx)
+
+    def test_and_a_proxied_asset_is_still_compressed(self):
+        """nginx does not gzip a proxied response unless told to, and the
+        default would send 47KB of JavaScript uncompressed to every first
+        load with nothing saying so. Measured through the sidecar: 16KB."""
+        self.assertIn("gzip_proxied any;", _read("kubernetes/configmap.yaml"))
+
     def test_every_container_in_a_pod_runs_the_same_image(self):
         """Including the init container, and that is the point.
 

@@ -451,6 +451,34 @@ def create_app(config_class=Config):
         # two questions and a local edit must not look like a version skew.
         return {'asset_version': asset_version, 'wdash_version': __version__}
 
+    @app.after_request
+    def _static_is_worth_keeping(response):
+        """How long a browser may hold a static file: a year, immutable.
+
+        The same bargain the version above buys, and it has to be made
+        HERE. Flask's own answer is `no-cache`, which is a conditional
+        request per asset per page load; the Kubernetes sidecar used to
+        override that with `expires 1y, immutable` of its own, which meant
+        the bargain existed in exactly one deployment and nowhere else — a
+        `docker compose` install revalidated everything, for ever.
+
+        It is safe because every asset a template asks for carries
+        `?v=<version>`: an upgrade asks for a DIFFERENT URL, so nothing
+        that changed is ever read from a cache. All seven of them do, and
+        no stylesheet or script reaches for an eighth.
+
+        Under debug it stays `no-cache`, because the buster is the process
+        start there and a file edited between two requests of one run would
+        otherwise be held until the next restart.
+        """
+        from flask import request
+
+        if request.endpoint == 'static' and response.status_code < 400:
+            response.headers['Cache-Control'] = (
+                'no-cache' if app.config.get('DEBUG')
+                else 'public, max-age=31536000, immutable')
+        return response
+
     # Initialize Flask-Login
     login_manager = LoginManager()
     login_manager.init_app(app)

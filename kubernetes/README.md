@@ -189,17 +189,27 @@ same problem.
 | --- | --- |
 | `wdash` | gunicorn, four workers, on port 5000 |
 | `alerts` | `python -m wdash.alerts`, evaluating rules every 30 seconds |
-| `nginx` | the sidecar on port 8080: static files, and the proxy in front |
-| `copy-static-files` | an init container: copies `/app/static` out of the WDash image into the emptyDir nginx serves |
+| `nginx` | the sidecar on port 8080: the proxy in front, `/static` included |
 
-**Upgrade all four together.** The init container is where the CSS and the
-JavaScript come from, and nginx serves them with `expires 1y, immutable`;
-the application container is where the HTML comes from. A partial upgrade —
-`kubectl set image` naming one container, a patch that lists containers by
-name — leaves the two on different releases, and then last release's
-JavaScript is served under this release's URL and cached for a year. It
-looks like nothing: no error, no warning, and a page whose controls quietly
-belong to an older version. Reported exactly once, that way.
+**Three containers, one image.** There is no init container and no shared
+volume: nginx proxies `/static/` to the application like everything else,
+so the HTML and the JavaScript come from the same place and cannot drift
+apart.
+
+They could. Until 3.1.6 a `copy-static-files` init container copied
+`/app/static` into an emptyDir that nginx served with `expires 1y,
+immutable`, which put two containers in charge of what a browser got: the
+application rendered the URL `?v=<version>`, and nginx served whatever file
+the INIT container's image had. An upgrade moving one and not the other —
+`kubectl set image` naming a container does exactly that — served last
+release's JavaScript under this release's URL and cached it for a year,
+with no error anywhere. It was reported as a button that did nothing.
+
+The year and the `immutable` did not go away; they moved into the
+application, where they also reach an install that does not run these
+manifests. Measured through the sidecar: `public, max-age=31536000,
+immutable`, gzip (16KB of a 47KB file), and a conditional request still
+answers 304.
 
 A browser says so: open the console on any page and a mismatch prints which
 release the page is and which the JavaScript is. From a terminal, the same
