@@ -19,6 +19,7 @@ password and has nowhere to keep a secret for one; a second factor for them
 belongs at the provider that authenticates them.
 """
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -415,17 +416,54 @@ class CodeTest(FlowTestCase):
         self.secret = support.set_up(self.client, username="owner",
                                      password=PASSWORD)
         self.client.get("/auth/logout")
+        self.MOMENT = time.time()
 
-    def submit(self, code, address="10.0.0.1"):
+    #: The moment every exchange in this class happens at, taken from the
+    #: real clock once the enrolment is done.
+    #:
+    #: Taken, not chosen: the replay guard remembers the step the enrolment
+    #: used, and a fixed constant would sit thousands of steps before it —
+    #: every code refused as a replay, which is a test measuring the wrong
+    #: rule. It only has to be ONE moment, not a particular one.
+    #:
+    #: A code is computed against `time.time()` HERE and checked against
+    #: `time.time()` in the process, and the two are separated by a sign-in
+    #: and a form post. A 30-second step boundary falling between them
+    #: shifts the distance by a whole step: a code two steps ahead becomes
+    #: one and is accepted, a code one step ahead becomes two and is
+    #: refused. Both are this class's assertions, inverted, and under load
+    #: it happens — once, in a full run, with the module passing twice on
+    #: its own afterwards.
+    #:
+    #: So the checking side is pinned to the same moment the code was made
+    #: for. `totp`'s own `time` is replaced rather than the process's: the
+    #: sign-in throttle and the audit trail read the real clock in the same
+    #: request, and freezing that would be a different test.
+    @contextlib.contextmanager
+    def _at(self, moment):
+        class _Clock:
+            @staticmethod
+            def time():
+                return moment
+
+        original = totp.time
+        totp.time = _Clock
+        try:
+            yield
+        finally:
+            totp.time = original
+
+    def submit(self, code, address="10.0.0.1", at=None):
         self.client.post("/auth/login",
                          data={"username": "owner", "password": PASSWORD},
                          environ_base={"REMOTE_ADDR": address})
-        return self.client.post("/auth/totp", data={"code": code},
-                                environ_base={"REMOTE_ADDR": address})
+        with self._at(self.MOMENT if at is None else at):
+            return self.client.post("/auth/totp", data={"code": code},
+                                    environ_base={"REMOTE_ADDR": address})
 
     def current(self, ahead=totp.STEP):
         """A code the enrolment has not already used."""
-        return totp.code(self.secret, at=time.time() + ahead)
+        return totp.code(self.secret, at=self.MOMENT + ahead)
 
     def test_an_enrolled_account_is_asked_for_a_code(self):
         response = self.client.post("/auth/login", data={
@@ -472,12 +510,12 @@ class CodeTest(FlowTestCase):
         a replay whatever the drift allowance says — which is the rule this
         test must not be measuring."""
         self.app.store.users.record_totp_step("owner", None)
-        behind = totp.code(self.secret, at=time.time() - totp.STEP)
+        behind = totp.code(self.secret, at=self.MOMENT - totp.STEP)
         self.assertEqual(self.submit(behind).status_code, 302)
 
     def test_two_steps_away_is_not(self):
         self.app.store.users.record_totp_step("owner", None)
-        far = totp.code(self.secret, at=time.time() + 2 * totp.STEP)
+        far = totp.code(self.secret, at=self.MOMENT + 2 * totp.STEP)
         self.assertEqual(self.submit(far).status_code, 401)
 
     def test_a_wrong_code_is_a_failure_the_existing_guard_counts(self):
