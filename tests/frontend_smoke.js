@@ -1419,12 +1419,17 @@ check('Clear takes away the chart, the sources, the warnings and the stats', () 
         const filter = w.document.getElementById('fieldStatsFilter');
         filter.value = 'kube';
         filter.dispatchEvent(new w.Event('input'));
-        check('filtering hides what does not match',
-              () => assert(w.document.querySelector(
-                  '[data-field="@i"]').classList.contains('d-none')));
+        const hidden = (field) => {
+            const row = w.document.querySelector('[data-field="' + field + '"]');
+            return (row.closest('.col') || row).classList.contains('d-none');
+        };
+        check('filtering hides what does not match', () => assert(hidden('@i')));
+        check('and hides its COLUMN, so the grid does not keep the gap',
+              () => assert(w.document.querySelector('[data-field="@i"]')
+                  .closest('.col').classList.contains('d-none'),
+                  'the row was hidden inside a cell that still holds space'));
         check('and never hides a field that is ticked',
-              () => assert(!w.document.querySelector(
-                  '[data-field="@l"]').classList.contains('d-none')));
+              () => assert(!hidden('@l')));
 
         // What is POSTed is what is ticked, including rows the filter is
         // hiding at the time.

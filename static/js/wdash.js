@@ -991,7 +991,12 @@ class LogSearch {
                         const ticked = row.querySelector('input').checked;
                         const matches = !wanted || name.toLowerCase().includes(wanted);
                         anything = anything || matches;
-                        row.classList.toggle('d-none', !ticked && !matches);
+                        // The COLUMN, not the row inside it. The list is a
+                        // two-column grid: hiding the row leaves its cell
+                        // holding the space, so filtering a long list drew
+                        // as many blank gaps as it hid names.
+                        (row.closest('.col') || row).classList.toggle(
+                            'd-none', !ticked && !matches);
                     });
 
                 // Nothing on this page matches, and the page holds a cut
