@@ -21,7 +21,7 @@
  * Held to `src/wdash/__init__.py` by `tests/test_version.py`, like the
  * eight other places the number lives.
  */
-const WDASH_BUNDLE_VERSION = '3.1.6';
+const WDASH_BUNDLE_VERSION = '3.1.7';
 
 //: Readable from a console, which is where somebody asks this question.
 //:

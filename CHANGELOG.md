@@ -22,6 +22,33 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
+## 3.1.7 — 2026-09-23
+
+### Needs action
+
+- **If you have 3.1.6's `kubernetes/`, take this one.** 3.1.6 shipped a
+  deployment file `kubectl` refuses to read — a duplicate `readOnly` key
+  left behind when the static volume was removed. `kubectl apply -k` fails
+  on it outright; the images were fine.
+
+### Fixed
+
+- **3.1.6's manifests could not be applied.** `mapping key "readOnly"
+  already defined`. The test suite read these files with a parser that
+  takes the last duplicate and says nothing, so a malformed manifest passed
+  everything and CI caught it after the tag. They are read strictly now,
+  and `kubectl kustomize` itself runs as a test wherever kubectl is
+  installed.
+
+### Changed
+
+- **Choosing which fields the log sidebar counts happens in a dialog.** The
+  strip inside the sidebar card was a 14rem box for a list that can hold
+  hundreds of names, most of them too long to read in a single narrow
+  column. Two columns, a count of what is chosen including the ticks a
+  search has scrolled past, and Save and Cancel where they are expected.
+  Nothing about what is stored or who may change it has moved.
+
 ## 3.1.6 — 2026-09-23
 
 ### Needs action
