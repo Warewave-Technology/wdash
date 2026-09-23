@@ -119,11 +119,19 @@ class TheDocsContentsTest(unittest.TestCase):
 
     def test_every_cross_reference_inside_the_page_resolves(self):
         """The prose links between sections — "see the backends", "the
-        capability table". Each is a promise that something is there."""
+        capability table". Each is a promise that something is there.
+
+        Any `id`, not only a section's. A heading deep inside one is a real
+        place to send somebody — "a rule that watches your own logs" sits
+        under Alert rules and is worth linking to directly — and a check
+        that only knew about sections would have refused the link while the
+        anchor was sitting there working.
+        """
         body = self.text.split("</aside>", 1)[1]
         referenced = set(re.findall(r'href="#([a-z0-9-]+)"', body))
-        dangling = sorted(referenced - set(self.sections))
-        self.assertEqual(dangling, [], "cross-references with no section")
+        anchors = set(re.findall(r'id="([a-z0-9-]+)"', self.text))
+        dangling = sorted(referenced - anchors)
+        self.assertEqual(dangling, [], "cross-references with nothing to reach")
 
 
 class TheLandingPageTest(unittest.TestCase):

@@ -22,6 +22,77 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
+## 3.2.0 — 2026-09-23
+
+### Needs action
+
+- **A log rule needs the alert evaluator running.** `python -m wdash.alerts`,
+  one of them, as the other three rule kinds already needed. Nothing new to
+  deploy — but if you have never run it, a rule you write now will sit there
+  looking like it is watching.
+
+### Added
+
+- **Alerts on a saved log search.** A fourth rule kind beside the three
+  about monitoring. Save a search on the Logs page, press the bell beside
+  it, and the rule form opens on it: pick a field to group by, a channel,
+  and either a count or a share.
+
+  The rule fires **per group**. A rule watching twenty services is twenty
+  alerts that fire and recover on their own — one alert for the whole query
+  would hide the second service to break behind the first, and would
+  recover when either of them did.
+
+  Two ways to judge a group:
+
+  - *How many records* — at least this many matches in the window. For a
+    thing that should almost never happen.
+  - *What share of them* — the search matches at least this percentage of
+    the group's records in the same window. For a service that is busy at
+    noon and idle at 3am, where ten errors is an outage at one hour and a
+    rounding error at the other. Groups with fewer records than the volume
+    floor (twenty by default) are reported as **unknown** rather than as
+    well: with three records, one of them is a third of the answer.
+
+  A pass that could not count resolves nothing. No saved search, a deleted
+  one, an unparseable setting, no source, a failed search, an answer short
+  of a shard — and the quiet one, a field the backend cannot group by,
+  where the search succeeds and only the aggregation is refused. Each is
+  marked incomplete, because an empty list of groups otherwise reads as
+  "everything recovered" in the middle of the outage.
+
+  Only a `system:admin` may write a rule, and a rule reads with the
+  evaluator's own scope.
+
+### Fixed
+
+- **The histogram drew records as UNSPECIFIED that the rows beside them
+  read correctly.** It split by the first spelling of the level your
+  mapping offered, so on a cluster written by more than one thing —
+  `level` in some indices and Serilog's `@l` in others — every record
+  written the other way fell into the leftover and was drawn as having no
+  level at all. It now splits on every spelling present, without counting
+  a record that has two of them twice.
+
+  The same bar also ignored CLEF's own rule that an absent `@l` means
+  Information, which the rows have applied since the format was first
+  read. On a cluster whose informational lines are most of its traffic,
+  that was most of the chart.
+
+- **Logs from Serilog's own Elasticsearch sink were unreadable.** Without a
+  shipper there is no `kubernetes` object and no `log` field, and no
+  `message` or `level` either, so the documents matched none of the three
+  shapes, fell back to the flat one and came back with an empty body, no
+  service and UNSPECIFIED on every row. Shipped Serilog logs were already
+  read correctly; these were not.
+
+### Changed
+
+- **The field picker's list uses the width of the dialog.** Two equal
+  halves is the wrong shape for names like `@l` and `tag`. The columns now
+  follow the width: the same 24 fields that took twelve rows and scrolled
+  take eight and do not.
+
 ## 3.1.7 — 2026-09-23
 
 ### Needs action

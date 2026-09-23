@@ -1650,9 +1650,18 @@ check('Clear takes away the chart, the sources, the warnings and the stats', () 
         check('and the message names BOTH versions, which is the whole point',
               () => assert(said[0] && said[0].includes('9.9.9')
                            && said[0].includes(version), said[0]));
-        check('and names where to look',
-              () => assert(said[0].includes('init container')
-                           && said[0].includes('/static'), said[0]));
+        // Where to look, as the deployment ACTUALLY is. It used to send
+        // somebody to the `copy-static-files` init container, which 3.1.6
+        // removed when nginx started proxying /static through — an error
+        // message telling an operator to go and check something that is
+        // not there costs more than saying nothing.
+        check('and names where to look', () => {
+            assert(said[0].includes('/static'), said[0]);
+            assert(said[0].includes('cache') && said[0].includes('image tag'),
+                   said[0]);
+            assert(!said[0].includes('init container'),
+                   'it names a container this deployment no longer has');
+        });
 
         said.length = 0;
         check('a page that passes no version asks nothing of it',

@@ -21,7 +21,7 @@
  * Held to `src/wdash/__init__.py` by `tests/test_version.py`, like the
  * eight other places the number lives.
  */
-const WDASH_BUNDLE_VERSION = '3.1.7';
+const WDASH_BUNDLE_VERSION = '3.2.0';
 
 //: Readable from a console, which is where somebody asks this question.
 //:
@@ -43,11 +43,11 @@ function wdashCheckBundleVersion(expected) {
         'WDash: this page is ' + expected + ' but the JavaScript it loaded ' +
         'is ' + WDASH_BUNDLE_VERSION + '. Something between your browser and ' +
         'the application is serving an older copy of /static. In the shipped ' +
-        'Kubernetes deployment that is the nginx sidecar, whose files come ' +
-        'from the copy-static-files init container: check that it is on the ' +
-        'same image tag as the application container, and that no cache in ' +
-        'front of it is holding /static. Until then this page is running ' +
-        'code from a different release than the one it is showing you.');
+        'Kubernetes deployment nothing holds a second copy — the nginx ' +
+        'sidecar proxies /static through to the application — so look for a ' +
+        'cache in front of it, or a pod still on the previous image tag. ' +
+        'Until then this page is running code from a different release than ' +
+        'the one it is showing you.');
     return false;
 }
 

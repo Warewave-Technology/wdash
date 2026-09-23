@@ -221,7 +221,7 @@
 <main>
 
 <h1>WDash documentation</h1>
-<p class="lede">Version 3.1.7. Everything below is behaviour of the shipped
+<p class="lede">Version 3.2.0. Everything below is behaviour of the shipped
 code — where a number appears it was measured, and where something is a
 limitation it is written as one rather than left for you to find.</p>
 
@@ -418,7 +418,7 @@ $ kubectl -n wdash rollout status deploy/wdash</pre>
 
 <p><strong>Two things have to change before that command</strong>, and
 neither starts without you. The image is not one of them any more:
-<code>yigitbasalma/wdash-elastic-dashboard:3.1.7</code> is published for
+<code>yigitbasalma/wdash-elastic-dashboard:3.2.0</code> is published for
 <code>linux/amd64</code> and <code>linux/arm64</code>, so an apply of these
 files as they are pulls a tag that exists. For a cluster that pulls from a
 registry of its own, <em>retag</em> rather than rebuild — a rebuild is a
@@ -1085,6 +1085,11 @@ searches on a JSON file when dashboards moved made that migration a half-truth
 once already. A save or a delete that fails says what the server said; the list
 does not quietly shorten.</p>
 
+<p>A saved search is also what an alert counts. The bell beside one — shown to
+administrators, who are the only people who may write a rule — carries it to
+the rule form: see <a href="#log-rules">a rule that watches your own
+logs</a>.</p>
+
 <h3>Scope</h3>
 
 <p>Which containers you can search is your role's business, not the query's. A
@@ -1302,8 +1307,9 @@ zero, which would render as "−100%, traffic has stopped".</p>
 
 <div class="stop"><b>Thresholds are not alerting</b>
 <p>They colour the dashboard. There is no notification, no schedule, no
-silencing and no history behind them. That is <a href="#rules">alert
-rules</a>, which are a different subsystem over different data.</p></div>
+silencing and no history behind them — nobody is told. To be told about a
+number in your logs, use a <a href="#log-rules">log rule</a>, which watches a
+saved search on its own schedule and has all four of those.</p></div>
 
 <div class="note"><b>A partial answer gets no badge at all</b>
 <p>When a backend returns a result that is short of a shard, the board does
@@ -1908,10 +1914,10 @@ WDash misses no check, and two WDash replicas do not double every probe.</p>
 
 <span class="c"># or the image — two of them, and the small one is the default.</span>
 <span class="c"># Published for linux/amd64 and linux/arm64.</span>
-$ docker pull <span class="g">yigitbasalma/wdash-elastic-dashboard:3.1.7</span>   <span class="c"># server, 79MB</span>
-$ docker pull <span class="g">yigitbasalma/wdash-browser:3.1.7</span>            <span class="c"># + Chromium, 557MB</span>
+$ docker pull <span class="g">yigitbasalma/wdash-elastic-dashboard:3.2.0</span>   <span class="c"># server, 79MB</span>
+$ docker pull <span class="g">yigitbasalma/wdash-browser:3.2.0</span>            <span class="c"># + Chromium, 557MB</span>
 
-$ docker run -d yigitbasalma/wdash-browser:3.1.7 \
+$ docker run -d yigitbasalma/wdash-browser:3.2.0 \
       --server https://wdash.example.com --token <span class="g">&lt;token&gt;</span></pre>
 
 <p>Create the agent at <strong>Configuration → Agents</strong>; the token is
@@ -2112,9 +2118,11 @@ all, so no button is offered for one.</p></div>
 <section id="rules">
 <h2>Alert rules</h2>
 
-<p>Three kinds, evaluated by <code>python -m wdash.alerts</code> every thirty
-seconds. They are about <em>monitoring</em>, not about log volume — see
-<a href="#thresholds">thresholds</a> for the difference.</p>
+<p>Four kinds, evaluated by <code>python -m wdash.alerts</code> every thirty
+seconds. Three are about <em>monitoring</em> — something you asked WDash to
+probe — and the fourth is about what your own applications are writing down.
+A dashboard's <a href="#thresholds">thresholds</a> are neither: they colour a
+card and nobody is told.</p>
 
 <table class="cmp">
 <thead><tr><th>Kind</th><th>Fires when</th><th>Its own settings</th></tr></thead>
@@ -2128,12 +2136,81 @@ delay, and a second one would add evaluation intervals for no benefit</td></tr>
 <tr><td><code>certificate_expiring</code></td><td>A certificate a check saw
 expires within <em>days before</em>.</td><td>days 1–365, default 30; threshold
 forced to 1</td></tr>
+<tr><td><code>log_query</code></td><td>A group of records matching one of your
+saved searches passes a count or a share. <a href="#log-rules">Below</a>.</td>
+<td>the saved search, the field to group by, the window, and either a count or
+a percentage with a volume floor</td></tr>
 </tbody>
 </table>
 
 <p>Every rule also takes a <strong>selector</strong> — which monitors or agents
-it is about — a <strong>channel</strong>, and <strong>repeat minutes</strong>
-(0 means notify once per transition).</p>
+it is about, or, for a log rule, the fields the form writes for you — a
+<strong>channel</strong>, and <strong>repeat minutes</strong> (0 means notify
+once per transition).</p>
+
+<h3 id="log-rules">A rule that watches your own logs</h3>
+
+<p>Save a search on the Logs page, then press the bell beside it. That carries
+the search to the rule form, which asks for everything a rule needs and the
+logs page has no business choosing: a channel, a threshold, a window.</p>
+
+<p>The rule <strong>groups</strong>, and each value of the grouped field is its
+own alert. A rule watching twenty services is twenty alerts that fire and
+recover on their own. One alert for the whole query would hide the second
+service to break behind the first, and would recover when either of them
+did.</p>
+
+<table class="cmp">
+<thead><tr><th>Fires on</th><th>Meaning</th><th>Use it when</th></tr></thead>
+<tbody>
+<tr><td>How many records</td><td>A group reaches <em>at least this many</em>
+matching records inside the window.</td><td>The thing should almost never
+happen, and any of it is worth knowing about.</td></tr>
+<tr><td>What share of them</td><td>The search matches <em>at least this
+percentage</em> of the group's records in the same window.</td><td>Traffic
+moves during the day. Ten errors is an outage at 3am and a rounding error at
+noon, so a count is either silent or always firing.</td></tr>
+</tbody>
+</table>
+
+<p>The share's denominator is the <em>same window and the same source</em> with
+the query taken off — "of what this search looks at, how much did it match".
+Not the whole cluster: a search pinned to one source and divided by every
+source answers a question nobody asked.</p>
+
+<div class="note"><b>A share of three records is a statement about three records</b>
+<p>With N records, one record <em>is</em> 100/N per cent: at twenty a single
+line moves the answer by five points, and at three it moves it by
+thirty-three. A group under the volume floor — twenty by default — is reported
+as <strong>unknown</strong> rather than as well. Calling it well would resolve
+a firing alert on a sample of three; calling it bad would page somebody about
+a service nobody is using.</p></div>
+
+<div class="stop"><b>A pass that could not count resolves nothing</b>
+<p>An empty list of groups is a real answer — nothing matched, so every firing
+group should recover — which makes every <em>failure</em> that returns an empty
+list an announcement that the outage is over. So each of them is marked
+incomplete instead: no saved search, a deleted one, nothing to group by, a
+setting that will not parse, no source, a search that failed, an answer short
+of a shard.</p>
+<p>Including the quiet one. A field that is not mapped as a keyword is refused
+by the <em>aggregation</em> while the search around it succeeds — nothing
+failed, nothing was partial, and no groups came back. That is not "everything
+recovered", and the evaluator reads the aggregation's own reason to tell them
+apart.</p></div>
+
+<p>A log rule counts over its own window, not the saved search's: the search
+may cover a day and the rule five minutes. The window is exact rather than
+aligned, because alignment widens a range by up to one bucket — invisible on a
+chart, and against a threshold it counts records from outside the minutes the
+rule names.</p>
+
+<p class="fn">Only a <code>system:admin</code> may write a rule, and a rule
+reads with the evaluator's own scope. If rule creation is ever opened further,
+that is the line to change first — and not by rebuilding the author's scope
+from their role, which for an identity-provider account carries no groups and
+so falls through to the default role, possibly granting <em>more</em> than the
+author had.</p>
 
 <h3>A rule reads through the hub</h3>
 
@@ -2234,7 +2311,7 @@ running version.</td><td>People and alerts. <strong>Not</strong> probes.</td></t
 </table>
 
 <pre>$ curl -s localhost:5001/livez
-{"status":"alive","version":"3.1.7"}
+{"status":"alive","version":"3.2.0"}
 
 $ curl -s localhost:5001/readyz
 {"status":"ready","store":"connected"}
@@ -2243,7 +2320,7 @@ $ curl -s localhost:5001/health
 {"main-elasticsearch": "connected",
  "status": "healthy",
  "store": "connected",
- "version": "3.1.7",
+ "version": "3.2.0",
  "wdash-agents": "connected"}</pre>
 
 <p><code>/health</code> asks every backend <strong>at once</strong> and answers
@@ -2745,12 +2822,12 @@ server.</p>
 <h3>Which version am I running?</h3>
 
 <pre>$ curl -s localhost:5001/livez
-{"status":"alive","version":"3.1.7"}</pre>
+{"status":"alive","version":"3.2.0"}</pre>
 
 <p><code>/livez</code> asks nothing else, so it answers even when every backend
 and the metadata store are unreachable.</p>
 
-<p class="note-src">Everything on this page is behaviour of WDash 3.1.7. Where
+<p class="note-src">Everything on this page is behaviour of WDash 3.2.0. Where
 a number appears — request counts, record counts, retention windows, limits —
 it was measured against the lab or the demo rather than estimated. The
 repository's <code>README.md</code> carries the same facts in more detail, and
