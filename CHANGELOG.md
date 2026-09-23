@@ -22,6 +22,33 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
+## 3.1.4 — 2026-09-23
+
+### Needs action
+
+- **Pull the image if your services are .NET.** The fix in 3.1.2 and 3.1.3
+  was not reaching the log LIST; the records were right when opened.
+
+### Fixed
+
+- **A Serilog line read `UNSPECIFIED` in the list and `INFO` when opened.**
+  The list asks Elasticsearch for a slice of each document rather than the
+  whole of it, and the slice did not include `@i` — so with `@t` already
+  deleted by fluent-bit's parser, a row carried one of the format's keys
+  where the record had two, and the rule that an absent `@l` means
+  Information did not fire on the row.
+
+  The slice is now derived from what the shapes detect on rather than
+  listed beside them, so a shape that WDash learns brings its own keys with
+  it. This is the third time one key went missing from that list; it is now
+  the kind of thing a test asks about directly, for every shape at once.
+
+- **The field picker's button said nothing when it could not be wired up.**
+  A deployment reported it doing nothing with an empty console. Both ways
+  that can happen now name themselves, the button is disabled rather than
+  left looking usable, and a successful wiring logs one line — so the next
+  report of this starts from an answer instead of a guess.
+
 ## 3.1.3 — 2026-09-23
 
 ### Needs action
