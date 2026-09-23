@@ -22,6 +22,39 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
+## 3.1.6 — 2026-09-23
+
+### Needs action
+
+- **Apply `kubernetes/` again, not just the image tag.** The pod has one
+  container fewer: the `copy-static-files` init container and the volume it
+  filled are gone, and the nginx sidecar proxies `/static/` to the
+  application instead of serving a copy. A cluster left on the old shape
+  keeps working — but it keeps the fault below with it.
+
+### Fixed
+
+- **Two containers decided what your browser got, and could disagree.**
+  `/static/` was served by the nginx sidecar out of a directory the
+  `copy-static-files` init container filled, while the HTML — including the
+  `?v=<version>` on every asset — came from the application container. An
+  upgrade that moved one and not the other, which is what `kubectl set
+  image` naming a container does, served the previous release's JavaScript
+  under this release's URL and cached it for a year. No error, no warning:
+  it looked like a page whose controls quietly did nothing.
+
+  One source now. Confirmed on the cluster that reported it: `/livez`
+  answered 3.1.5 while the file being served carried no 3.1.5 stamp at all.
+
+### Changed
+
+- **Static files are cached by the application, not by one deployment's
+  nginx.** A year and `immutable`, which is what the `?v=<version>` on
+  every asset buys — and which until now existed only for installations
+  running the Kubernetes manifests. Everybody else revalidated every asset
+  on every page load. Under `DEBUG` it stays `no-cache`, so an edited
+  stylesheet is still visible without a restart.
+
 ## 3.1.5 — 2026-09-23
 
 ### Needs action
