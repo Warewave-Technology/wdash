@@ -12,5 +12,5 @@ WDash — a minimal Kibana alternative with RBAC and OIDC support.
 #:
 #: `tests/test_version.py` fails if any of them drifts again, and `/health`
 #: reports it so a running instance can be asked rather than guessed at.
-__version__ = "3.1.4"
+__version__ = "3.1.5"
 __author__ = "Warewave"

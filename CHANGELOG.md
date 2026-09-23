@@ -22,6 +22,34 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
+## 3.1.5 — 2026-09-23
+
+### Needs action
+
+- **If a control on a page does nothing, open the console first.** It now
+  says when the JavaScript your browser loaded belongs to a different
+  release than the page showing it to you — which, in the shipped
+  Kubernetes deployment, is a thing that can happen without any other sign.
+
+### Fixed
+
+- **A page could run an older release's JavaScript, silently.** `/static/`
+  is served by the nginx sidecar out of a directory the `copy-static-files`
+  init container fills, and the HTML comes from the application container —
+  two containers, which a partial upgrade can leave on two image tags. The
+  `?v=<version>` on the script tag is rendered by the application, so it
+  says what the page ASKED for and nothing about what came back: last
+  release's file is then served under this release's URL and cached for a
+  year by `expires 1y, immutable`.
+
+  Reported as a button that did nothing, with an empty console. The page
+  checks now, and a mismatch prints both releases and where to look;
+  `window.WDASH_BUNDLE_VERSION` answers the same question at any time.
+
+  **Upgrade every container in the pod together** — the init container
+  included. `kubernetes/README.md` says so where the containers are listed,
+  and a test holds all of them to one tag.
+
 ## 3.1.4 — 2026-09-23
 
 ### Needs action

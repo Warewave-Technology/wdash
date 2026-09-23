@@ -61,7 +61,7 @@ spec:
         # and raise the memory limit below with it. An agent that has no
         # browser reports nothing for a journey, so the journey reads unknown
         # rather than down.
-        image: yigitbasalma/wdash-elastic-dashboard:3.1.4
+        image: yigitbasalma/wdash-elastic-dashboard:3.1.5
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "wdash.agent"]
         env:
