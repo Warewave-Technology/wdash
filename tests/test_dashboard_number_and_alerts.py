@@ -51,6 +51,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from wdash.dashboard.panels import PanelError, normalise  # noqa: E402
 from wdash.hub.adapters import (  # noqa: E402
     ElasticsearchLogSource, VictoriaLogsSource)
+from wdash.hub.models import normalise_severity  # noqa: E402
 from wdash.models import Dashboard  # noqa: E402
 from wdash.store.schema import alert_history, alert_rules  # noqa: E402
 
@@ -929,15 +930,38 @@ class NumberAgainstEveryLogBackendTest(unittest.TestCase):
 
                 # The commonest value is the one a number panel would be
                 # pointed at, and the one the terms list cannot have cut off.
+                #
+                # Compared through `normalise_severity` on BOTH sides. An
+                # aggregation answers the raw value an index holds and a
+                # listed record answers the level it normalises to, and the
+                # two are the same string only where a cluster writes its
+                # levels in upper case — which the lab's seeder does and a
+                # real cluster does not. Measured against one holding
+                # Serilog indices: the aggregation said `Error` and every
+                # record said `ERROR`, and this read as WDash miscounting.
+                #
+                # What it still catches is the divergence it is for: an
+                # aggregation counting a different NUMBER of records than
+                # the source lists for the same level.
+                #
+                # Every bucket that normalises to the same level is summed,
+                # not just the commonest: one container CAN hold two
+                # spellings, and comparing one of them against a list that
+                # holds both is the same arithmetic error in reverse.
                 value = str(buckets[0].key)
+                wanted = str(normalise_severity(value))
+                counted = sum(bucket.count for bucket in buckets
+                              if str(normalise_severity(
+                                  str(bucket.key))) == wanted)
                 listed = sum(1 for record in records
-                             if str(record.get("severity") or "") == value)
+                             if str(normalise_severity(
+                                 record.get("severity") or "")) == wanted)
                 self.assertEqual(
-                    buckets[0].count, listed,
+                    counted, listed,
                     f"{source.name}: the aggregation counted "
-                    f"{buckets[0].count} records with severity {value} over "
+                    f"{counted} records with severity {wanted} over "
                     f"{container} and the source listed {listed}")
-                checked.append(f"{source.name}/{container}:{value}="
+                checked.append(f"{source.name}/{container}:{wanted}="
                                f"{listed}")
 
         # A run in which every backend was skipped proves nothing, and would

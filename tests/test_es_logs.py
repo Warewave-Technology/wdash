@@ -625,9 +625,16 @@ class _Histogram:
         return Indices()
 
     def search(self, index=None, **kw):
+        self.asked = kw.get("body") or kw
         return {"took": 1, "timed_out": False,
                 "hits": {"total": {"value": 0}, "hits": []},
                 "aggregations": {"timeline": {"buckets": self.buckets}}}
+
+
+#: A mapping written by two things at once, which is what a cluster looks
+#: like once it is a year old: some indices flat, some Serilog's.
+BOTH_SPELLINGS = {"level": {"type": "keyword"}, "@l": {"type": "keyword"},
+                  "@m": {"type": "keyword"}}
 
 
 class TheHistogramStacksToItsCountTest(unittest.TestCase):
@@ -636,19 +643,102 @@ class TheHistogramStacksToItsCountTest(unittest.TestCase):
     100 + WARNING 60 + WARN 40 in a bucket of 1100 drew as 140."""
 
     def histogram(self, mapping, buckets):
-        page = ElasticsearchLogSource(_Histogram(mapping, buckets)).search(
+        self.es = _Histogram(mapping, buckets)
+        page = ElasticsearchLogSource(self.es).search(
             LogQuery(window=WINDOW, histogram=True), EVERY)
         return page.histogram
 
-    def bucket(self, count, severities):
-        return {"key": 0, "key_as_string": START, "doc_count": count,
-                "severity": {"buckets": [{"key": k, "doc_count": n}
-                                         for k, n in severities]}}
+    def bucket(self, count, *splits, assumed=0):
+        """A bucket answered for one split per severity spelling asked about.
+
+        `assumed` is the split that counts documents whose level is absent by
+        the format's rule rather than by omission.
+        """
+        answer = {"key": 0, "key_as_string": START, "doc_count": count,
+                  "severity_assumed": {"doc_count": assumed}}
+        for number, severities in enumerate(splits):
+            answer[f"severity_{number}"] = {
+                "doc_count": sum(n for _, n in severities),
+                "values": {"buckets": [{"key": k, "doc_count": n}
+                                       for k, n in severities]}}
+        return answer
 
     def test_spellings_of_one_level_add_up(self):
         [bucket] = self.histogram({"level": {"type": "keyword"}}, [self.bucket(
             1100, [("INFO", 900), ("info", 100), ("WARNING", 60), ("WARN", 40)])])
         self.assertEqual(bucket["by_severity"], {"INFO": 1000, "WARN": 100})
+
+    def test_spellings_of_the_FIELD_add_up_too(self):
+        """A level in `level` and a level in `@l` are the same level.
+
+        Measured on a 43-index cluster: the split was asked of the first
+        spelling only, and 5,364 documents carrying the other were drawn as
+        having no level — UNSPECIFIED bars standing over rows reading WARNING.
+        """
+        [bucket] = self.histogram(BOTH_SPELLINGS, [self.bucket(
+            30, [("WARNING", 10)], [("Warning", 12), ("Error", 8)])])
+        self.assertEqual(bucket["by_severity"], {"WARN": 22, "ERROR": 8})
+        self.assertEqual(sum(bucket["by_severity"].values()), bucket["count"])
+
+    def test_every_spelling_is_asked_about_and_each_document_once(self):
+        """One split per spelling, each excluding the ones before it.
+
+        Overlapping splits would count a document carrying both `level` and
+        `@l` twice, and the count left over is drawn as UNSPECIFIED — so an
+        overlap does not merely double a bar, it eats the unknown one.
+        """
+        self.histogram(BOTH_SPELLINGS, [self.bucket(0, [], [])])
+        splits = self.es.asked["aggs"]["timeline"]["aggs"]
+        self.assertEqual(splits["severity_0"]["aggs"]["values"]["terms"]["field"],
+                         "level")
+        self.assertEqual(splits["severity_1"]["aggs"]["values"]["terms"]["field"],
+                         "@l")
+        self.assertEqual(splits["severity_0"]["filter"]["bool"]["must_not"], [])
+        self.assertEqual(splits["severity_1"]["filter"]["bool"]["must_not"],
+                         [{"exists": {"field": "level"}}])
+
+    def test_each_spelling_is_asked_for_every_level_it_could_hold(self):
+        """A convention has half a dozen levels and none has ten. Asking for
+        fewer does not lose the documents — they fall into the rest and are
+        drawn as UNSPECIFIED — it loses which level they were."""
+        self.histogram(BOTH_SPELLINGS, [self.bucket(0, [], [])])
+        splits = self.es.asked["aggs"]["timeline"]["aggs"]
+        for name in ("severity_0", "severity_1"):
+            self.assertGreaterEqual(
+                splits[name]["aggs"]["values"]["terms"]["size"], 6,
+                f"{name} asks for too few levels to name a record's own")
+
+    def test_the_formats_own_rule_is_asked_about_too(self):
+        """The reading of `severity_assumed` is only worth anything if the
+        search asks for it: a response carrying a key nobody requested is an
+        assumption that holds in the test and in no cluster."""
+        self.histogram(BOTH_SPELLINGS, [self.bucket(0, [], [])])
+        splits = self.es.asked["aggs"]["timeline"]["aggs"]
+        self.assertIn("severity_assumed", splits)
+        rule = splits["severity_assumed"]["filter"]["bool"]
+        self.assertEqual(
+            rule["must_not"],
+            [{"exists": {"field": "level"}}, {"exists": {"field": "@l"}}],
+            "a document that HAS a level would be assumed to have none")
+        # The rule is about CLEF, and only about CLEF. Asked of every
+        # document with no level, it would call a record that simply has no
+        # severity an informational one — which is the opposite of the
+        # UNSPECIFIED this histogram exists to draw honestly.
+        self.assertEqual(rule["minimum_should_match"], 2,
+                         "a document carrying no key of the format at all "
+                         "would be counted as one of its Information lines")
+        self.assertIn({"exists": {"field": "@m"}}, rule["should"])
+
+    def test_a_clef_line_with_no_level_is_counted_as_information(self):
+        """The format omits `@l` FOR Information, and the rows say so.
+
+        The bars did not, and a cluster whose informational lines are most of
+        its traffic drew almost entirely UNSPECIFIED underneath rows reading
+        INFO.
+        """
+        [bucket] = self.histogram(BOTH_SPELLINGS, [self.bucket(
+            50, [], [("Warning", 10)], assumed=40)])
+        self.assertEqual(bucket["by_severity"], {"WARN": 10, "INFO": 40})
 
     def test_records_with_no_level_are_drawn_as_unspecified(self):
         """Missing the field, or beyond the ten levels asked for: counted,

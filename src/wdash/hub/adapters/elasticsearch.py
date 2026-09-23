@@ -21,7 +21,8 @@ from ..query import DEFAULT_LOG_FIELDS, SORT_SLOWEST
 from .. import query_language as ql
 from ..source import Capability, LogSource, TraceSource
 from .es_log_schema import (
-    field_candidates, match_candidates, schema_for_document, source_fields,
+    CLEF_DEFAULT_SEVERITY, clef_without_level_query, field_candidates,
+    match_candidates, schema_for_document, source_fields,
 )
 from .es_trace_schema import detect_schema, dig, parse_time
 
@@ -34,6 +35,59 @@ DEFAULT_TRACE_PATTERNS = ("*traces*", "*apm*")
 _MAPPED_LOG_FIELDS = {"@timestamp", "message", "level", "service",
                       "trace_id", "span_id"}
 _RESOURCE_FIELDS = ("host", "environment", "container", "pod", "namespace")
+
+#: How many distinct values of ONE severity spelling the histogram asks for.
+#: Ten is far more levels than any convention has; what runs past it is not a
+#: level but a field somebody logged a message into, and it lands in the rest.
+SEVERITY_VALUES_SHOWN = 10
+
+#: The sub-aggregation counting documents whose level is absent BY RULE rather
+#: than by omission. Named apart from the numbered splits because it holds no
+#: values to read — the rule already says which level it means.
+_SEVERITY_ASSUMED = "severity_assumed"
+
+
+def _severity_split_names(fields):
+    """One name per spelling, in the order the splits were built."""
+    return tuple(f"severity_{number}" for number in range(len(fields)))
+
+
+def _severity_split(fields):
+    """Sub-aggregations that give every document in a bucket one level.
+
+    A cluster is rarely written by one thing. The reported one holds 43
+    indices, some flat with `level` and some Serilog with `@l`, and the
+    histogram asked a single terms aggregation on the first spelling it
+    found: 5,364 documents had a level, in the wrong key, and were drawn as
+    having none — UNSPECIFIED bars standing over rows that read WARNING.
+
+    So one terms aggregation per spelling. Each sits behind a filter that
+    excludes the spellings before it, which makes the splits disjoint: a
+    document carrying both `level` and `@l` is counted once, under the first,
+    and never twice. That matters beyond tidiness — the count left over is
+    drawn as UNSPECIFIED, so a double count would silently eat it.
+
+    The last split is the one rule a document can satisfy by leaving a key
+    out; `clef_without_level_query` states it.
+    """
+    aggregations = {}
+    for number, field in enumerate(fields):
+        name, earlier = f"severity_{number}", fields[:number]
+        aggregations[name] = {
+            # `must_not` and nothing else. Requiring the field as well reads
+            # like a second safeguard and is not one: a terms aggregation on
+            # a field puts documents that lack it in no bucket at all, so the
+            # clause could never change a count. A check that cannot fail is
+            # worse than no check, because it looks like cover.
+            "filter": {"bool": {
+                "must_not": [{"exists": {"field": other}} for other in earlier],
+            }},
+            "aggs": {"values": {"terms": {"field": field,
+                                          "size": SEVERITY_VALUES_SHOWN}}},
+        }
+    aggregations[_SEVERITY_ASSUMED] = {
+        "filter": clef_without_level_query(fields)}
+    return aggregations
 
 
 from ..patterns import matches as _pattern_matches  # noqa: F401
@@ -566,19 +620,18 @@ class ElasticsearchLogSource(LogSource):
         if query.cursor:
             body["search_after"] = query.cursor
 
-        severity_field = None
+        severity_fields = ()
         if query.histogram:
             # Rides on the same request. Split by severity because a flat count
             # tells you volume changed; split by severity tells you what changed.
-            severity_field = self._resolve_agg_field(targets, "severity")
+            severity_fields = self._resolve_agg_fields(targets, "severity")
             timeline = {"date_histogram": {
                 "field": "@timestamp",
                 "fixed_interval": query.window.suggest_interval(),
                 "min_doc_count": 0,
             }}
-            if severity_field:
-                timeline["aggs"] = {
-                    "severity": {"terms": {"field": severity_field, "size": 10}}}
+            if severity_fields:
+                timeline["aggs"] = _severity_split(severity_fields)
             body["aggs"] = {"timeline": timeline}
 
         try:
@@ -601,16 +654,31 @@ class ElasticsearchLogSource(LogSource):
                     by_severity = {}
                     # Added, not assigned: INFO and info, WARN and WARNING are
                     # one level each, and the last spelling used to overwrite
-                    # the others — a bucket of 1100 stacked to 140.
-                    for sub in (bucket.get("severity") or {}).get("buckets", []):
-                        level = normalise_severity(sub["key"])
-                        by_severity[level] = (by_severity.get(level, 0)
-                                              + _count(sub["doc_count"]))
+                    # the others — a bucket of 1100 stacked to 140. The same
+                    # addition merges the spellings of the FIELD: `level` and
+                    # `@l` both say WARN and say it about different documents.
+                    for split in _severity_split_names(severity_fields):
+                        buckets = ((bucket.get(split) or {}).get("values")
+                                   or {}).get("buckets", [])
+                        for sub in buckets:
+                            level = normalise_severity(sub["key"])
+                            by_severity[level] = (by_severity.get(level, 0)
+                                                  + _count(sub["doc_count"]))
+                    if severity_fields:
+                        # CLEF's absent level is a level. Counted by the format's
+                        # own rule so the bar agrees with the row, which has
+                        # applied that rule since the shape was first read.
+                        assumed = _count((bucket.get(_SEVERITY_ASSUMED) or {})
+                                         .get("doc_count", 0))
+                        if assumed:
+                            level = normalise_severity(CLEF_DEFAULT_SEVERITY)
+                            by_severity[level] = (by_severity.get(level, 0)
+                                                  + assumed)
                     # The page stacks these rather than drawing the count, so
                     # what no level bucket holds — records without the field,
                     # levels beyond the ten asked for — is drawn too.
                     rest = count - sum(by_severity.values())
-                    if severity_field and rest > 0:
+                    if severity_fields and rest > 0:
                         by_severity[UNKNOWN_SEVERITY] = (
                             by_severity.get(UNKNOWN_SEVERITY, 0) + rest)
                     histogram.append({
@@ -1074,6 +1142,31 @@ class ElasticsearchLogSource(LogSource):
     def _resolve_agg_field(self, targets, neutral_name):
         """The real aggregatable field path, or None. See `_resolve_agg`."""
         return self._resolve_agg(targets, neutral_name)[0]
+
+    def _resolve_agg_fields(self, targets, neutral_name):
+        """EVERY spelling of a neutral name these indices have, best first.
+
+        `_resolve_agg_field` answers with one, which is what sorting or
+        grouping by a field needs — those pick a column. A total is not a
+        column: every document counted has to land somewhere, and on a
+        cluster written by more than one thing the documents are spread
+        across spellings. Answering with the first there counted the rest as
+        having no value at all.
+
+        Empty when the mapping cannot be read, where the singular form falls
+        back to a dotted guess: a guess is a reasonable column to sort by and
+        an unreasonable thing to count a cluster with, because a filter on a
+        field that is not there matches nothing and every document would then
+        be drawn as unknown. Nothing asked is drawn as nothing known.
+        """
+        try:
+            discovered, _ = self._discovered(targets, max_fields=1000)
+        except Exception:
+            return ()
+        return tuple(dict.fromkeys(
+            discovered[candidate]
+            for candidate in field_candidates(neutral_name)
+            if candidate in discovered))
 
     def _resolve_agg(self, targets, neutral_name):
         """Find the real aggregatable field path and its mapped type.

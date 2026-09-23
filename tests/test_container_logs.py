@@ -508,9 +508,10 @@ class WhatSerilogWritesTest(unittest.TestCase):
                                   "log": "a line"}).timestamp)
 
     def test_it_is_still_the_container_shape(self):
-        """Not a schema of its own: these documents carry the `kubernetes`
-        object too, and a CLEF schema taking them would read the message
-        and lose the pod, the namespace and the service."""
+        """A SHIPPED one is: these documents carry the `kubernetes` object
+        too, and a CLEF schema reached first would read the message and lose
+        the pod, the namespace and the service. Serilog's own sink writes
+        neither, and `WhatSerilogsOwnSinkWritesTest` covers that."""
         read = record(serilog())
         self.assertEqual(read.service, "content-service")
         self.assertEqual(read.resource["namespace"], "superapp")
@@ -552,6 +553,63 @@ class WhatSerilogWritesTest(unittest.TestCase):
                                            for f in asked)}
         self.assertEqual(str(record(narrowed).severity),
                          str(record(whole).severity))
+
+
+def from_the_sink(**extra):
+    """CLEF as Serilog's own Elasticsearch sink writes it: no shipper.
+
+    No `kubernetes` object, no `log`, no `stream`, no `tag` — and no
+    `message`, `level` or `service` either. Every marker the three schemas
+    detected on was a shipper's or a flat index's, so this document matched
+    none of them.
+    """
+    document = {"@t": "2026-09-22T18:39:52.2909439Z", "@m": CLEF_MESSAGE,
+                "@i": "9fb525ae", "@l": "Warning"}
+    document.update(extra)
+    return document
+
+
+class WhatSerilogsOwnSinkWritesTest(unittest.TestCase):
+    """The same events, arriving without a shipper.
+
+    Found while reproducing the histogram fault on a real cluster: an index
+    of these read with an empty body, no service and UNSPECIFIED on every
+    row — the flat fallback, looking for `message` and `level` in a document
+    that has neither. The reading was never missing; being reached was.
+    """
+
+    def test_the_sinks_own_shape_is_recognised(self):
+        self.assertEqual(schema_for_document(from_the_sink()).name, "clef")
+
+    def test_the_message_is_the_body(self):
+        self.assertEqual(record(from_the_sink()).body, CLEF_MESSAGE)
+
+    def test_the_level_is_read(self):
+        self.assertEqual(str(record(from_the_sink()).severity), "WARN")
+
+    def test_and_an_absent_level_is_still_information(self):
+        """The rule that made this shape worth detecting, on the documents
+        that carry nothing else to detect."""
+        self.assertEqual(
+            str(record(from_the_sink(**{"@l": None})).severity), "INFO")
+
+    def test_the_applications_clock_is_read(self):
+        """`@t` rather than `@timestamp`: there is no shipper to write one."""
+        self.assertIsNotNone(record(from_the_sink()).timestamp)
+
+    def test_a_lone_key_is_still_not_the_compact_format(self):
+        """The detection is `_is_clef` itself, so the two-key rule holds
+        here as well — an index mapping one field that starts with a symbol
+        is not Serilog's."""
+        read = record({"@m": "a line", "service": "billing"})
+        self.assertEqual(schema_for_document({"@m": "a line"}).name, "flat")
+        self.assertEqual(read.body, "")
+
+    def test_a_shipped_one_is_still_read_as_a_container_log(self):
+        """Ordered after the container schema on purpose: these documents
+        carry both, and reading them as CLEF would lose the pod, the
+        namespace and the service."""
+        self.assertEqual(schema_for_document(serilog()).name, "container")
 
 
 class ARowReadsLikeTheRecordItListsTest(unittest.TestCase):
@@ -608,6 +666,11 @@ class ARowReadsLikeTheRecordItListsTest(unittest.TestCase):
             "@timestamp": "2026-09-23T06:53:23Z",
             "@mt": "failed for {Code}", "@x": "System.Exception: ...",
             "kubernetes": {"container_name": "content-service"}},
+        # No shipper at all, so no `@timestamp` either: the projection has
+        # to reach the application's own clock or the row loses its time.
+        "compact, straight from the sink": {
+            "@t": "2026-09-23T06:53:23.9Z", "@m": "served",
+            "@l": "Error", "@i": "d106fcee"},
     }
 
     def projected(self, document):

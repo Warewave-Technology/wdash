@@ -176,7 +176,11 @@ _CLEF_KEYS = ("@t", "@m", "@mt", "@l", "@i", "@x", "@r")
 #: reported cluster's `@l` counted Warning and Error and nothing else — its
 #: informational lines, which are most of them, carry no `@l` at all. Read as
 #: absent they would every one of them say UNSPECIFIED.
-_CLEF_DEFAULT_SEVERITY = "Information"
+CLEF_DEFAULT_SEVERITY = "Information"
+
+#: How many of the format's keys make a document CLEF. Two, not one: a single
+#: `@t` is a timestamp field somebody spelled the same way.
+_CLEF_KEYS_NEEDED = 2
 
 
 def _is_clef(source):
@@ -185,7 +189,32 @@ def _is_clef(source):
     Asked of a DOCUMENT rather than a mapping, because the rule it decides —
     an absent `@l` means Information — is a statement about one event.
     """
-    return sum(1 for name in _CLEF_KEYS if name in source) >= 2
+    return sum(1 for name in _CLEF_KEYS
+               if name in source) >= _CLEF_KEYS_NEEDED
+
+
+def clef_without_level_query(severity_fields):
+    """The same question as `_is_clef`, asked of a whole index at once.
+
+    A histogram cannot call `_is_clef` per document — it never sees the
+    documents, only counts of them — so the rule has to be expressible as a
+    query, and it is expressed HERE rather than in the adapter so that the
+    bar and the row beneath it read one rule. Written twice they drifted
+    apart once already: the rows applied the default and the bars did not,
+    and a cluster whose informational lines are most of its traffic drew
+    almost entirely UNSPECIFIED underneath rows reading INFO.
+
+    `severity_fields` are the real field paths a level could be written to;
+    a document carrying any of them is not assuming anything and is counted
+    by its own value instead. `@l` being among `_CLEF_KEYS` costs nothing:
+    it can never satisfy a `should` that `must_not` has already excluded, so
+    the count needed is the same two the document rule needs.
+    """
+    return {"bool": {
+        "should": [{"exists": {"field": name}} for name in _CLEF_KEYS],
+        "minimum_should_match": _CLEF_KEYS_NEEDED,
+        "must_not": [{"exists": {"field": name}} for name in severity_fields],
+    }}
 
 
 #: What a container record maps onto the model. Everything else — `stream`,
@@ -217,7 +246,7 @@ _CONTAINER_BODY = ("@m", "@mt", "message", "log")
 
 #: A level only if the shipper or the application put one in the document.
 #: Reading it is not guessing: it is there. Absent — and absent for a reason
-#: other than CLEF's, which `_CLEF_DEFAULT_SEVERITY` covers — the record says
+#: other than CLEF's, which `CLEF_DEFAULT_SEVERITY` covers — the record says
 #: UNSPECIFIED, and see the class docstring for why nothing is inferred from
 #: the text.
 _CONTAINER_SEVERITY = ("@l", "level", "severity", "severity_text")
@@ -310,8 +339,8 @@ class ContainerLogSchema(LogSchema):
             severity_text = str(source.get(severity_key) or "")
         elif _is_clef(source):
             # Not a missing level: CLEF omits the key FOR Information. See
-            # `_CLEF_DEFAULT_SEVERITY`.
-            severity_text = _CLEF_DEFAULT_SEVERITY
+            # `CLEF_DEFAULT_SEVERITY`.
+            severity_text = CLEF_DEFAULT_SEVERITY
         else:
             severity_text = ""
 
@@ -344,6 +373,37 @@ class ContainerLogSchema(LogSchema):
             ref=self._ref(hit, backend),
             source=source_name,
         )
+
+
+class ClefLogSchema(ContainerLogSchema):
+    """Serilog's compact format written straight to Elasticsearch.
+
+    The same events the container schema already reads — it maps `@m`, `@l`,
+    `@t` and the rest because a shipper leaves them at the top level — but
+    arriving without a shipper, from Serilog's own Elasticsearch sink. No
+    `kubernetes` object, no `log`, no `stream`: nothing the container schema
+    detects on, and none of `message`, `level` or `service` either, so
+    `detect_schema` matched nothing, the caller fell back to flat, and every
+    row of such an index came back with an empty body, no service and
+    UNSPECIFIED. The reading was never the problem; being reached was.
+
+    So it detects and inherits. Detection is `_is_clef` itself rather than a
+    second spelling of it, because a mapping's field names and a document's
+    keys are the same names, and the two rules drifting apart is exactly how
+    this shape went unread the first time.
+
+    It sits AFTER the container schema: a fluent-bit document carries both
+    the `kubernetes` object and these keys, and it is a container log that
+    happens to be written in CLEF rather than the other way about.
+    """
+
+    name = "clef"
+    body_field = "@m"
+    severity_field = "@l"
+
+    @classmethod
+    def detect(cls, properties):
+        return _is_clef(properties)
 
 
 class FlatLogSchema(LogSchema):
@@ -392,7 +452,7 @@ class FlatLogSchema(LogSchema):
 #: writes both `log` and `message` has put the line in `log`. Flat stays last
 #: for the same reason it always was: it is what nothing more specific
 #: matched, rather than a claim about the index.
-SCHEMAS = (OtelLogSchema, ContainerLogSchema, FlatLogSchema)
+SCHEMAS = (OtelLogSchema, ContainerLogSchema, ClefLogSchema, FlatLogSchema)
 
 
 def detect_schema(properties):

@@ -841,9 +841,13 @@ class HistogramTest(LogContractTest):
         self.assertNotIn("aggs", self.es.searches[-1]["body"])
 
     def test_histogram_is_split_by_severity(self):
+        """One split per spelling of the level this cluster has, so the
+        splits are named rather than one fixed name."""
         self.search()
         timeline = self.es.searches[-1]["body"]["aggs"]["timeline"]
-        self.assertIn("severity", timeline.get("aggs", {}))
+        splits = timeline.get("aggs", {})
+        self.assertTrue([name for name in splits if name.startswith("severity_")],
+                        f"nothing splits these buckets by level: {sorted(splits)}")
 
     def test_response_carries_the_histogram_key(self):
         self.assertIn("histogram", self.search().get_json())
