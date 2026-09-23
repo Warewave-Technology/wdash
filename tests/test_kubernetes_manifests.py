@@ -58,9 +58,47 @@ def _files():
     return sorted(f for f in os.listdir(MANIFESTS) if f.endswith(".yaml"))
 
 
-def _documents(name):
-    with open(os.path.join(MANIFESTS, name)) as handle:
-        return [d for d in yaml.safe_load_all(handle) if d]
+class StrictLoader(yaml.SafeLoader):
+    """A loader that refuses a duplicate mapping key.
+
+    PyYAML takes the last one and says nothing. `kubectl kustomize` refuses
+    the file outright — so a manifest could pass every test in here and be
+    rejected by the tool that applies it, which is exactly what happened: a
+    `volumeMount` deleted two lines at a time left its `readOnly: true`
+    behind the mount above it, every test here passed, and CI failed on
+    `mapping key "readOnly" already defined`.
+
+    The file's own header says it cannot tell you a cluster would accept
+    these manifests, and that is still true. A duplicate key is not a
+    cluster's opinion, though: it is a malformed file, and reading one
+    leniently is how a malformed file reaches a tag.
+    """
+
+
+def _no_duplicate_keys(loader, node, deep=False):
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping", node.start_mark,
+                f"found a duplicate key {key!r}", key_node.start_mark)
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+
+StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys)
+
+
+def _documents(name, where=None):
+    """Every document in a manifest, read strictly.
+
+    `where` is for the test that breaks a copy on purpose: a guard nothing
+    can be shown refusing is a guard nobody can tell is still there.
+    """
+    with open(os.path.join(where or MANIFESTS, name)) as handle:
+        return [d for d in yaml.load_all(handle, Loader=StrictLoader) if d]
 
 
 def _every_document():
@@ -755,11 +793,107 @@ class TheSecretsTest(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "True", result.stderr)
 
 
+class TheToolThatAppliesThemTest(unittest.TestCase):
+    """`kubectl kustomize`, when there is a kubectl to run.
+
+    The file's header says a cluster's opinion belongs to CI, and it does.
+    But this is not a cluster: it is the parser `kubectl apply -k` runs
+    before it ever reaches one, it was installed on the machine where these
+    manifests were edited, and it was not run. CI failed on
+    `mapping key "readOnly" already defined` after a tag had been pushed
+    and two images published.
+
+    Skipped where kubectl is absent, which is honest: a check that cannot
+    run says so rather than passing.
+    """
+
+    def test_the_kustomization_builds(self):
+        import shutil as _shutil
+        import subprocess
+
+        kubectl = _shutil.which("kubectl")
+        if not kubectl:
+            raise unittest.SkipTest("kubectl is not installed here; the "
+                                    "`manifests` job in CI runs this")
+        built = subprocess.run([kubectl, "kustomize", MANIFESTS],
+                               capture_output=True, text=True)
+        self.assertEqual(built.returncode, 0, built.stderr.strip())
+        # And it built something, rather than succeeding over nothing.
+        documents = [d for d in yaml.load_all(built.stdout, Loader=StrictLoader)
+                     if d]
+        self.assertGreater(len(documents), 3)
+        self.assertIn("Deployment", {d.get("kind") for d in documents})
+
+
+class AMalformedFileIsNotReadLenientlyTest(unittest.TestCase):
+    """The guard on every other test in this file.
+
+    Everything here parses the manifests first. A parser that accepts what
+    the applying tool refuses makes every assertion below it an assertion
+    about a file nobody can apply — which is how
+    `mapping key "readOnly" already defined` reached a tag with 4,505 green
+    tests behind it.
+    """
+
+    DUPLICATED = ("apiVersion: v1\n"
+                  "kind: ConfigMap\n"
+                  "metadata:\n"
+                  "  name: a\n"
+                  "  name: b\n")
+
+    def test_a_duplicate_key_is_refused(self):
+        with self.assertRaises(yaml.constructor.ConstructorError) as caught:
+            yaml.load(self.DUPLICATED, Loader=StrictLoader)
+        self.assertIn("duplicate key", str(caught.exception))
+
+    def test_where_the_lenient_one_silently_keeps_the_last(self):
+        """Held still, because it is the reason the loader exists. Reading
+        this file with `yaml.safe_load` answers `b` and says nothing."""
+        self.assertEqual(
+            yaml.safe_load(self.DUPLICATED)["metadata"]["name"], "b")
+
+    def test_a_manifest_with_one_in_it_is_refused(self):
+        """Through the reader every other test uses, not through the loader
+        on its own: the loader was strict and the call site was not, twice,
+        and both read the same files.
+        """
+        import shutil
+
+        for name in _files():
+            with self.subTest(file=name):
+                with tempfile.TemporaryDirectory() as where:
+                    shutil.copy(os.path.join(MANIFESTS, name), where)
+                    path = os.path.join(where, name)
+                    with open(path) as handle:
+                        lines = handle.readlines()
+                    # Repeat the first mapping key the file has, which is
+                    # what deleting a block two lines at a time leaves
+                    # behind.
+                    for index, line in enumerate(lines):
+                        stripped = line.strip()
+                        if stripped and not stripped.startswith("#") and ":" in stripped:
+                            lines.insert(index + 1, line)
+                            break
+                    with open(path, "w") as handle:
+                        handle.writelines(lines)
+                    with self.assertRaises(yaml.constructor.ConstructorError):
+                        _documents(name, where=where)
+
+    def test_and_an_ordinary_manifest_still_reads(self):
+        """A strict loader that refused something valid would be worse than
+        a lenient one: every test here would fail for the wrong reason."""
+        for name in _files():
+            with self.subTest(file=name):
+                self.assertTrue(_documents(name) or name == "kustomization.yaml")
+
+
 class KustomizationTest(unittest.TestCase):
     def setUp(self):
         with open(os.path.join(MANIFESTS, "kustomization.yaml")) as handle:
             self.text = handle.read()
-        self.kustomization = yaml.safe_load(self.text)
+        # Through the same reader as every other manifest, so there is one
+        # place that decides how strictly these files are read.
+        self.kustomization = _documents("kustomization.yaml")[0]
 
     def test_every_manifest_is_either_applied_or_explained(self):
         """A file in this directory that nothing applies is a file somebody

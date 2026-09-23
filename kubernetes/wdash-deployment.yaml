@@ -227,7 +227,6 @@ spec:
         - name: nginx-config
           mountPath: /etc/nginx/conf.d
           readOnly: true
-          readOnly: true
         - name: nginx-tmp
           mountPath: /var/cache/nginx
         - name: nginx-run
