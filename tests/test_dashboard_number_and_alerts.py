@@ -816,6 +816,15 @@ class NumberAgainstEveryLogBackendTest(unittest.TestCase):
     victorialogs/auth-service INFO 49 = 49.
     """
 
+    #: What a container may hold and still be listed whole.
+    #:
+    #: Asked for, not granted: `ElasticsearchLogSource.search` caps `size` at
+    #: 500 however large a `limit` it is handed, so a container of 501 is
+    #: skipped by the `len(records) == total` test below and a number this
+    #: far above the real bound only hides which one is doing the work. Kept
+    #: high all the same, because the cap is the ADAPTER's and the other two
+    #: backends do not share it — lowering this would narrow what they can
+    #: be checked over to no purpose.
     LIMIT = 2000
 
     def sources(self):
@@ -887,7 +896,16 @@ class NumberAgainstEveryLogBackendTest(unittest.TestCase):
             # A window small enough that a container can be listed whole.
             # Which container that is differs by backend and by how recently
             # the lab was seeded, so it is found rather than named.
-            for span in ("1h", "24h"):
+            #
+            # A LADDER, and the rungs between an hour and a day are the
+            # point. The lab's seeder writes its records backdated and then
+            # stops, while Heartbeat goes on writing: an hour after a seed
+            # the log indices hold nothing in `1h` and twenty-four thousand
+            # in `24h`, and neither can be listed whole. Measured in that
+            # state, `2h` held 359 records of `bad-logs-000001` — countable,
+            # with levels — and the run that had only those two rungs failed
+            # for the age of the lab rather than for anything about WDash.
+            for span in ("1h", "2h", "3h", "6h", "12h", "24h"):
                 window = TimeWindow.of(span)
                 container, records = self.a_container_with_records(
                     source, window, scope)
@@ -924,7 +942,12 @@ class NumberAgainstEveryLogBackendTest(unittest.TestCase):
 
         # A run in which every backend was skipped proves nothing, and would
         # read as a pass. Say so instead.
-        self.assertTrue(checked, f"no backend could be checked: {skipped}")
+        self.assertTrue(
+            checked,
+            f"no backend could be checked: {skipped}. Every window from an "
+            f"hour to a day was either empty or too full to list whole — "
+            f"which is what an ageing lab looks like. `cd lab && ./lab.sh "
+            f"demo` writes a fresh set and this passes again.")
 
 
 class TheEditorKnowsTheNewPanels(unittest.TestCase):
