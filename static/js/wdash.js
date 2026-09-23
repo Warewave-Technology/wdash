@@ -964,17 +964,17 @@ class LogSearch {
         }
         console.log('WDash: field picker wired up.');
 
+        // A dialog, opened through Bootstrap so it gets the backdrop, the
+        // focus trap and Escape without any of that being written here.
         button.addEventListener('click', () => {
-            const open = !panel.classList.contains('d-none');
-            panel.classList.toggle('d-none', open);
-            button.setAttribute('aria-expanded', String(!open));
-            if (!open) {
-                // Forgotten on each opening, so the panel always starts
-                // from what is actually stored rather than from ticks
-                // somebody abandoned earlier.
-                this._ticked = null;
-                this._loadStatsFieldOffer();
-            }
+            // Forgotten on each opening, so it always starts from what is
+            // actually stored rather than from ticks somebody abandoned
+            // and then dismissed.
+            this._ticked = null;
+            const filter = document.getElementById('fieldStatsFilter');
+            if (filter) { filter.value = ''; }
+            this._statsModal().show();
+            this._loadStatsFieldOffer();
         });
 
         const filter = document.getElementById('fieldStatsFilter');
@@ -1023,6 +1023,14 @@ class LogSearch {
 
         // No probe on load. The button is rendered only for somebody who
         // may save the choice, which the template already knows.
+    }
+
+    _statsModal() {
+        // One instance, kept: `new bootstrap.Modal(el)` twice on one element
+        // leaves two sets of handlers and a backdrop that outlives the
+        // dialog. `getOrCreateInstance` is the one that does not.
+        return bootstrap.Modal.getOrCreateInstance(
+            document.getElementById('fieldStatsPicker'));
     }
 
     //: The last search sent, so a keystroke that arrives while one is in
@@ -1129,14 +1137,18 @@ class LogSearch {
         });
         container.innerHTML = ordered.map((name, index) => {
             const id = 'fs-pick-' + index;
-            return '<div class="form-check" data-field="' +
-                WDash.escapeAttr(name) + '">' +
+            // `col` because the container is a two-column row at md and up.
+            // The name is the label's title as well as its text: these are
+            // long enough to truncate, and a truncated name somebody cannot
+            // read in full is a name they cannot choose between.
+            return '<div class="col"><div class="form-check py-1" ' +
+                'data-field="' + WDash.escapeAttr(name) + '">' +
                 '<input class="form-check-input" type="checkbox" id="' + id +
                     '"' + (chosen.has(name) ? ' checked' : '') + '>' +
                 '<label class="form-check-label text-truncate d-block" ' +
                     'for="' + id + '" title="' + WDash.escapeAttr(name) +
-                    '" style="font-size:.75rem">' + WDash.escapeHtml(name) +
-                '</label></div>';
+                    '" style="font-size:.8rem">' + WDash.escapeHtml(name) +
+                '</label></div></div>';
         }).join('');
 
         container.querySelectorAll('input[type="checkbox"]').forEach(box => {
@@ -1144,8 +1156,22 @@ class LogSearch {
                 const name = box.closest('.form-check').dataset.field;
                 if (box.checked) { this._ticked.add(name); }
                 else { this._ticked.delete(name); }
+                this._showChosenCount();
             });
         });
+        this._showChosenCount();
+    }
+
+    _showChosenCount() {
+        // How many are ticked, including the ones a search has scrolled
+        // out of view: the whole reason the ticks live off the DOM is that
+        // what is on screen is not the choice.
+        const label = document.getElementById('fieldStatsChosenCount');
+        if (!label) { return; }
+        const count = (this._ticked || new Set()).size;
+        label.textContent = count
+            ? count + (count === 1 ? ' field chosen' : ' fields chosen')
+            : 'nothing chosen';
     }
 
     async _saveStatsFields(override) {
@@ -1176,9 +1202,7 @@ class LogSearch {
                       (chosen.length === 1 ? ' field.' : ' fields.')
                     : 'The sidebar shows what this source offers.',
                 'success');
-            document.getElementById('fieldStatsPicker').classList.add('d-none');
-            document.getElementById('fieldStatsPick')
-                .setAttribute('aria-expanded', 'false');
+            this._statsModal().hide();
             this.loadFieldStats();
         } catch (e) {
             if (note) {

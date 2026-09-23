@@ -88,9 +88,10 @@ function makeWindow(fetchImpl) {
           <small id="histogramSummary"></small>
           <canvas id="logHistogram"></canvas>
         </div>
-        <button id="fieldStatsPick" class="d-none" aria-expanded="false"></button>
-        <div id="fieldStatsPicker" class="d-none">
+        <button id="fieldStatsPick" aria-haspopup="dialog"></button>
+        <div class="modal fade" id="fieldStatsPicker">
           <input id="fieldStatsFilter">
+          <span id="fieldStatsChosenCount"></span>
           <div id="fieldStatsOptions"></div>
           <button id="fieldStatsSave"></button>
           <button id="fieldStatsClear"></button>
@@ -107,8 +108,18 @@ function makeWindow(fetchImpl) {
     global.window = w;
     global.document = w.document;
     w.bootstrap = {
-        Modal: class { constructor() {} show() { this.shown = true; }
-                       hide() {} static getInstance() { return null; } },
+        Modal: class {
+            constructor(element) { this.element = element; }
+            show() { this.shown = true; this.element.dataset.shown = 'yes'; }
+            hide() { this.shown = false; this.element.dataset.shown = 'no'; }
+            static getInstance() { return null; }
+            static getOrCreateInstance(element) {
+                if (!element.__modal) {
+                    element.__modal = new w.bootstrap.Modal(element);
+                }
+                return element.__modal;
+            }
+        },
         Tooltip: class {}, Alert: class { close() {} },
     };
     w.navigator.clipboard = { writeText: () => Promise.resolve() };
@@ -1358,11 +1369,23 @@ check('Clear takes away the chart, the sources, the warnings and the stats', () 
 
         const open = async (body) => {
             const w = makeWindow(offer(body || OFFER));
-            const search = Object.create(w.__LogSearch.prototype);
-            search._setupFieldStatsPicker();
+            // THE PAGE'S OWN INSTANCE, not a second one.
+            //
+            // The bundle creates `window.logSearch` on DOMContentLoaded
+            // wherever there is a search form, and this fixture has one. A
+            // test that built its own alongside it left TWO click handlers
+            // on the button: two fetches, two renders, and the change
+            // listeners on the rows belonged to whichever instance
+            // rendered last — while the test read the ticks off the other.
+            // It passed for years on the order happening to favour the
+            // test's copy, and stopped the moment opening the picker grew
+            // a step. The page has one instance; so does this now.
             await new Promise(r => setTimeout(r, 0));
+            const search = w.logSearch;
             w.document.getElementById('fieldStatsPick').click();
-            await new Promise(r => setTimeout(r, 0));
+            // Long enough for the offer to arrive and be drawn: opening is
+            // a click, a fetch and a render.
+            await new Promise(r => setTimeout(r, 20));
             return { w, search };
         };
 
