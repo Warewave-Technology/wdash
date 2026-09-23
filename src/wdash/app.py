@@ -445,7 +445,11 @@ def create_app(config_class=Config):
 
     @app.context_processor
     def _asset_version():
-        return {'asset_version': asset_version}
+        # `asset_version` busts a cache and is the process start under
+        # debug; `wdash_version` is what this release IS, which is the
+        # question the bundle check asks. Two names because they answer
+        # two questions and a local edit must not look like a version skew.
+        return {'asset_version': asset_version, 'wdash_version': __version__}
 
     # Initialize Flask-Login
     login_manager = LoginManager()

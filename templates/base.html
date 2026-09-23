@@ -340,6 +340,31 @@
     <script nonce="{{ csp_nonce }}" src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js" integrity="sha384-9MhbyIRcBVQiiC7FSd7T38oJNj2Zh+EfxS7/vjhBi4OOT78NlHSnzM31EZRWR1LZ" crossorigin="anonymous"></script>
     <script nonce="{{ csp_nonce }}" src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
     <script nonce="{{ csp_nonce }}" src="{{ url_for('static', filename='js/wdash.min.js') }}?v={{ asset_version }}"></script>
+    {# Did the browser get the JavaScript this page asked for?
+
+       The query string above does not answer that. In the shipped
+       Kubernetes deployment `/static/` is served by an nginx sidecar out of
+       an emptyDir a separate init container filled, so the HTML and the
+       JavaScript come from two containers that can be on two image tags —
+       and the older one's file is served under the newer one's URL, cached
+       `immutable` for a year. A deployment reported a control doing
+       nothing, and nothing anywhere said why.
+
+       Asked here rather than inside the bundle, because a bundle that
+       failed to load cannot report on itself: `wdashCheckBundleVersion`
+       being undefined is the louder failure of the two, and this says that
+       too. #}
+    <script nonce="{{ csp_nonce }}">
+      (function () {
+          if (typeof wdashCheckBundleVersion === 'function') {
+              wdashCheckBundleVersion('{{ wdash_version }}');
+          } else {
+              console.error('WDash: /static/js/wdash.min.js did not load, or ' +
+                            'what loaded is not WDash\u0027s. Nothing on this ' +
+                            'page that needs JavaScript will work.');
+          }
+      })();
+    </script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

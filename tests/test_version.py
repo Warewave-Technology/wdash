@@ -85,6 +85,90 @@ class EverythingElseReadsItTest(unittest.TestCase):
         self.assertEqual(lock["version"], self.version)
         self.assertEqual(lock["packages"][""]["version"], self.version)
 
+    def test_the_bundle_says_which_release_it_is(self):
+        """And it has to be this one.
+
+        The page asks for `wdash.min.js?v=<version>`, which says what it
+        ASKED for. In the shipped Kubernetes deployment `/static/` is
+        served by an nginx sidecar out of an emptyDir that a separate init
+        container filled, so the file can come from a different image than
+        the HTML — under the new URL, cached `immutable` for a year. The
+        stamp in the bundle is what makes that visible, and a stamp that
+        drifts from the version would name the wrong release in the one
+        message somebody reads when nothing else makes sense.
+        """
+        for name in ("static/js/wdash.js", "static/js/wdash.min.js"):
+            with self.subTest(file=name):
+                self.assertIn(f"WDASH_BUNDLE_VERSION = '{self.version}'"
+                              if name.endswith("wdash.js")
+                              else f'WDASH_BUNDLE_VERSION="{self.version}"',
+                              _read(name))
+
+    def test_and_the_page_asks_the_bundle_that_question(self):
+        """A stamp nothing reads is a comment. The template calls the
+        check, and calls it with the VERSION rather than `asset_version`,
+        which is the process start under debug — a local edit must not
+        look like a deployment skew."""
+        page = _read("templates/base.html")
+        self.assertIn("wdashCheckBundleVersion('{{ wdash_version }}')", page)
+
+    def test_a_local_edit_does_not_look_like_a_deployment_skew(self):
+        """Under debug the cache buster is the process start, so that
+        editing a stylesheet is visible without bumping a version. The
+        bundle check must NOT use that number: it would call every page of
+        every development run a version mismatch, and a warning that is
+        always there is a warning nobody reads when it is true.
+
+        The two are the same string in production, which is why this has
+        to be asked with debug on — the only place they differ.
+        """
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(ROOT, "tests"))
+        from tests.support import grant
+        from tests.test_log_contract import TestConfig, _session
+        from wdash.app import create_app
+
+        class Debugging(TestConfig):
+            DEBUG = True
+
+        app = create_app(Debugging)
+        client = app.test_client()
+        grant(app, "u", ["logs:read"], ("*",))
+        with client.session_transaction() as session:
+            session["user_data"] = _session(["logs:read"], ("*",))
+            session["_user_id"] = "1"
+        page = client.get("/logs").get_data(as_text=True)
+        self.assertIn(f"wdashCheckBundleVersion('{self.version}')", page)
+        # And the buster really is something else here, or the assertion
+        # above would pass for the wrong reason.
+        self.assertNotIn(f"wdash.min.js?v={self.version}", page)
+
+    def test_every_container_in_a_pod_runs_the_same_image(self):
+        """Including the init container, and that is the point.
+
+        `copy-static-files` copies `/app/static` into an emptyDir the nginx
+        sidecar serves, so the JavaScript a browser gets comes from THAT
+        image while the HTML comes from the application container's. Left
+        on an older tag — which is what a partial `kubectl set image` or a
+        patch naming one container does — it serves last release's file
+        under this release's URL, cached `immutable` for a year, and the
+        page runs code from a release it is not.
+
+        Reported exactly that way: a control doing nothing, no error, no
+        warning. The runtime check says so now; this keeps the manifests
+        in the repository from being the thing that caused it.
+        """
+        import re
+        for name in ("kubernetes/wdash-deployment.yaml",
+                     "kubernetes/wdash-agent.yaml"):
+            text = _read(name)
+            ours = re.findall(r"image:\s*(\S*wdash[-\w]*:\S+)", text)
+            with self.subTest(file=name):
+                self.assertTrue(ours, f"{name} names no WDash image")
+                tags = {reference.rsplit(":", 1)[1] for reference in ours}
+                self.assertEqual(tags, {self.version},
+                                 f"{name} mixes tags: {sorted(set(ours))}")
+
     def test_the_manifests_deploy_this_version(self):
         """They pinned `:1.0.0`. Whatever else is true of a deployment, the
         manifests in the repository should not install something older than

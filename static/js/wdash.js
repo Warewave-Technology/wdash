@@ -3,6 +3,55 @@
  */
 
 /**
+ * Which release this file belongs to.
+ *
+ * The page asks for `wdash.min.js?v=<version>` — and in the shipped
+ * Kubernetes deployment that file is served by an nginx SIDECAR, out of an
+ * emptyDir that a COPY-STATIC-FILES INIT CONTAINER filled. That is a
+ * different container from the one rendering the HTML, so the query string
+ * says what the page asked for and nothing about what came back: an init
+ * container left on an older tag serves last release's JavaScript under
+ * this release's URL, with `expires 1y, immutable` on top of it.
+ *
+ * That was invisible. A deployment reported a control doing nothing, with
+ * no error, no warning, and no way to tell the code that shipped from the
+ * code in front of it. This is the answer: the page knows what it asked
+ * for, this says what it got, and a mismatch is one line naming the cause.
+ *
+ * Held to `src/wdash/__init__.py` by `tests/test_version.py`, like the
+ * eight other places the number lives.
+ */
+const WDASH_BUNDLE_VERSION = '3.1.4';
+
+//: Readable from a console, which is where somebody asks this question.
+//:
+//: The minifier folds the constant into the message below, so without this
+//: the shipped file states its version in prose and nowhere a person can
+//: query it — and the whole point is to be askable when a page is behaving
+//: like a release it is not.
+if (typeof window !== 'undefined') {
+    window.WDASH_BUNDLE_VERSION = WDASH_BUNDLE_VERSION;
+}
+
+/**
+ * Say so when the JavaScript running is not the JavaScript this page asked
+ * for. Called from the page, which is the only thing that knows the answer.
+ */
+function wdashCheckBundleVersion(expected) {
+    if (!expected || expected === WDASH_BUNDLE_VERSION) { return true; }
+    console.error(
+        'WDash: this page is ' + expected + ' but the JavaScript it loaded ' +
+        'is ' + WDASH_BUNDLE_VERSION + '. Something between your browser and ' +
+        'the application is serving an older copy of /static. In the shipped ' +
+        'Kubernetes deployment that is the nginx sidecar, whose files come ' +
+        'from the copy-static-files init container: check that it is on the ' +
+        'same image tag as the application container, and that no cache in ' +
+        'front of it is holding /static. Until then this page is running ' +
+        'code from a different release than the one it is showing you.');
+    return false;
+}
+
+/**
  * A colour from the palette, by token name.
  *
  * Read at call time rather than cached at load: the palette is what a theme

@@ -190,6 +190,20 @@ same problem.
 | `wdash` | gunicorn, four workers, on port 5000 |
 | `alerts` | `python -m wdash.alerts`, evaluating rules every 30 seconds |
 | `nginx` | the sidecar on port 8080: static files, and the proxy in front |
+| `copy-static-files` | an init container: copies `/app/static` out of the WDash image into the emptyDir nginx serves |
+
+**Upgrade all four together.** The init container is where the CSS and the
+JavaScript come from, and nginx serves them with `expires 1y, immutable`;
+the application container is where the HTML comes from. A partial upgrade —
+`kubectl set image` naming one container, a patch that lists containers by
+name — leaves the two on different releases, and then last release's
+JavaScript is served under this release's URL and cached for a year. It
+looks like nothing: no error, no warning, and a page whose controls quietly
+belong to an older version. Reported exactly once, that way.
+
+A browser now says so. Open the console on any page: a mismatch prints
+which release the page is and which the JavaScript is, and
+`window.WDASH_BUNDLE_VERSION` answers the second one at any time.
 
 The evaluator is a **separate process, in the same pod**. Separate because
 evaluation has to run when nothing is arriving — an agent going completely

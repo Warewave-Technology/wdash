@@ -1548,6 +1548,45 @@ check('Clear takes away the chart, the sources, the warnings and the stats', () 
                   .includes('does not provide')));
     }
 
+    // --- is the JavaScript running the JavaScript the page asked for? ----
+    //
+    // In the shipped Kubernetes deployment `/static/` is served by an nginx
+    // sidecar out of an emptyDir a separate init container filled, so the
+    // HTML and the bundle come from two containers that can be on two image
+    // tags — the older one's file under the newer one's URL, cached
+    // `immutable` for a year. A deployment reported a control doing nothing
+    // and nothing anywhere said why.
+    {
+        const w = makeWindow();
+        const said = [];
+        w.console.error = (m) => said.push(String(m));
+        const version = w.WDASH_BUNDLE_VERSION;
+
+        check('the bundle says which release it is',
+              () => assert(/^\d+\.\d+\.\d+$/.test(version || ''), version));
+        check('and says it somewhere a console can ask',
+              () => assertEqual(typeof w.WDASH_BUNDLE_VERSION, 'string', 'type'));
+
+        check('a page of the same release is not complained about',
+              () => assert(w.wdashCheckBundleVersion(version) === true
+                           && said.length === 0, JSON.stringify(said)));
+
+        said.length = 0;
+        const answer = w.wdashCheckBundleVersion('9.9.9');
+        check('a page of another release is', () => assertEqual(answer, false, 'answer'));
+        check('and the message names BOTH versions, which is the whole point',
+              () => assert(said[0] && said[0].includes('9.9.9')
+                           && said[0].includes(version), said[0]));
+        check('and names where to look',
+              () => assert(said[0].includes('init container')
+                           && said[0].includes('/static'), said[0]));
+
+        said.length = 0;
+        check('a page that passes no version asks nothing of it',
+              () => assert(w.wdashCheckBundleVersion('') === true
+                           && said.length === 0, JSON.stringify(said)));
+    }
+
     await Promise.all(pending);
 
     console.log(failures.length
