@@ -67,24 +67,42 @@ MAPPING = {
     "stream": {"type": "keyword"},
     "kubernetes": {"properties": {
         "container_name": {"type": "keyword"},
+        "host": {"type": "keyword"},
         "namespace_name": {"type": "keyword"},
     }},
 }
 
 
+#: Enough records for a ranking to be able to tell two fields apart.
+#:
+#: With three of them every field scores three, whatever its shape, and a
+#: panel that shows ten out of nine has nothing to choose. The distribution
+#: below is the reported cluster's: a handful of fields that describe the
+#: records, and four whose values are unique per record — a span, a trace,
+#: a connection and a request — which is what filled the sidebar.
+RECORDS = 40
+
+
 def _document(number):
     return {"_id": f"d{number}", "@timestamp": "2026-09-22T13:30:00Z",
-            "@l": "Warning" if number else "Error", "@i": "9fb525ae",
+            "@l": "Warning" if number % 4 else "Error",
+            "@i": f"9fb525a{number % 3}",
             "@sp": f"span{number}", "@tr": f"trace{number}",
+            "ConnectionId": f"conn{number}", "RequestId": f"req{number}",
+            "RequestPath": "/api/symbols" if number % 2 else "/api/orders",
+            "Application": "superapp", "EventId": f"{number % 3}",
+            "SourceContext": "Warewave.Content.Controllers",
             "ALPACACOUNT": "13078397580", "stream": "stdout",
             "kubernetes": {"container_name": "content-service",
+                           "host": "10.0.40.110",
                            "namespace_name": "superapp"}}
 
 
 class _Base(unittest.TestCase):
     def setUp(self):
         self.es = ModelledES({"kube-superapp-2026.09.22":
-                              (MAPPING, [_document(n) for n in range(3)])})
+                              (MAPPING,
+                               [_document(n) for n in range(RECORDS)])})
         self.app = create_app(TestConfig)
         hub = Hub()
         hub.add_logs(ElasticsearchLogSource(self.es, name="k8s",
@@ -114,24 +132,234 @@ class _Base(unittest.TestCase):
 
 
 class WhatTheSidebarShowsWithoutAChoiceTest(_Base):
-    """The behaviour that was there, unchanged. An installation that never
-    opens the picker must see exactly what it saw before."""
+    """What a source picks when nobody has chosen.
+
+    This used to be the first ten field names, sorted — which is not a
+    ranking, and on the cluster that reported it produced `@i`, `@l`, `@m`,
+    `@sp`, `@tr` and an application's own counter, three of them holding a
+    single value seen once, while `kubernetes.container_name` never
+    reached the list at all. `@` sorts before letters; that was the whole
+    of it.
+    """
 
     def test_the_source_still_picks(self):
         _, fields = self.counted()
         self.assertTrue(fields)
 
-    def test_and_the_fault_is_still_visible_in_what_it_picks(self):
-        """Held still rather than fixed here. `@i`, `@l` and `@sp` sort
-        before `kubernetes.container_name`, so the panel is full of them —
-        which is why there is a picker. A default that quietly changed under
-        every installation would be a second surprise on top of the first."""
+    def test_the_service_is_shown(self):
+        """The priority list is resolved through the neutral names now.
+        Spelled `("level", "service", "host", "environment")`, it matched
+        nothing here — this cluster calls them `@l` and
+        `kubernetes.container_name`."""
         _, fields = self.counted()
-        self.assertIn("@i", fields)
+        self.assertIn("kubernetes.container_name", fields)
+
+    def test_and_the_level(self):
+        _, fields = self.counted()
+        self.assertIn("@l", fields)
+
+    def test_and_the_host(self):
+        _, fields = self.counted()
+        self.assertIn("kubernetes.host", fields)
+
+    def test_a_field_whose_every_value_is_unique_is_not(self):
+        """A span id over forty records has forty values, one each, and the
+        ten the panel can show account for a quarter of them. It says
+        nothing about the hour, and four fields like it — the span, the
+        trace, the connection, the request — were taking four of the ten
+        slots on the cluster that reported this."""
+        _, fields = self.counted()
+        for unique in ("@sp", "@tr", "ConnectionId", "RequestId"):
+            self.assertNotIn(unique, fields)
+
+    def test_while_a_field_that_describes_the_records_is(self):
+        _, fields = self.counted()
+        self.assertIn("RequestPath", fields)
+
+    def test_and_ten_is_still_what_it_shows(self):
+        _, fields = self.counted()
+        self.assertEqual(len(fields), 10)
 
     def test_and_nothing_says_a_choice_was_made(self):
         answer, _ = self.counted()
         self.assertNotIn("chosen", answer)
+
+
+class WhenTheSpellingSortsLateTest(_Base):
+    """The priority list has to be resolved, not matched.
+
+    Everything above happens to use `@l`, which sorts before letters and
+    would survive any cut by accident. These use `severity_text` — the
+    OpenTelemetry Collector's spelling — in a mapping full of `attr_*`,
+    where a name that is merely eligible is a name that gets cut.
+    """
+
+    def source(self, extra=None):
+        """Forty records where the level and the service are on every one
+        and each `attr_*` is on a single record.
+
+        The distribution matters: with one record every field scores the
+        same and nothing the ranking does is visible. Here a promoted
+        field wins its slot and an unpromoted one cannot, which is what
+        makes promotion observable at all.
+        """
+        mapping = {"@timestamp": {"type": "date"},
+                   "severity_text": {"type": "keyword"},
+                   "resource.attributes.service.name": {"type": "keyword"}}
+        mapping.update(extra or {})
+        mapping.update({f"attr_{n:04d}": {"type": "keyword"}
+                        for n in range(60)})
+        documents = []
+        for number in range(40):
+            document = {"_id": f"d{number}",
+                        "@timestamp": "2026-09-22T13:30:00Z",
+                        "severity_text": "ERROR" if number % 3 else "WARN",
+                        "resource.attributes.service.name": "api"}
+            document.update({key: "x" for key in (extra or {})})
+            document[f"attr_{number:04d}"] = f"v{number}"
+            documents.append(document)
+        es = ModelledES({"kube-otel": (mapping, documents)})
+        source = ElasticsearchLogSource(es, name="otel", patterns=("kube-*",))
+        self.app.hub.add_logs(source)
+        return source
+
+    def shown(self, extra=None):
+        self.source(extra)
+        answer = self.client.get(
+            f"/api/field-stats?q=*&source=otel&start_time={START}"
+            f"&end_time={END}").get_json()
+        return [field["field"] for field in answer["fields"]]
+
+    def test_the_collectors_spelling_of_the_level_is_shown(self):
+        """`severity_text` sorts after sixty `attr_*`. Spelled into the
+        priority list as `level`, it matched nothing and was cut."""
+        self.assertIn("severity_text", self.shown())
+
+    def test_and_its_spelling_of_the_service(self):
+        self.assertIn("resource.attributes.service.name", self.shown())
+
+    def test_two_spellings_of_one_name_do_not_take_two_slots(self):
+        """A merged view over a flat cluster and a collector's has both
+        `level` and `severity_text`, and only the first is pinned: four
+        neutral names filling ten slots with two spellings each is a panel
+        of synonyms.
+
+        The second is still ELIGIBLE — it just has to earn a slot, and
+        earning one means being ASKED about: `severity_text` sorts after
+        sixty `attr_*`, so without a promotion it is not among the thirty
+        the sidebar asks about and cannot be ranked into the ten it shows,
+        however much of the answer it would have accounted for.
+        """
+        shown = self.shown({"level": {"type": "keyword"}})
+        self.assertIn("level", shown)
+        self.assertNotIn("severity_text", shown)
+
+
+class WhenAFilterFieldIsQuietTest(_Base):
+    """The four names people filter by are kept whatever they score.
+
+    Without that, an hour in which every record shares a service takes the
+    service row away — the control disappears exactly when the thing it
+    controls is uniform, which is when somebody is trying to confirm it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        mapping = {"@timestamp": {"type": "date"},
+                   "service": {"type": "keyword"}}
+        mapping.update({f"attr_{n:04d}": {"type": "keyword"}
+                        for n in range(20)})
+        documents = []
+        for number in range(40):
+            document = {"_id": f"d{number}",
+                        "@timestamp": "2026-09-22T13:30:00Z"}
+            document.update({f"attr_{n:04d}": f"v{n}" for n in range(20)})
+            # One record in forty carries a service at all.
+            if number == 0:
+                document["service"] = "api"
+            documents.append(document)
+        self.app.hub.add_logs(ElasticsearchLogSource(
+            ModelledES({"kube-quiet": (mapping, documents)}),
+            name="quiet", patterns=("kube-*",)))
+
+    def shown(self):
+        answer = self.client.get(
+            f"/api/field-stats?q=*&source=quiet&start_time={START}"
+            f"&end_time={END}").get_json()
+        return [field["field"] for field in answer["fields"]]
+
+    def test_the_service_is_shown_although_it_accounts_for_one_record(self):
+        self.assertIn("service", self.shown())
+
+    def test_and_it_leads(self):
+        """Pinned means first, not merely present: a control somebody has
+        to scroll to is one they will not find."""
+        self.assertEqual(self.shown()[0], "service")
+
+
+class HowTheTenAreChosenTest(unittest.TestCase):
+    """The ranking on its own, so its rule can be stated rather than
+    inferred from a panel."""
+
+    def stat(self, field, *counts):
+        from wdash.hub.models import FieldStat, FieldValue
+        return FieldStat(field=field,
+                         values=[FieldValue(value=f"v{n}", count=count)
+                                 for n, count in enumerate(counts)])
+
+    def rank(self, stats, keep=3, first=()):
+        from wdash.hub.adapters.elasticsearch import _most_telling
+        return [s.field for s in _most_telling(stats, keep, first=first)]
+
+    def test_the_field_that_accounts_for_most_of_the_answer_leads(self):
+        self.assertEqual(
+            self.rank([self.stat("id", 1, 1, 1), self.stat("service", 900, 80),
+                       self.stat("tenant", 40)]),
+            ["service", "tenant", "id"])
+
+    def test_a_field_whose_top_value_was_seen_once_sinks(self):
+        """Not a rule of its own — it falls out of the score. A trace id
+        with ten buckets of one scores ten, against a service that scores
+        the whole window."""
+        ordered = self.rank([self.stat("trace_id", *([1] * 10)),
+                             self.stat("severity", 500, 20)], keep=2)
+        self.assertEqual(ordered[0], "severity")
+
+    def test_what_it_covers_beats_what_its_biggest_value_is(self):
+        """The score is the SUM of the counts shown, not the top one. A
+        field split three ways over fifteen records accounts for more of
+        the answer than one with a single value on ten, and the question
+        is how much of the answer a field explains."""
+        self.assertEqual(
+            self.rank([self.stat("split", 5, 5, 5), self.stat("one", 10)],
+                      keep=2),
+            ["split", "one"])
+
+    def test_a_tie_goes_to_the_one_with_fewer_values_to_read(self):
+        self.assertEqual(
+            self.rank([self.stat("many", 20, 20, 20, 20, 20),
+                       self.stat("few", 50, 50)], keep=2),
+            ["few", "many"])
+
+    def test_and_then_by_name_so_the_same_answer_reads_the_same(self):
+        self.assertEqual(self.rank([self.stat("b", 10), self.stat("a", 10)],
+                                   keep=2),
+                         ["a", "b"])
+
+    def test_what_people_filter_by_is_kept_whatever_it_scores(self):
+        """A quiet hour in which every record shares a service must not
+        take the service row away — it is the control, not a statistic."""
+        ordered = self.rank([self.stat("chatty", 900, 90),
+                             self.stat("service", 1)],
+                            keep=1, first=("service",))
+        self.assertEqual(ordered, ["service"])
+
+    def test_a_field_with_no_values_scores_nothing_rather_than_raising(self):
+        from wdash.hub.models import FieldStat
+        self.assertEqual(
+            self.rank([FieldStat(field="empty", values=[]),
+                       self.stat("real", 5)], keep=2),
+            ["real", "empty"])
 
 
 class WhatThePickerOffersTest(_Base):
@@ -281,6 +509,19 @@ class WhatChoosingDoesTest(_Base):
         _, fields = self.counted()
         self.assertGreater(len(fields), 1)
 
+    def test_a_choice_longer_than_the_panel_shows_is_shown_whole(self):
+        """The ranking cuts what a source picked for itself. A set somebody
+        chose is not that: cutting it answers a different question from the
+        one they asked, and the field they went looking for is the one that
+        goes."""
+        wanted = ["@l", "@i", "@sp", "@tr", "ALPACACOUNT", "Application",
+                  "ConnectionId", "EventId", "RequestId", "RequestPath",
+                  "SourceContext", "stream", "kubernetes.container_name",
+                  "kubernetes.host", "kubernetes.namespace_name"]
+        self.choose(wanted)
+        _, fields = self.counted()
+        self.assertEqual(len(fields), len(wanted))
+
     def test_a_name_repeated_is_stored_once(self):
         """A checkbox list cannot produce this; a script can, and each name
         is an aggregation in the same request."""
@@ -317,18 +558,26 @@ class SearchingTheOfferTest(_Base):
                          ElasticsearchLogSource.STATS_FIELD_LIMIT)
         self.assertTrue(answer["partial"])
 
-    def test_and_the_field_somebody_wants_is_past_the_cut(self):
-        """The fault, held still: `kubernetes.*` sorts after four hundred
-        `attr_*`, so it is not in the first three hundred by name."""
-        self.assertNotIn("kubernetes.container_name", self.wide()["fields"])
+    def test_the_fields_people_filter_by_survive_the_cut(self):
+        """The priority names are resolved and put first, so the cut can no
+        longer hide the service or the host behind four hundred `attr_*` —
+        which is exactly what it did on the cluster that reported this."""
+        offered = self.wide()["fields"]
+        self.assertIn("kubernetes.container_name", offered)
+        self.assertIn("kubernetes.host", offered)
+        self.assertIn("@l", offered)
+
+    def test_but_an_ordinary_field_can_still_be_past_it(self):
+        """Three hundred of four hundred and thirteen. Whatever the order,
+        a cut cuts something, and this is what the search is for."""
+        self.assertNotIn("attr_0399", self.wide()["fields"])
 
     def test_a_search_reaches_it(self):
-        found = self.wide(q="container")["fields"]
-        self.assertIn("kubernetes.container_name", found)
+        self.assertIn("attr_0399", self.wide(q="attr_0399")["fields"])
 
     def test_and_answers_only_what_was_asked_for(self):
-        found = self.wide(q="container")["fields"]
-        self.assertTrue(all("container" in name for name in found), found)
+        found = self.wide(q="attr_039")["fields"]
+        self.assertTrue(all("attr_039" in name for name in found), found)
 
     def test_a_search_that_fits_is_not_called_partial(self):
         """The warning is about the cut. Carrying it over a complete answer
@@ -338,6 +587,9 @@ class SearchingTheOfferTest(_Base):
 
     def test_it_ignores_case(self):
         self.assertIn("ALPACACOUNT", self.wide(q="alpaca")["fields"])
+
+    def test_a_search_that_fits_is_not_called_partial_either(self):
+        self.assertFalse(self.wide(q="attr_0399").get("partial"))
 
     def test_a_search_matching_nothing_answers_nothing(self):
         """Rather than everything, which is what an ignored filter looks
@@ -367,21 +619,21 @@ class ResolvingAChoiceTest(_Base):
         mapping = dict(MAPPING)
         mapping.update({f"attr_{n:04d}": {"type": "keyword"}
                         for n in range(400)})
-        es = ModelledES({"kube-wide": (mapping, [_document(0)])})
+        es = ModelledES({"kube-wide": (mapping,
+                                       [dict(_document(0), attr_0399="x")])})
         self.app.hub.add_logs(ElasticsearchLogSource(es, name="wide",
                                                      patterns=("kube-*",)))
         offered = self.client.get(
             "/api/field-stats/fields?source=wide").get_json()["fields"]
-        self.assertNotIn("kubernetes.container_name", offered)
+        self.assertNotIn("attr_0399", offered)
 
         self.client.post("/api/field-stats/fields",
-                         json={"source": "wide",
-                               "fields": ["kubernetes.container_name"]})
+                         json={"source": "wide", "fields": ["attr_0399"]})
         answer = self.client.get(
             f"/api/field-stats?q=*&source=wide&start_time={START}"
             f"&end_time={END}").get_json()
         self.assertEqual([f["field"] for f in answer["fields"]],
-                         ["kubernetes.container_name"])
+                         ["attr_0399"])
         self.assertNotIn("warnings", answer)
 
     def test_a_text_field_is_counted_on_its_keyword_subfield(self):

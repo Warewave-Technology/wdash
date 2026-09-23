@@ -203,6 +203,41 @@ def _in_url_sized_batches(indices):
         yield batch
 
 
+def _most_telling(stats, keep, first=()):
+    """The `keep` field statistics worth showing, most telling first.
+
+    Which fields matter cannot be read off a mapping. What can be measured
+    is how much of the result each one accounts for: a field whose top
+    values cover most of the records tells you what you are looking at, and
+    one whose top value was seen once — a trace id, an event hash, a
+    request id — tells you only that its values are unique, which is a
+    property of the field and not of the hour.
+
+    Measured on a real cluster's sidebar: of ten fields shown, three held a
+    single value seen once and a fourth covered 47 records out of
+    thousands. They were there because `@` sorts before letters.
+
+    `first` is kept whatever it scores — the level, the service, the host
+    and the environment are what people FILTER by, and a quiet hour in
+    which every record shares a service must not take the service row
+    away.
+
+    The score is the sum of the counts shown, which needs no denominator:
+    every field in one answer was counted over the same records, so they
+    are already comparable. Ties go to the field with fewer distinct
+    values, then by name, so the same answer always orders the same way.
+    """
+    def score(stat):
+        # Every count here came through `_count`, which refuses anything
+        # that is not a finite number, so this needs no guard of its own.
+        return sum(value.count for value in stat.values)
+
+    pinned = [stat for stat in stats if stat.field in first]
+    rest = [stat for stat in stats if stat.field not in first]
+    rest.sort(key=lambda stat: (-score(stat), len(stat.values), stat.field))
+    return (pinned + rest)[:keep]
+
+
 def _search(es, indices, body, **options):
     """One search. `indices` is a list; the client wants a string.
 
@@ -787,7 +822,9 @@ class ElasticsearchLogSource(LogSource):
         if not targets:
             return PartialCounts()
 
-        discovered = fields or self._aggregatable_fields(targets)
+        chosen = fields is not None
+        discovered = fields or self._aggregatable_fields(
+            targets, max_fields=self.STATS_FIELDS_CONSIDERED)
         if not discovered:
             return PartialCounts()
 
@@ -817,7 +854,33 @@ class ElasticsearchLogSource(LogSource):
                                        count=_count(b["doc_count"]))
                             for b in buckets],
                 ))
+        if not chosen:
+            # Asked about more than it shows, so that which ten are shown
+            # is measured rather than alphabetical. A chosen set is shown
+            # whole: somebody said those, and cutting them would be
+            # answering a different question.
+            pinned = [name for name in discovered
+                      if name in self._first_shown(discovered)]
+            stats = _most_telling(stats, self.STATS_FIELDS_SHOWN,
+                                  first=pinned)
         return PartialCounts(stats, warnings=(shards,) if shards else ())
+
+    def _first_shown(self, discovered):
+        """The discovered paths that are a `_PRIORITY_FIELDS` name here.
+
+        `_aggregatable_fields` puts them at the front of its map, but the
+        map is a dict and the answer is a list of what had buckets, so the
+        order is gone by the time the ranking runs. Resolved again rather
+        than carried, because the resolution is one table lookup and a
+        second way of saying it is a second thing to keep in step.
+        """
+        pinned = []
+        for neutral in self._PRIORITY_FIELDS:
+            for candidate in field_candidates(neutral):
+                if candidate in discovered:
+                    pinned.append(candidate)
+                    break
+        return pinned
 
     def aggregate(self, query, aggregations, scope):
         """Run the given aggregations in a SINGLE Elasticsearch request.
@@ -1240,8 +1303,31 @@ class ElasticsearchLogSource(LogSource):
             return record.resource[neutral_name]
         return record.attributes.get(neutral_name)
 
-    #: Fields shown first in the sidebar — the ones users filter on most
-    _PRIORITY_FIELDS = ("level", "service", "host", "environment")
+    #: Shown first in the sidebar, by NEUTRAL name — the ones people filter
+    #: on most.
+    #:
+    #: Neutral, and resolved through `field_candidates`, because this list
+    #: used to be spelled `("level", "service", "host", "environment")` and
+    #: that is one shape's spelling. On a cluster where the level is `@l`
+    #: and the service `kubernetes.container_name` it matched NOTHING, so
+    #: the sidebar fell through to its fallback — the first ten field names
+    #: alphabetically — and `@` sorts before letters. The panel filled with
+    #: `@i`, `@l`, `@m`, `@sp`, `@tr` and an application's own counter,
+    #: three of them holding a single value seen once, while the container
+    #: name never reached the list.
+    _PRIORITY_FIELDS = ("severity", "service", "host", "environment")
+
+    #: How many the sidebar SHOWS, and how many it asks about to choose
+    #: them.
+    #:
+    #: Asking about more than it shows is the whole of the ranking: which
+    #: fields are worth looking at cannot be read off a mapping, because
+    #: what makes a field worth showing is how much of the RESULT it
+    #: accounts for, and that is only in the answer. The extra ones are
+    #: terms aggregations in the same request; a source whose fields have
+    #: been chosen skips all of this and runs exactly those.
+    STATS_FIELDS_SHOWN = 10
+    STATS_FIELDS_CONSIDERED = 30
 
     _FIELD_CACHE_TTL = 60.0
 
@@ -1342,9 +1428,14 @@ class ElasticsearchLogSource(LogSource):
             walk((index_mapping.get("mappings") or {}).get("properties") or {})
 
         ordered = {}
-        for name in self._PRIORITY_FIELDS:
-            if name in found:
-                ordered[name] = found.pop(name)
+        for neutral in self._PRIORITY_FIELDS:
+            # The first spelling this cluster actually has. Not every one:
+            # four neutral names filling ten slots with two spellings each
+            # is a panel of synonyms.
+            for candidate in field_candidates(neutral):
+                if candidate in found:
+                    ordered[candidate] = found.pop(candidate)
+                    break
         for name in sorted(found):
             if len(ordered) >= max_fields:
                 break
