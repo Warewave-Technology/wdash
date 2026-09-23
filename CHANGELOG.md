@@ -22,6 +22,37 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
+## 3.1.3 — unreleased
+
+### Needs action
+
+- **Nothing.** The log sidebar chooses its ten fields differently; if you
+  picked fields in 3.1.2, yours are untouched.
+
+### Changed
+
+- **The log sidebar shows the ten fields that account for most of what you
+  are looking at**, instead of the first ten field names alphabetically.
+  Sorting is not ranking: on a cluster whose fields begin with `@` it gave
+  a panel of `@i`, `@l`, `@sp`, `@tr` and an application's own counter —
+  four of the ten holding one value per record, which says their values are
+  unique and nothing about the hour — while the container name never
+  appeared. The sidebar now asks about thirty fields and shows the ten
+  whose values cover the most records.
+
+  The level, the service, the host and the environment are always shown
+  when the cluster has them, whatever they score: an hour in which every
+  record shares a service must not take the service row away.
+
+  And they are found by their NEUTRAL names now. The list that puts them
+  first was spelled `level`, `service`, `host`, `environment` — one shape's
+  spelling, which matched nothing on a cluster calling them `@l` and
+  `kubernetes.container_name`. That is also why those fields now survive
+  the picker's own list on a cluster with hundreds of them.
+
+  Fields you chose yourself are shown exactly as chosen, all of them, in
+  the order you get them.
+
 ## 3.1.2 — 2026-09-22
 
 Both of these came from the same screenshot of a real cluster, a day
