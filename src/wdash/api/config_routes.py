@@ -2764,7 +2764,10 @@ LOG_CONDITIONS = {
     "count": ("How many records",
               "Fires when a group reaches this many matching records. "
               "Right for a thing that should almost never happen."),
-    "ratio": ("What share of the records",
+    # Short enough not to be clipped: a select shows what fits and cuts the
+    # rest, and "What share of the recor" is a choice somebody is reading
+    # halfway through. The sentence under it carries the meaning.
+    "ratio": ("What share of them",
               "Fires when this much of a group's traffic matches. Right "
               "for a service that is busy at noon and idle at 3am, where "
               "one count is either silent or always firing."),
