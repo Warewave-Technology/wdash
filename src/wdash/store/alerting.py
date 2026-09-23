@@ -179,13 +179,34 @@ class ChannelRepository:
         }
 
 
+def _check_log_selector(selector):
+    """A log rule has to say what it counts and how it is grouped.
+
+    Refused at the save rather than left to the evaluator. The evaluator
+    does refuse it — a log rule with no saved search observes nothing and
+    says why, every pass, in the log — but a rule that exists and never
+    evaluates reads as a rule that is watching, and "I have an alert for
+    that" is exactly the belief this product must not sell.
+    """
+    selector = selector or {}
+    if not str(selector.get("saved_search") or "").strip():
+        raise AlertingError(
+            "A rule that watches logs needs a saved search to count. Save "
+            "the search on the logs page first.")
+    if not str(selector.get("group_by") or "").strip():
+        raise AlertingError(
+            "A rule that watches logs needs a field to group by, so that "
+            "each value breaching it is its own alert — one noisy service "
+            "would otherwise hide the next one to break.")
+
+
 class RuleRepository:
     def __init__(self, engine):
         self._engine = engine
 
     def create(self, name, kind, channel_id, threshold=3, repeat_minutes=0,
                days_before=None, selector=None, created_by=None):
-        from ..alerts.evaluate import CERTIFICATE_EXPIRING, RULE_KINDS
+        from ..alerts.evaluate import CERTIFICATE_EXPIRING, LOG_QUERY, RULE_KINDS
 
         name = (name or "").strip()
         if not name:
@@ -209,6 +230,8 @@ class RuleRepository:
             # evaluations before saying so delays the warning by three
             # evaluation intervals for no benefit.
             threshold = 1
+        if kind == LOG_QUERY:
+            _check_log_selector(selector)
 
         now = _now()
         row = {
@@ -224,11 +247,22 @@ class RuleRepository:
         return self.get(row["id"])
 
     def update(self, rule_id, **changes):
+        from ..alerts.evaluate import LOG_QUERY
+
         allowed = {"name", "threshold", "repeat_minutes", "days_before",
                    "selector", "channel_id", "enabled"}
         values = {k: v for k, v in changes.items() if k in allowed}
         if not values:
             return self.get(rule_id)
+        if "selector" in values:
+            # The kind comes from the row: it is not editable, and taking it
+            # from the caller would let an edit dodge the check by not
+            # mentioning it. An edit that empties a log rule's selector is
+            # the same mistake as saving one empty, and it arrives by the
+            # same form.
+            existing = self.get(rule_id)
+            if existing and existing.get("kind") == LOG_QUERY:
+                _check_log_selector(values["selector"])
         values["updated_at"] = _now()
         with self._engine.begin() as connection:
             result = connection.execute(

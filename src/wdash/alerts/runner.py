@@ -18,8 +18,8 @@ from datetime import datetime, timedelta, timezone
 from ..hub.models import DOWN, UP
 from .channels import DeliveryError, payload, send
 from .evaluate import (
-    AGENT_SILENT, CERTIFICATE_EXPIRING, MONITOR_DOWN, NOTIFY_RESOLVED,
-    Observation, evaluate,
+    AGENT_SILENT, CERTIFICATE_EXPIRING, LOG_QUERY, MONITOR_DOWN,
+    NOTIFY_RESOLVED, Observation, evaluate,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,12 +54,18 @@ class Observed:
         self.warnings = tuple(warnings)
 
 
-def observe(rule, source, store, window, now):
+def observe(rule, source, store, window, now, hub=None):
     """What this rule sees right now, as an `Observed`.
 
     The judgement — what counts as bad — lives here rather than in the state
     machine, because it differs per rule kind and the state machine should not
     have to know.
+
+    `source` is the MONITOR source; `hub` is passed for the kinds that read
+    something else. A log rule cannot be given its source up front because
+    which one it reads is written on the saved search it points at, and a
+    rule pointed at a source that was since deleted has to be able to say so
+    rather than silently reading a different one.
     """
     kind = rule.get("kind")
     if kind == AGENT_SILENT:
@@ -67,6 +73,9 @@ def observe(rule, source, store, window, now):
         # the rule for this pass. Swallowed, it became an empty agent list,
         # which reads exactly like "every agent was deleted".
         return Observed(_agents(store, now))
+
+    if kind == LOG_QUERY:
+        return _log_query(rule, store, hub, now)
 
     page = source.monitors(window, _scope()) if source else None
     # A monitor source that failed answers `MonitorPage(partial=True)` with no
@@ -151,6 +160,153 @@ def observe(rule, source, store, window, now):
                                 f"knows how to evaluate",))
 
 
+#: How many groups one log rule counts. Well past any service list a person
+#: would page on, and the cut is reported rather than trimmed to — see
+#: `_log_query`, which can tell a cut that hid a breach from one that did not.
+LOG_QUERY_GROUPS = 200
+
+#: What a log rule's selector is allowed to say. Named here because the
+#: selector column is also a monitor label selector, and a typo in a key
+#: would otherwise be read as "a label called `windo_minutes`" and match
+#: nothing, quietly.
+LOG_QUERY_KEYS = ("saved_search", "group_by", "window_minutes", "at_least")
+
+#: The default window a log rule counts over, in minutes. Fifteen rather
+#: than the monitor side's hour: a log rule is usually about a burst, and an
+#: hour of history keeps a burst alive long after it has stopped.
+LOG_QUERY_WINDOW = 15
+
+
+def _log_setting(rule, key, fallback):
+    """One whole-number setting off the selector.
+
+    The selector arrives from a form, so every value is a string, and a
+    value that will not parse is NOT quietly replaced by the default: a rule
+    written to fire at ten that silently fires at one is worse than a rule
+    that refuses to evaluate, because only one of the two says anything.
+    """
+    raw = (rule.get("selector") or {}).get(key)
+    if raw is None or raw == "":
+        return fallback, None
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None, f"{key} is {raw!r}, which is not a whole number"
+    if value < 1:
+        return None, f"{key} is {value}, and it has to be at least 1"
+    return value, None
+
+
+def _log_query(rule, store, hub, now):
+    """What a saved search counts right now, per group.
+
+    One observation per value of the grouped field, so a rule watching
+    twenty services is twenty alerts that fire and recover on their own. The
+    alternative — one alert for the whole query — hides the second service
+    to break behind the first, and recovers when either of them does.
+
+    Every way this cannot answer is `complete=False` rather than an empty
+    list, because an empty list of groups is a real and common answer: it
+    means nothing matched, and every firing group should resolve. A rule
+    that cannot find its saved search must not resolve anything.
+    """
+    selector = rule.get("selector") or {}
+    unknown = sorted(set(selector) - set(LOG_QUERY_KEYS))
+    if unknown:
+        # Refused rather than ignored. An unread key is a setting somebody
+        # believes is in force.
+        return Observed([], False, (f"this rule's selector has "
+                                    f"{', '.join(repr(k) for k in unknown)}, "
+                                    f"which a log rule does not read",))
+
+    search_id = selector.get("saved_search")
+    search = store.saved_searches.get(search_id) if search_id else None
+    if search is None:
+        return Observed([], False, (
+            f"no saved search {search_id!r}" if search_id
+            else "this rule names no saved search",))
+
+    group_by = (selector.get("group_by") or "").strip()
+    if not group_by:
+        return Observed([], False, ("this rule names no field to group by",))
+
+    minutes, complaint = _log_setting(rule, "window_minutes",
+                                      LOG_QUERY_WINDOW)
+    # One, meaning "tell me the first time this search matches anything in
+    # this group". Written as 1 because that is what it MEANS, not because
+    # anything could tell it from 0: a terms bucket exists only where at
+    # least one document made it, so no input separates `>= 0` from `>= 1`
+    # here, and a mutation between them survives every test. Said out loud
+    # so the next reader does not go looking for the check that is missing.
+    at_least, other = _log_setting(rule, "at_least", 1)
+    complaint = complaint or other
+    if complaint:
+        return Observed([], False, (complaint,))
+
+    source = hub.logs(search.source or hub.ALL_SOURCES) if hub else None
+    if source is None:
+        return Observed([], False, (
+            f"the saved search '{search.name}' reads "
+            f"{search.source or 'every source'}, and there is none",))
+
+    from ..hub.aggregation import Terms
+    from ..hub.query import LogQuery, TimeWindow
+
+    # `exact`, not the aligned `between` an aggregation would normally use.
+    # Alignment widens a window by up to one bucket, which is invisible on a
+    # chart and is not invisible against a threshold: it counts records from
+    # outside the minutes the rule names, and the sentence the alert sends
+    # says how many happened in those minutes.
+    window = TimeWindow.exact(now - timedelta(minutes=minutes), now)
+    query = LogQuery(window=window, text=search.query or "*", limit=1)
+    result = source.aggregate(
+        query, [Terms(name="groups", field=group_by,
+                      size=LOG_QUERY_GROUPS)], _scope())
+
+    # `failed` is no answer; `partial` is a short one. Either way the groups
+    # in hand are not the groups there are, and resolving on them would
+    # announce a recovery out of a backend's bad minute.
+    complete = not result.failed and not result.partial
+    warnings = tuple(result.warnings)
+    buckets = result.get("groups")
+
+    # And the search can succeed while THIS aggregation does not: a field
+    # that is not mapped as a keyword is refused on its own, and the rest of
+    # the answer comes back fine. Measured against a real cluster, grouping
+    # by `@m`: no buckets, nothing failed, nothing partial — so every firing
+    # group would have been told it had recovered, on a pass that never
+    # counted anything. Not being able to look is not the same as looking
+    # and finding nothing, and this is the line that keeps them apart.
+    refused = result.reasons("groups")
+    if refused:
+        complete = False
+        # Only the ones not already said. A single source files its reason
+        # under both the page-level list and the aggregation's name, and the
+        # same sentence twice in a log reads as the thing having happened
+        # twice.
+        warnings += tuple(r for r in refused if r not in warnings)
+
+    # A terms aggregation is ordered by count, so everything below the cut
+    # counts no more than the last value returned. If that last one is still
+    # under the threshold, nothing hidden can be over it and the cut cost us
+    # nothing; if it is over, a group that should be firing may be out of
+    # sight and this pass cannot say it is not.
+    if len(buckets) >= LOG_QUERY_GROUPS and buckets[-1].count >= at_least:
+        complete = False
+        warnings += (f"more than {LOG_QUERY_GROUPS} values of "
+                     f"{group_by!r} are over the threshold, so this pass "
+                     f"cannot see all of them",)
+
+    return Observed(
+        [Observation(str(bucket.key),
+                     bucket.count >= at_least,
+                     f"{bucket.count:,} record(s) in {minutes} minute(s), "
+                     f"against a threshold of {at_least:,}",
+                     str(bucket.key))
+         for bucket in buckets],
+        complete, warnings)
+
+
 def _detail(monitor):
     """Why this monitor is bad, or nothing at all because it is not.
 
@@ -232,6 +388,26 @@ def _selected(rule, monitor):
 
 
 def _scope():
+    """What an evaluation pass is allowed to read.
+
+    Everything, and that is a decision rather than an oversight. Only a
+    `system:admin` may create or edit a rule (`_require_admin` on the route),
+    and a log rule reads a saved search, which belongs to the person who
+    saved it — so the query, the threshold and the channel are all one
+    administrator's, and an administrator can already read every index.
+
+    The alternative was to rebuild the author's own scope from RBAC at
+    evaluation time. It was not taken because it can fail OPEN: a saved
+    search created through OIDC carries a username and no groups, and
+    `choose_role` reads groups before it reaches the default — so a
+    reconstruction here would fall through to the default role, which may
+    grant MORE than the author had. A narrower scope that is sometimes wider
+    is worse than an honest wide one.
+
+    If rule creation is ever opened past `system:admin`, this is the line
+    that has to change first, and the groups problem above is the reason it
+    cannot change by simply calling `resolve`.
+    """
     from ..hub.scope import Scope
     return Scope(principal="alerts", containers=("*",))
 
@@ -263,7 +439,7 @@ class AlertRunner:
         return sent
 
     def _one_rule(self, rule, source, window, now, silenced):
-        seen = observe(rule, source, self._store, window, now)
+        seen = observe(rule, source, self._store, window, now, self._hub)
         if not seen.complete:
             # Said out loud, because the pass then declines to resolve
             # anything: a silent decision not to act is a second silent

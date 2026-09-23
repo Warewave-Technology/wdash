@@ -2739,6 +2739,13 @@ RULE_DESCRIPTIONS = {
         "Fires once a certificate is inside the warning window. A diary "
         "entry rather than an outage — it is still working when this "
         "arrives."),
+    "log_query": (
+        "A saved search finds too much",
+        "Counts what one of your saved searches matches, grouped by a "
+        "field, and fires for every VALUE of that field over the "
+        "threshold — so a burst in one service is its own alert and "
+        "recovers on its own, rather than hiding the next service to "
+        "break."),
 }
 
 
@@ -2756,7 +2763,21 @@ def _describe_rule(rule, channels):
                  f"{k}={v}" for k, v in selector.items()))
 
     kind = rule.get("kind")
-    if kind == "certificate_expiring":
+    if kind == "log_query":
+        # Its selector is not a label selector, so `which` above says
+        # nothing about it — a log rule reads a saved search and groups the
+        # matches, and describing it as "any monitor labelled
+        # saved_search=..." is the sentence a reader would have to unlearn.
+        #
+        # The search is named by ID here on purpose: this function is given
+        # a rule and a channel list, not the store, and inventing a lookup
+        # would put a database read inside a page's render loop. The form
+        # shows the name.
+        what = (f"each {selector.get('group_by') or 'group'} matching the "
+                f"saved search reaches "
+                f"{selector.get('at_least') or 1} record(s) in "
+                f"{selector.get('window_minutes') or 15} minute(s)")
+    elif kind == "certificate_expiring":
         what = (f"a certificate on {which} is within "
                 f"{rule.get('days_before') or 30} days of expiring")
     elif kind == "agent_silent":

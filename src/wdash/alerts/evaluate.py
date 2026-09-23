@@ -22,13 +22,20 @@ list.
 
 from datetime import timedelta
 
-#: What a rule can watch. Three, because they are three different facts with
-#: three different audiences: a target that stopped answering, a probe that
-#: stopped looking, and a diary entry about a certificate.
+#: What a rule can watch. Four different facts with four different
+#: audiences: a target that stopped answering, a probe that stopped looking,
+#: a diary entry about a certificate, and what the application itself is
+#: writing down. Sending them down one channel with one wording is how
+#: people learn to ignore all four.
 MONITOR_DOWN = "monitor_down"
 AGENT_SILENT = "agent_silent"
 CERTIFICATE_EXPIRING = "certificate_expiring"
-RULE_KINDS = (MONITOR_DOWN, AGENT_SILENT, CERTIFICATE_EXPIRING)
+#: A saved log search, counted per group. The state machine needs nothing
+#: new for it: a grouped value is a subject like a monitor is a subject, and
+#: everything this module knows about flapping, repeating and recovering is
+#: already about subjects.
+LOG_QUERY = "log_query"
+RULE_KINDS = (MONITOR_DOWN, AGENT_SILENT, CERTIFICATE_EXPIRING, LOG_QUERY)
 
 OK = "ok"
 FIRING = "firing"

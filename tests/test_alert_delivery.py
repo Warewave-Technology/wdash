@@ -1155,6 +1155,19 @@ class RuleReadabilityTest(unittest.TestCase):
         self.assertIn("an agent stops reporting",
                       self._describe(kind="agent_silent"))
 
+    def test_a_log_rule_is_about_the_group_it_counts(self):
+        """Its selector is not a label selector. Read as one it becomes "any
+        monitor labelled saved_search=abc, group_by=service", which is a
+        sentence a reader has to unlearn before they can check the rule
+        against what they meant."""
+        sentence = self._describe(
+            kind="log_query",
+            selector={"saved_search": "s1", "group_by": "service",
+                      "at_least": "10", "window_minutes": "15"})
+        self.assertIn("each service matching the saved search reaches 10 "
+                      "record(s) in 15 minute(s)", sentence)
+        self.assertNotIn("monitor", sentence)
+
     def test_a_missing_channel_is_stated_as_the_fault_it_is(self):
         """A rule with no channel fires into nothing, and that is the thing to
         notice — not a blank in a column."""
