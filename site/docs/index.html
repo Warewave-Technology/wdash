@@ -182,6 +182,7 @@
   <h4>Searching</h4>
   <a href="#query">Query syntax</a>
   <a href="#logs">The Logs screen</a>
+  <a href="#multiline">Stack traces in one piece</a>
   <a href="#traces">Traces</a>
 
   <h4>Dashboards</h4>
@@ -1060,7 +1061,7 @@ window, served by the backend where it can be — see
 <a href="#capabilities">capabilities</a>. Click a value to add it to the
 query.</p>
 
-<h3>A record, in three depths</h3>
+<h3 id="record-depths">A record, in three depths</h3>
 
 <table class="cmp">
 <thead><tr><th>View</th><th>Shows</th></tr></thead>
@@ -1098,6 +1099,221 @@ exist there, not their names — only an administrator is shown the names. A
 drill-down arriving from a dashboard is answered from that dashboard's source,
 and the picker on screen moves to match: the control and the records under it
 used to disagree.</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="multiline">
+<h2>Stack traces arriving line by line</h2>
+
+<p>An exception is many lines of stdout. A shipper reading stdout writes
+<em>one document per line</em> unless it is told otherwise, so one exception
+becomes forty records — and because the Logs screen is newest first, you read
+it upside down: <code>... 23 more</code> at the top and the actual message ten
+rows below.</p>
+
+<p>Measured on a lab cluster: three exceptions (Java, Python, Go) and thirty
+ordinary request lines came to <strong>54 records and 54 rows</strong>, 23 of
+which were fragments of the three traces.</p>
+
+<div class="note"><b>Two things are already right, and one is not</b>
+<p>A continuation line carries no level — the shipper's parser could not read
+it — so it lands in <code>UNSPECIFIED</code>. That means an
+<a href="#log-rules">alert rule</a> naming a level already counts one per
+exception, not one per line, and the <code>ERROR</code> and <code>INFO</code>
+bars on the histogram are already right. What is wrong is the row list, and
+the <code>UNSPECIFIED</code> bar.</p></div>
+
+<p>WDash does not put them back together, and that is deliberate: whether a
+line continues the one above it cannot be asked of Elasticsearch as a query.
+The body is analysed text, matching a leading tab needs a keyword field, and a
+stack frame is past the 256-character cut that keyword sub-fields usually
+carry. A reader could guess from shape and timing, but the count behind the
+chart could not follow it without reading the whole window. One record per
+event is the only version of this that is true everywhere — and that is the
+shipper's job.</p>
+
+<h3>Two stages, and they are not the same stage</h3>
+
+<table class="cmp">
+<thead><tr><th>Stage</th><th>What it joins</th><th>Where</th></tr></thead>
+<tbody>
+<tr><td><code>multiline.parser cri</code> (or <code>docker</code>)</td>
+<td>CRI's OWN split: a line over 16KB is written in pieces with a
+<code>P</code> flag. Nothing to do with stack traces.</td>
+<td>on the <code>tail</code> INPUT</td></tr>
+<tr><td><code>multiline</code> filter, <code>mode parser</code></td>
+<td>The stack trace, by the grammar of the language that wrote it.</td>
+<td>a FILTER, because the input's parser slot is spent on the first row</td></tr>
+</tbody>
+</table>
+
+<pre>[INPUT]
+    Name              tail
+    Path              /var/log/containers/*.log
+    Tag               kube.&lt;namespace_name&gt;.&lt;container_name&gt;.&lt;pod_name&gt;
+    Tag_Regex         (?&lt;pod_name&gt;[a-z0-9](?:[-a-z0-9]*)?)_(?&lt;namespace_name&gt;[^_]+)_(?&lt;container_name&gt;.+)-
+    Read_from_Head    false
+    Skip_Long_Lines   On
+    multiline.parser  cri            <span class="c"># stage one</span>
+
+[FILTER]
+    Name                   multiline
+    Match                  kube.*.order-service.*
+    multiline.key_content  log
+    mode                   parser     <span class="c"># stage two — NOT partial_message</span>
+    multiline.parser       java
+    flush_timeout          2000</pre>
+
+<div class="stop"><b>Three ways this silently does nothing</b>
+<p><code>mode partial_message</code> is for stage one. With it on a stage-two
+filter, measured: twelve lines in, twelve lines out, no error printed.</p>
+<p><strong>Two languages in one filter duplicate a line.</strong> Measured
+with <code>multiline.parser java, python</code>: the traces joined correctly
+AND Python's final exception line was emitted a second time as its own record.
+Each grammar alone was right. One language per filter, matched to the
+containers that speak it.</p>
+<p><code>flush_timeout</code> defaults to 5s. A line held longer than that is
+emitted alone — which looks exactly like the fault you are fixing, and only
+under load.</p></div>
+
+<p class="fn">Put the <code>multiline</code> filters <em>before</em> the
+<code>kubernetes</code> filter. They work on the raw <code>log</code> key, and
+enriching first only gives them more to copy onto every joined line.</p>
+
+<h3>One line per language</h3>
+
+<p>Every row below was run through fluent-bit v4.0.1 against a real trace of
+that language, with an ordinary log line after it to catch a grammar that
+swallows what follows. <em>Lines</em> is the trace; <em>records</em> is what
+came out, including that following line.</p>
+
+<table class="cmp">
+<thead><tr><th>Language</th><th>Parser</th><th>Lines → records</th>
+<th>Notes</th></tr></thead>
+<tbody>
+<tr><td>Java, Kotlin, Scala, Clojure</td><td><code>java</code>, built in</td>
+<td>8 → 3</td><td>Joins the exception. Does NOT join it to your logger's line
+above — see below.</td></tr>
+<tr><td>Python</td><td><code>python</code>, built in</td><td>6 → 2</td>
+<td>Whole, including the final <code>…Error:</code> line, which is where
+Python puts the message.</td></tr>
+<tr><td>Go</td><td><code>go</code>, built in</td><td>8 → 2</td>
+<td>Whole, including the blank line and the <code>goroutine</code> header.</td></tr>
+<tr><td>Ruby</td><td><code>ruby</code>, built in</td><td>3 → 2</td><td>Whole.</td></tr>
+<tr><td>.NET / C#, console</td><td>custom <code>dotnet</code></td>
+<td>5 → 2</td><td>Covers <code>--- End of stack trace …</code>.</td></tr>
+<tr><td>.NET / C#, ASP.NET logger</td><td>custom <code>dotnet_aspnet</code></td>
+<td>5 → 2</td><td>A different grammar: <code>fail:</code> then six-space
+continuation.</td></tr>
+<tr><td>Node.js</td><td>custom <code>node</code></td><td>8 → 2</td>
+<td>Whole, including the <code>^</code> marker and the blank line inside.</td></tr>
+<tr><td>PHP</td><td>custom <code>php</code></td><td>6 → 2</td>
+<td>Covers <code>Stack trace:</code>, <code>#N</code> frames and
+<code>thrown in</code>.</td></tr>
+<tr><td>Rust</td><td>custom <code>rust</code></td><td>9 → 2</td>
+<td>Needs three states: the panic message is its own line at column 0.</td></tr>
+<tr><td>Elixir / Erlang</td><td>custom <code>elixir</code></td><td>4 → 2</td>
+<td>Whole.</td></tr>
+</tbody>
+</table>
+
+<h3>The grammars</h3>
+
+<p>Put these in the file named by <code>parsers_file</code>. A
+<code>start_state</code> rule matches the line that BEGINS an event; a
+<code>cont</code> rule appends a line to it; a line matching neither closes the
+record and stands on its own.</p>
+
+<pre>[MULTILINE_PARSER]
+    name          dotnet
+    type          regex
+    flush_timeout 1000
+    rule          "start_state"  "/^(Unhandled exception|[\w.]+Exception: )/"  "cont"
+    rule          "cont"         "/^\s*(at |--- End of|--- )/"                 "cont"
+
+[MULTILINE_PARSER]
+    name          dotnet_aspnet
+    type          regex
+    flush_timeout 1000
+    rule          "start_state"  "/^(info|warn|fail|crit|dbug|trce): /"  "cont"
+    rule          "cont"         "/^      /"                            "cont"
+
+[MULTILINE_PARSER]
+    name          node
+    type          regex
+    flush_timeout 1000
+    rule          "start_state"  "/^(\/.*:\d+$|\w*Error: |\w+Error$)/"  "cont"
+    rule          "cont"         "/^(\s|\^|$|\w*Error: |.*\^$)/"        "cont"
+
+[MULTILINE_PARSER]
+    name          php
+    type          regex
+    flush_timeout 1000
+    rule          "start_state"  "/^(PHP )?(Fatal error|Parse error|Warning|Notice|Deprecated)/"  "cont"
+    rule          "cont"         "/^(Stack trace:|#\d+ |\s)/"                                     "cont"
+
+<span class="c"># Three states: the panic message is its own line at column 0, and only
+# the FIRST such line belongs to the panic. A cont rule loose enough to
+# take it would take the next log line too.</span>
+[MULTILINE_PARSER]
+    name          rust
+    type          regex
+    flush_timeout 1000
+    rule          "start_state"  "/^thread '.*' panicked at /"       "message"
+    rule          "message"      "/^.*$/"                            "cont"
+    rule          "cont"         "/^(\s|stack backtrace:|note: )/"   "cont"
+
+[MULTILINE_PARSER]
+    name          elixir
+    type          regex
+    flush_timeout 1000
+    rule          "start_state"  "/^\*\* \(/"  "cont"
+    rule          "cont"         "/^\s+/"      "cont"</pre>
+
+<h3>The exception and the line that announced it</h3>
+
+<p>The built-in <code>java</code> parser starts the event at the exception,
+not at the line your logger wrote above it. Measured: eight lines became three
+records — your <code>ERROR … Failed to place order</code>, the seven-line
+trace, and the next request. In WDash that is one <code>ERROR</code> row and
+one <code>UNSPECIFIED</code> row holding the whole stack. Far better than
+eight rows, and still two.</p>
+
+<p>Joining them needs a grammar that knows <em>your logger's line format</em>,
+which is the one thing in this whole page only you can write. Spring Boot's
+default, measured at eight lines into one record:</p>
+
+<pre>[MULTILINE_PARSER]
+    name          java_spring
+    type          regex
+    flush_timeout 1000
+    rule          "start_state"  "/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/"                     "cont"
+    rule          "cont"         "/^(\s|Caused by: |\t\.\.\. |[\w.$]+(Exception|Error)[: ])/"  "cont"</pre>
+
+<p class="fn">Logback's default and log4j2 start differently; change only the
+<code>start_state</code> line. The trade is real and worth stating: a start
+pattern this broad means every ordinary log line starts an event, so a
+grammar that is wrong about your format joins lines that have nothing to do
+with each other.</p>
+
+<h3>What a wrong grammar does, and what no grammar can do</h3>
+
+<p>Measured across six mismatched pairs — a Python traceback through the Java
+parser, a Go panic through Ruby's, and so on — the usual result is that
+<strong>nothing joins</strong>: the records come out exactly as they went in,
+which is the fault you already had. One pair (a .NET trace through the Java
+parser) joined part of it. None of the six swallowed the following log line.
+So a container with no grammar, or the wrong one, is no worse off than it is
+today.</p>
+
+<div class="stop"><b>Two threads writing at once cannot be separated</b>
+<p>Their lines interleave in the stream, and no parser downstream can tell
+whose frame is whose without a thread id on every line. This one the
+application has to solve, by logging the exception as a <em>field</em> rather
+than to stdout — which is what Serilog's <code>@x</code> already does, and why
+a .NET service logging through Serilog never has this problem in the first
+place. <a href="#record-depths">WDash reads that field</a> and shows the trace
+inside the one record it belongs to.</p></div>
 </section>
 
 <!-- ================================================================ -->

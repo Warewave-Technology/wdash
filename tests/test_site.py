@@ -38,6 +38,18 @@ OLDER_VERSIONS_NAMED_ON_PURPOSE = {
     "2.4.0",
 }
 
+#: Versions of OTHER software the pages name, and the name each has to be
+#: standing next to. Not the same relaxation as the set above: that one
+#: forgives an old WDash version, and this one says a number is not a WDash
+#: version at all. The name is required rather than trusted, so a stale
+#: WDash version added here by mistake still fails — "3.1.7" is not
+#: preceded by "fluent-bit" anywhere, and cannot be made to be.
+OTHER_SOFTWARE_NAMED_ON_PURPOSE = {
+    # The multiline section is a measurement, and a measurement without the
+    # version it was taken against is a claim rather than a reading.
+    "4.0.1": "fluent-bit",
+}
+
 _VERSION = re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?![\d.])")
 
 #: How the README may name the documentation page: the path a checkout has,
@@ -218,6 +230,15 @@ class TheVersionOnThePagesTest(unittest.TestCase):
         allowed = OLDER_VERSIONS_NAMED_ON_PURPOSE | {__version__}
         for page, text in self.pages.items():
             for found in set(_VERSION.findall(text)):
+                software = OTHER_SOFTWARE_NAMED_ON_PURPOSE.get(found)
+                if software:
+                    # It has to be standing next to the name that excuses it.
+                    self.assertRegex(
+                        text, re.compile(re.escape(software) + r"[^<]{0,20}"
+                                         + re.escape(found)),
+                        f"{page} prints {found}, which is allowed only as "
+                        f"{software}'s version, and {software} is not beside it")
+                    continue
                 self.assertIn(found, allowed,
                               f"{page} prints {found}; this is {__version__}")
 
