@@ -22,7 +22,7 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
-## 3.2.0 — 2026-09-23
+## 3.2.0 — 2026-10-02
 
 ### Needs action
 
@@ -92,6 +92,23 @@ recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
   halves is the wrong shape for names like `@l` and `tag`. The columns now
   follow the width: the same 24 fields that took twelve rows and scrolled
   take eight and do not.
+
+### Documentation
+
+- **Stack traces arriving line by line**, and the shipper configuration
+  that stops them. A shipper reading stdout writes one document per line,
+  so one exception becomes forty records — and the Logs screen, being
+  newest first, shows it upside down. The new section covers ten
+  languages: four fluent-bit already knows, six whose grammars now ship in
+  `docs/multiline-parsers.conf`, and a seventh for joining a trace to the
+  logger line above it. Every count on that page was measured against
+  fluent-bit v4.0.1, and `tests/test_multiline_parsers` takes the
+  measurements again wherever fluent-bit is installed.
+
+  Three things in it are worth the two minutes before you edit a config:
+  the wrong `mode` joins nothing and says nothing; two languages in one
+  filter duplicate a line; and a wrong grammar is harmless, which is the
+  one of the three that is good news.
 
 ## 3.1.7 — 2026-09-23
 

@@ -867,7 +867,11 @@ class DrillDownScopeTest(unittest.TestCase):
     answers per index, so the narrowing is actually exercised.
     """
 
-    WINDOW = ("start_time=2026-09-01T09:00:00Z&end_time=2026-09-01T11:00:00Z")
+    #: One instant for the records, and bounds either side of it. Both the
+    #: search and the dashboard are asked about these exact bounds, so
+    #: neither can drift off the fixture as the calendar moves.
+    START, END = "2026-09-01T09:00:00Z", "2026-09-01T11:00:00Z"
+    WINDOW = f"start_time={START}&end_time={END}"
 
     def setUp(self):
         from tests.support import ModelledES
@@ -939,12 +943,16 @@ class DrillDownScopeTest(unittest.TestCase):
     def card_counts(self):
         """The stat cards as the dashboard page draws them.
 
-        `30d` rather than `1h` only because the modelled records sit at a
-        fixed instant; it covers exactly the same records as `WINDOW`, which
-        the first assertion of the test below checks rather than assumes.
+        The SAME absolute bounds the search uses, not a relative range. It
+        was `time_range=30d`, chosen because the modelled records sit at a
+        fixed instant — and thirty-one days after that instant the window
+        moved off them, every card read zero, and two tests failed for the
+        date rather than for anything in the code. A fixture pinned to a
+        moment and a window measured from now are a test with a shelf life.
         """
         return self.client.get(
-            f"/api/dashboard/{DASH_ID}/data?time_range=30d").get_json()
+            f"/api/dashboard/{DASH_ID}/data?start={self.START}&end={self.END}"
+        ).get_json()
 
     def test_the_role_really_does_reach_both_indices(self):
         """Otherwise the scoped numbers below would be right by accident."""
