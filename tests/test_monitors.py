@@ -783,6 +783,218 @@ class ChartDataTest(unittest.TestCase):
         self.assertEqual(len(chart["average"]), 3)
         self.assertEqual(len(chart["failures"]), 3)
 
+    # ---- the cadence the checks actually arrived at ---------------------
+    #
+    # Reported with a screenshot: a TCP monitor on a 60-second schedule,
+    # "60 check(s)" printed, "Peak 11.0 ms" printed, the grid and the legend
+    # drawn — and no line. The adapters divide a window into 120 buckets
+    # whatever the schedule, so an hour gives one every 30 seconds and a
+    # minutely check fills every other one. A line needs two ADJACENT values
+    # to draw a segment, so every value was an island; with `pointRadius: 0`
+    # none of them was visible, while the y axis scaled correctly from the
+    # data sitting behind the blank.
+
+    @staticmethod
+    def _series(count, every, silent=(), duration=3.0):
+        """`count` buckets with a check in every `every`-th one."""
+        import datetime as when
+        from wdash.hub.models import MonitorPoint
+        start = when.datetime(2026, 10, 2, 2, 0, tzinfo=when.timezone.utc)
+        out = []
+        for index in range(count):
+            ran = (index % every == 0) and not any(
+                low <= index < high for low, high in silent)
+            out.append(MonitorPoint(
+                timestamp=start + when.timedelta(seconds=30 * index),
+                duration_ms=duration if ran else None,
+                checks=1 if ran else 0, down=0))
+        return out
+
+    @staticmethod
+    def _segments(values):
+        """How many separate lines Chart.js would draw, and how many of the
+        values take part in one at all."""
+        pairs = sum(1 for a, b in zip(values, values[1:])
+                    if a is not None and b is not None)
+        runs, previous = 0, None
+        for value in values:
+            if value is not None and previous is None:
+                runs += 1
+            previous = value
+        return runs, pairs
+
+    def test_a_schedule_slower_than_the_bucket_still_draws_a_line(self):
+        """The reported fault. Sixty checks in 120 buckets came out as
+        [None, v, None, v, …] with two adjacent pairs in the whole series."""
+        from wdash.api.monitor_routes import response_chart
+        chart = response_chart(self._series(120, 2))
+        runs, pairs = self._segments(chart["average"])
+        self.assertEqual(runs, 1, "the line is in pieces")
+        self.assertGreater(pairs, 30, "too few adjacent values to draw with")
+
+    def test_a_series_that_was_already_dense_is_left_alone(self):
+        """Merging buys nothing where every bucket holds a check, and costs
+        half the resolution."""
+        from wdash.api.monitor_routes import response_chart
+        chart = response_chart(self._series(120, 1))
+        self.assertEqual(len(chart["average"]), 120)
+
+    def test_a_real_silence_still_breaks_the_line(self):
+        """The one thing the nulls are for. Thirty minutes with no check is
+        the agent having stopped, and a continuous line would say it had
+        not."""
+        from wdash.api.monitor_routes import response_chart
+        chart = response_chart(self._series(120, 2, silent=((40, 100),)))
+        runs, _ = self._segments(chart["average"])
+        self.assertEqual(runs, 2, "the outage was merged away")
+
+    def test_and_so_does_a_single_missed_check_in_a_dense_series(self):
+        """The mirror risk of the fix: one empty bucket in a hundred is a
+        fact, and a merge would round it off into the neighbours."""
+        from wdash.api.monitor_routes import response_chart
+        points = self._series(120, 1)
+        points[57].duration_ms, points[57].checks = None, 0
+        chart = response_chart(points)
+        self.assertEqual(len(chart["average"]), 120)
+        self.assertIsNone(chart["average"][57])
+
+    def test_a_check_that_drifts_does_not_invent_an_outage(self):
+        """An agent does not run on the second. Merged at exactly the check
+        rate, a check landing late fills its neighbour's bucket and empties
+        its own — and that hole is drawn as a BREAK, which this chart means
+        as "the agent stopped". Measured before the headroom: drift of two
+        seconds broke an hour into eight pieces."""
+        import random
+        from wdash.api.monitor_routes import response_chart
+        from wdash.hub.models import MonitorPoint
+        import datetime as when
+        start = when.datetime(2026, 10, 2, 2, 0, tzinfo=when.timezone.utc)
+        worst = 0
+        for seed in range(12):
+            random.seed(seed)
+            counts, clock = [0] * 120, 0.0
+            while clock < 3600:
+                index = int(clock // 30)
+                if 0 <= index < 120:
+                    counts[index] += 1
+                clock += 60 + random.uniform(-10, 10)
+            points = [MonitorPoint(
+                timestamp=start + when.timedelta(seconds=30 * i),
+                duration_ms=3.0 if n else None, checks=n, down=0)
+                for i, n in enumerate(counts)]
+            runs, _ = self._segments(response_chart(points)["average"])
+            worst = max(worst, runs)
+        self.assertEqual(worst, 1,
+                         f"drift broke the line into {worst} pieces")
+
+    def test_the_merged_average_is_weighted_by_the_checks_behind_it(self):
+        """A mean of means is only the same number when the buckets hold
+        equal counts, and the ones being merged here are exactly the ones
+        that do not — most hold nothing and the rest hold one.
+
+        Checked against the RULE rather than against a number: how many
+        buckets one merged bucket covers follows from the data, so a
+        fixture pinning the answer pins the width as well and fails the
+        day the width is right for a different reason.
+        """
+        import datetime as when
+        from math import ceil
+        from wdash.api.monitor_routes import response_chart
+        from wdash.hub.models import MonitorPoint
+        start = when.datetime(2026, 10, 2, 2, 0, tzinfo=when.timezone.utc)
+        # One check at 10ms beside nine at 20ms, then a sparse tail so the
+        # series is merged at all.
+        points = []
+        for index in range(120):
+            if index == 0:
+                ms, count = 10.0, 1
+            elif index == 1:
+                ms, count = 20.0, 9
+            elif index % 8 == 0:
+                ms, count = 5.0, 1
+            else:
+                ms, count = None, 0
+            points.append(MonitorPoint(
+                timestamp=start + when.timedelta(seconds=30 * index),
+                duration_ms=ms, checks=count, down=0))
+
+        merged = response_chart(points)["average"]
+        self.assertLess(len(merged), 120, "the series was not merged at all")
+        width = ceil(120 / len(merged))
+        covered = [p for p in points[:width] if p.checks]
+        runs = sum(p.checks for p in covered)
+        weighted = sum(p.duration_ms * p.checks for p in covered) / runs
+        plain = sum(p.duration_ms for p in covered) / len(covered)
+
+        self.assertAlmostEqual(merged[0], round(weighted, 1), places=1)
+        self.assertNotAlmostEqual(
+            round(weighted, 1), round(plain, 1), places=1,
+            msg="the fixture cannot tell a weighted mean from a plain one")
+
+    def test_a_merged_bucket_keeps_every_failure_under_it(self):
+        """The red marks behind the chart and the "N failed check(s)" in the
+        tooltip are drawn from this. A merge that kept only the first
+        bucket's count would erase most of an outage from the one view that
+        is supposed to show it."""
+        import datetime as when
+        from wdash.api.monitor_routes import response_chart
+        from wdash.hub.models import MonitorPoint
+        start = when.datetime(2026, 10, 2, 2, 0, tzinfo=when.timezone.utc)
+        points = []
+        for index in range(120):
+            ran = index % 2 == 0
+            points.append(MonitorPoint(
+                timestamp=start + when.timedelta(seconds=30 * index),
+                duration_ms=3.0 if ran else None,
+                checks=1 if ran else 0,
+                # Every check in the first half failed.
+                down=1 if (ran and index < 60) else 0))
+        chart = response_chart(points)
+        self.assertEqual(sum(f or 0 for f in chart["failures"]), 30,
+                         "failures were lost in the merge")
+
+    def test_a_merged_bucket_takes_the_slowest_of_the_group(self):
+        """The dashed series is the whole reason there are two: the average
+        hides one slow request in a hundred, and the maximum is what shows
+        it. Taking the first bucket's maximum instead of the group's throws
+        that away."""
+        import datetime as when
+        from wdash.api.monitor_routes import response_chart
+        from wdash.hub.models import MonitorPoint
+        start = when.datetime(2026, 10, 2, 2, 0, tzinfo=when.timezone.utc)
+        points = []
+        for index in range(120):
+            ran = index % 2 == 0
+            point = MonitorPoint(
+                timestamp=start + when.timedelta(seconds=30 * index),
+                duration_ms=3.0 if ran else None,
+                checks=1 if ran else 0, down=0)
+            # One slow reading, and NOT in the first bucket of its group.
+            point.worst_ms = (99.0 if index == 2 else 4.0) if ran else None
+            points.append(point)
+        self.assertEqual(max(v for v in response_chart(points)["worst"]
+                             if v is not None), 99.0,
+                         "the slowest reading was merged away")
+
+    def test_a_merged_bucket_says_how_many_checks_it_covers(self):
+        """Not visible on the chart, which is why it is asked of the merge
+        itself: `checks` is what tells an empty bucket from a fast one, and
+        a merged bucket claiming one check where it covers ten would be the
+        next reader's wrong number."""
+        import datetime as when
+        from wdash.api.monitor_routes import _at_the_cadence_it_ran
+        from wdash.hub.models import MonitorPoint
+        start = when.datetime(2026, 10, 2, 2, 0, tzinfo=when.timezone.utc)
+        points = [MonitorPoint(
+            timestamp=start + when.timedelta(seconds=30 * index),
+            duration_ms=3.0 if index % 4 == 0 else None,
+            checks=2 if index % 4 == 0 else 0, down=0) for index in range(120)]
+        merged = _at_the_cadence_it_ran(points)
+        self.assertLess(len(merged), 120, "nothing was merged")
+        self.assertEqual(sum(p.checks for p in merged),
+                         sum(p.checks for p in points),
+                         "the merge lost checks")
+
     def test_failures_are_counted_not_flagged(self):
         """Three failures in a bucket and one are different facts, and the
         tooltip says which."""

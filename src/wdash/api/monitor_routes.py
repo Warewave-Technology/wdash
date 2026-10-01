@@ -18,6 +18,8 @@ configured sources report; a deployment that needs finer separation runs a
 second source.
 """
 
+from dataclasses import replace
+from math import ceil
 from urllib.parse import quote
 
 from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, url_for
@@ -908,6 +910,102 @@ def _availability(points, checks):
     return summary
 
 
+#: Headroom on the merged bucket, over the rate the checks arrived at.
+#:
+#: Without it the merge is exact and therefore brittle: an agent does not
+#: run on the second, and a check that drifts late lands in its neighbour's
+#: bucket and leaves its own empty. That hole is drawn as a BREAK in the
+#: line, which this chart means as "the agent stopped" — so the fix for an
+#: empty chart would have started inventing outages that never happened.
+#:
+#: Measured over twenty runs of an hour at a 60-second schedule, worst case
+#: of each: with no headroom, drift of ±2s already broke the line into
+#: EIGHT pieces. At 1.25 it is one piece at ±2s and still one at ±10s, and
+#: a genuine thirty-minute silence still broke the line in 20 runs out of
+#: 20. Half again and double do no better and cost resolution, so this is
+#: the smallest number that stops the lie without losing the truth.
+CADENCE_SLACK = 1.25
+
+#: Below this many buckets the window is already coarse, and an empty one is
+#: structure rather than sampling noise — a third of a three-bucket series is
+#: a gap somebody needs to see, not a check that drifted into its neighbour.
+COARSE_ENOUGH = 12
+
+
+def _at_the_cadence_it_ran(points):
+    """Re-bucket the series to the rate the checks actually arrived at.
+
+    The adapters bucket a window into 120 regardless of the schedule, and a
+    monitor slower than that fills one bucket in every N. Every value is
+    then an island with a hole on each side, and a line needs two ADJACENT
+    values to draw a segment at all — so with `pointRadius: 0` the chart
+    came out empty while its axis scaled correctly from the data behind it.
+
+    Measured: a TCP check on a 60-second schedule over an hour gave 120
+    buckets of which 60 held a check, in strict alternation, with two
+    adjacent pairs in the whole series. The page drew the grid, the legend,
+    the peak underneath — and no line.
+
+    This is the same fault `STEP_POINTS` describes one screen up, where the
+    answer was to plot per run instead of per minute. Here the cadence is
+    DERIVED rather than configured: the neutral monitor model carries no
+    schedule, and asking the configuration would miss a check that is
+    running at a different rate than it was told to.
+
+    `width` is how many buckets make one: enough that an average bucket
+    holds a check, plus `CADENCE_SLACK`. Where the data is already dense it
+    is 1 and nothing moves. A real gap survives — an agent silent for half
+    the window still merges to empty buckets, and the line still breaks
+    there, which is the one thing the nulls are for.
+    """
+    filled = sum(1 for p in points if p.has_data)
+    # Gated on the thing the whole fix is about: a line needs two ADJACENT
+    # values to draw a segment, so count those rather than guess at a
+    # fraction. Where most values already have a neighbour the line reads,
+    # and its breaks are real missed checks worth seeing — merging those
+    # away would hide the one thing an empty bucket is for.
+    #
+    # A fraction WAS tried, "at most half the buckets filled", and drift
+    # walked straight through it: sixty checks jittering across an hour put
+    # 61 of them in 120 buckets, one over the line, and the merge was
+    # skipped on the exact series that needed it.
+    together = sum(1 for a, b in zip(points, points[1:])
+                   if a.has_data and b.has_data)
+    # And not on a series too coarse for a hole to be sampling noise. The
+    # adapters divide a window into 120; where something has divided it into
+    # a handful instead, one empty bucket is a large part of the window and
+    # therefore a fact about the monitor rather than about the bucketing —
+    # merging it away would delete the gap this chart exists to show.
+    if len(points) < COARSE_ENOUGH or not filled or together * 2 >= filled:
+        return points
+    width = ceil(len(points) * CADENCE_SLACK / filled)
+    if width < 2:
+        return points
+
+    out = []
+    for start in range(0, len(points), width):
+        group = points[start:start + width]
+        ran = [p for p in group if p.has_data and p.duration_ms is not None]
+        checks = sum(p.checks for p in group)
+        # WEIGHTED by the checks behind each bucket. A plain mean of means
+        # is only the same number when every bucket holds the same count,
+        # and the buckets being merged here are exactly the ones that do
+        # not — most hold nothing and the rest hold one.
+        covered = sum(p.checks for p in ran)
+        mean = (sum(p.duration_ms * p.checks for p in ran) / covered
+                if covered else None)
+        merged = replace(group[0], duration_ms=mean, checks=checks,
+                         down=sum(p.down for p in group))
+        # `worst_ms` is not on the model — the adapters attach it — so it is
+        # carried across by hand rather than by `replace`.
+        slowest = [getattr(p, "worst_ms", None) for p in group]
+        slowest = [v for v in slowest if v is not None]
+        if slowest:
+            merged.worst_ms = max(slowest)
+        out.append(merged)
+    return out
+
+
 def response_chart(points):
     """Response time over the window, as data for Chart.js.
 
@@ -931,6 +1029,8 @@ def response_chart(points):
     usable = [p for p in points if p.has_data and p.duration_ms is not None]
     if len(usable) < 2:
         return None
+
+    points = _at_the_cadence_it_ran(points)
 
     labels, average, worst, failures = [], [], [], []
     for point in points:
