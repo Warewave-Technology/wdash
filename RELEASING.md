@@ -69,19 +69,26 @@ command somebody types, and step 6 is the one no test replaces.
 
    **Check the ratio rather than the number, and say which number you
    mean.** There are three, and they are three questions rather than a mess
-   to tidy up. Measured for 3.1.1:
+   to tidy up. Measured for 3.2.0, and the registry rows WITHOUT pushing:
+   `--output type=oci,dest=…` for both platforms writes an archive whose
+   manifest per architecture carries the compressed layer sizes, which is
+   what a pull transfers. That matters because the push can be the step
+   you are not allowed to take, and a release should not have to guess
+   these to write them down.
 
    | | server | browser |
    |---|---|---|
-   | registry, `linux/amd64` — what you wait for | 79MB | 557MB |
-   | registry, `linux/arm64` | 81MB | 592MB |
-   | `docker images`, unpacked on this machine | 370MB | 2.39GB |
+   | registry, `linux/amd64` — what you wait for | 77MB | 555MB |
+   | registry, `linux/arm64` | 79MB | 591MB |
+   | `docker images`, unpacked on this machine | 364MB | 2.39GB |
 
    The last row depends on the storage driver (containerd's overlayfs
    snapshotter here) and is the one `docker images` prints, which is why it
    is the one that gets quoted by accident. Measure all three again at
    every release rather than carrying them forward: 3.0.0's registry
-   figures were 2MB light by 3.1.1. The figures this file carried
+   figures were 2MB light by 3.1.1, and 3.1.1's were 2MB HEAVY by 3.2.0 —
+   they move in both directions, so a number that looks plausible is not
+   evidence of anything. The figures this file carried
    before — 260MB and 1.77GB — match none of the three, and the 2.4.1 image
    built on this machine measures 375MB unpacked against the 260MB its own
    README claimed, so that gap was the measurement environment rather than
