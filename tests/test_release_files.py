@@ -337,6 +337,111 @@ class TheThirdPartyNoticesTest(unittest.TestCase):
         self.assertIn("LGPL", self.text)
 
 
+class WhatTheImageCarriesTest(unittest.TestCase):
+    """`.dockerignore`, held to what it has to keep out.
+
+    Measured on an image built after a test run: 103 `.pyc` files in 14
+    `__pycache__` directories, 2.06 MB, compiled by the build HOST's Python
+    3.14 and sitting inside an image running 3.11 — which ignores them on
+    the magic number, so the whole 2 MB was dead. Worse than dead: present
+    only when somebody had run the tests before building, which makes the
+    image's contents depend on what the developer did that afternoon.
+
+    `__pycache__/` was the pattern, and it matches the one at the context
+    ROOT and nothing nested. Checked here against paths rather than against
+    the text of the file, so a pattern that is spelled differently but
+    excludes the same things still passes.
+    """
+
+    #: Paths that must never reach the image, as they really appear.
+    KEPT_OUT = (
+        "src/wdash/__pycache__/app.cpython-314.pyc",
+        "src/wdash/api/__pycache__/config_routes.cpython-311.pyc",
+        "__pycache__/conftest.cpython-312.pyc",
+        "src/wdash/hub/adapters/elasticsearch.pyc",
+        "data/wdash.db",
+        "data/tour.db",
+        ".env",
+        "venv/bin/python",
+        "node_modules/jsdom/package.json",
+        "tests/test_release_files.py",
+        "lab/docker-compose.yml",
+    )
+
+    #: And paths that must reach it, so the check cannot pass by excluding
+    #: everything.
+    LET_IN = (
+        "src/wdash/app.py",
+        "templates/services.html",
+        "static/js/wdash.min.js",
+        "requirements.txt",
+        "data/.gitkeep",
+        "README.md",
+    )
+
+    @staticmethod
+    def _patterns():
+        lines = []
+        for line in _read(".dockerignore").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                lines.append(line)
+        return lines
+
+    @staticmethod
+    def _matches(pattern, path):
+        """Docker's matching, not the shell's.
+
+        The distinction is the whole point: `fnmatch` lets `*` cross a `/`,
+        so `*.py[cod]` appears to exclude `src/wdash/__pycache__/app.pyc`
+        and the first version of this test passed the very pattern it was
+        written to reject. Docker matches PATH COMPONENTS — `*` stops at a
+        separator and only `**` crosses one — and a pattern matching a
+        directory excludes everything under it.
+        """
+        import fnmatch
+        parts, want = path.split("/"), pattern.strip("/").split("/")
+
+        def walk(p, w):
+            if not w:
+                # The pattern ran out: it named this path or a directory
+                # above it, and either way the path is in.
+                return True
+            if w[0] == "**":
+                return any(walk(p[i:], w[1:]) for i in range(len(p) + 1))
+            if not p:
+                return False
+            return fnmatch.fnmatch(p[0], w[0]) and walk(p[1:], w[1:])
+
+        return walk(parts, want)
+
+    @classmethod
+    def _excluded(cls, path):
+        """Docker's rule: the LAST matching pattern decides, and one
+        beginning with `!` puts the path back."""
+        verdict = False
+        for pattern in cls._patterns():
+            negated = pattern.startswith("!")
+            candidate = pattern[1:] if negated else pattern
+            if cls._matches(candidate, path):
+                verdict = not negated
+        return verdict
+
+    def test_nothing_that_belongs_to_this_machine_is_copied_in(self):
+        for path in self.KEPT_OUT:
+            with self.subTest(path=path):
+                self.assertTrue(self._excluded(path),
+                                f"{path} would be copied into the image")
+
+    def test_and_the_application_itself_still_is(self):
+        """A guard on the guard: `*` would pass the check above and ship an
+        empty image."""
+        for path in self.LET_IN:
+            with self.subTest(path=path):
+                self.assertFalse(self._excluded(path),
+                                 f"{path} is excluded from the image")
+
+
 class TheReleaseProcessTest(unittest.TestCase):
     def setUp(self):
         self.text = _read("RELEASING.md")

@@ -25,8 +25,14 @@ venv/
 .venv/
 **/.venv/
 node_modules/
-__pycache__/
-*.py[cod]
+# `**/` because a bare `__pycache__/` matches only the one at the
+# context root. Measured: an image built after a test run carried 103
+# .pyc files in 14 directories — 2.06 MB of bytecode compiled by the
+# BUILD HOST's Python 3.14, inside an image running 3.11, which
+# ignores it on the magic number. Dead weight, and worse, weight whose
+# presence depends on whether somebody ran the tests before building.
+**/__pycache__
+**/*.py[cod]
 *.egg-info/
 .pytest_cache/
 
