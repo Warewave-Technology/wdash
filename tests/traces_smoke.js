@@ -47,21 +47,39 @@ function answer(reply) {
                              json: () => Promise.resolve(body) });
 }
 
-/** The page, with the server answering `services` and `traces`. */
-function build(services, traces) {
+/** The page, with the server answering `services` and `traces`.
+ *
+ * `url` is a parameter because one behaviour reads it: the Services table
+ * hands a service and a window over as query parameters, and a fixture with
+ * a fixed address cannot tell a page that was sent here from one that was
+ * opened. The picker carries every window that table offers, for the same
+ * reason — a fixture missing one would pass a check about handing it over.
+ */
+function build(services, traces, url = 'http://localhost/traces') {
+    const asked = [];
     const dom = new JSDOM(`<!doctype html><body>
-      <select id="timeRange"><option value="24h" selected>24h</option></select>
+      <select id="timeRange">
+        <option value="15m">15m</option>
+        <option value="1h">1h</option>
+        <option value="6h">6h</option>
+        <option value="24h" selected>24h</option>
+        <option value="7d">7d</option>
+      </select>
       <span id="spanTotal"></span><div id="serviceList"></div>
       <span id="traceListTitle"></span>
       <input id="traceIdInput"><button id="lookupBtn"></button>
       <select id="sortBy"><option value="recent" selected>recent</option></select>
       <input type="checkbox" id="errorsOnly">
       <div id="traceList"></div></body>`,
-      { runScripts: 'outside-only', url: 'http://localhost/traces' });
+      { runScripts: 'outside-only', url });
     const w = dom.window;
-    w.fetch = (url) => answer(url.startsWith('/api/traces/services')
-                              ? services : traces);
+    w.fetch = (where) => {
+        asked.push(String(where));
+        return answer(String(where).startsWith('/api/traces/services')
+                      ? services : traces);
+    };
     w.eval(script[1]);
+    w.__asked = asked;
     return w;
 }
 
@@ -424,6 +442,50 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 20));
     await settle();
     check('every other warning on the trace page is text too',
           plantedMore.every(w => !w.document.querySelector('[id^=planted]')));
+
+    // ---- arriving from the Services table -------------------------------
+    //
+    // A row there links to this page with the service and the window on the
+    // query string. Both halves were written; only the link was tested, and
+    // a link that looks like it filters and does not is worse than no link.
+    const services = { services: [{ name: 'api-gateway', span_count: 10,
+                                    error_count: 0 }] };
+    const traces = { traces: [] };
+
+    const sent = build(services, traces,
+                       'http://localhost/traces?service=api-gateway&window=6h');
+    await settle();
+    check('a page opened from a service row says which service',
+          sent.document.getElementById('traceListTitle').textContent
+              === 'Traces through api-gateway');
+    check('and asks the server for that service',
+          sent.__asked.some(u => u.includes('/api/traces?')
+                                 && u.includes('service=api-gateway')),
+          JSON.stringify(sent.__asked));
+    check('and moves the picker to the window it was handed',
+          sent.document.getElementById('timeRange').value === '6h');
+    check('and asks for that window too, not the default',
+          sent.__asked.some(u => u.includes('time_range=6h')),
+          JSON.stringify(sent.__asked));
+
+    // The two pages keep separate ladders. A window this picker does not
+    // offer must leave it alone rather than be forced in: a select set to a
+    // value it has no option for reads as empty, and the list underneath
+    // would then be drawn over a window nothing on screen names.
+    const odd = build(services, traces,
+                      'http://localhost/traces?service=api-gateway&window=90d');
+    await settle();
+    check('a window it does not offer is left alone rather than forced in',
+          odd.document.getElementById('timeRange').value === '24h');
+
+    const plain = build(services, traces);
+    await settle();
+    check('a page nobody was sent to filters by nothing',
+          plain.document.getElementById('traceListTitle').textContent
+              !== 'Traces through api-gateway');
+    check('and asks for no service at all',
+          !plain.__asked.some(u => u.includes('service=')),
+          JSON.stringify(plain.__asked));
 
     console.log(failures.length ? `\n${failures.length} failure(s)`
                                 : '\nall trace page checks passed');

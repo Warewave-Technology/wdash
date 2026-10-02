@@ -103,7 +103,7 @@
     <td>
       {# To the traces of that service, which is the next question anybody
          asks of a row on this table. #}
-      <a href="{{ url_for('traces.traces_page') }}?service={{ row.name | urlencode }}&window={{ window }}">{{ row.name }}</a>
+      <a href="{{ url_for('traces.traces_page') }}?service={{ row.name | urlencode }}&amp;window={{ window }}">{{ row.name }}</a>
     </td>
     <td>
       {% if row.environment %}

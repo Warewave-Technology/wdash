@@ -20,6 +20,7 @@ their services out.
 
 import datetime as dt
 import os
+import pathlib
 import re
 import sys
 import tempfile
@@ -312,6 +313,31 @@ class TheTableOnThePageTest(unittest.TestCase):
 
         self._hub(Broken())
         self.assertIn("the cluster refused", self.page())
+
+    def test_a_row_links_to_that_service_s_traces_in_the_same_window(self):
+        """The next question anybody asks of a row. The link carries BOTH
+        the service and the window, because a table read over six hours
+        opening a trace list over twenty-four is two screens disagreeing
+        about what somebody is looking at."""
+        self._hub(self._measuring([self._row("api-gateway", calls=10)]))
+        page = self.client.get("/services?window=6h").get_data(as_text=True)
+        self.assertIn("/traces?service=api-gateway&amp;window=6h", page)
+
+    def test_every_window_this_page_offers_can_be_handed_over(self):
+        """The two pickers are separate ladders, and a window the other page
+        does not offer is dropped on arrival — leaving somebody who clicked
+        from fifteen minutes looking at twenty-four, labelled correctly and
+        still not what they were reading."""
+        from wdash.api.trace_routes import SERVICE_RANGES
+        traces = pathlib.Path(
+            os.path.join(os.path.dirname(__file__), "..",
+                         "templates", "traces.html")).read_text()
+        picker = traces.split('id="timeRange"')[1].split("</select>")[0]
+        offered = set(re.findall(r'<option value="([0-9a-z]+)"', picker))
+        missing = sorted({value for value, _ in SERVICE_RANGES} - offered)
+        self.assertEqual(missing, [],
+                         "the Services table offers windows the Traces page "
+                         "cannot open on")
 
     def test_exactly_one_navigation_item_is_the_current_page(self):
         """Two items of one blueprint both lit up when this page was added:

@@ -16,7 +16,12 @@
             {% endfor %}
         </select>
         {% endif %}
+        {# `15m` so every window the Services table offers can be handed over
+           intact. Without it a row clicked from a fifteen-minute view opened
+           on twenty-four hours — honestly labelled, and still not the window
+           somebody was looking at. #}
         <select class="form-select form-select-sm" id="timeRange" style="width:auto">
+            <option value="15m">Last 15 minutes</option>
             <option value="1h">Last 1 hour</option>
             <option value="6h">Last 6 hours</option>
             <option value="24h" selected>Last 24 hours</option>
@@ -316,6 +321,36 @@
     if (incoming) {
         window.location.replace('/traces/' + encodeURIComponent(incoming) + '?time_range=7d');
         return;
+    }
+
+    // Arriving from the Services table: /traces?service=…&window=…
+    //
+    // Applied BEFORE the first load rather than by calling `selectService`
+    // after it, which would paint the unfiltered list and then replace it —
+    // two requests and a flash of every trace in the window, under a title
+    // naming one service.
+    //
+    // The service is not checked against the list first. The sidebar is
+    // loaded from the same window, so a name that is not in it comes back
+    // as an empty trace list under "Traces through <name>", which says what
+    // happened; silently dropping the filter would show every trace under
+    // the same title, which does not.
+    const wanted = new URLSearchParams(window.location.search);
+    const fromTable = wanted.get('service');
+    if (fromTable) {
+        selectedService = fromTable;
+        el('traceListTitle').textContent = 'Traces through ' + fromTable;
+    }
+    // The window travels with it, so the table's "last 6h" and the list's
+    // are the same six hours. Only a value the picker actually offers: the
+    // two screens share a ladder, and one that drifts would put a window on
+    // screen that the control underneath it disagrees with.
+    const askedWindow = wanted.get('window');
+    if (askedWindow) {
+        const picker = el('timeRange');
+        if ([...picker.options].some(o => o.value === askedWindow)) {
+            picker.value = askedWindow;
+        }
     }
 
     const goToTrace = () => {
