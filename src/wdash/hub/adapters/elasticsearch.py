@@ -13,8 +13,8 @@ import time
 from ...utils import timerange
 from ..models import (
     FieldStat, FieldValue, LogContext, LogPage, LogRecord, PartialCounts,
-    PartialList, Service, SourceRef, Span, Trace, TraceSummary,
-    UNKNOWN_SEVERITY, normalise_severity,
+    PartialList, Service, ServiceMetrics, ServicePoint, SourceRef, Span,
+    Trace, TraceSummary, UNKNOWN_SEVERITY, normalise_severity,
 )
 from ..aggregation import AggregationResult, Bucket, DateHistogram, Terms
 from ..query import DEFAULT_LOG_FIELDS, SORT_SLOWEST
@@ -45,6 +45,18 @@ SEVERITY_VALUES_SHOWN = 10
 #: than by omission. Named apart from the numbered splits because it holds no
 #: values to read — the rule already says which level it means.
 _SEVERITY_ASSUMED = "severity_assumed"
+
+
+def _slice_of(seconds, slices):
+    """A fixed_interval string dividing `seconds` into about `slices`.
+
+    Seconds rather than a calendar interval: the window is whatever the
+    picker says, and `1h`/`1d` would snap a four-hour view onto boundaries
+    it did not ask for. A floor of one second because Elasticsearch refuses
+    a zero-length interval, which a very short window would otherwise
+    produce.
+    """
+    return f"{max(1, int(seconds // max(1, slices)))}s"
 
 
 def _severity_split_names(fields):
@@ -1588,7 +1600,8 @@ class ElasticsearchTraceSource(TraceSource):
     @property
     def capabilities(self):
         return frozenset({Capability.TRACE_LOOKUP, Capability.TRACE_SEARCH,
-                          Capability.SERVICE_LIST})
+                          Capability.SERVICE_LIST,
+                          Capability.SERVICE_METRICS})
 
     def health(self):
         # `ping()` returns False rather than raising, so the detail has to
@@ -1934,3 +1947,125 @@ class ElasticsearchTraceSource(TraceSource):
              for n, c in totals.items()),
             key=lambda s: s.span_count, reverse=True,
         ), partial=bool(failures), warnings=failures)
+
+    #: Services on the table. Past this the page is a list nobody reads down,
+    #: and a terms aggregation this wide is answering a question about a
+    #: cluster rather than about a service.
+    SERVICE_ROWS = 100
+
+    #: Slices each sparkline is drawn from. Enough shape to see a step or a
+    #: spike in, few enough that a hundred rows is a hundred small shapes
+    #: rather than a payload.
+    SERVICE_SLICES = 24
+
+    def service_metrics(self, window, scope):
+        """One row per service: how fast, how much, and how much failed.
+
+        ONE request per schema group, with the sparklines nested inside it.
+        Asking per service would be a hundred round trips to draw one table,
+        which is the N+1 the monitor listing already learned not to make.
+
+        Only ENTRY spans are counted, through `entry_filter`. A service's
+        latency is the time it took to answer, not the sum of everything
+        that happened underneath: counting inner spans makes a service look
+        slower the more work it delegates, and makes a leaf look fastest.
+        """
+        rows, series = {}, {}
+        groups, requests = [], []
+        grouped, failures = self._grouped(scope)
+        seconds = max(1.0, (window.end - window.start).total_seconds())
+
+        for schema, indices in grouped.items():
+            groups.append((schema, indices))
+            per_service = {
+                "latency": {"avg": {"field": schema.duration_field}},
+                "failed": {"filter": schema.error_filter()},
+                "over_time": {
+                    "date_histogram": {
+                        "field": schema.timestamp_field,
+                        "fixed_interval": _slice_of(seconds,
+                                                    self.SERVICE_SLICES),
+                        "min_doc_count": 0,
+                        "extended_bounds": {
+                            "min": timerange.to_es(window.start),
+                            "max": timerange.to_es(window.end)}},
+                    "aggs": {"latency": {"avg": {"field": schema.duration_field}},
+                             "failed": {"filter": schema.error_filter()}}},
+            }
+            # Only where the shape keeps one. A terms aggregation on a field
+            # no index maps answers nothing and costs a clause; asking for it
+            # anyway would put an empty column on every OTel-only cluster and
+            # call it the environment.
+            if schema.environment_field:
+                per_service["environment"] = {
+                    "terms": {"field": schema.environment_field, "size": 1}}
+            requests.append((indices, {
+                "size": 0,
+                "query": {"bool": {"filter": [
+                    schema.entry_filter(),
+                    {"range": {schema.timestamp_field: window.as_es_range()}}]}},
+                "aggs": {"services": {
+                    "terms": {"field": schema.service_field,
+                              "size": self.SERVICE_ROWS,
+                              "order": {"_count": "desc"}},
+                    "aggs": per_service}},
+            }))
+
+        responses = self._search_groups(groups, requests, failures)
+        if failures and not any(response is not None for response in responses):
+            raise self._nothing_answered(failures)
+
+        for (schema, _), response in zip(groups, responses):
+            if response is None:
+                continue
+            for bucket in response["aggregations"]["services"]["buckets"]:
+                name = bucket["key"]
+                if not scope.allows_service(name, source=self.name):
+                    continue
+                self._add_service_bucket(rows, series, name, bucket, schema,
+                                         seconds)
+
+        for name, row in rows.items():
+            row.series = tuple(series[name].values())
+        return PartialList(
+            sorted(rows.values(), key=lambda r: r.calls, reverse=True),
+            partial=bool(failures), warnings=failures)
+
+    def _add_service_bucket(self, rows, series, name, bucket, schema, seconds):
+        """Fold one schema's answer for one service into the row.
+
+        A service can appear under BOTH schemas — a cluster migrating from
+        the APM agents to the collector holds the same name in each — and
+        the row is one row. Latency is therefore re-derived from the totals
+        rather than averaged: a mean of two means weights a service's quiet
+        half as heavily as its busy one.
+        """
+        calls = _count(bucket["doc_count"])
+        failed = _count(bucket["failed"]["doc_count"])
+        average = bucket["latency"]["value"]
+        row = rows.get(name)
+        if row is None:
+            row = rows[name] = ServiceMetrics(name=name,
+                                              window_seconds=seconds)
+            row._latency_total = 0.0
+        if row.environment == "" and bucket.get("environment", {}).get("buckets"):
+            row.environment = str(bucket["environment"]["buckets"][0]["key"])
+        row.calls += calls
+        row.failed += failed
+        if average is not None:
+            row._latency_total += average / schema.duration_per_ms * calls
+        row.latency_ms = (round(row._latency_total / row.calls, 1)
+                          if row.calls else None)
+
+        slices = series.setdefault(name, {})
+        for slot in bucket["over_time"]["buckets"]:
+            key = slot["key"]
+            point = slices.get(key)
+            if point is None:
+                point = slices[key] = ServicePoint(
+                    timestamp=slot.get("key_as_string"))
+            point.calls += _count(slot["doc_count"])
+            point.failed += _count(slot["failed"]["doc_count"])
+            value = slot["latency"]["value"]
+            if value is not None:
+                point.latency_ms = round(value / schema.duration_per_ms, 1)

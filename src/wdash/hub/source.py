@@ -27,6 +27,15 @@ class Capability:
     TRACE_LOOKUP = "trace_lookup"
     TRACE_SEARCH = "trace_search"
     SERVICE_LIST = "service_list"
+    #: Per-service latency, throughput and failure rate, over time. Named
+    #: apart from SERVICE_LIST because the two are far apart in practice:
+    #: every trace backend can say which services exist, and measured
+    #: against the lab only Elasticsearch can say how any of them is doing.
+    #: Jaeger's metrics endpoints answer 501 without a separate Prometheus
+    #: behind them, Tempo's TraceQL metrics answer 500 without its
+    #: metrics-generator, and both cap a search at 200 traces — so a
+    #: throughput counted from one is a floor presented as a number.
+    SERVICE_METRICS = "service_metrics"
     LOG_TRACE_CORRELATION = "log_trace_correlation"
     MONITOR_LIST = "monitor_list"          # current state of every monitor
     MONITOR_HISTORY = "monitor_history"    # past checks for one monitor
@@ -187,6 +196,22 @@ class TraceSource(Source):
     @abstractmethod
     def services(self, window, scope):
         """Services observed within the window."""
+
+    def service_metrics(self, window, scope):
+        """Per-service latency, throughput and failure rate, over time.
+
+        NOT abstract, and the default is a refusal with a reason rather than
+        an empty list. A backend that cannot answer this is the common case,
+        not the error case — and an empty table is indistinguishable from a
+        window with no traffic in it, which is the one thing the page must
+        never say on behalf of a backend that was never able to look.
+
+        The page asks `supports(Capability.SERVICE_METRICS)` first, so this
+        is reached only by a caller that did not.
+        """
+        raise NotImplementedError(
+            f"{self.name} cannot measure services. {self.backend} answers "
+            f"which services exist and nothing about how they are doing.")
 
     def search(self, query, scope):
         """TraceQuery -> trace summaries. Optional."""

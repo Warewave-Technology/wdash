@@ -152,8 +152,14 @@
     Both halves. The class is what the stylesheet paints;
     `aria-current="page"` is what a screen reader reads, and neither one
     does the other's job. -#}
-{%- macro nav_item(endpoint, icon, label) -%}
-  {%- set current = request.blueprint == endpoint.split('.')[0] -%}
+{#- `owns` is for a blueprint that has MORE THAN ONE item in the strip.
+    Without it the match is by blueprint, which is deliberate — `/monitors/42`
+    is still Monitors — but two items of one blueprint then both light up, and
+    two current pages at once is the navbar saying something that cannot be
+    true. Where it is given, the item owns exactly those endpoints. -#}
+{%- macro nav_item(endpoint, icon, label, owns=none) -%}
+  {%- set current = (request.endpoint in owns) if owns
+                    else request.blueprint == endpoint.split('.')[0] -%}
   <a class="nav-link{{ ' active' if current }}"
      {% if current %}aria-current="page"{% endif %}
      href="{{ url_for(endpoint) }}">
@@ -206,8 +212,13 @@
                         {{ nav_item('dashboards.dashboards_page',
                                     'fa-chart-bar', 'Dashboards') }}
                         {% if current_user.has_permission('traces:read') %}
+                        {{ nav_item('traces.services_page',
+                                    'fa-diagram-project', 'Services',
+                                    owns=['traces.services_page']) }}
                         {{ nav_item('traces.traces_page',
-                                    'fa-project-diagram', 'Traces') }}
+                                    'fa-project-diagram', 'Traces',
+                                    owns=['traces.traces_page',
+                                          'traces.trace_page']) }}
                         {% endif %}
                         {% if current_user.has_permission('monitors:read') %}
                         {{ nav_item('monitors.monitors_page',

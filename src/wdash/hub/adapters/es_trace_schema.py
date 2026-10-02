@@ -65,6 +65,15 @@ class SpanSchema(ABC):
     timestamp_field = "@timestamp"
     #: Field holding the parent's span id; absent on a root span.
     parent_field = "parent_span_id"
+    #: Where this shape keeps the deployment environment, or "" where it
+    #: keeps none. Empty rather than None so a caller asking for it gets a
+    #: field name or nothing, never a value that has to be tested for.
+    environment_field = ""
+    #: The field an AVERAGE can be taken of, and what divides that average
+    #: into milliseconds. A duration filter can hide the spelling behind a
+    #: `should`; an aggregation names one field and one unit.
+    duration_field = ""
+    duration_per_ms = 1.0
 
     @classmethod
     def for_mapping(cls, properties):
@@ -157,6 +166,10 @@ class OtelSpanSchema(SpanSchema):
     name = "otel"
     trace_id_field = "trace_id"
     service_field = "resource.attributes.service.name"
+    environment_field = "resource.attributes.deployment.environment"
+    #: Nanoseconds, whichever of the two spellings this index maps —
+    #: `duration_field` is settled per index by `for_mapping`.
+    duration_per_ms = 1e6
 
     def __init__(self, duration_field="duration"):
         #: The duration field THIS index maps: what the collector writes, or
@@ -272,6 +285,11 @@ class ApmSpanSchema(SpanSchema):
     trace_id_field = "trace.id"
     service_field = "service.name"
     parent_field = "parent.id"
+    environment_field = "service.environment"
+    #: Microseconds. The same field `duration_filter` and `slowest_first`
+    #: name below, written once so an aggregation cannot drift off them.
+    duration_field = "transaction.duration.us"
+    duration_per_ms = 1000.0
 
     @classmethod
     def detect(cls, properties):
@@ -286,10 +304,10 @@ class ApmSpanSchema(SpanSchema):
         return {"term": {"event.outcome": "failure"}}
 
     def duration_filter(self, minimum_us):
-        return {"range": {"transaction.duration.us": {"gte": minimum_us}}}
+        return {"range": {self.duration_field: {"gte": minimum_us}}}
 
     def slowest_first(self):
-        return [{"transaction.duration.us": {"order": "desc"}}]
+        return [{self.duration_field: {"order": "desc"}}]
 
     def to_span(self, hit):
         source = hit.get("_source") or {}

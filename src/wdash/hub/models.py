@@ -731,6 +731,55 @@ class Monitor:
 
 
 @dataclass
+class ServicePoint:
+    """One service's numbers over one slice of the window."""
+    timestamp: object
+    #: Mean of the entry spans in this slice, or None where none ran.
+    latency_ms: float = None
+    #: Entry spans in the slice. The page turns it into a rate; the count
+    #: is kept because a rate cannot say how long the slice was.
+    calls: int = 0
+    failed: int = 0
+
+
+@dataclass
+class ServiceMetrics:
+    """One row of the service table: how fast, how much, how much failed.
+
+    Separate from the service LIST, which is only a name. Every trace
+    backend can produce the list; measured against the lab, only
+    Elasticsearch can produce this — see `Capability.SERVICE_METRICS`.
+
+    `environment` is "" rather than None when the shape has nowhere to keep
+    one, so a column of empty cells is a column of empty cells rather than
+    a page deciding what None should look like.
+    """
+    name: str
+    environment: str = ""
+    latency_ms: float = None
+    #: Entry spans over the whole window, and the window in seconds beside
+    #: it. A rate computed in the adapter would be a number nobody could
+    #: check against the window on screen.
+    calls: int = 0
+    failed: int = 0
+    window_seconds: float = 0.0
+    #: One per slice, for the sparklines. Empty where the backend answered
+    #: the totals but not the shape.
+    series: tuple = ()
+
+    @property
+    def per_minute(self):
+        minutes = (self.window_seconds or 0) / 60.0
+        return (self.calls / minutes) if minutes else 0.0
+
+    @property
+    def failed_ratio(self):
+        """Of the entry spans, the share that failed. None when nothing ran:
+        zero per cent of nothing is a claim, and an empty cell is not."""
+        return (self.failed / self.calls) if self.calls else None
+
+
+@dataclass
 class MonitorPoint:
     """One bucket of a monitor's history.
 

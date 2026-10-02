@@ -27,6 +27,16 @@ trace_bp = Blueprint("traces", __name__)
 
 DEFAULT_RANGE = "24h"
 
+#: What the services table offers. The same ladder the monitor detail page
+#: offers, so two screens do not disagree about what "last hour" is called.
+SERVICE_RANGES = (("15m", "last 15m"), ("1h", "last 1h"), ("6h", "last 6h"),
+                  ("24h", "last 24h"), ("7d", "last 7d"))
+
+
+def _reason(exc):
+    """What went wrong, in the source's words, for the page."""
+    return str(exc) or type(exc).__name__
+
 
 def _scope():
     return request_scope()
@@ -171,6 +181,133 @@ def traces_page():
             _scope(), hub.trace_sources if hub else []),
         default_range=DEFAULT_RANGE,
         source_choices=_trace_source_choices(),
+    )
+
+
+#: The shape of a row's three sparklines. Narrow because there are three of
+#: them per row and a hundred rows: wider is a payload rather than a reading.
+SPARK_WIDTH, SPARK_HEIGHT = 110, 26
+
+
+def _spark(values):
+    """A polyline over `values`, or None when there is nothing to draw.
+
+    Server-rendered SVG, for the reason the monitor listing already gives:
+    three hundred of these on a page would be three hundred canvases with
+    three hundred redraw loops to draw shapes that never change. This is a
+    string per sparkline and no JavaScript, which also means it survives a
+    page with a strict CSP.
+
+    None rather than a flat line when every value is zero or missing: an
+    empty box reads as a measurement of nothing, and a line along the
+    bottom reads as a measurement of zero, and only one of those is ever
+    what happened.
+    """
+    usable = [v for v in values if v is not None]
+    if len(usable) < 2 or not any(usable):
+        return None
+    highest = max(usable) or 1.0
+    step = SPARK_WIDTH / max(1, len(values) - 1)
+    span = SPARK_HEIGHT - 4
+    runs, current = [], []
+    for index, value in enumerate(values):
+        if value is None:
+            if len(current) > 1:
+                runs.append(current)
+            current = []
+            continue
+        x = round(index * step, 1)
+        y = round(2 + span * (1 - value / highest), 1)
+        current.append(f"{x},{y}")
+    if len(current) > 1:
+        runs.append(current)
+    if not runs:
+        return None
+    return {"width": SPARK_WIDTH, "height": SPARK_HEIGHT,
+            "runs": [" ".join(run) for run in runs], "peak": round(highest, 1)}
+
+
+def _service_row(row):
+    """One service as the table draws it.
+
+    The three sparklines are built from the SAME slices, so a spike in one
+    is at the same x as the dip in another — which is most of why they are
+    beside each other rather than on three charts.
+    """
+    series = list(row.series)
+    minutes = max(1e-9, (row.window_seconds / 60.0) / max(1, len(series)))
+    return {
+        "name": row.name,
+        "environment": row.environment,
+        "latency_ms": row.latency_ms,
+        "per_minute": row.per_minute,
+        "calls": row.calls,
+        "failed": row.failed,
+        "failed_ratio": row.failed_ratio,
+        "latency_spark": _spark([p.latency_ms for p in series]),
+        # Per minute in each slice, not the raw count: the number beside it
+        # is a rate, and a sparkline on a different unit than its number is
+        # two readings of one thing.
+        "throughput_spark": _spark([p.calls / minutes for p in series]),
+        # A share, so a service with ten calls and one failure reads as high
+        # as a service with ten thousand and a thousand — which is what a
+        # failure RATE means, and why the count is in the tooltip.
+        "failed_spark": _spark([(p.failed / p.calls) if p.calls else None
+                                for p in series]),
+    }
+
+
+@trace_bp.route("/services")
+@login_required
+def services_page():
+    """One row per service: how fast, how much, how much of it failed.
+
+    Its own page rather than a strip above the trace search. The two are
+    asked at different moments — "which service is unwell" before "show me
+    that request" — and one time picker cannot serve both without the
+    search's query narrowing the table that is supposed to be the overview.
+    """
+    if not current_user.has_permission("traces:read"):
+        flash("Access denied: you do not have permission to view traces.",
+              "error")
+        return redirect(url_for("index"))
+
+    hub = getattr(current_app, "hub", None)
+    window_label = request.args.get("window") or DEFAULT_RANGE
+    source_name = request.args.get("source") or None
+    rows, error, measured_by, blind = [], None, [], []
+
+    sources = list(hub.trace_sources) if hub else []
+    for source in sources:
+        (measured_by if source.supports(Capability.SERVICE_METRICS)
+         else blind).append(source.name)
+
+    if sources and measured_by:
+        try:
+            source = hub.traces(source_name or hub.ALL_SOURCES)
+            found = source.service_metrics(TimeWindow.of(window_label),
+                                           _scope())
+            rows = [_service_row(row) for row in found]
+            warnings = list(getattr(found, "warnings", ()) or ())
+        except Exception as exc:
+            error, warnings = _reason(exc), []
+    else:
+        warnings = []
+
+    return render_template(
+        "services.html",
+        rows=rows,
+        error=error,
+        warnings=warnings,
+        window=window_label,
+        ranges=SERVICE_RANGES,
+        # Which sources this table is made of, and which were left out of
+        # it. Named rather than counted: "1 source cannot measure services"
+        # is a sentence nobody can act on.
+        measured_by=measured_by,
+        blind=blind,
+        source_choices=_trace_source_choices(),
+        source=source_name,
     )
 
 

@@ -183,6 +183,7 @@
   <a href="#query">Query syntax</a>
   <a href="#logs">The Logs screen</a>
   <a href="#multiline">Stack traces in one piece</a>
+  <a href="#services">The Services table</a>
   <a href="#traces">Traces</a>
 
   <h4>Dashboards</h4>
@@ -1314,6 +1315,59 @@ than to stdout — which is what Serilog's <code>@x</code> already does, and why
 a .NET service logging through Serilog never has this problem in the first
 place. <a href="#record-depths">WDash reads that field</a> and shows the trace
 inside the one record it belongs to.</p></div>
+</section>
+
+<!-- ================================================================ -->
+<section id="services">
+<h2>The Services table</h2>
+
+<p>One row per service: how fast it answers, how much it is being asked, and
+how much of that failed &mdash; each with a sparkline over the window. It is
+the screen you open before the trace search, to find out <em>which</em>
+service to go and look at.</p>
+
+<p>Only <strong>entry</strong> spans are counted: the work each service was
+asked to do, not the work it did inside somebody else's request. Counting the
+inner ones makes a service look slower the more it delegates, and puts a
+database on the table as though it served requests of its own.</p>
+
+<div class="stop"><b>Elasticsearch only, and the page says so</b>
+<p>Measured against all three trace backends before this was built:</p>
+<table class="cmp">
+<thead><tr><th></th><th>Elasticsearch</th><th>Jaeger</th><th>Tempo 2.6</th></tr></thead>
+<tbody>
+<tr><td>Service list</td><td>yes</td><td>yes</td><td>yes</td></tr>
+<tr><td>Environment</td><td>yes</td><td>not in the data</td><td>not indexed</td></tr>
+<tr><td>Latency</td><td>yes</td><td>from a sample</td><td>per trace only</td></tr>
+<tr><td>Throughput</td><td>yes, counted</td><td><strong>no</strong></td><td><strong>no</strong></td></tr>
+<tr><td>Failure rate</td><td>yes</td><td>from a sample</td><td>from a sample</td></tr>
+<tr><td>Sparklines</td><td>yes</td><td>no</td><td>no</td></tr>
+<tr><td>Cost</td><td>one request</td><td>one per service</td><td>one search</td></tr>
+</tbody>
+</table>
+<p>Jaeger's metrics endpoints answer <code>501 metrics querying is currently
+disabled</code> without a separate Prometheus behind them (its Service
+Performance Monitoring), and Tempo's TraceQL metrics answer <code>500 empty
+ring</code> without its metrics-generator. Both then cap a search at
+<strong>200 traces</strong> server-side &mdash; asked for 1,500, returned 200
+&mdash; so a throughput counted from one would be a floor printed as a
+number.</p>
+<p>So the table is behind a capability only Elasticsearch declares, and a
+page opened beside a Jaeger or Tempo source <em>names that source</em> and
+says why its services are not on the table. A backend's limit is never left
+to look like a backend with no services.</p></div>
+
+<p>Both Elasticsearch shapes are read, and in their own units: the APM agents
+store microseconds in <code>transaction.duration.us</code> and the collector
+stores nanoseconds in <code>duration</code>. A cluster part-way through that
+migration holds the same service name in both, and it is ONE row &mdash; with
+the latency weighted by the calls behind each half, because a mean of means
+weights a service's quiet half as heavily as its busy one.</p>
+
+<p class="fn">The three sparklines on a row are cut from the same slices, so a
+spike in one sits at the same place as the dip in another. They are
+server-rendered SVG: three per row over a hundred rows would otherwise be
+three hundred chart instances drawing shapes that never change.</p>
 </section>
 
 <!-- ================================================================ -->

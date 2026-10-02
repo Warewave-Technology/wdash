@@ -32,6 +32,7 @@ one before the next.
 import datetime as dt
 import logging
 from collections import Counter
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 
 from .aggregation import AggregationResult, Bucket
@@ -122,20 +123,26 @@ class FanOutLogSource(LogSource):
 
     # ---------- fan-out ----------
 
-    def _parallel(self, work):
+    def _parallel(self, work, sources=None):
         """Run one callable per source and keep failures attached to a name.
 
         Returns [(source, result_or_None, error_or_None)] in source order, so a
         caller can report which backend failed rather than that something did.
+
+        `sources` narrows it to the members that can answer at all. Asking
+        the others and catching the refusal would be the same work plus a
+        warning per page load about a backend doing exactly what it says on
+        its capability list.
         """
-        if len(self._sources) == 1:
-            source = self._sources[0]
+        members = list(self._sources if sources is None else sources)
+        if len(members) == 1:
+            source = members[0]
             try:
                 return [(source, work(source), None)]
             except Exception as exc:
                 return [(source, None, exc)]
 
-        with ThreadPoolExecutor(max_workers=min(len(self._sources),
+        with ThreadPoolExecutor(max_workers=min(len(members),
                                                 MAX_PARALLEL)) as pool:
             futures = [(source, pool.submit(work, source))
                        for source in self._sources]
@@ -830,7 +837,7 @@ class FanOutTraceSource(TraceSource):
         return Trace(trace_id=trace_id, spans=spans, partial=partial,
                      hidden=hidden, warnings=tuple(warnings))
 
-    def _gather(self, work, what):
+    def _gather(self, work, what, sources=None):
         """Every member's answer to `work`, as (rows, partial, warnings,
         missing).
 
@@ -839,7 +846,7 @@ class FanOutTraceSource(TraceSource):
         carries through. When every member failed there is no answer to
         give, and that is raised.
         """
-        results = self._parallel(work)
+        results = self._parallel(work, sources)
         rows, warnings, missing, partial = [], [], [], False
         for source, found, error in results:
             if error is not None:
@@ -883,6 +890,74 @@ class FanOutTraceSource(TraceSource):
                      error_count=errors.get(name, 0))
              for name, count in totals.items()),
             key=lambda service: service.span_count, reverse=True),
+            partial, warnings, missing)
+
+    @staticmethod
+    def _merge_series(left, right):
+        """Two sources' slices of one service, added by their timestamps.
+
+        By timestamp rather than by position: both sides were cut from the
+        same window, but a source that answered a shorter one would
+        otherwise have its morning added to the other's afternoon.
+        """
+        merged = {}
+        for point in list(left) + list(right):
+            into = merged.get(point.timestamp)
+            if into is None:
+                merged[point.timestamp] = replace(point)
+                continue
+            calls = into.calls + point.calls
+            if calls:
+                into.latency_ms = round(
+                    ((into.latency_ms or 0) * into.calls
+                     + (point.latency_ms or 0) * point.calls) / calls, 1)
+            into.calls = calls
+            into.failed += point.failed
+        return tuple(merged[key] for key in sorted(merged))
+
+    def service_metrics(self, window, scope):
+        """The table, merged across the sources that can measure one.
+
+        Sources that cannot are SKIPPED rather than asked and caught: the
+        base class raises with a sentence about the backend, and a fan-out
+        turning that into a per-source warning would put "jaeger cannot
+        measure services" on the page every time somebody opened it beside
+        an Elasticsearch that answered perfectly well. The page says which
+        sources can, once, out of the capability.
+
+        A service seen by two sources is ONE row. Latency is re-derived from
+        the totals rather than averaged, for the reason the adapter gives:
+        a mean of means weights a quiet source as heavily as a busy one.
+        """
+        from .source import Capability
+
+        able = [s for s in self._sources
+                if s.supports(Capability.SERVICE_METRICS)]
+        if not able:
+            return self._attributed([], False, [], [])
+
+        rows = {}
+        answered, partial, warnings, missing = self._gather(
+            lambda source: source.service_metrics(window, scope),
+            "service metrics", sources=able)
+        for _, measured in answered:
+            for row in measured:
+                into = rows.get(row.name)
+                if into is None:
+                    rows[row.name] = replace(row, series=tuple(row.series))
+                    continue
+                # Totals add; the latency is the weighted mean of the two.
+                calls = into.calls + row.calls
+                if calls:
+                    into.latency_ms = round(
+                        ((into.latency_ms or 0) * into.calls
+                         + (row.latency_ms or 0) * row.calls) / calls, 1)
+                into.calls = calls
+                into.failed += row.failed
+                into.environment = into.environment or row.environment
+                into.series = self._merge_series(into.series, row.series)
+        return self._attributed(
+            sorted(rows.values(), key=lambda r: r.calls, reverse=True),
             partial, warnings, missing)
 
     def search(self, query, scope):

@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}Services - WDash{% endblock %}
+
+{% macro spark(shape, label) %}
+  {# Server-rendered SVG. Three of these per row and a hundred rows would
+     otherwise be three hundred chart instances holding three hundred
+     canvases to draw shapes that never change. #}
+  {% if shape %}
+  <svg class="sparkline" width="{{ shape.width }}" height="{{ shape.height }}"
+       viewBox="0 0 {{ shape.width }} {{ shape.height }}" role="img"
+       aria-label="{{ label }}">
+    <title>{{ label }}</title>
+    {% for run in shape.runs %}
+    <polyline points="{{ run }}" fill="none" stroke-width="1.5"
+              stroke-linejoin="round"/>
+    {% endfor %}
+  </svg>
+  {% else %}
+  {# Not an empty box: a blank reads as a measurement of nothing and a line
+     along the bottom reads as a measurement of zero. #}
+  <span class="text-muted" style="font-size:.7rem">&mdash;</span>
+  {% endif %}
+{% endmacro %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2><i class="fas fa-diagram-project"></i> Services</h2>
+    <div class="d-flex align-items-center gap-2">
+        {% if source_choices %}
+        <select class="form-select form-select-sm" id="serviceSource"
+                style="width:auto">
+            {% for choice in source_choices %}
+            <option value="{{ choice.value }}"
+                    {% if source == choice.value %}selected{% endif %}>
+                {{ choice.label }}
+            </option>
+            {% endfor %}
+        </select>
+        {% endif %}
+        <select class="form-select form-select-sm" id="serviceWindow"
+                style="width:auto">
+            {% for value, text in ranges %}
+            <option value="{{ value }}"
+                    {% if window == value %}selected{% endif %}>{{ text }}</option>
+            {% endfor %}
+        </select>
+    </div>
+</div>
+
+{# What this table is made of, and what it is not made of. Named rather than
+   counted: "1 source cannot measure services" is a sentence nobody can act
+   on, and a table silently missing a backend's services is the failure this
+   whole page would otherwise introduce. #}
+{% if blind %}
+<div class="alert alert-secondary py-2" style="font-size:.8rem">
+  <i class="fas fa-circle-info"></i>
+  Measured from <strong>{{ measured_by | join(', ') or 'no source' }}</strong>.
+  Not from <strong>{{ blind | join(', ') }}</strong>: that backend can say
+  which services exist and nothing about how they are doing. Jaeger's metrics
+  endpoints need a separate Prometheus behind them, and Tempo's need its
+  metrics-generator; without those, both cap a search at 200 traces, so a
+  throughput counted from one would be a floor printed as a number.
+</div>
+{% endif %}
+
+{% if error %}
+<div class="alert alert-danger py-2" style="font-size:.85rem">
+  <i class="fas fa-triangle-exclamation"></i> {{ error }}
+</div>
+{% endif %}
+
+{% for warning in warnings %}
+<div class="alert alert-warning py-2" style="font-size:.8rem">{{ warning }}</div>
+{% endfor %}
+
+{% if not rows and not error %}
+<div class="card"><div class="card-body text-center text-muted py-5">
+  {% if not measured_by %}
+  <p class="mb-1">No source here can measure services.</p>
+  <p class="mb-0" style="font-size:.8rem">Add an Elasticsearch source with
+    the traces signal, and this table fills in.</p>
+  {% else %}
+  <p class="mb-1">No service answered a request in the last {{ window }}.</p>
+  <p class="mb-0" style="font-size:.8rem">Only entry spans are counted &mdash;
+    the work a service was asked to do, not the work it did inside somebody
+    else's request.</p>
+  {% endif %}
+</div></div>
+{% elif rows %}
+<div class="card">
+<div class="table-responsive">
+<table class="table field-table mb-0">
+  <thead><tr>
+    <th>Name</th>
+    <th>Environment</th>
+    <th class="text-end">Latency (avg.)</th>
+    <th class="text-end">Throughput</th>
+    <th class="text-end">Failed</th>
+  </tr></thead>
+  <tbody>
+  {% for row in rows %}
+  <tr>
+    <td>
+      {# To the traces of that service, which is the next question anybody
+         asks of a row on this table. #}
+      <a href="{{ url_for('traces.traces_page') }}?service={{ row.name | urlencode }}&window={{ window }}">{{ row.name }}</a>
+    </td>
+    <td>
+      {% if row.environment %}
+      <span class="badge bg-secondary">{{ row.environment }}</span>
+      {% else %}
+      <span class="text-muted" style="font-size:.75rem">&mdash;</span>
+      {% endif %}
+    </td>
+    <td class="text-end">
+      <div class="d-flex align-items-center justify-content-end gap-2">
+        <span>{{ '%.0f' | format(row.latency_ms or 0) }} ms</span>
+        {{ spark(row.latency_spark, 'peak %.0f ms' % (row.latency_spark.peak if row.latency_spark else 0)) }}
+      </div>
+    </td>
+    <td class="text-end">
+      <div class="d-flex align-items-center justify-content-end gap-2">
+        <span title="{{ '{:,}'.format(row.calls) }} entry span(s)">{{ '%.1f' | format(row.per_minute) }} tpm</span>
+        {{ spark(row.throughput_spark, 'peak %.1f per minute' % (row.throughput_spark.peak if row.throughput_spark else 0)) }}
+      </div>
+    </td>
+    <td class="text-end">
+      <div class="d-flex align-items-center justify-content-end gap-2">
+        {% if row.failed_ratio is none %}
+        {# Zero per cent of nothing is a claim; an empty cell is not. #}
+        <span class="text-muted">&mdash;</span>
+        {% else %}
+        <span class="{% if row.failed_ratio > 0 %}text-danger{% endif %}"
+              title="{{ '{:,}'.format(row.failed) }} of {{ '{:,}'.format(row.calls) }}">
+          {{ '%.1f' | format(row.failed_ratio * 100) }}%
+        </span>
+        {% endif %}
+        {{ spark(row.failed_spark, 'peak %.1f%%' % ((row.failed_spark.peak * 100) if row.failed_spark else 0)) }}
+      </div>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+</div>
+<p class="text-muted mt-2 mb-0" style="font-size:.7rem">
+  Entry spans only &mdash; the work each service was asked to do. Counting the
+  spans inside somebody else's request makes a service look slower the more
+  it delegates, and makes a leaf look like the fastest thing in the system.
+</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+(function () {
+    function reload(name, value) {
+        const url = new URL(window.location.href);
+        if (value) { url.searchParams.set(name, value); }
+        else { url.searchParams.delete(name); }
+        window.location.href = url.toString();
+    }
+    document.getElementById('serviceWindow')?.addEventListener(
+        'change', function () { reload('window', this.value); });
+    document.getElementById('serviceSource')?.addEventListener(
+        'change', function () { reload('source', this.value); });
+})();
+</script>
+{% endblock %}
