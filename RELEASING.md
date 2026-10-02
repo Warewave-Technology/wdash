@@ -69,7 +69,7 @@ command somebody types, and step 6 is the one no test replaces.
 
    **Check the ratio rather than the number, and say which number you
    mean.** There are three, and they are three questions rather than a mess
-   to tidy up. Measured for 3.2.0, and the registry rows WITHOUT pushing:
+   to tidy up. Measured for 3.3.0, and the registry rows WITHOUT pushing:
    `--output type=oci,dest=…` for both platforms writes an archive whose
    manifest per architecture carries the compressed layer sizes, which is
    what a pull transfers. That matters because the push can be the step
@@ -78,9 +78,9 @@ command somebody types, and step 6 is the one no test replaces.
 
    | | server | browser |
    |---|---|---|
-   | registry, `linux/amd64` — what you wait for | 77MB | 555MB |
-   | registry, `linux/arm64` | 79MB | 591MB |
-   | `docker images`, unpacked on this machine | 364MB | 2.39GB |
+   | registry, `linux/amd64` — what you wait for | 80MB | 558MB |
+   | registry, `linux/arm64` | 82MB | 594MB |
+   | `docker images`, unpacked on this machine | 376MB | 2.4GB |
 
    The last row depends on the storage driver (containerd's overlayfs
    snapshotter here) and is the one `docker images` prints, which is why it
@@ -93,6 +93,19 @@ command somebody types, and step 6 is the one no test replaces.
    built on this machine measures 375MB unpacked against the 260MB its own
    README claimed, so that gap was the measurement environment rather than
    anything a release changed.
+
+   **When a figure moves, find the layer before you write it down.** 3.3.0
+   came in 3MB heavier on all four images at once — server and browser,
+   amd64 and arm64 — which is already the shape of a cause outside the
+   tree, because those four share only a base. Comparing the two archives
+   layer by layer named it exactly: `python:3.11-slim` moved 3.11.16 to
+   3.11.17 under a tag that does not change, and ITS apt layer went 1.29MB
+   to 4.27MB compressed. Our own `COPY . .` layer moved 0.86MB to 0.87MB,
+   so the whole release cost ten kilobytes. The comparison is worth the
+   two minutes: the same +3MB could just as easily have been something
+   shipped by accident, and in the same release it WAS — see the 2MB of
+   host bytecode that `WhatTheImageCarriesTest` now keeps out. One number
+   could not tell those two apart; the layer could.
 
    What the check is really for survives all of that: **the server image is
    about a seventh of the browser one.** A server image that has grown

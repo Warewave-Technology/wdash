@@ -52,8 +52,9 @@ class TheComposeFileRunsTheProductTest(unittest.TestCase):
             self.wdash, "`docker compose up` starts everything but WDash")
 
     def test_it_builds_the_server_image_rather_than_the_browser_one(self):
-        """The browser target is the same tree plus Chromium — 1.77GB
-        against 260MB — and nothing a server does needs it."""
+        """The browser target is the same tree plus Chromium — 558MB
+        against 80MB as the registry stores them — and nothing a server
+        does needs it."""
         self.assertEqual(self.wdash["build"]["target"], "server")
 
     def test_it_carries_both_keys_and_will_not_start_without_them(self):

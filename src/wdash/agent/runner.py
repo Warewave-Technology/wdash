@@ -95,8 +95,9 @@ def _answer(response, what):
 def _has_browser():
     """Whether this image can run a journey at all.
 
-    The browser is a separate image — 1.77GB against 260MB — and the plain one
-    has no Playwright. Asked before the check rather than discovered inside
+    The browser is a separate image — 558MB against 80MB as the registry
+    stores them — and the plain one has no Playwright. Asked before the
+    check rather than discovered inside
     it, because the answer decides whether to report AT ALL rather than what
     to report: see `_run_one`.
     """

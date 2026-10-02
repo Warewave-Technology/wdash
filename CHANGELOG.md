@@ -22,6 +22,76 @@ Versions follow semantic versioning. The one number lives in
 heading carries the date its tag was made, which is the one date that is
 recorded rather than remembered — `git log -1 --format=%ai v3.0.0`.
 
+## 3.3.0 — 2026-10-02
+
+### Added
+
+- **A Services screen.** One row per service: average latency, throughput
+  and failure rate, each with a sparkline over the window, and a link
+  through to that service's traces in the same window. It is the screen to
+  open before the trace search — to find out *which* service to go and look
+  at.
+
+  Only **entry** spans are counted: the work each service was asked to do,
+  not the work it did inside somebody else's request. Counting the inner
+  ones makes a service look slower the more it delegates, and puts a
+  database on the table as though it served requests of its own.
+
+  **Elasticsearch only**, and the page says so rather than showing a short
+  table. Measured against all three trace backends before it was built:
+  Jaeger's metrics endpoints answer `501 metrics querying is currently
+  disabled` without a separate Prometheus behind them, Tempo's TraceQL
+  metrics answer `500 empty ring` without its metrics-generator, and both
+  cap a search at 200 traces server-side — so a throughput counted from
+  either would be a floor printed as a number. A page opened beside a
+  Jaeger or Tempo source names that source and says why its services are
+  not on the table.
+
+  Both Elasticsearch shapes are read, in their own units: the APM agents'
+  microseconds and the collector's nanoseconds. A cluster part-way through
+  that migration holds the same service in both, and it is one row.
+
+### Fixed
+
+- **A monitor's response-time chart drew nothing while showing its own
+  peak.** The adapters divide a window into 120 buckets whatever the
+  schedule, so an hour gives one every thirty seconds and a check running
+  once a minute filled every other one. A line needs two adjacent values to
+  draw a segment, so every reading was an island and none was visible —
+  under an axis that had scaled perfectly from the data behind the blank.
+
+  The series is now re-bucketed to the rate the checks actually arrived at,
+  derived from the data rather than from the configured schedule. A real
+  silence still breaks the line, a single missed check in a dense series is
+  still shown, and a check that drifts by a few seconds no longer invents
+  an outage.
+
+- **The server image carried 2 MB of the build machine's bytecode.**
+  `.dockerignore` excluded `__pycache__/`, which matches the one directory
+  at the top of the build context and none of the fourteen underneath it.
+  An image built after a test run therefore shipped 103 `.pyc` files
+  compiled by whatever Python the developer had — 3.14 here, inside an
+  image running 3.11, which ignores them on the magic number. Dead weight,
+  and weight that was there or not depending on what somebody had run that
+  afternoon.
+
+- **The documented image sizes were wrong nearly everywhere.** The
+  `Dockerfile`, `docker-compose.yml`, the Kubernetes agent manifest and the
+  agent's own source all said the images were 260MB and 1.77GB, which they
+  have not been for several versions. Anybody sizing a node from those was
+  planning against a server image 116MB smaller than the real one. Measured
+  for this release: **80MB** and **558MB** as a registry stores them for
+  `linux/amd64`, 82MB and 594MB for `arm64`, and 376MB and 2.4GB once
+  `docker images` has unpacked them. A test now holds every file that quotes
+  one of these to the table they are measured in.
+
+### Changed
+
+- **The Traces page accepts a service and a window on its address.**
+  `/traces?service=api&window=6h` opens filtered, which is what the
+  Services table links to. It also offers a 15-minute window now, so every
+  window that table offers can be handed over intact.
+
 ## 3.2.0 — 2026-10-02
 
 ### Needs action

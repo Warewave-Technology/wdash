@@ -1201,14 +1201,14 @@ so it works behind NAT and restarting WDash misses no check.
 
 ```bash
 # published for linux/amd64 and linux/arm64
-docker pull yigitbasalma/wdash-elastic-dashboard:3.2.0   # server, 77MB
-docker pull yigitbasalma/wdash-browser:3.2.0             # + Chromium, 555MB
+docker pull yigitbasalma/wdash-elastic-dashboard:3.3.0   # server, 80MB
+docker pull yigitbasalma/wdash-browser:3.3.0             # + Chromium, 558MB
 
 # or build them, which is the same two stages of one Dockerfile
 docker build -t wdash .
 docker build -t wdash-browser --target browser .
 
-docker run -d yigitbasalma/wdash-browser:3.2.0 \
+docker run -d yigitbasalma/wdash-browser:3.3.0 \
     --server https://wdash.example.com --token <the agent token>
 ```
 
@@ -1217,7 +1217,7 @@ docker run -d yigitbasalma/wdash-browser:3.2.0 \
   http and tcp checks should use `wdash`. The sizes above are **content
   size** — what a registry reports and what you pull. `docker images` prints
   disk usage instead, which depends on the storage driver: the same two
-  images are 364MB and 2.39GB there, measured on arm64 over containerd's
+  images are 376MB and 2.4GB there, measured on arm64 over containerd's
   overlayfs snapshotter. The ratio is the part that matters and it holds
   either way — the server is about a seventh of the browser image.
 - **A journey needs a browser agent.** Assign the journey to one. An agent

@@ -150,13 +150,44 @@ class TheChangelogTest(unittest.TestCase):
         self.assertEqual(headings[0], __version__)
 
     def test_it_leads_with_what_has_to_be_done(self):
-        """The section somebody is reading this for. Ordered rather than
-        assumed: an upgrade note under "Changed", four screens down, is one
-        that gets read after the upgrade."""
-        entry = self.text.split(f"## {__version__}", 1)[1]
+        """The section somebody is reading this for, FIRST where there is
+        one. Ordered rather than assumed: an upgrade note under "Changed",
+        four screens down, is one that gets read after the upgrade.
+
+        Not required to exist. A release where nothing stops working and no
+        setting changes meaning has nothing to put there, and demanding the
+        heading anyway is demanding a sentence somebody has to invent —
+        which is how the one section an operator relies on becomes the one
+        they learn to skip. What is held is that it cannot appear LATER,
+        which is the failure the ordering is about.
+        """
+        # Cut at the NEXT version heading. Without it the "sections" are
+        # every section of every older entry, and an older release having a
+        # Needs action makes this pass for a newer one that does not.
+        entry = self.text.split(f"## {__version__}", 1)[1].split("\n## ", 1)[0]
         sections = re.findall(r"^### (.+)$", entry, re.M)
         self.assertTrue(sections, "the entry has no sections")
-        self.assertEqual(sections[0], "Needs action")
+        if "Needs action" in sections:
+            self.assertEqual(sections[0], "Needs action")
+
+    def test_an_upgrade_note_is_never_buried_in_a_later_section(self):
+        """The other half of the rule above, and the one a missing heading
+        would otherwise let through: a sentence telling somebody to do
+        something, under "Fixed" or "Changed", where they read it after
+        upgrading."""
+        entry = self.text.split(f"## {__version__}", 1)[1]
+        entry = entry.split("\n## ", 1)[0]
+        parts = re.split(r"^### (.+)$", entry, flags=re.M)[1:]
+        for name, body in zip(parts[::2], parts[1::2]):
+            if name == "Needs action":
+                continue
+            with self.subTest(section=name):
+                for phrase in ("before you upgrade", "before upgrading",
+                               "you have to", "you must"):
+                    self.assertNotIn(
+                        phrase, body.lower(),
+                        f"'{phrase}' is under {name!r}, where it is read "
+                        f"after the upgrade rather than before it")
 
     def test_every_upgrade_note_in_the_readme_is_in_it(self):
         """The README carries upgrade notes because that is where somebody
@@ -488,6 +519,176 @@ class TheReleaseProcessTest(unittest.TestCase):
         """Signing and an SBOM are not here. A process that lists only what
         it does reads as complete."""
         self.assertIn("not in this process", self.text.lower())
+
+
+class WhatTheImagesMeasureTest(unittest.TestCase):
+    """The size figures, and whether the four files that quote them agree
+    with the one file that measured them.
+
+    `RELEASING.md` carries a table of three measurements per image, and the
+    process says to take all three again at every release. Four other files
+    then repeat two of them in prose, where they read as facts about the
+    current version. 3.3.0 moved every one of the six: the base image grew
+    under a tag that does not change, so a release that touched nothing
+    about packaging still owed a new table.
+
+    Nothing here can tell whether the table is TRUE — that needs a build.
+    What it can tell is whether the prose still agrees with it, which is the
+    way these rot: one file gets the new number and the others keep
+    yesterday's. This file once carried 260MB, which matched none of the
+    three measurements and no version.
+    """
+
+    #: Sizes in these files that are not about an image. Each has to be
+    #: named, so a new one is a decision somebody took rather than a hole
+    #: the sweep quietly grew.
+    NOT_AN_IMAGE = {
+        "228 MB": "ROADMAP's storage projection, 10 checks at 60s",
+        "1.2 GB": "ROADMAP's storage projection, 50 checks at 60s",
+        "4.8 GB": "ROADMAP's storage projection, 50 checks at 15s",
+        "4 MB": "the agent's results-per-delivery payload",
+        "1 MB": "a proxy body limit that turned into a lost delivery",
+        "2.58GB": "Elastic's own heartbeat image, which carries a Chromium",
+        "2.5GB": "a second Elastic heartbeat, costed and not run",
+        "3MB": "the playwright pip package, which is not the browser",
+        "150MB": "the Chromium that package downloads separately",
+    }
+
+    #: Not swept. `RELEASING.md` is where the measuring happens and carries
+    #: older figures on purpose, to say which way they moved; `CHANGELOG.md`
+    #: records what was true at a version and must never be brought up to
+    #: date. This file is out too: the pattern below names the images, so it
+    #: matches its own source, and its docstrings quote history on purpose.
+    NOT_SWEPT = {"RELEASING.md", "CHANGELOG.md",
+                 os.path.join("tests", "test_release_files.py")}
+
+    #: A file that quotes an image size names the image. Hunting for the
+    #: files instead of listing them is the point: the first version of this
+    #: test carried a list of four, and `docker-compose.yml`, the
+    #: `Dockerfile`, `kubernetes/wdash-agent.yaml` and `test_first_run.py`
+    #: were all quoting figures nothing checked — three of them the 260MB
+    #: and 1.77GB that this release found had outlived several versions.
+    NAMES_AN_IMAGE = re.compile(
+        r"wdash-browser|wdash-elastic-dashboard|target:? browser"
+        r"|browser target|Chromium")
+
+    #: A floor under the sweep, not a list of what it covers: anything new
+    #: that documents the images is found on its own. Every file that carries
+    #: a measured figure today is named, because counting the swept files let
+    #: a pattern keep its count up on files that quote nothing while the ten
+    #: that do quote one dropped out of it. Removing a figure from one of
+    #: these is a decision; failing here is how it gets made rather than
+    #: noticed two releases later.
+    ALWAYS_SWEPT = {
+        "README.md", "ROADMAP.md", "Dockerfile", "docker-compose.yml",
+        os.path.join("kubernetes", "README.md"),
+        os.path.join("kubernetes", "wdash-agent.yaml"),
+        os.path.join("site", "docs", "index.html"),
+        os.path.join("src", "wdash", "agent", "runner.py"),
+        os.path.join("tests", "test_first_run.py"),
+        os.path.join(".github", "workflows", "tests.yml"),
+    }
+
+    SKIPPED_DIRS = {".git", "venv", "node_modules", "dist", "data",
+                    "__pycache__", ".pytest_cache", "coverage"}
+    PROSE = (".md", ".html", ".py", ".yml", ".yaml", ".conf", ".sh", ".txt")
+
+    @classmethod
+    def _files_that_quote_them(cls):
+        for where, dirs, files in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d not in cls.SKIPPED_DIRS]
+            for name in files:
+                if not (name.endswith(cls.PROSE) or name.startswith("Docker")):
+                    continue
+                path = os.path.relpath(os.path.join(where, name), ROOT)
+                if path in cls.NOT_SWEPT:
+                    continue
+                try:
+                    text = _read(path)
+                except (UnicodeDecodeError, OSError):
+                    continue
+                if cls.NAMES_AN_IMAGE.search(text):
+                    yield path, text
+
+    SIZE = re.compile(r"\b\d+(?:\.\d+)? ?[MG]B\b")
+
+    def setUp(self):
+        self.process = _read("RELEASING.md")
+
+    def _measured(self):
+        """The figures in the table, which is the only place they are
+        measured."""
+        rows = [line for line in self.process.splitlines()
+                if line.lstrip().startswith("|")
+                and ("registry," in line or "docker images" in line)]
+        self.assertTrue(rows, "RELEASING.md has no table of measurements")
+        found = {size.group() for row in rows
+                 for size in self.SIZE.finditer(row)}
+        self.assertEqual(
+            len(rows) * 2, len(found),
+            f"expected two figures per row, got {sorted(found)} from "
+            f"{len(rows)} rows")
+        return found
+
+    def test_the_table_was_measured_for_the_version_being_shipped(self):
+        """Carrying the table forward is the one thing the process tells you
+        not to do, and a table says which version it belongs to."""
+        self.assertIn(f"Measured for {__version__},", self.process,
+                      "RELEASING.md's table is not labelled for "
+                      f"{__version__} — re-measure it, or say why not")
+
+    def test_every_size_quoted_elsewhere_is_one_that_was_measured(self):
+        measured = self._measured()
+        swept = set()
+        for path, text in self._files_that_quote_them():
+            swept.add(path)
+            for size in self.SIZE.finditer(text):
+                quoted = size.group()
+                if quoted in self.NOT_AN_IMAGE:
+                    continue
+                with self.subTest(path=path, size=quoted):
+                    self.assertIn(
+                        quoted.replace(" ", ""),
+                        {m.replace(" ", "") for m in measured},
+                        f"{path} says {quoted}, which RELEASING.md's table "
+                        f"does not measure — it has {sorted(measured)}")
+        missed = self.ALWAYS_SWEPT - swept
+        self.assertFalse(
+            missed, f"the sweep did not reach {sorted(missed)} — a pattern "
+            "that stops finding the files that document the images agrees "
+            "with the table about nothing")
+
+    #: The two files that tell a reader what to pull, which is where the
+    #: figure they wait for has to actually appear.
+    TELLS_YOU_WHAT_TO_PULL = ("README.md",
+                              os.path.join("site", "docs", "index.html"))
+
+    def test_the_figure_a_reader_waits_for_is_told_to_them(self):
+        """A sweep over what a file happens to say proves nothing if the file
+        stopped saying it. The amd64 row is the one somebody waits through on
+        a pull, so both of its figures have to be present where the pull
+        command is, not merely consistent with the table.
+
+        Picked off the row's own label rather than by position, because
+        sorting these put the unpacked server figure where the browser's
+        belonged and the check passed on the wrong number.
+        """
+        row = [line for line in self.process.splitlines()
+               if line.lstrip().startswith("|") and "linux/amd64" in line]
+        self.assertEqual(1, len(row),
+                         "RELEASING.md has no one row for linux/amd64")
+        waited_for = [size.group() for size in self.SIZE.finditer(row[0])]
+        self.assertEqual(2, len(waited_for),
+                         f"expected a server and a browser figure, got "
+                         f"{waited_for}")
+        for path in self.TELLS_YOU_WHAT_TO_PULL:
+            text = _read(path)
+            for size in waited_for:
+                with self.subTest(path=path, size=size):
+                    self.assertIn(
+                        size, text,
+                        f"{path} tells somebody to pull an image without "
+                        f"saying it is {size}")
 
 
 if __name__ == "__main__":

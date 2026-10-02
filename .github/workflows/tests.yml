@@ -256,7 +256,7 @@ jobs:
       # Dockerfile stopped working — it is the one artefact every deployment
       # uses and the only one no test touches.
       #
-      # Not the browser target: 1.77GB and several minutes, for a stage that
+      # Not the browser target: 2.4GB and several minutes, for a stage that
       # differs by one `pip install` and a `playwright install`. Worth a
       # nightly or a release, not a pull request.
       - name: Build the server image

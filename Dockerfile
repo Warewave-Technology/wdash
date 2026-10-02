@@ -3,7 +3,9 @@
 #   wdash            the server, and an agent that runs http and tcp checks
 #   wdash-browser    the same code plus Chromium, for browser journeys
 #
-# Measured: 260MB and 1.77GB. That ratio is the whole reason for the split.
+# Measured for 3.3.0: 80MB and 558MB as the registry stores them for
+# amd64, 376MB and 2.4GB unpacked by `docker images`. That ratio is the
+# whole reason for the split, and it holds under either pair.
 # Phase 2 settled on "same image, different entry point" for the agent and
 # that still holds for http and tcp; a journey broke the rule for a concrete
 # reason rather than a tidy one — everybody running a single probe for uptime
@@ -73,9 +75,10 @@ USER root
 #
 # PLAYWRIGHT_BROWSERS_PATH is set BEFORE the install, so the browser is
 # unpacked where it will be read from. Installing into root's cache and
-# copying it afterwards produced a 2.8GB image: the copy is a new layer and
-# the original stays in the one below it, so the browser shipped twice. Same
-# result, 1.77GB.
+# copying it afterwards nearly doubled the image: the copy is a new layer
+# and the original stays in the one below it, so the browser shipped twice.
+# Unpacking it where it will be read from ships it once, for the same
+# result. No figure here, because the lesson is the layer and not the size.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 
 RUN pip install --no-cache-dir playwright==1.62.0 \

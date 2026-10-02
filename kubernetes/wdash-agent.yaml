@@ -52,8 +52,8 @@ spec:
       containers:
       - name: agent
         # The small image — the server's, with a different entry point. Http
-        # and tcp checks need nothing else, and the browser image is 1.77GB
-        # against 260MB.
+        # and tcp checks need nothing else, and the browser image is 558MB
+        # against 80MB as the registry stores them.
         #
         # For BROWSER JOURNEYS, build and push the other target and use it
         # here instead:
@@ -61,7 +61,7 @@ spec:
         # and raise the memory limit below with it. An agent that has no
         # browser reports nothing for a journey, so the journey reads unknown
         # rather than down.
-        image: yigitbasalma/wdash-elastic-dashboard:3.2.0
+        image: yigitbasalma/wdash-elastic-dashboard:3.3.0
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "wdash.agent"]
         env:
